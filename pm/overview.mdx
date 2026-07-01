@@ -53,6 +53,11 @@ All MDX specifications in this directory and its subdirectories:
   categories, four status colors, the StatusCell, the brand header, the account slot), a walkthrough
   of every screen (Dashboard, Domains, Run detail, Audits, Blacklists, Settings), the two left bars,
   the common finding-presentation pattern, and a Use Cases section on how a user flows through the app.
+* [Toasts & scan progress](./progress_ui.mdx) — the two "something is happening" surfaces: toasts
+  re-anchored bottom-left, enlarged, and kept clear of the 256px left bar; and the live scan-progress
+  dock — stacked per-domain "Running <domain>" cards with a spinning icon that drain as each domain
+  finishes. Also fixes the concurrency model: parallel per-domain scans (bounded limiter) with a
+  concurrency-safe persist.
 * [Dashboard](./dashboard.mdx) — the main screen: the big "Email Delivery Hero" brand header, the
   TanStack table (one run per day × six color-coded category columns), the metric cell text, and
   the top-right **Run checks** button + scheduled-checks toggle/chevron.

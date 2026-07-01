@@ -1,0 +1,270 @@
+---
+title: EmailDeliveryHero — Toasts & Scan Progress
+description: The product spec for the two feedback surfaces that tell the user "something is happening" — (1) the app-wide toast notifications, re-anchored to the bottom-left, enlarged, and kept clear of the left navigation bar; and (2) the live scan-progress dock, a stack of per-domain "Running <domain>" cards with an animated circular-arrows spinner that appears while a manual scan runs and empties itself card-by-card as each domain finishes. It also fixes the concurrency model: scans run in parallel across domains, bounded by a small lightweight concurrency limiter (TypeScript-on-Node, no worker threads), both in the browser (per-domain fan-out) and in the backend runner. This is the human companion to ui.mdx §9 (Toasts) and engineering.mdx (the audit runner).
+---
+
+# EmailDeliveryHero — Toasts & Scan Progress
+
+This document specifies **how the app shows the user that work is happening**. There are two distinct
+surfaces, and they must not be confused:
+
+1. **Toasts** — the transient event notifications (`sonner`) that already fire on every mutation
+   ("Now monitoring act3ai.com", "Removed …", "Audit failed"). This spec **re-positions and enlarges**
+   them; it does not change *when* they fire.
+2. **The scan-progress dock** — a **new, dedicated** surface. While a manual scan runs, it shows one
+   card per domain currently scanning, each with an animated circular-arrows spinner and the text
+   **"Running <domain>"**. Cards **stack** (parallel scans are visible at once) and each card
+   **removes itself the instant its domain finishes** — so a slow domain lingers after a fast one is
+   gone.
+
+It builds on and stays in lockstep with:
+
+* [User Interface](./ui.mdx) — the consolidated UI spec; §9 "Toasts" and the app frame (256px left
+  bar) are the invariants this spec extends. Where they overlap, **ui.mdx §9 is updated to point
+  here**.
+* [Engineering](./engineering.mdx) — the audit runner (`AuditService`), the REST contract
+  (`POST /api/audit/run`, `POST /api/audit/run/:id`), and the JSON state store this spec makes
+  concurrency-safe.
+* [Dashboard](./dashboard.mdx) · [Domains](./domains.mdx) — the two screens whose **Run checks** /
+  **Run audit now** actions drive the dock.
+
+---
+
+## 1. Goals (what the user asked for)
+
+* When something happens (e.g. a domain is added), a **toast pops in from the bottom**.
+* Toasts appear **about twice as big** as the default and anchored **bottom-left** — but **never
+  overlapping the left navigation bar**.
+* A **manual scan** shows its progress in that same bottom-left region, **below/clear of the left
+  bar**.
+* Scans run **in parallel per domain**. Pressing **Run All** on four domains scans all four at once.
+* Each in-flight domain shows a card reading **"Running <domain>"** with an **animated circular-arrows
+  icon** (the two-arrows-in-a-circle refresh glyph), spinning to signal live progress.
+* The card is **not too tall** — roughly the height of its text (or a touch bigger) — and **somewhat
+  wide**. Cards **stack** one above another, one per domain.
+* **When a domain finishes, its card disappears.** Domains finish at different times, so the stack
+  drains unevenly.
+* The engine must genuinely **run scans in parallel** (support concurrency). If a lightweight
+  task/concurrency library that fits TypeScript-on-Node helps, use it.
+
+---
+
+## 2. Toasts — position, size, and the left-bar exclusion (updates ui.mdx §9)
+
+The single `sonner` `<Toaster>` (mounted once in `src/router.tsx`) is reconfigured:
+
+| Property | Before | After (this spec) |
+| --- | --- | --- |
+| `position` | `top-right` | **`bottom-left`** — toasts rise in from the bottom-left corner. |
+| Size | default (~356px wide, `text-sm`) | **~1.8–2× visual weight**: wider card (`--width` ≈ **440px**), larger type (`text-base`), roomier padding (`py-4`). |
+| Left offset | none | **Cleared past the left bar.** The bar is a fixed **256px**; the toast container is pushed to **`left: 272px`** (16px gutter) so a toast **never sits over the nav**. |
+| `richColors` | on | unchanged (green success / red error). |
+
+Implementation notes (non-normative, see §6):
+
+* Anchor with `position="bottom-left"`, then override the container's inline `left` with a
+  `!left-[272px]` utility class (Tailwind `!important` beats sonner's inline `left`), so the stack
+  clears the 256px bar on **every** route (the settings bar is also 256px).
+* Enlarge via the Toaster `style={{ "--width": "440px" }}` and
+  `toastOptions={{ className: "text-base", style: { padding: "1rem 1.25rem" } }}`.
+* **Behavior is unchanged** — the same `toast.success/error(...)` calls in DomainsPage,
+  DashboardPage, RunDetailPage, AuditsPage still fire on the same events. Only where/how big they
+  render changes.
+
+> This supersedes the "top-right, default size" implication of ui.mdx §9. ui.mdx §9's bullet is
+> amended to: *"success/failure of every mutation surfaces a `sonner` toast, rendered bottom-left,
+> enlarged, and offset clear of the 256px left bar (see [progress_ui.mdx](./progress_ui.mdx))."*
+
+---
+
+## 3. The scan-progress dock (new surface)
+
+### 3.1 Where it lives
+
+A **fixed-position** region in the **bottom-left** of the viewport, offset to clear the left bar —
+the same 272px inset as the toasts, sitting **above** the toast stack so the two never collide
+(dock `bottom: 88px`, toasts `bottom: 16px`; both anchored left). It renders **only while ≥1 scan is
+active** and is otherwise absent from the DOM (no empty box).
+
+```
+┌────────────┬──────────────────────────────────────────────────────────┐
+│  LEFT BAR  │  content area                                             │
+│  (256px)   │                                                           │
+│  …nav…     │                                                           │
+│            │                                                           │
+│            │   ┌───────────────────────────────────┐  ← dock, stacked │
+│            │   │ ⟳  Running  act3ai.com            │    one per domain │
+│            │   ├───────────────────────────────────┤                  │
+│  account   │   │ ⟳  Running  whitehatengineering…  │                  │
+│  slot      │   └───────────────────────────────────┘                  │
+│            │   ── toast stack rises below the dock ──                  │
+└────────────┴──────────────────────────────────────────────────────────┘
+   ▲ dock left edge = 272px (never over the 256px bar)
+```
+
+### 3.2 The card
+
+One card per **actively scanning** domain:
+
+* **Icon** — lucide-react **`RefreshCw`** (two arrows forming a circle) with `animate-spin`, sized to
+  the text (~`h-4 w-4`, a touch larger than the label). It circles continuously = "progress is
+  happening."
+* **Label** — muted **"Running"** + the **domain name** in medium weight, single line, truncated if
+  very long.
+* **Shape** — **short** (height ≈ text line + `py-2`, ~36–40px) and **somewhat wide**
+  (`min-w-[240px]`, `max-w-[340px]`). A white/near-white card, subtle border and shadow, rounded.
+* **Stacking** — a vertical `flex-col` with a small gap; newest on top. Each card is an isolated
+  element so it can leave independently.
+
+### 3.3 Lifecycle
+
+1. A scan is **started** for a domain → a card is added to the dock immediately (optimistic; the user
+   sees it the moment they click, before any network round-trip resolves).
+2. The card stays while that domain's `POST /api/audit/run/:id` is in flight.
+3. The domain **finishes** (success **or** error) → **its card is removed** at once. Success also
+   refreshes the grids (query invalidation) so the domain's cells recolor; failure raises an error
+   toast (§2). A brief fade/slide-out is allowed but must not delay removal past ~200ms.
+4. When the **last** card leaves, the dock unmounts. A single **"Checks complete"** success toast
+   fires once the whole batch settles (not one per domain — the cards already gave per-domain
+   feedback); each **failed** domain still gets its own error toast.
+
+### 3.4 Accessibility
+
+* The dock is an `aria-live="polite"` region so screen readers announce "Running act3ai.com" and its
+  removal.
+* The spinner is decorative (`aria-hidden`); the text carries the meaning (color/motion is never the
+  only signal — matches ui.mdx §9 accessibility).
+
+---
+
+## 4. Concurrency model — scans run in parallel
+
+### 4.1 Frontend (per-domain fan-out)
+
+**Run All** and **Run audit now** both route through **one** shared runner (`useScanRunner`) instead
+of the old single blocking call:
+
+* **Run All (Dashboard):** for **each** domain, fire an independent `POST /api/audit/run/:id`. They
+  run **concurrently**, so the dock shows every domain at once and each card leaves as its own request
+  resolves. This is what makes "some take longer than others" visible.
+* **Run audit now (Domains row) / Run checks again (Run detail):** the same runner with a single
+  domain — one card.
+* **Bounded concurrency.** The fan-out is capped by a small limiter (default **4** concurrent) so a
+  large fleet does not open dozens of sockets or hammer DNS at once. Extra domains queue and start as
+  slots free; their cards still appear immediately in a "queued" state is **not** required — a card is
+  added only when its request actually starts, so the dock reflects true in-flight work. (A queued
+  domain simply has no card yet; it gets one when it starts.)
+
+> The old `POST /api/audit/run` (audit-all-in-one-response) endpoint **remains** for the scheduler and
+> programmatic callers, but the **UI no longer uses it for Run All** — it fans out per-domain so it can
+> show per-domain progress and let cards drain unevenly.
+
+### 4.2 Backend (parallel runner + safe persistence)
+
+Two backend changes make real parallelism correct:
+
+* **`AuditService.runForAll` runs domains concurrently**, bounded by the same small limiter (default
+  **4**), instead of the current sequential `for` loop. DNS/SMTP checks are **I/O-bound**, so bounded
+  async concurrency — **not** OS worker threads — is the right, lightweight tool; the event loop
+  overlaps the waits. (Worker threads / `piscina` would add weight for no benefit on I/O-bound work;
+  explicitly out of scope.)
+* **Concurrency-safe writes.** Parallel per-domain `runForDomain` calls each do a
+  read-modify-write of the single `audits.json` map, and the JSON store writes through a **shared**
+  temp file. Both race under parallelism (lost updates; temp-file collision). `AuditService`
+  therefore **serializes its persist step** through an in-service async lock (a promise chain): each
+  result re-reads the latest map, sets its own key, and writes — one writer at a time — so no
+  concurrent scan clobbers another's result. This is invisible to callers (results still return as
+  each domain finishes); only the disk write is serialized.
+
+### 4.3 The lightweight limiter
+
+A tiny in-repo `mapLimit(items, limit, fn)` (a `p-limit`-style bounded runner) lives in **both**
+packages — `frontend/src/lib/concurrency.ts` and `backend/src/shared/concurrency.ts`. It is
+dependency-free (no ESM/CJS interop risk in the CommonJS NestJS build, works offline), a few lines,
+and is the single "task view" both the browser fan-out and the server runner use. It preserves input
+order in its returned array and never rejects the whole batch for one failure when used with
+`Promise.allSettled` semantics at the call site.
+
+---
+
+## 5. Data flow (end to end)
+
+```
+User clicks Run All (4 domains)
+        │
+        ▼
+useScanRunner.runDomains([d1..d4])
+        │  mapLimit(domains, 4, runOne)
+        ├── runOne(d1): dock.add(d1) → POST /audit/run/d1 → dock.remove(d1) → invalidate
+        ├── runOne(d2): dock.add(d2) → POST /audit/run/d2 → dock.remove(d2) → invalidate
+        ├── runOne(d3): …
+        └── runOne(d4): …            (all concurrent, cards drain as each resolves)
+        │
+        ▼  when all settle
+   toast.success("Checks complete")   (+ per-domain error toasts on any failure)
+
+Backend  POST /audit/run/:id → AuditService.runForDomain(id)
+        → auditDomain(id)  (unchanged checker loop)
+        → persistResult(result)  ── serialized via async write-lock ──> audits.json
+```
+
+State (React context, `ScanProgressProvider`):
+
+* `active: { domainId → { domain, startedAt } }` — the set of cards to render.
+* `begin(domainId, domain)` / `end(domainId)` — add/remove a card.
+* `runDomains(domains)` — the fan-out above; the only entry point the pages call.
+
+---
+
+## 6. Implementation map (files)
+
+**Frontend (`code/packages/frontend/src`)**
+
+* `lib/concurrency.ts` — **new.** `mapLimit<T,R>(items, limit, fn): Promise<R[]>`.
+* `scan/ScanProgressContext.tsx` — **new.** `ScanProgressProvider`, `useScanProgress` (active cards),
+  and `useScanRunner` (`runDomains`) wiring the fan-out, the dock, query invalidation, and the
+  batch/failure toasts.
+* `components/ScanProgressDock.tsx` — **new.** The fixed bottom-left stacked-card UI.
+* `main.tsx` — wrap the app in `<ScanProgressProvider>` (inside `QueryClientProvider`, since the
+  runner invalidates queries).
+* `router.tsx` — reconfigure `<Toaster>` (bottom-left, enlarged, `!left-[272px]`); render
+  `<ScanProgressDock />` once at the root so it overlays every screen.
+* `pages/app/DashboardPage.tsx` — **Run checks** calls `runDomains(list)` (was `runAll.mutate`).
+* `pages/domains/DomainsPage.tsx` — **Run audit now** calls `runDomains([d])`.
+* `pages/domains/RunDetailPage.tsx` — **Run checks again** calls `runDomains([domain])`.
+
+**Backend (`code/packages/backend/src`)**
+
+* `shared/concurrency.ts` — **new.** Same `mapLimit`.
+* `modules/audit/audit.service.ts` — `runForAll` uses `mapLimit` (bounded parallel); add
+  `persistResult` guarded by an async write-lock; `runForDomain` persists through it.
+
+---
+
+## 7. Acceptance criteria
+
+1. Toasts render **bottom-left**, ~**2× larger**, and their container's left edge is **≥ 272px** so a
+   toast never overlaps the 256px left bar — on every route (app and settings bars).
+2. Adding a domain still fires "Now monitoring …", now rising from the bottom-left at the new size.
+3. Pressing **Run All** with N domains adds **N cards** (up to the concurrency cap at a time), each
+   **"Running <domain>"** with a **spinning `RefreshCw`** icon; cards **stack**, sit clear of the left
+   bar, are short and somewhat wide.
+4. Scans run **concurrently** — a fast domain's card disappears while a slow domain's card remains;
+   the dock **drains card-by-card** and unmounts when the last finishes.
+5. **Run audit now** (Domains) and **Run checks again** (Run detail) show a single card via the same
+   runner.
+6. The backend `runForAll` audits domains **in parallel** (bounded) and **never loses a result** to a
+   concurrent write (serialized persist); `audits.json` always reflects every domain's latest run.
+7. A single **"Checks complete"** toast fires once a batch settles; each failed domain raises its own
+   error toast; successful runs refresh the grids (cells recolor) with no full reload.
+8. The concurrency limiter is a **small dependency-free `mapLimit`** shared in both packages; no
+   worker-thread/`piscina` dependency is added.
+
+<!--
+  progress_ui.mdx maintenance: this owns the toast placement/size AND the scan-progress dock. Keep it
+  in lockstep with ui.mdx §9 (Toasts) and engineering.mdx (the audit runner + REST contract). If the
+  left-bar width changes from 256px, update the 272px offset here and in router.tsx/ScanProgressDock.
+  The dock is driven by real in-flight per-domain POSTs — do not fake progress; a card exists iff a
+  request is in flight. The backend persist lock is required as long as the UI fans out per-domain
+  runs in parallel against a single JSON store.
+-->

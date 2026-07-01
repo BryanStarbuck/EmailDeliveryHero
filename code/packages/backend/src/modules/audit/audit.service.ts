@@ -2,11 +2,15 @@ import { join } from "node:path"
 import type { MonitoredDomain } from "@module/domains/domain.types"
 import { DomainsService } from "@module/domains/domains.service"
 import { Injectable } from "@nestjs/common"
+import { mapLimit } from "@shared/concurrency"
 import { readJson, writeJson } from "@shared/json-store"
 import { logError, logInfo } from "@shared/logging"
 import { resolveStateDir } from "@shared/state-dir"
 import { CHECKERS } from "./checks"
 import { type AuditResult, type Finding, summarize } from "./checks/types"
+
+/** How many domains to audit concurrently (pm/progress_ui.mdx §4.2). I/O-bound, so this is plenty. */
+const AUDIT_CONCURRENCY = 4
 
 /**
  * The audit engine. Runs every registered checker against a domain, rolls the findings into a
@@ -17,6 +21,14 @@ import { type AuditResult, type Finding, summarize } from "./checks/types"
 export class AuditService {
   private readonly file = join(resolveStateDir(), "audits.json")
 
+  /**
+   * Serializes every persist so parallel per-domain scans (pm/progress_ui.mdx §4.2) can't clobber
+   * each other. Concurrent scans each do a read-modify-write of the single audits.json map and the
+   * JSON store writes through one shared temp file; without this chain the last writer would drop
+   * the others' results. Each `persistResult` re-reads the latest map, sets its own key, writes.
+   */
+  private writeChain: Promise<void> = Promise.resolve()
+
   constructor(private readonly domains: DomainsService) {}
 
   /** Latest audit result keyed by domain id (persisted map). */
@@ -26,6 +38,18 @@ export class AuditService {
 
   private saveAll(map: Record<string, AuditResult>): void {
     writeJson(this.file, map)
+  }
+
+  /** Merge one result into the store under the write-lock (see writeChain). */
+  private persistResult(result: AuditResult): Promise<void> {
+    const run = this.writeChain.then(() => {
+      const map = this.loadAll()
+      map[result.domainId] = result
+      this.saveAll(map)
+    })
+    // Keep the chain alive even if a write throws (it's logged + rethrown to the caller below).
+    this.writeChain = run.catch(() => {})
+    return run
   }
 
   latest(domainId: string): AuditResult | null {

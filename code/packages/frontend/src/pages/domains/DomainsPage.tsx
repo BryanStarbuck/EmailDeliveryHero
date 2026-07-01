@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router"
-import { ArrowUpRight, Pencil, Play, Plus, Trash2, X } from "lucide-react"
+import { ArrowUpRight, ChevronRight, Pencil, Play, Plus, Trash2, X } from "lucide-react"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { useAuditResults, useRunAudit } from "@/api/audit"
@@ -178,6 +178,9 @@ function DomainDialog({ domain, onClose }: { domain?: MonitoredDomain; onClose: 
   const [name, setName] = useState(domain?.name ?? "")
   const [selectors, setSelectors] = useState((domain?.dkimSelectors ?? []).join(", "))
   const [ips, setIps] = useState((domain?.sendingIps ?? []).join(", "))
+  // The two optional fields live behind an "Advanced" disclosure. Collapsed by default when adding
+  // (only the domain is required); expanded when editing, since selectors/IPs are the point of editing.
+  const [showAdvanced, setShowAdvanced] = useState(editing)
 
   // Close on Escape (the modal backdrop is non-interactive for a11y; use Escape or the X button).
   useEffect(() => {
@@ -250,24 +253,39 @@ function DomainDialog({ domain, onClose }: { domain?: MonitoredDomain; onClose: 
               className="w-full rounded-md border border-[var(--edh-border)] px-3 py-2 disabled:bg-slate-50"
             />
           </label>
-          <label className="text-sm">
-            <span className="mb-1 block font-medium">DKIM selectors (comma-separated)</span>
-            <input
-              value={selectors}
-              onChange={(e) => setSelectors(e.target.value)}
-              placeholder="google, s1"
-              className="w-full rounded-md border border-[var(--edh-border)] px-3 py-2"
+          <button
+            type="button"
+            onClick={() => setShowAdvanced((v) => !v)}
+            aria-expanded={showAdvanced}
+            className="-mx-1 flex items-center gap-1 rounded px-1 py-1 text-left text-sm font-medium text-[var(--edh-muted)] hover:bg-slate-50"
+          >
+            <ChevronRight
+              className={`h-4 w-4 transition-transform ${showAdvanced ? "rotate-90" : ""}`}
             />
-          </label>
-          <label className="text-sm">
-            <span className="mb-1 block font-medium">Sending IPs (comma-separated)</span>
-            <input
-              value={ips}
-              onChange={(e) => setIps(e.target.value)}
-              placeholder="203.0.113.10"
-              className="w-full rounded-md border border-[var(--edh-border)] px-3 py-2"
-            />
-          </label>
+            Advanced (optional)
+          </button>
+          {showAdvanced && (
+            <div className="grid gap-3">
+              <label className="text-sm">
+                <span className="mb-1 block font-medium">DKIM selectors (comma-separated)</span>
+                <input
+                  value={selectors}
+                  onChange={(e) => setSelectors(e.target.value)}
+                  placeholder="google, s1"
+                  className="w-full rounded-md border border-[var(--edh-border)] px-3 py-2"
+                />
+              </label>
+              <label className="text-sm">
+                <span className="mb-1 block font-medium">Sending IPs (comma-separated)</span>
+                <input
+                  value={ips}
+                  onChange={(e) => setIps(e.target.value)}
+                  placeholder="203.0.113.10"
+                  className="w-full rounded-md border border-[var(--edh-border)] px-3 py-2"
+                />
+              </label>
+            </div>
+          )}
           <div className="mt-1 flex justify-end gap-2">
             <button
               type="button"

@@ -403,8 +403,12 @@ watch cells go green. See [View a health-check run](./use_cases/view_health_chec
 * **Data & caching** — all screens read through TanStack Query hooks over the shared axios instance
   (`Authorization: Bearer <jwt>` injected from the session when signed in). Mutations (run audit, add/
   edit/remove domain) invalidate the relevant queries so the UI refreshes without a full reload.
-* **Toasts** — success/failure of every mutation surfaces a `sonner` toast; server validation errors
-  (e.g. duplicate domain) are shown inline on the form and as a toast.
+* **Toasts** — success/failure of every mutation surfaces a `sonner` toast, rendered **bottom-left**,
+  **enlarged (~2×)**, and offset clear of the 256px left bar; server validation errors (e.g. duplicate
+  domain) are shown inline on the form and as a toast. A manual scan additionally drives the **scan-
+  progress dock** — stacked per-domain "Running <domain>" cards that drain as each finishes. Both
+  surfaces, plus the parallel-scan concurrency model, are specified in
+  [Toasts & scan progress](./progress_ui.mdx).
 * **Icons** — lucide-react throughout (`RefreshCw`, `Play`, `Pencil`, `Trash2`, `ArrowUpRight`,
   `ChevronRight`, `Copy`, `Wrench`, …).
 * **Styling** — Tailwind with the app's CSS variables (`--edh-primary`, `--edh-border`, `--edh-muted`);
