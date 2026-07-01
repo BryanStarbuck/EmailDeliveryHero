@@ -1,0 +1,501 @@
+---
+title: EmailDeliveryHero — Report-Email Ingestion (DMARC aggregate & TLS-RPT)
+description: The authoritative spec for the inbound report emails that mailbox providers send to a monitored domain — DMARC aggregate (rua) XML reports and SMTP TLS Reporting (TLS-RPT) JSON reports. Defines how to recognize, decode, and parse a .eml file, the exact deliverability problems the reports reveal (unauthorized senders, SPF/DKIM-alignment gaps, spoofing, silent TLS/MTA-STS breakage), how each report row becomes a severity-tagged Finding with a concrete fix, the receive → classify → decode → parse → normalize → findings → store pipeline, which proactive DNS health checks hunt these same problems in future, the Reports UI surface, and the on-disk schema. Grounded in the 10 real reports for act3ai.com under emails/.
+---
+
+# EmailDeliveryHero — Report-Email Ingestion (DMARC aggregate & TLS-RPT)
+
+The mailbox providers your domain sends to — Google, Microsoft, Yahoo, Outlook.com — send **report
+emails back to you**. Those emails are not human-readable prose; they are machine reports, one
+compressed attachment per message, describing **who sent mail as your domain and whether it
+authenticated** (DMARC aggregate reports) and **whether inbound TLS to your MX succeeded or failed**
+(TLS-RPT reports). They are the single most direct evidence of a deliverability problem: they are the
+receivers telling you, in their own words, what they saw.
+
+This spec is the authoritative description of **those emails and how EmailDeliveryHero turns them
+into problems-and-fixes**. It is the shared ingestion machinery that the two "future ingestion" stubs
+already scoped in the per-check specs plug into — `dmarc.real_pass_rate` /
+[`dmarc_aggregate_reports`](./checks/dmarc.mdx#5-information-schema-database-schema) and
+`infra.tls_rpt_reports_ingested` / [`tls_rpt_reports`](./checks/tls_rpt.mdx#5-information-schema-database-schema).
+Where the per-check specs audit the **DNS record** that *requests* these reports (`rua=` on the DMARC
+and TLS-RPT records), **this spec covers the reports that come back**.
+
+> **Where these emails live.** The reports we are auditing are stored in the repo at
+> `~/BGit/Bryan_git/EmailDeliveryHero/emails/` — 10 real reports for `act3ai.com` used as the worked
+> example throughout (§12). That directory is the **fixture set / sample corpus**, not a runtime
+> path; in production the reports arrive at the domain's report mailbox and are ingested per §4.
+
+**Read alongside**
+- [overview.mdx](./overview.mdx) — product charter, personas, the six locked dashboard categories, ports.
+- [engineering.mdx](./engineering.mdx) — the `Checker`/`Finding` contract, the registry + runner, the
+  file store, and the scheduler this ingestion runs beside.
+- [checks/dmarc.mdx](./checks/dmarc.mdx) — audits the `_dmarc` record (including the `rua=` that
+  **requests** these aggregate reports); `dmarc.real_pass_rate` is the finding this ingestion feeds.
+- [checks/tls_rpt.mdx](./checks/tls_rpt.mdx) — audits the `_smtp._tls` record (the `rua=` that
+  **requests** TLS-RPT reports); `infra.tls_rpt_reports_ingested` is the finding this ingestion feeds.
+- [checks/spf.mdx](./checks/spf.mdx) / [checks/dkim.mdx](./checks/dkim.mdx) — the two authentication
+  mechanisms whose per-source pass/fail these reports measure in the field.
+- [checks/mta_sts.mdx](./checks/mta_sts.mdx) / [checks/dane_tlsa.mdx](./checks/dane_tlsa.mdx) — the TLS
+  policy layers whose enforcement failures land in TLS-RPT reports.
+- [dashboard.mdx](./dashboard.mdx) — where report-derived findings roll up (DMARC column, DNS &
+  Infrastructure column). No seventh category is added.
+- [scheduled_checks.mdx](./scheduled_checks.mdx) — the recurring cadence and run-diff that report
+  ingestion piggybacks on.
+- [settings.mdx](./settings.mdx) — the admin-only report-mailbox/collector configuration.
+
+---
+
+## 1. What these emails are
+
+There are **three** kinds of report email a monitored domain receives. All three arrive because a DNS
+record you published named a `rua=`/`ruf=` mailbox and asked receivers to report to it. Two of the
+three are in scope for the first ingestion round; the third is future.
+
+| Report kind | Standard | Requested by DNS record | Attachment media type | Payload | Answers the question |
+| --- | --- | --- | --- | --- | --- |
+| **DMARC aggregate (RUA)** | RFC 7489 / DMARCbis RFC 9990 | `_dmarc.<domain>` `rua=mailto:…` | `application/zip`, `application/gzip` (also `application/x-zip-compressed`) | XML (`<feedback>…`) | *Who sent mail as me, from which IPs, and did SPF/DKIM pass **and align**?* |
+| **TLS-RPT (SMTP TLS Reporting)** | RFC 8460 | `_smtp._tls.<domain>` `rua=mailto:…`/`https:…` | `application/tlsrpt+gzip` (email) / `application/tlsrpt+json` (HTTPS POST) | JSON (`{ organization-name, policies[] … }`) | *Did inbound TLS to my MX succeed, or did MTA-STS/DANE/STARTTLS fail silently?* |
+| **DMARC failure/forensic (RUF)** *(future)* | RFC 7489 / DMARCbis RFC 9991 | `_dmarc.<domain>` `ruf=mailto:…; fo=1` | `message/feedback-report` + `message/rfc822` | ARF | *Show me a redacted sample of one message that failed alignment.* |
+
+**Crucial classification fact (learned from the real corpus).** The subject line and the reporting-
+org name are **not** reliable type discriminators. Of the 10 `act3ai.com` reports in `emails/`, three
+carry a `microsoft.com` submitter and a "Report Domain: act3ai.com" subject **identical in shape** to
+the DMARC ones, yet they are **TLS-RPT reports** (`application/tlsrpt+gzip`), not DMARC. The
+classifier **must key off the attachment media type and the decompressed payload's root element**
+(`<feedback>` XML vs. TLS-RPT JSON), never the filename or subject. See §4.2.
+
+Google Postmaster Tools reputation and provider feedback-loop (FBL) complaint reports are **separate
+feeds** (a web dashboard / a distinct ARF stream) and belong to
+[checks/reputation_metrics.mdx](./checks/reputation_metrics.mdx) — they are noted here only so nobody
+tries to route them through this parser.
+
+---
+
+## 2. Anatomy of a report email — how to read a `.eml`
+
+A `.eml` is a raw RFC 822 message. The report is an **attachment**, and the useful data is inside a
+compressed part that must be decoded before it can be parsed. The pipeline never trusts the human-
+visible body; it walks the MIME tree.
+
+1. **Parse MIME.** Split headers from body; if `Content-Type: multipart/*`, split on the boundary and
+   walk every part (recurse into nested `multipart/mixed` / `multipart/report`).
+2. **Find the report part** by `Content-Type` (the media types in §1's table), falling back to the
+   `Content-Disposition: attachment; filename=…` extension (`.zip`, `.gz`, `.xml`, `.json`) only as a
+   secondary hint.
+3. **Base64-decode** the part per its `Content-Transfer-Encoding` (almost always `base64`).
+4. **Decompress** by magic bytes, not by filename: `PK\x03\x04` → ZIP (Google); `\x1f\x8b` → gzip
+   (Outlook, Microsoft TLS-RPT); raw `<?xml`/`{` → already plain.
+5. **Parse** the resulting XML (DMARC) or JSON (TLS-RPT) — §4.3.
+
+**Filename convention (informational only).** Providers name the attachment
+`<reporting-domain>!<audited-domain>!<begin-epoch>!<end-epoch>[!unique].xml.(gz|zip)` for DMARC, e.g.
+`google.com!act3ai.com!1750809600!1750896000.zip`. The window and reporter can be read from the
+filename, but the authoritative values are **inside** the payload — parse those, treat the filename as
+a hint only.
+
+**Robustness rules.** Tolerate: multiple attachments in one email (parse each); an attachment that is
+already-decompressed XML/JSON; `application/octet-stream` with a `.gz`/`.zip` filename (sniff magic
+bytes); oversized reports (stream-decompress with a hard cap, default 25 MB uncompressed, to avoid a
+zip-bomb); a non-report email in the mailbox (no matching part → skip, log `info`, do not error).
+
+---
+
+## 3. What problems these reports reveal
+
+This is the heart of the spec: the catalog of **deliverability problems detectable from the reports**,
+each with the concrete fix. Every problem below becomes a `Finding` (§5) rolled into the DMARC or DNS
+& Infrastructure dashboard category (§6). Problems are grouped by report kind.
+
+### 3.1 From DMARC aggregate (RUA) reports
+
+DMARC passes for a message if SPF **or** DKIM passes **and** the passing identity **aligns** with the
+`From:` domain (relaxed = same org domain; strict = exact). The report gives, per source IP: the
+message `count`, the receiver's applied `disposition` (none/quarantine/reject), and the SPF/DKIM
+**evaluated** and **aligned** results. From that we detect:
+
+| Problem | What in the report signals it | Why it hurts deliverability | Concrete fix |
+| --- | --- | --- | --- |
+| **Unauthorized / unknown sender** | A source IP with meaningful `count` where **both** SPF and DKIM fail alignment, and the IP is not a known ESP of the domain. | Either spoofing/abuse of your domain, or a legitimate sender you forgot to authorize — both erode reputation and, under `p=reject`, get rejected. | If yours: add the sender to SPF (`include:`) and enable DKIM for it. If not: it is being rejected already under `p=reject`; monitor and, if volume is high, report the abuse. |
+| **SPF-alignment gap on a real stream** | A known ESP source where DKIM aligns+passes but **SPF alignment fails** because the envelope (Return-Path/mfrom) domain is a subdomain/ESP domain, under `aspf=s` (strict). | The stream passes DMARC **only** via DKIM. One DKIM key rotation/breakage and the whole stream fails DMARC and is rejected under `p=reject`. Single point of failure. | Relax SPF alignment (`aspf=s` → `aspf=r`) **or** configure a branded/custom Return-Path under the org domain (e.g. `bounces.<domain>` CNAME'd at the ESP) so the envelope aligns. |
+| **DKIM-alignment gap on a real stream** | A known ESP source where SPF aligns+passes but DKIM fails/doesn't align (unsigned, or signed with an ESP `d=` that isn't your domain), under `adkim=s`. | Symmetric single-point-of-failure: the stream leans entirely on SPF; a Return-Path change or forward breaks it. | Enable DKIM signing with a selector under your domain (`selector._domainkey.<domain>`) and/or set `adkim=r`. |
+| **Forwarded / indirect mail failing** | Rows with `header_from=<domain>` but envelope `spf:` domain of a forwarder/gmail.com/etc., SPF non-aligned, "rescued" only by DKIM pass. | Forwarders rewrite the envelope; only DKIM (or ARC) survives. If DKIM also breaks, forwarded mail is rejected. | Ensure DKIM is robust; consider ARC-aware handling ([checks/arc.mdx](./checks/arc.mdx)). Usually benign when DKIM aligns. |
+| **Active enforcement (mail being quarantined/rejected)** | Any row with `disposition=quarantine` or `reject` and non-trivial `count`. | Your **own** legitimate mail is being dropped by receivers right now. | Identify the failing source, authorize it (SPF/DKIM), and confirm alignment before it recurs. |
+| **Policy weaker than believed** | The `<policy_published>` block shows `p=none` (or `sp=none`) while the owner thinks they enforce. | Monitor-only = zero spoofing protection despite the reports arriving. | Raise to `p=quarantine` → `p=reject` once reports confirm all legit sources align. (See [checks/dmarc.mdx](./checks/dmarc.mdx) `dmarc.policy`.) |
+| **Real-world pass rate too low to enforce** | Aggregate: % of volume that is DMARC-aligned-pass across all sources over the window. | Raising to `p=reject` while a meaningful slice fails would reject legitimate mail. | Do not tighten `p` until aligned-pass rate is ~100% for known sources; fix the failing streams first. This is the data behind `dmarc.real_pass_rate`. |
+| **New source appeared** | A source IP present in this window's report but absent from prior windows. | Could be a new legit ESP (authorize it) or the onset of spoofing (watch it). | Reconcile against known senders; add to SPF/DKIM if yours, else monitor. |
+
+### 3.2 From TLS-RPT reports
+
+TLS-RPT reports summarize, per reporting org per day, whether the sender could negotiate TLS to your
+MX under your MTA-STS/DANE policy: `policies[]` (with `policy-type` `sts`/`tlsa`/`no-policy-found`),
+`summary.total-successful-session-count` / `total-failure-session-count`, and `failure-details[]`.
+
+| Problem | What in the report signals it | Why it hurts deliverability | Concrete fix |
+| --- | --- | --- | --- |
+| **TLS negotiation failures to your MX** | `total-failure-session-count > 0`, `failure-details[].result-type` = `starttls-not-supported`, `certificate-host-mismatch`, `certificate-expired`, `validation-failure`, `tlsa-invalid`, etc. | Senders enforcing MTA-STS/DANE **bounce or downgrade** mail to you; silent for days without these reports. | Fix the reported layer: renew/replace the MX certificate (host-mismatch/expired), repair the TLSA record after a key roll (`tlsa-invalid`), ensure STARTTLS is offered. See [checks/tls_transport.mdx](./checks/tls_transport.mdx). |
+| **Failure-rate spike / regression** | A day's failure count jumps vs. the prior baseline. | An MTA-STS/DANE change just broke inbound TLS. | Roll back the offending policy/cert change; re-check MTA-STS mode and MX cert. |
+| **`no-policy-found` where a policy is expected** | `policy-type: no-policy-found` from a reporter while you believe MTA-STS is published. | Your MTA-STS/TLSA isn't being seen — policy not actually protecting you. | Verify `_mta-sts` TXT + the HTTPS policy file ([checks/mta_sts.mdx](./checks/mta_sts.mdx)) or the TLSA record. |
+| **Healthy baseline (informational)** | `total-failure-session-count == 0` across reporters, `mode: enforce`. | Confirms inbound TLS is working — a green signal, not a problem. | None; record the healthy baseline so a later regression is detectable. |
+
+### 3.3 What the reports do NOT tell you
+
+State the limits so the audit doesn't over-claim: DMARC/TLS-RPT reports carry **no blacklist/DNSBL
+status**, **no content spam score**, and **no inbox-vs-spam placement**. Those come from separate
+checks ([checks/blacklists.mdx](./checks/blacklists.mdx),
+[checks/content_scoring.mdx](./checks/content_scoring.mdx),
+[checks/inbox_placement.mdx](./checks/inbox_placement.mdx)). Report ingestion complements, never
+replaces, the DNS/probe checks.
+
+---
+
+## 4. The ingestion pipeline
+
+Report emails arrive **asynchronously** (daily-ish, on each receiver's schedule), independent of the
+on-demand/scheduled DNS audits. Ingestion is a distinct stage that reads the report mailbox, parses
+what it finds, and writes normalized rows that the audit engine and UI read.
+
+```
+receive  →  classify  →  decode  →  parse  →  normalize  →  derive findings  →  store  →  diff/surface
+(mailbox)   (media type) (b64+     (XML/JSON) (per-source   (report.* into the  (reports/  (regression +
+             /payload)    gunzip)             rows)          dmarc/infra cats)   *.json)    Reports UI)
+```
+
+### 4.1 Receive (source of the emails)
+
+First round supports two sources, both admin-configured (§8 / [settings.mdx](./settings.mdx)):
+
+- **IMAP mailbox poll** — the `rua` mailbox (e.g. `dmarc@<domain>`, `tls-reports@<domain>`) is polled
+  on a cadence (default hourly). Uses the same Google Workspace identity the app already authenticates
+  with via OpenAuthFederated where possible; otherwise an app-password/OAuth mailbox configured in
+  Admin settings. Processed messages are marked read / moved to a `Processed` folder (idempotent — see
+  dedupe in §4.5).
+- **Drop folder** — a local directory of `.eml`/`.xml`/`.json`/`.gz`/`.zip` files (this is exactly the
+  repo `emails/` corpus, and how a user can hand-feed reports without wiring a mailbox). The folder
+  path is admin-configurable; new files are ingested and then moved to a processed subdir.
+
+> **Runtime, per the charter.** Ingestion is **TypeScript on Node** like everything else — the poller
+> is the same kind of Node worker the launchd scheduler already invokes
+> (`code/deploy/launchd/trigger-scheduler.mjs`), not a shell/`curl` job.
+
+### 4.2 Classify (never trust the filename)
+
+For each candidate part, in order: (1) `Content-Type` media type → DMARC-agg vs TLS-RPT vs RUF; (2)
+if ambiguous (`application/octet-stream`), sniff magic bytes then peek the decompressed payload — root
+`<feedback>` element ⇒ DMARC aggregate; a JSON object with `organization-name`/`policies` ⇒ TLS-RPT.
+A part matching nothing is skipped with an `info` log. **This step is why the three `microsoft.com`
+files in the corpus are correctly handled as TLS-RPT despite DMARC-looking subjects.**
+
+### 4.3 Decode & parse
+
+- **DMARC XML** → parse `<report_metadata>` (`org_name`, `report_id`, `date_range.begin/end`),
+  `<policy_published>` (`domain`, `p`, `sp`, `adkim`, `aspf`, `pct`, `np`), and every `<record>`:
+  `<row><source_ip>`, `<count>`, `<policy_evaluated>` (`disposition`, `dkim`, `spf`),
+  `<identifiers><header_from>`, and `<auth_results>` (`<dkim><domain><result>`,
+  `<spf><domain><result>`). Use a dependency-light XML parser; never `eval`.
+- **TLS-RPT JSON** → parse `organization-name`, `date-range`, and each `policies[]` entry's
+  `policy.policy-type`, `summary.total-successful-session-count`,
+  `summary.total-failure-session-count`, and `failure-details[]` (`result-type`, `failed-session-count`).
+
+### 4.4 Normalize
+
+Reduce to a common shape the engine can reason over:
+- **DMARC** → one normalized row per `<record>`: `{ reporterOrg, reportId, windowStart, windowEnd,
+  sourceIp, count, disposition, spfEvaluated, dkimEvaluated, spfAligned, dkimAligned, dmarcPass,
+  headerFrom, envelopeSpfDomain, dkimSigningDomains[] }`. `dmarcPass = (spfAligned || dkimAligned)`.
+- **TLS-RPT** → one normalized row per reporter-per-policy: `{ reporterOrg, reportDate, policyType,
+  successCount, failureCount, failureDetails[] }`.
+
+### 4.5 Dedupe
+
+Reports are re-sent and windows overlap. Key each report by `(reporterOrg, reportId)` (DMARC) or
+`(reporterOrg, reportDate, policyType)` (TLS-RPT); ignore a report whose key is already stored. This
+makes both the IMAP poll and the drop-folder scan **idempotent** — re-ingesting the same `emails/`
+corpus produces no duplicates.
+
+### 4.6 Derive findings & store
+
+Normalized rows are aggregated over a rolling window (default 7 days), scored against §3's catalog
+into `Finding`s (§5), and persisted (§9). The findings attach to the domain's audit surface so they
+appear on the dashboard and in the Reports view (§7).
+
+---
+
+## 5. Findings emitted (rolled into existing categories)
+
+To honor the **six locked dashboard categories** (no seventh is added — see
+[dashboard.mdx](./dashboard.mdx)), report-derived findings use existing `checkId` prefixes: DMARC-
+aggregate findings under **`dmarc.*`**, TLS-RPT findings under **`infra.*`**. Each is a standard
+`Finding { checkId, severity, title, detail, remediation }` ([engineering.mdx](./engineering.mdx)).
+
+| checkId | Source | Severity rule | Title / detail | Remediation |
+| --- | --- | --- | --- | --- |
+| `dmarc.real_pass_rate` | DMARC agg | **warning** if aligned-pass rate < ~100% of known-sender volume while `p<reject`, or any non-trivial unaligned volume before enforcing; **info** at 100%. | "N% of mail is DMARC-aligned; M msgs from K sources fail alignment." | Fix/authorize the failing sources (SPF `include:` / DKIM selector / alignment) **before** raising policy. |
+| `dmarc.report_unaligned_source` | DMARC agg | **critical** if a source fails **both** SPF+DKIM alignment with real volume and isn't a known sender; **warning** if it's a known ESP with a one-sided alignment gap. | "Source `<ip>` sent `<count>` as `<header_from>` — SPF `<r>`/aligned `<b>`, DKIM `<r>`/aligned `<b>`." | Per §3.1: authorize (SPF/DKIM) if yours; else monitor — it's already being rejected under `p=reject`. |
+| `dmarc.report_alignment_fragility` | DMARC agg | **warning** — a real stream passes on only one mechanism (e.g. SendGrid via DKIM only, SPF strict-misaligned). | "Stream from `<ip>`/`<envelope-domain>` passes DMARC via DKIM only; SPF alignment fails under `aspf=s`." | `aspf=s` → `aspf=r` **or** brand the Return-Path (`bounces.<domain>`), so the stream has dual-auth resilience. |
+| `dmarc.report_enforcement` | DMARC agg | **critical** if own mail is `disposition=reject`/`quarantine`; **info** if all `none`. | "`<count>` msgs from `<ip>` were `<disposition>` by `<reporterOrg>`." | Identify + authorize the failing source; confirm alignment. |
+| `dmarc.report_new_source` | DMARC agg | **info** (watch) — a source IP unseen in prior windows. | "New sending source `<ip>` (`<count>` msgs) appeared this window." | Reconcile against known senders; add to SPF/DKIM if yours. |
+| `infra.tls_rpt_reports_ingested` | TLS-RPT | **warning** on any `failure-details` volume / failure-rate spike; **info** at zero failures. | "`<reporterOrg>`: `<success>` ok / `<failure>` failed TLS sessions (`<result-type>`)." | Fix the reported layer: MX cert (host-mismatch/expired), TLSA (`tlsa-invalid`), STARTTLS, or MTA-STS policy. |
+
+Every non-`ok` finding carries a **concrete** remediation (the exact tag edit or step) — never a
+generic "check your DNS," per [engineering.mdx §6.4](./engineering.mdx).
+
+---
+
+## 6. How report findings roll up onto the dashboard
+
+The six category columns are **LOCKED**; report findings simply feed the two relevant columns:
+
+- **DMARC column** ← all `dmarc.report_*` and `dmarc.real_pass_rate` findings (worst severity wins the
+  cell color, exactly as for the DNS-based `dmarc.*` sub-checks).
+- **DNS & Infrastructure column** ← `infra.tls_rpt_reports_ingested` (alongside the TLS-RPT record
+  audit and MTA-STS/DANE).
+
+Because reports arrive asynchronously, a report-derived finding can appear on the **most recent
+audit's** category cell between DNS audits (the store attaches the latest report-window findings to
+the domain; the dashboard's daily row reflects them). `info`-only report findings (healthy TLS
+baseline, new-source watch) never turn a cell amber — same rule as everywhere.
+
+---
+
+## 7. User interface
+
+Two surfaces, both built on the shared React 19 + shadcn/ui finding row.
+
+### 7.1 A "Reports" view (per domain)
+
+A new left-bar item **Reports** (see [left_bar.yaml](./left_bar.yaml)) and a per-domain **Reports**
+tab. It answers the user's three-step need: *see the problem → open the details → get the fix.*
+
+```
+Reports ▸ act3ai.com                                   window: last 7 days ▾   [ Ingest now ]
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│ DMARC aggregate            5 reports · google.com, outlook.com · 1,195 msgs · 06-24→06-30  │
+│  ✔  DMARC-aligned pass rate                96.8%  (1,157 / 1,195)                            │
+│  ⚠  SendGrid stream is DKIM-only           34 msgs · em2598.act3ai.com · SPF strict-misalign │
+│       fix: set aspf=r  (or brand Return-Path bounces.act3ai.com)                    [ Copy ] │
+│  ⓘ  No unauthorized senders                0 rows fail both SPF+DKIM                          │
+│                                                                                              │
+│ TLS-RPT (SMTP TLS)         3 reports · microsoft.com · mode: enforce                         │
+│  ✔  Inbound TLS healthy                    7 ok / 0 failed sessions (06-26→06-29)            │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+- Grouped by report kind. Each group header shows report count, reporters, message/session volume,
+  and the window.
+- Each problem is a finding row: severity `Badge` (lucide `ShieldAlert`/`ShieldCheck`/`Info`), title,
+  an **observed** block (the parsed detail — the source IP, envelope domain, counts, dispositions),
+  the **remediation** string, and a **copy-to-clipboard** button that copies the exact record edit
+  (e.g. the corrected DMARC TXT with `aspf=r`).
+- **Open the details** → expanding a DMARC finding reveals the **per-source-IP table**: `Source IP |
+  Count | Disposition | SPF (eval/align) | DKIM (eval/align) | DMARC | Header-From | Envelope`, sorted
+  by count desc. A TLS-RPT finding expands to a **per-reporter/day table** with success/failure counts
+  and `failure-details`.
+- **Ingest now** button triggers an on-demand mailbox/drop-folder scan (§4) so the user can pull fresh
+  reports without waiting for the poll.
+
+### 7.2 Inside the health-check run detail
+
+The [view one health-check run](./use_cases/view_health_check_run.mdx) page already groups findings by
+the six categories. Report-derived findings render **in-line** there: `dmarc.report_*` under the
+**DMARC** group, `infra.tls_rpt_reports_ingested` under **DNS & Infrastructure**, each with the same
+observed-detail + remediation + copy control, and a small **"from reports"** chip so the user knows the
+evidence came from an ingested report rather than a live DNS lookup. Expanding still reveals the
+per-source-IP table.
+
+### 7.3 States
+
+- **Never ingested** → the Reports view shows an empty state: "No reports ingested yet. Publish
+  `rua=` on your DMARC/TLS-RPT records so receivers send reports, then point the mailbox here in
+  Settings → Admin," with the exact record strings and a link to the two check specs.
+- **Records published but no reports yet** → "Reports typically take 24–72h after publishing `rua=`."
+- **Loading** → shadcn `Skeleton` rows.
+
+---
+
+## 8. Configuration (admin-only)
+
+Under **Settings → Admin** (gated by `role:admin`, per [settings.mdx](./settings.mdx)):
+
+- **Report source** — IMAP mailbox (host/user/credential ref, or "use the signed-in Google Workspace
+  mailbox") and/or a drop-folder path. Credentials are read from the out-of-repo credentials file, not
+  stored in the state dir ([storage.mdx](./storage.mdx) / [authentication.mdx](./authentication.mdx)).
+- **Poll cadence** — default hourly; and the rolling aggregation window (default 7 days).
+- **Per-domain rua mailbox mapping** — which mailbox/address receives reports for which monitored
+  domain (a domain may point `rua` at a shared box; the parser routes by the report's
+  `<policy_published><domain>` / TLS-RPT policy domain, not the mailbox).
+- **Enable/disable ingestion** — the master switch for `dmarc.real_pass_rate` and
+  `infra.tls_rpt_reports_ingested`; off = they return a single `info` "ingestion disabled" finding and
+  contribute zero to score (matching the existing "future" behavior in the two check specs).
+
+---
+
+## 9. Information schema (on-disk store)
+
+There is **no database** in the first round ([engineering.mdx §7](./engineering.mdx),
+[storage.mdx](./storage.mdx)). Ingested reports persist as JSON under the state root, fronted by the
+`store` module, and map 1:1 to the future SQL tables already declared in the per-check specs
+(`dmarc_aggregate_reports` in [dmarc.mdx](./checks/dmarc.mdx), `tls_rpt_reports` in
+[tls_rpt.mdx](./checks/tls_rpt.mdx)).
+
+```
+~/T/_emaildeliveryhero/                       # state root (storage.mdx; EDH_STATE_DIR override)
+└── reports/
+    └── <domainId>/
+        ├── dmarc/<reporterOrg>-<reportId>.json     # one parsed DMARC aggregate report (deduped by reportId)
+        ├── tlsrpt/<reporterOrg>-<reportDate>.json  # one parsed TLS-RPT report (deduped by reporter+date)
+        └── ingest-state.json                        # last poll time, processed message ids, cursor
+```
+
+A parsed DMARC report file holds `{ reporterOrg, reportId, window:{begin,end}, policyPublished:{domain,
+p,sp,adkim,aspf,pct,np}, rows:[ { sourceIp, count, disposition, spf:{evaluated,aligned},
+dkim:{evaluated,aligned}, dmarcPass, headerFrom, envelopeSpfDomain, dkimSigningDomains[] } ] }` — the
+same fields as `dmarc_aggregate_reports`. A parsed TLS-RPT file holds `{ reporterOrg, reportDate,
+policies:[ { policyType, successCount, failureCount, failureDetails:[{resultType,count}] } ] }` — the
+same fields as `tls_rpt_reports`. The derived `report.*`/`dmarc.report_*`/`infra.*` findings land in
+the normal audit document's `findings[]` (with a `source:"report"` marker) so the dashboard and run
+detail read them with no special path. Because the store module abstracts all of this, the file→DB
+move is a single-module change.
+
+---
+
+## 10. When we run it & regression detection
+
+- **Ingestion cadence** is **report-driven**, not audit-driven: the poller runs on its own schedule
+  (default hourly) because reports trickle in daily per receiver. This is deliberately decoupled from
+  the DNS-audit cadence in [scheduled_checks.mdx](./scheduled_checks.mdx).
+- **On-demand** ingest via the Reports view's **Ingest now** and `POST /api/domains/:id/reports/ingest`.
+- **Regression detection** mirrors the rest of the app ([engineering.mdx §8](./engineering.mdx)): each
+  new rolling-window aggregation is diffed against the prior one. New problems to surface: a **new
+  unaligned source** appears, the **aligned-pass rate drops**, own mail starts being **rejected/
+  quarantined**, or **TLS failure sessions appear/spike**. Each becomes a "new problem" on the
+  Dashboard the same way a DNS regression does.
+
+---
+
+## 11. First round vs. future
+
+| Capability | First round | Future |
+| --- | --- | --- |
+| DMARC aggregate (RUA) XML: decode zip/gzip, parse, per-source rows, alignment/pass-rate findings | ✅ | — |
+| TLS-RPT JSON: decode gzip, parse, success/failure + failure-details findings | ✅ | — |
+| IMAP mailbox poll + drop-folder ingest, dedupe, idempotent | ✅ | OAuth mailbox auto-discovery |
+| Reports UI (per-source table, copy-fix), roll-up into DMARC / DNS&Infra cells | ✅ | — |
+| DMARC **failure/forensic (RUF)** ARF parsing (redacted samples) | — | ⛔ needs `ruf`/`fo=1` + ARF parser + PII handling |
+| Google Postmaster Tools reputation / provider FBL complaint streams | — | ⛔ separate feed → [reputation_metrics.mdx](./checks/reputation_metrics.mdx) |
+| Trend charts (pass-rate/failure over time) | minimal (window totals) | ⛔ time-series charts |
+
+---
+
+## 12. Worked example — the 10 real reports for act3ai.com
+
+The `emails/` corpus (used as the fixture set) resolves to exactly the picture the ingestion is built
+to produce:
+
+- **Classification.** 5× `google.com` (DMARC agg, `application/zip`), 2× `protection.outlook.com`
+  (DMARC agg, `application/gzip`), **3× `microsoft.com` (TLS-RPT, `application/tlsrpt+gzip`)** — the
+  three TLS-RPT files are the reason §4.2 keys off media type, not subject.
+- **Published policy (all 7 DMARC reports agree):** `p=reject; sp=reject; adkim=s; aspf=s; pct=100` —
+  the strictest posture. So DMARC's own record checks are **healthy**; the problems are in the field
+  data, not the record.
+- **Volume:** 1,195 messages over 2026-06-24→30. **DMARC-aligned pass: 1,157 (96.8%). Fail: 38
+  (3.2%).**
+- **The one real problem → `dmarc.report_alignment_fragility` (warning).** ~34 messages from SendGrid
+  IPs (`149.72.*`, `159.183.*`) with envelope `em2598.act3ai.com`: **DKIM passes and aligns, but SPF
+  alignment fails** under `aspf=s` (envelope is a subdomain). The stream passes DMARC **via DKIM
+  only** — one DKIM hiccup from being rejected under `p=reject`. **Fix:** set `aspf=r`, or brand the
+  Return-Path (`bounces.act3ai.com` CNAME'd at SendGrid) so SPF aligns too. This is the single
+  actionable finding a good audit must surface.
+- **No spoofing → `dmarc.report_unaligned_source` is clear.** Zero rows fail *both* SPF and DKIM; all
+  traffic traces to Google Workspace or the SendGrid tenant. The handful of `gmail.com` /
+  `whitehatengineering.com` envelope rows are benign forwards, DKIM-authenticated.
+- **`dmarc.real_pass_rate`:** 96.8% aligned; because `p=reject` is already enforced and the 3.2% is a
+  known stream rescued by DKIM, the finding is a **warning** (fix the SendGrid alignment) rather than a
+  block-the-enforcement critical. Do **not** loosen `p`.
+- **TLS-RPT → `infra.tls_rpt_reports_ingested` (info/healthy).** Microsoft reports show MTA-STS
+  `mode: enforce`, MX = `aspmx.l.google.com` + alt1-4, and **0 failed sessions** across all three
+  days. Inbound TLS is healthy; record the baseline so a future regression is caught.
+- **Out of scope from these reports:** blacklist status must come from
+  [checks/blacklists.mdx](./checks/blacklists.mdx) against the Google Workspace + SendGrid IPs above.
+
+---
+
+## 13. Proactive health checks that hunt these problems (future)
+
+The reports are **retrospective** — they tell you what receivers already saw. The audit engine should
+also **proactively hunt** the same problems so it flags them before (or without) a report. For every
+sending source and stream, the DNS/probe checks reconcile against what the reports would show:
+
+1. **Enumerate known senders** per domain (SPF `include:` targets, DKIM selectors, configured ESPs,
+   and — once ingested — the source IPs/envelope domains observed in reports).
+2. **Alignment simulation (the core future check).** For each known stream, compute what DMARC would
+   conclude given the domain's `adkim`/`aspf`: does the envelope domain align (SPF) and does a DKIM
+   `d=` under the org domain exist and align? A stream that would pass on **only one** mechanism is
+   flagged as *fragile* — the same `dmarc.report_alignment_fragility` problem, detected from DNS
+   alone. (For act3ai.com this would flag the SendGrid subdomain under `aspf=s` without needing the
+   report.)
+3. **Enforcement-readiness cross-check** (already scoped as `dmarc.enforcement_readiness` in
+   [checks/dmarc.mdx](./checks/dmarc.mdx)): only advise raising `p=none → reject` when every known
+   stream is dual-aligned.
+4. **TLS posture probe** ([checks/tls_transport.mdx](./checks/tls_transport.mdx),
+   [checks/mta_sts.mdx](./checks/mta_sts.mdx), [checks/dane_tlsa.mdx](./checks/dane_tlsa.mdx)):
+   actively connect to each MX, verify STARTTLS, certificate validity/name-match, and TLSA/MTA-STS
+   consistency — pre-empting the `starttls-not-supported`/`certificate-host-mismatch`/`tlsa-invalid`
+   failures TLS-RPT would otherwise report after the fact.
+5. **Blacklist sweep** ([checks/blacklists.mdx](./checks/blacklists.mdx)) over every source IP the
+   reports reveal — closing the gap in §3.3.
+6. **New-source alerting** — when ingestion surfaces a source IP unseen in prior windows, cross-check
+   it against SPF and known ESPs; unknown + volume ⇒ escalate.
+
+This makes report ingestion and proactive DNS auditing **two views of one truth**: the reports confirm
+in the field what the health checks predict from DNS, and each backstops the other.
+
+---
+
+## 14. Acceptance criteria
+
+1. A `.eml` in `emails/` (or a report mailbox) is parsed by walking its MIME tree; the report part is
+   found by **media type / payload sniffing**, base64-decoded, and decompressed by **magic bytes**
+   (ZIP `PK`, gzip `\x1f\x8b`) — never by filename or subject.
+2. The **three `microsoft.com` files are classified as TLS-RPT**, and the Google/Outlook files as
+   DMARC aggregate, regardless of their DMARC-looking subjects.
+3. DMARC XML parsing yields, per `<record>`: source IP, count, disposition, SPF/DKIM evaluated **and
+   aligned** results, header-from, and envelope/DKIM identities; `dmarcPass = spfAligned || dkimAligned`.
+4. TLS-RPT JSON parsing yields per-reporter-per-policy success/failure counts and `failure-details`.
+5. A source failing **both** SPF and DKIM alignment with real volume emits
+   `dmarc.report_unaligned_source` (**critical** if unknown sender); a stream passing on only one
+   mechanism emits `dmarc.report_alignment_fragility` (**warning**) with the exact `aspf=r`/branded-
+   Return-Path fix.
+6. `dmarc.real_pass_rate` reports the aligned-pass percentage and is **warning** when a non-trivial
+   share is unaligned before enforcement, **info** at ~100%.
+7. `infra.tls_rpt_reports_ingested` is **warning** on any failure sessions with the layer-specific fix,
+   **info** at zero failures.
+8. All report-derived findings roll up into the **existing** DMARC and DNS & Infrastructure dashboard
+   cells — **no seventh category is introduced** — and `info`-only findings never turn a cell amber.
+9. Ingestion is **idempotent**: re-ingesting the same corpus produces no duplicate reports (deduped by
+   `reportId` / reporter+date).
+10. The Reports UI shows each problem, an expandable **per-source-IP table** for details, and a
+    **copy-to-clipboard** fix; report findings also appear in the run-detail page under the right
+    category with a "from reports" chip.
+11. Parsed reports persist under `~/T/_emaildeliveryhero/reports/<domainId>/…`, mapping 1:1 to the
+    future `dmarc_aggregate_reports` / `tls_rpt_reports` tables; findings carry `source:"report"`.
+12. Running against the `act3ai.com` corpus reproduces §12: 96.8% aligned pass, the SendGrid
+    strict-SPF-alignment fragility warning, zero spoofing, and a healthy TLS baseline.
+13. RUF/ARF parsing, provider FBL/Postmaster streams, and trend charts are clearly gated as **future**.
+
+<!--
+  Maintenance notes:
+  * This file is the authoritative spec for INBOUND report-email ingestion. It feeds the two "future
+    ingestion" stubs: dmarc.real_pass_rate / dmarc_aggregate_reports (checks/dmarc.mdx) and
+    infra.tls_rpt_reports_ingested / tls_rpt_reports (checks/tls_rpt.mdx). Keep those cross-links live.
+  * The classifier MUST key off attachment media type + decompressed payload root, NOT subject/filename
+    — three microsoft.com files in emails/ are TLS-RPT despite DMARC-looking subjects. Do not regress.
+  * Report findings roll into the EXISTING six categories (DMARC, DNS & Infrastructure). Never add a
+    seventh dashboard category (dashboard.mdx locks the six).
+  * Media types: DMARC agg = application/zip | application/gzip; TLS-RPT = application/tlsrpt+gzip.
+  * State root is ~/T/_emaildeliveryhero/ (storage.mdx authority); the older ~/.email_delivery_hero/
+    path in engineering.mdx/dmarc.mdx/tls_rpt.mdx refers to the same store module — reconcile there.
+  * When RUF/ARF or FBL/Postmaster ingestion ships, move the relevant row from §11 future → first
+    round and add a sub-check id under the correct existing category.
+-->
+</content>
+</invoke>

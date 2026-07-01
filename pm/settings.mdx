@@ -10,11 +10,13 @@ signed-in user tunes *how* the deliverability auditor behaves — which checks r
 blocklists to query, how periodic re-audits are scheduled, how the user is alerted to new problems,
 where state lives on disk, and which company domains may sign in.
 
-Settings sits behind the same gate as the rest of the app: every route requires a signed-in
-Google Workspace user (see [Authentication](./authentication.mdx)). Some settings are **all-users**
-(they change the current user's own experience or trigger read-only actions); others are
-**admin-only**, gated by the `role:admin` claim, because they change global behavior that affects
-every user and every scheduled run.
+Settings follows the app's optional-login model (see [Security](./security.mdx)): the Settings page is
+**reachable and usable while logged out**, where changes are attributed to the **`default`** user and
+persist in `users/default/config.yaml`. Some settings are **all-users** (they change the current
+user's own experience or trigger read-only actions); others are **admin-only**, enforced on the
+backend by the `role:admin` claim (the `@RequireRole("admin")` guard), because they change global
+behavior that affects every user and every scheduled run — and the `default` user, having no roles,
+is refused those with `403`.
 
 Related specs:
 

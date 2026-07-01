@@ -8,6 +8,11 @@ export interface CreateDomainInput {
   sendingIps?: string[]
 }
 
+export interface UpdateDomainInput {
+  dkimSelectors?: string[]
+  sendingIps?: string[]
+}
+
 const KEY = ["domains"] as const
 
 export function useDomains() {
@@ -22,6 +27,15 @@ export function useCreateDomain() {
   return useMutation({
     mutationFn: async (input: CreateDomainInput) =>
       (await api.post<MonitoredDomain>("/domains", input)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
+  })
+}
+
+export function useUpdateDomain() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ id, input }: { id: string; input: UpdateDomainInput }) =>
+      (await api.patch<MonitoredDomain>(`/domains/${id}`, input)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
   })
 }

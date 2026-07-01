@@ -17,8 +17,22 @@ type AuthBridge = {
   reloadSession: () => Promise<boolean>
 }
 let bridge: AuthBridge | null = null
+
+// Resolves the first time <AuthBridge> registers. Requests fired during the initial render wave run
+// before AuthBridge's effect executes; without this they'd race out tokenless and get refused as the
+// `default` user even when signed in. The interceptor awaits this (bounded) so the token lands on the
+// very first call. Never blocks logged-out use — see BRIDGE_READY_TIMEOUT_MS below.
+let resolveBridgeReady: () => void = () => {}
+const bridgeReady = new Promise<void>((resolve) => {
+  resolveBridgeReady = resolve
+})
+
+/** Grace window for <AuthBridge> to register on first paint before we proceed tokenless (default user). */
+const BRIDGE_READY_TIMEOUT_MS = 500
+
 export const registerAuthBridge = (b: AuthBridge) => {
   bridge = b
+  resolveBridgeReady()
 }
 
 /** Single shared axios instance. `withCredentials` lets the auth session cookie travel on calls. */
@@ -29,6 +43,14 @@ export const api = axios.create({
 
 // Request: attach the short-lived JWT from the active OpenAuthFederated session.
 api.interceptors.request.use(async (config) => {
+  // Give <AuthBridge> a chance to register before the first request wave, but never block logged-out
+  // use: if no bridge appears within the grace window the request proceeds tokenless (default user).
+  if (!bridge) {
+    await Promise.race([
+      bridgeReady,
+      new Promise<void>((resolve) => setTimeout(resolve, BRIDGE_READY_TIMEOUT_MS)),
+    ])
+  }
   if (!bridge) return config
   try {
     const token = await bridge.getToken()

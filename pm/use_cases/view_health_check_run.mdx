@@ -141,6 +141,15 @@ An example run for `whitehatengineering.com`:
 The user works top to bottom, reading each non-`ok` row's **remediation** — that "how to fix" line
 is the whole point of the page.
 
+**Findings sourced from ingested reports.** Some findings come not from a live DNS lookup but from the
+**DMARC aggregate / TLS-RPT report emails** the domain received (see
+[Report-email ingestion](../emails.mdx)). These render in-line in the same groups — `dmarc.report_*`
+and `dmarc.real_pass_rate` under **DMARC**, `infra.tls_rpt_reports_ingested` under **DNS &
+Infrastructure** — each tagged with a small **"from reports"** chip, and expanding one reveals the
+**per-source-IP table** (source IP, count, disposition, SPF/DKIM eval + alignment, header-from,
+envelope). They obey the same six-category roll-up and copy-the-fix rules as every other finding; the
+dedicated **Reports** view is where the full per-domain report picture lives.
+
 ---
 
 ## 5. Actions

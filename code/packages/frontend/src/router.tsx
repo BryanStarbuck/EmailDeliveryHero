@@ -5,6 +5,7 @@ import { DashboardPage } from "@/pages/app/DashboardPage"
 import { AuditsPage } from "@/pages/audits/AuditsPage"
 import { BlacklistsPage } from "@/pages/blacklists/BlacklistsPage"
 import { DomainsPage } from "@/pages/domains/DomainsPage"
+import { RunDetailPage } from "@/pages/domains/RunDetailPage"
 import { SettingsPage } from "@/pages/settings/SettingsPage"
 import { SignInPage } from "@/pages/sign-in/SignInPage"
 import { SsoCallbackPage } from "@/pages/sso-callback/SsoCallbackPage"
@@ -51,6 +52,11 @@ const domainsRoute = createRoute({
   path: "/domains",
   component: DomainsPage,
 })
+const runDetailRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id",
+  component: RunDetailPage,
+})
 const auditsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/audits",
@@ -78,6 +84,7 @@ const routeTree = rootRoute.addChildren([
   appLayoutRoute.addChildren([
     dashboardRoute,
     domainsRoute,
+    runDetailRoute,
     auditsRoute,
     blacklistsRoute,
     settingsIndexRoute,

@@ -1,0 +1,454 @@
+---
+title: EmailDeliveryHero — User Interface
+description: The consolidated UI product specification for EmailDeliveryHero — the design language that every screen shares (the six locked check categories, the four status colors, the StatusCell, the big "Email Delivery Hero" brand header, and the bottom-of-nav account slot), a walkthrough of every screen (Dashboard, Domains, Run detail, Audits, Blacklists, Settings), the two left navigation bars, the common finding-presentation pattern (severity badge → observed detail → copy-able "how to fix"), and a Use Cases section describing how a user flows through the product. This is the human companion to the per-screen specs; where they conflict on shared vocabulary, this file states the invariants they all obey.
+---
+
+# EmailDeliveryHero — User Interface
+
+This document is the **single UI product specification** for EmailDeliveryHero. The per-screen specs
+([Dashboard](./dashboard.mdx), [Domains](./domains.mdx), [Settings](./settings.mdx),
+[Scheduled checks](./scheduled_checks.mdx)) and the 21 [per-check specs](./checks/overview.mdx) each
+describe one surface in depth. **This file ties them together**: it fixes the design language every
+screen shares, walks the whole app screen-by-screen, defines the two left bars, and — in the
+[Use Cases](#8-use-cases--how-a-user-flows-through-the-product) section — describes how a real user
+moves through the product to get a problem fixed.
+
+The goal of the UI is one sentence: **make the customer successful at getting their email into the
+inbox.** Every layout decision below serves that — a glanceable health grid so nothing rots
+unnoticed, and, one click away, the *exact record to publish* for every problem, copy-able so the
+user never retypes a DNS string.
+
+It builds on the siblings and does not repeat their internals:
+
+* [Overview](./overview.mdx) — the charter, personas, the check list, ports (UI **4444**, API **9312**).
+* [Security](./security.mdx) — **login is optional**; there is always a current user (`default` when
+  logged out). This is why no screen ever gates behind a sign-in wall.
+* [Engineering](./engineering.mdx) — the audit engine, the `Finding` / `AuditResult` shape, the REST
+  contract, and the React 19 + Vite + Tailwind + lucide-react + TanStack Router/Query frontend.
+* [Dashboard](./dashboard.mdx) · [Domains](./domains.mdx) · [Settings](./settings.mdx) ·
+  [Scheduled checks](./scheduled_checks.mdx) — the per-screen specs this consolidates.
+* [View a health-check run](./use_cases/view_health_check_run.mdx) ·
+  [Audit a domain](./use_cases/audit_a_domain.mdx) ·
+  [Domain on a blacklist](./use_cases/domain_on_blacklist.mdx) — the flows expanded in §8.
+
+---
+
+## 1. The design language (LOCKED)
+
+Every screen is built from the same small vocabulary. These are **invariants** — do not add, rename,
+or recolor them in any screen.
+
+### 1.1 The six check categories
+
+Every one of the 21 checkers rolls its findings into **exactly one** of six categories, in this
+**locked order**. A finding's category is the prefix of its `checkId` (`checkId.split(".")[0]`):
+
+| # | Category (column header) | `checkId` prefix(es) | What rolls in |
+| --- | --- | --- | --- |
+| 1 | **SPF** | `spf` | The single SPF record, lookup count, `all` qualifier. |
+| 2 | **DKIM** | `dkim` | Each selector's `_domainkey` key present/valid. |
+| 3 | **DMARC** | `dmarc`, `arc` | DMARC record + policy strength; ARC has **no cell of its own** — it feeds DMARC. |
+| 4 | **Blacklists** | `blacklist` | DNSBL status across the domain's sending IPs. |
+| 5 | **DNS & Infrastructure** | `infra` (incl. `infra.*`) | MX, PTR/FCrDNS, TLS/STARTTLS, MTA-STS, TLS-RPT, DANE/TLSA, DNSSEC, DNS health, domain reputation, SMTP security — **ten checks share one cell**. |
+| 6 | **Spam & Content** | `content` (incl. `content.*`) | BIMI, content scoring, List-Unsubscribe, link/URL reputation, reputation metrics, inbox placement — **six checks share one cell**. |
+
+> The frontend's column *keys* are `spf`, `dkim`, `dmarc`, `blacklists`, `dnsInfra`, `spamContent`;
+> the *finding* `checkId` prefixes are `spf`, `dkim`, `dmarc`/`arc`, `blacklist`, `infra`, `content`.
+> The rollup in `src/lib/categories.ts` maps the latter to the former.
+
+### 1.2 The four status colors
+
+A category's color is the **worst finding severity** it contains for the latest audit. Severity is
+`ok | info | warning | critical` (see [Engineering §6.1](./engineering.mdx)). **`info`-only findings
+never turn a cell amber** — an all-`ok`/`info` category is green.
+
+| Meaning | When | Tailwind | Text |
+| --- | --- | --- | --- |
+| **Healthy** | every finding `ok`/`info` | `bg-green-800` | white |
+| **Some problems** | worst is `warning` | `bg-amber-500` | black |
+| **Critical** | any `critical` | `bg-red-800` | white |
+| **Never run** | no audit yet for this cell | `bg-gray-100 text-gray-500` | muted |
+
+All four meet WCAG AA. The mapping is identical on the Dashboard, the Domains table, and the run
+detail chips, so a user reads color the same way everywhere.
+
+### 1.3 The StatusCell metric text
+
+Each cell is a solid color block with a short (≤10-char) metric label:
+
+* **Healthy** → `Healthy`.
+* **Never run** → `Never` (or `—` in the ultra-compact empty state).
+* **Blacklists** → count-oriented: `N problems` / `1 problem` (number of listings), else `Healthy`.
+* **Spam & Content** → a percentage where natural (inbox placement), e.g. `92%`.
+* **Everything else** → `K of M fail` where M is that category's sub-check count and K = failing
+  (`warning` + `critical`), e.g. `2 of 7 fail`.
+
+The cell's `title`/tooltip carries the top open problem in words (e.g. "DKIM: selector `google`
+missing").
+
+### 1.4 The common finding-presentation pattern
+
+Wherever a finding is shown (the run detail page, the Audits view, the Blacklists view), it uses the
+**same row**:
+
+```
+[severity badge]  <title>   <checkId>
+                  <detail — what was observed, monospace for records>
+                  🔧 Fix: <remediation>                         [ Copy fix ]
+```
+
+* **Severity badge** — green `OK` / blue `Info` / amber `Warning` / red `Critical`.
+* **Detail** — the actual record / lookup result observed (monospace when it is a DNS string).
+* **Remediation** — present on every non-`ok` finding; it is the whole point of the app.
+* **Copy fix** — a copy-to-clipboard button on any finding that carries a record-shaped remediation
+  or `evidence`, so the user pastes the **exact TXT** into their DNS provider without retyping.
+
+Problems sort to the top (critical → warning → info → ok). Healthy findings render as quiet green
+rows with no fix.
+
+### 1.5 The account slot (optional login)
+
+At the **bottom of the left bar**, always visible:
+
+* **Logged out** → a **"Sign in"** button with the subtitle "Using default settings" (the current
+  user is the `default` user; see [Security §3.2](./security.mdx)). No screen ever forces this.
+* **Signed in** → avatar + name + email; clicking opens an **upward** popup with **Settings**,
+  **Admin** (only if the token carries `role:admin`), and **Log out**. Log out returns to the
+  `default` user — it never ejects the person from the app.
+
+---
+
+## 2. App frame
+
+Every authenticated-or-default screen shares one frame: a fixed **256px left bar** and a scrolling
+**content area**.
+
+```
+┌────────────┬──────────────────────────────────────────────────────────┐
+│  LEFT BAR  │  content area (routed screen; scrolls independently)      │
+│  (256px)   │                                                            │
+│  …nav…     │                                                            │
+│  ────────  │                                                            │
+│  account   │                                                            │
+│  slot      │                                                            │
+└────────────┴──────────────────────────────────────────────────────────┘
+```
+
+The left-bar **variant** is chosen by route: the **settings** bar renders under `/settings/*`, the
+**app** bar everywhere else. The frame renders for everyone (logged in or `default`); it shows only a
+brief spinner while the auth SDK loads and a "Reconnecting…" state if the auth backend blips, so a
+signed-in user is never bounced (see [Security §3.4](./security.mdx)).
+
+---
+
+## 3. Left navigation (source of truth: `pm/left_bar.yaml`)
+
+There are **two** left bars. Both are **data-driven** from `pm/left_bar.yaml`, imported raw and
+parsed by `src/config/left_bar.ts` — there is no second copy. Icons are lucide-react names resolved
+in `NavIcon.tsx`.
+
+### 3.1 The app bar (main navigation)
+
+A flat, ordered list; the account slot pinned to the bottom.
+
+| Order | Item | Icon | Route | Purpose |
+| --- | --- | --- | --- | --- |
+| 1 | **Dashboard** | `LayoutDashboard` | `/` | The fleet health grid — every domain × six categories. |
+| 2 | **Domains** | `Globe` | `/domains` | Add/manage the sending domains under audit. |
+| 3 | **Audits** | `ShieldCheck` | `/audits` | Per-domain audit results and every finding's fix. |
+| 4 | **Blacklists** | `Ban` | `/blacklists` | DNSBL status + delisting steps across all domains. |
+| 5 | **Reports** | `Mailbox` | `/reports` | Ingested DMARC (`rua`) + TLS-RPT report emails: who sent as your domain, alignment, TLS health, with fixes. |
+| 6 | **Settings** | `Settings` | `/settings` | Account, scheduling, app config. |
+
+Header: the **"EmailDeliveryHero"** wordmark linking to `/`. Footer: the **account slot** (§1.5),
+whose menu is `Settings`, `Admin` (gated `role:admin`), `Log out`.
+
+### 3.2 The settings bar
+
+Shown under `/settings/*`. A **back-to-app** link at the top, then grouped items:
+
+* **General** → **Account** (`/settings`, default) · **Scheduling** (`/settings/scheduling`).
+* **Administration** → **Admin** (`/settings/admin`, gated `role:admin` — hidden without the claim).
+
+A group with no visible items (all gated out) does not render its header.
+
+---
+
+## 4. Dashboard — the fleet health grid
+
+Route `/`. The landing screen and the one users live in. See [Dashboard](./dashboard.mdx).
+
+```
+┌────────────┬──────────────────────────────────────────────────────────────┐
+│            │      E M A I L   D E L I V E R Y   H E R O      ┌────────────┐ │
+│  LEFT BAR  │        (big, extra-bold, tracked-out wordmark)  │ ⟳ Run checks│ │
+│            │                                                 └────────────┘ │
+│            │                                                 Scheduled ◉  › │
+│            ├──────────────────────────────────────────────────────────────┤
+│            │ Domain          SPF   DKIM  DMARC Blkl  DNS&Inf  Spam&Content  │
+│            ├──────────────────────────────────────────────────────────────┤
+│            │ whitehat….com  Hlthy 2of7  Hlthy Hlthy 1 of10   92%           │ ← row → run detail
+│            │ act3ai.com     Hlthy Hlthy 1fail Hlthy Hlthy    88%           │
+│            │ mail.example…  Never Never Never Never Never    Never         │
+│  account   │                                                              │
+└────────────┴──────────────────────────────────────────────────────────────┘
+```
+
+* **Brand header** — the wordmark **"Email Delivery Hero"** rendered large (`text-4xl md:text-5xl`),
+  `font-extrabold`, `tracking-[0.25em]`, with visible spacing between the three words. The brand is a
+  feature, not a label.
+* **Run checks** (top-right) — `POST /api/audit/run`; idle → running (spinner, disabled) → done, then
+  the grid refetches (TanStack Query invalidation) and a success toast fires.
+* **Scheduled toggle + chevron** (directly below Run checks) — an on/off switch for recurring checks
+  with a **chevron on its right** that navigates to `/settings/scheduling`. The chevron only
+  navigates; the toggle only sets the schedule preference.
+* **The grid** — **one row per monitored domain**, the **first column is Domain**, then the **six
+  locked category columns** each a `StatusCell` (§1.2–1.3). A domain never audited shows six gray
+  **Never** cells.
+* **Row click** — navigates to that domain's **run detail** (§5), the full findings behind the six
+  cells.
+* **States** — **empty** (no domains): a dashed card with "Add your first domain →". **Never-run**
+  (domains exist, no audit): all-gray cells and a nudge to press Run checks. **Loading**: skeleton
+  rows sized to Domain + six cells so there is no layout shift.
+
+> **Row model.** The backend keeps the **latest** audit per domain (`audits.json`, keyed by domain),
+> so the Dashboard grid is **one row per domain**. A per-day time-series grid (one row per day) is a
+> planned enhancement that arrives when the store keeps run history; the design language (six columns,
+> four colors) is already the one it will use.
+
+---
+
+## 5. Run detail — the findings and their fixes
+
+Route `/domains/$id`. Reached by clicking a Dashboard row, a Domains row's **open** action, or from
+the Audits view. This is where the product delivers its promise: **the exact fix for every problem.**
+See [View a health-check run](./use_cases/view_health_check_run.mdx).
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  ‹ Back to dashboard        whitehatengineering.com     ⟳ Run checks again │
+│  Score 62/100   ● Critical   ·   2 open problems   ·   ran 2026-07-01 14:03│
+│  [SPF ✓][DKIM ✕][DMARC !][Blacklists ✓][DNS & Infra !][Spam & Content ✓]  │ ← six chips, colored
+├──────────────────────────────────────────────────────────────────────────┤
+│  ▸ DKIM                                                        1 problem   │
+│     ✕ Critical  Selector `google` missing            dkim                  │
+│        No TXT at google._domainkey.whitehatengineering.com                 │
+│        🔧 Fix: Enable DKIM in Google Admin and publish the TXT.  [Copy fix]│
+│  ▸ DMARC                                                       1 problem   │
+│     ! Warning   Policy is p=none (monitor only)      dmarc                 │
+│        🔧 Fix: Strengthen to v=DMARC1; p=quarantine; …           [Copy fix]│
+│  ▸ SPF · Blacklists · DNS & Infrastructure · Spam & Content   all healthy  │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+* **Summary header** — the domain, the numeric **score**, the overall **status badge** (worst
+  severity), the **open-problem count** (non-`ok` findings), and the run timestamp. Actions: **Run
+  checks again** (`POST /api/audit/run/:id` → refetch) and **Back to dashboard**.
+* **Six category chips** — one per category, colored to match the Dashboard cells; clicking a chip
+  scrolls to that category's section.
+* **Findings grouped by the six categories** — each category is a collapsible section; inside, one
+  row per finding using the common pattern (§1.4). Healthy categories collapse to a quiet "all
+  healthy" line. Every non-`ok` finding shows its **Copy fix** button; Blacklist criticals also carry
+  a delisting deep-link (see [Domain on a blacklist](./use_cases/domain_on_blacklist.mdx)).
+* **Not-yet-audited** — if the domain has no run, the page shows a "Not yet audited" state with a
+  single **Run checks** button.
+
+---
+
+## 6. Domains — the CRUD surface
+
+Route `/domains`. The primary object of the app is a domain; this is where they are registered and
+managed. See [Domains](./domains.mdx).
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Domains                                                    + Add domain    │
+├──────────────────────────────────────────────────────────────────────────┤
+│  Domain          SPF   DKIM  DMARC Blkl  DNS&Inf Spam   Actions            │
+│  whitehat….com  Hlthy 2of7  Hlthy Hlthy 1of10   92%    ⟳  ✎  🗑  ↗        │
+│  act3ai.com     Hlthy Hlthy 1fail Hlthy Hlthy   88%    ⟳  ✎  🗑  ↗        │
+└──────────────────────────────────────────────────────────────────────────┘
+   Add / Edit domain (dialog): Domain · DKIM selectors · Sending IPs
+```
+
+* **Add domain** (top-right) opens a form: **Domain name** (required, validated to real DNS syntax,
+  duplicates rejected on client and server), **DKIM selectors** and **Sending IPs** (comma-separated;
+  used by the DKIM, PTR, and DNSBL checkers). Submitting `POST /api/domains` appends to
+  `domains.json`; the new row shows six **Never** cells until first audit.
+* **Row** — Domain (name + optional label), the **six category cells** (same colors/labels as the
+  Dashboard, from the domain's latest audit), then **Actions**:
+  * **⟳ Run audit now** — `POST /api/audit/run/:id`, this domain only; cells refresh on completion.
+  * **✎ Edit** — opens the form pre-filled (DKIM selectors + sending IPs) → `PATCH /api/domains/:id`.
+  * **🗑 Remove** — behind a confirm dialog → `DELETE /api/domains/:id`.
+  * **↗ Open** — navigates to the run detail (§5).
+* The whole row (outside the action buttons) also click-navigates to the run detail.
+
+> **Per-domain schedule toggle.** [Domains §6](./domains.mdx) specifies an inline per-domain
+> "Scheduled" switch ANDed with the global switch. That requires a `scheduleEnabled` field the
+> first-round `domains.json` record does not yet carry, so the toggle is a **planned** column; the
+> current schedule is the single global preference surfaced on the Dashboard.
+
+---
+
+## 7. The other screens
+
+### 7.1 Audits (`/audits`)
+
+A per-domain list: one card per domain with its latest status/score and an expandable
+[FindingsList](#14-the-common-finding-presentation-pattern), plus a per-domain **Run audit** button.
+It is the "read every finding across the fleet without leaving the page" companion to the run detail.
+
+### 7.2 Blacklists (`/blacklists`)
+
+Pulls just the `blacklist`-category findings out of every domain's latest audit into one place, so a
+user sees which sending IPs are listed and the **delisting steps** for each — the specific removal
+URL for the specific blocklist, never a generic note. Empty state prompts an audit.
+
+### 7.3 Reports (`/reports`)
+
+The inbound-report surface — the receivers' own account of your mail. It reads the ingested **DMARC
+aggregate (`rua`)** and **TLS-RPT** report emails ([Report-email ingestion](./emails.mdx)) and, per
+domain over a rolling window, answers the user's three-step need: *see the problem → open the details
+→ get the fix.*
+
+* Grouped by report kind, each group header showing report count, reporters, volume, and the window
+  (e.g. "DMARC aggregate · 5 reports · google.com, outlook.com · 1,195 msgs · 06-24→06-30").
+* Each problem is a standard [finding row](#14-the-common-finding-presentation-pattern): severity
+  badge → observed detail → copy-able fix. Examples: *SPF-alignment fragility* on an ESP stream (fix:
+  `aspf=r` or a branded Return-Path), an *unauthorized/unaligned sender* (spoof vs. forgot-to-
+  authorize), *own mail being rejected/quarantined*, or *inbound-TLS failures* from TLS-RPT.
+* **Open the details** — expanding a DMARC finding reveals the **per-source-IP table** (`Source IP ·
+  Count · Disposition · SPF eval/align · DKIM eval/align · DMARC · Header-From · Envelope`); a TLS-RPT
+  finding expands to per-reporter/day success/failure counts and `failure-details`.
+* **Ingest now** triggers an on-demand mailbox/drop-folder scan. Empty state explains how to publish
+  `rua=` and point the mailbox at the app (Settings → Admin).
+* These same report findings also appear **in the run detail** (§5) — `dmarc.report_*` under DMARC,
+  `infra.tls_rpt_reports_ingested` under DNS & Infrastructure — each tagged with a **"from reports"**
+  chip so the evidence source is clear. They roll into the **existing** DMARC and DNS & Infrastructure
+  cells; no seventh category is added.
+
+### 7.4 Settings (`/settings/*`)
+
+Left sub-nav (settings bar, §3.2) + right content pane. First round is intentionally lean:
+
+* **Account** — the signed-in identity (name/email from the OpenAuthFederated session), or a note
+  that you are the `default` user with a Sign-in prompt. No password to manage.
+* **Scheduling** — the recurring-audit summary (cadence, on/off) and a link to the fuller
+  [Scheduled checks](./scheduled_checks.mdx) config. Reachable while logged out; per-user settings
+  persist under `users/default/…` until sign-in (see [Security §2.2](./security.mdx)).
+* **Admin** — rendered only with `role:admin`; the backend is authoritative and rejects admin writes
+  regardless of what the UI shows. The full field list is in [Settings](./settings.mdx).
+
+The richer per-check admin controls and thresholds catalogued in the [per-check specs](./checks/overview.mdx)
+(spam-score thresholds, DNSBL zone editor, probe toggles, integration credentials) land here under
+Admin as they ship.
+
+---
+
+## 8. Use Cases — how a user flows through the product
+
+The three canonical flows, described as the user experiences them across the screens above.
+
+### 8.1 First run — "are my domains healthy?"
+
+1. The user opens `http://localhost:4444/` and lands on the **Dashboard** as the `default` user (no
+   login wall). It is empty, so a card invites **"Add your first domain."**
+2. They go to **Domains → Add domain**, type `whitehatengineering.com`, optionally add a DKIM selector
+   (`google`) and a sending IP, and save. The row appears with six gray **Never** cells.
+3. Back on the **Dashboard** they press **Run checks**. The button spins; when it finishes the row
+   lights up — five green cells and one red **DKIM** cell reading `1 of 1 fail`.
+4. They **click the row**. The **run detail** opens: score `62/100`, a **Critical** badge, "1 open
+   problem", six chips. The DKIM section is expanded with a red finding and a **Fix** line. They press
+   **Copy fix**, paste the DKIM TXT into Google Admin / their DNS provider.
+5. They press **Run checks again**. The DKIM finding flips to green `OK`, the score climbs, and the
+   Dashboard cell goes green. The customer is now inbox-safe on DKIM. This is the whole loop.
+
+### 8.2 A blacklist listing shows up on its own
+
+1. The user has scheduled checks **on**. A periodic run (or the next manual one) discovers a sending
+   IP on **Spamhaus ZEN**.
+2. On the **Dashboard** the domain's **Blacklists** cell turns red and reads `1 problem`. On the
+   **Blacklists** screen the listing is spelled out: the IP, the zone, the reason from the DNSBL's
+   TXT reply.
+3. The finding's **remediation** is specific to that blocklist: fix the root cause first, then use
+   **that** blocklist's removal tool (with the correct lookup/removal URL). The user follows it,
+   requests delisting.
+4. After propagation they **Run audit** again; the finding clears, the cell goes green, the open-
+   problem count drops. See [Domain on a blacklist](./use_cases/domain_on_blacklist.mdx).
+
+### 8.3 Reading one run in full
+
+A deliverability owner clicks a Dashboard row and works the **run detail** top to bottom: the summary
+header sizes the work ("2 open problems"), the six chips show which categories are hot, and each
+non-`ok` finding hands them the exact record to publish with a copy button. They fix, re-run, and
+watch cells go green. See [View a health-check run](./use_cases/view_health_check_run.mdx).
+
+### 8.4 A report reveals a problem the DNS records didn't
+
+1. Receivers have been mailing DMARC aggregate reports to the domain's `rua` mailbox. On **Reports**
+   (or via **Ingest now**) the app parses them.
+2. The DNS-record checks are all green — `p=reject`, `aspf=s`, valid SPF/DKIM — yet the report data
+   shows a real stream (e.g. a SendGrid subdomain) passing DMARC on **DKIM only**, because strict SPF
+   alignment fails on its envelope domain. The **DMARC** cell shows a warning it couldn't have gotten
+   from DNS alone.
+3. The user expands the finding, reads the **per-source-IP table** (which IPs, how many messages,
+   which side of alignment fails), and presses **Copy fix** — the corrected DMARC TXT with `aspf=r`
+   (or the branded-Return-Path step). One DKIM hiccup away from rejecting its own mail becomes a
+   two-mechanism-resilient stream. See [Report-email ingestion](./emails.mdx).
+
+---
+
+## 9. Cross-cutting UI behavior
+
+* **Data & caching** — all screens read through TanStack Query hooks over the shared axios instance
+  (`Authorization: Bearer <jwt>` injected from the session when signed in). Mutations (run audit, add/
+  edit/remove domain) invalidate the relevant queries so the UI refreshes without a full reload.
+* **Toasts** — success/failure of every mutation surfaces a `sonner` toast; server validation errors
+  (e.g. duplicate domain) are shown inline on the form and as a toast.
+* **Icons** — lucide-react throughout (`RefreshCw`, `Play`, `Pencil`, `Trash2`, `ArrowUpRight`,
+  `ChevronRight`, `Copy`, `Wrench`, …).
+* **Styling** — Tailwind with the app's CSS variables (`--edh-primary`, `--edh-border`, `--edh-muted`);
+  `cn()` merges conditional classes.
+* **Accessibility** — every color has a text label (color is never the only signal); all four status
+  colors meet WCAG AA; action icons carry `aria-label`s; the whole row is a real click target.
+* **Errors & logging** — uncaught frontend errors are forwarded to the backend fault trail (see
+  [Error handling & logging](./errors.mdx)); a run that errors on a checker still renders (the checker
+  contributes a warning finding rather than failing the page).
+
+---
+
+## 10. Acceptance criteria
+
+1. Every screen shares the **app frame** (256px left bar + scrolling content) and renders for
+   everyone — logged in or as the `default` user — never forcing a sign-in.
+2. The **six categories** (SPF, DKIM, DMARC, Blacklists, DNS & Infrastructure, Spam & Content) and the
+   **four status colors** (green healthy / amber some-problems / red critical / gray never-run) are
+   used identically on the Dashboard, the Domains table, and the run-detail chips; `info`-only never
+   turns a cell amber.
+3. The **Dashboard** shows the big "Email Delivery Hero" wordmark, a **Run checks** button
+   (`POST /api/audit/run`), a **Scheduled** toggle with a chevron to `/settings/scheduling`, and a grid
+   of **one row per domain × six category StatusCells**; a row click opens the run detail; empty/never-
+   run/loading states are handled.
+4. The **run detail** (`/domains/$id`) shows the summary header (score, status badge, open-problem
+   count, timestamp), six colored category chips, findings grouped by the six categories, and a **Copy
+   fix** control on every non-`ok` finding; **Run checks again** and **Back to dashboard** work.
+5. **Domains** supports add (validated, duplicates rejected), edit (`PATCH`), remove (confirm), run-
+   now (`POST /api/audit/run/:id`), and open-detail, and shows each domain's six latest category cells.
+6. **Audits**, **Blacklists**, **Reports**, and **Settings** render per §7, using the common finding-
+   presentation pattern and the settings sub-nav. **Reports** groups ingested DMARC-aggregate + TLS-RPT
+   findings, expands each to a per-source-IP (or per-reporter/day) detail table, offers a copy-able fix
+   and **Ingest now**, and rolls its findings into the existing DMARC / DNS & Infrastructure cells (no
+   seventh category); the same findings also appear in the run detail tagged "from reports".
+7. The **two left bars** are driven by `pm/left_bar.yaml`; the account slot offers **Sign in** when
+   logged out and the identity + gated menu (Settings / Admin / Log out) when signed in.
+8. Every non-`ok` finding presents a **concrete, copy-able remediation** — the product's whole promise.
+
+<!--
+  ui.mdx maintenance: this is the consolidated UI spec; keep it in lockstep with the per-screen specs
+  (dashboard/domains/settings/scheduled_checks) and the per-check specs (checks/*). The LOCKED items —
+  six categories, four colors, StatusCell, brand header, account slot, optional login — must match
+  every sibling. When a screen changes shape, update its per-screen spec AND the matching section here.
+  Where a described control is not yet backed by the first-round backend (per-day history, per-domain
+  scheduleEnabled, scheduler config endpoints), mark it "planned" rather than implying it exists.
+  When a new .mdx is added under pm/, add a TOC bullet in overview.mdx.
+-->

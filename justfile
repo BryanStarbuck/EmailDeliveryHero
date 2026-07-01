@@ -2,8 +2,10 @@
 #
 #   just build   → compile the TypeScript (frontend + backend) and install the macOS launchd
 #                  "plist-based cron job" so scheduled audits run on localhost.
-#   just run     → verify nothing is blocking, then run BOTH the frontend and backend together as
-#                  one localhost web app (http://localhost:4444, API proxied to :9312).
+#   just run     → stop any pre-existing instance, then start BOTH the frontend and backend in the
+#                  BACKGROUND as one localhost web app (http://localhost:4444, API proxied to :9312).
+#                  Waits for both ports to bind, then frees the command line. `just logs` follows it.
+#   just stop    → kill the background webapp and free both ports.
 #
 # The app is a TypeScript-on-Node monorepo under ./code (NestJS backend + Vite/React frontend).
 # Requires Homebrew-installed `node`, `pnpm`, and `just`.
@@ -22,6 +24,14 @@ trigger := code / "deploy/launchd/trigger-scheduler.mjs"
 # web_port is the UI WebApp — always localhost:4444 (per pm/overview.mdx "Key facts").
 web_port := "4444"
 api_port := "9312"
+
+# Background `run`: combined dev log + launcher pid. Kept in /tmp under the same
+# `edh.` prefix as the scheduler's logs (see install-agent) so nothing lands in the repo.
+webapp_log := "/tmp/edh.webapp.log"
+pid_file   := "/tmp/edh.webapp.pid"
+
+# How long `run` waits for each port to bind before giving up.
+startup_timeout := "60"
 
 # Default: show the recipe list.
 default:
@@ -82,8 +92,14 @@ uninstall-agent:
     echo "✓ removed launchd agent: {{label}}"
 
 # ── run ────────────────────────────────────────────────────────────────────────
-# Preflight (tools, env, free ports, state dir) then start frontend + backend as one web app.
-run: _preflight-tools
+# Preflight (tools, env, state dir), STOP any pre-existing instance, then start
+# frontend + backend together in the BACKGROUND as one web app. Depending on `stop`
+# guarantees a fresh restart (no port collision — Vite uses strictPort and would die
+# on a stale :4444). The dev servers keep running after this recipe returns; the
+# command line is freed. Follow output with `just logs`; shut down with `just stop`.
+#
+# Start the web app in the BACKGROUND (fresh restart; web :4444 + API :9312).
+run: _preflight-tools stop
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -100,32 +116,77 @@ run: _preflight-tools
     mkdir -p "$state_dir"
     echo "• state dir: $state_dir"
 
-    # 3) Ports must be free, or the app fails loudly (Vite uses strictPort).
-    blocked=0
-    for port in {{web_port}} {{api_port}}; do
-      if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
-        echo "✗ port $port is already in use:" >&2
-        lsof -nP -iTCP:"$port" -sTCP:LISTEN | tail -n +1 >&2
-        blocked=1
-      fi
-    done
-    [ "$blocked" = 0 ] || { echo "Free the port(s) above (or 'just stop') and re-run." >&2; exit 1; }
-
-    # 4) Dependencies present? (build may not have run yet.)
+    # 3) Dependencies present? (build may not have run yet.)
     if [ ! -d "{{code}}/node_modules" ]; then
       echo "• node_modules missing — installing…"
       pnpm -C "{{code}}" install
     fi
 
-    echo "▶ Starting EmailDeliveryHero — web http://localhost:{{web_port}}  (API → :{{api_port}})"
-    echo "  Ctrl-C stops both. Background audits keep running via the launchd agent."
-    # `pnpm dev` runs @edh/frontend + @edh/backend in parallel = one web app (Vite proxies /api).
-    exec pnpm -C "{{code}}" dev
+    # 4) Launch both packages in the background. `pnpm dev` runs @edh/frontend +
+    #    @edh/backend in parallel = one web app (Vite proxies /api → :{{api_port}}).
+    echo "▶ Starting EmailDeliveryHero in the background — web :{{web_port}} + API :{{api_port}}…"
+    nohup pnpm -C "{{code}}" dev >"{{webapp_log}}" 2>&1 &
+    pid=$!
+    echo "$pid" >"{{pid_file}}"
 
-# Stop anything left listening on the app ports (e.g. an orphaned dev server).
+    # Wait for a TCP port to bind. Bails out early (tailing the log) if the launcher
+    # process dies, or after the timeout if the port never comes up.
+    # Usage: wait_for_port <label> <port>
+    wait_for_port() {
+        local label="$1" port="$2"
+        printf "  waiting for %s (:%s) " "$label" "$port"
+        for _ in $(seq 1 {{startup_timeout}}); do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                printf "\n\n✗ webapp exited during startup. Last log lines:\n\n" >&2
+                tail -n 40 "{{webapp_log}}" >&2
+                rm -f "{{pid_file}}"
+                exit 1
+            fi
+            if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+                printf " up!\n"
+                return 0
+            fi
+            printf "."
+            sleep 1
+        done
+        printf "\n\n✗ %s did not come up on :%s within {{startup_timeout}}s. Last log lines:\n\n" "$label" "$port" >&2
+        tail -n 40 "{{webapp_log}}" >&2
+        exit 1
+    }
+
+    # Both must be up. Frontend (Vite) usually binds first; the backend (Nest) takes
+    # longer to compile + map routes, so it is treated as required and waited on second.
+    wait_for_port "frontend" "{{web_port}}"
+    wait_for_port "backend"  "{{api_port}}"
+
+    printf "\n"
+    printf "  Web  → http://localhost:%s\n" "{{web_port}}"
+    printf "  API  → http://localhost:%s   (proxied at /api)\n" "{{api_port}}"
+    printf "  Logs → %s   (follow: just logs)\n" "{{webapp_log}}"
+    printf "  PID  → %s   (stop: just stop)\n" "$pid"
+    printf "  Background audits also keep running via the launchd agent.\n"
+    exit 0
+
+# Follow the background webapp log.
+logs:
+    @test -f "{{webapp_log}}" && tail -f "{{webapp_log}}" || echo "No log yet — start it with: just run"
+
+# Kill the recorded launcher and free both ports (also catches an orphaned dev server).
+#
+# Stop the background webapp.
 stop:
     #!/usr/bin/env bash
-    set -euo pipefail
+    set -uo pipefail
+    # Recorded launcher pid first (kills the pnpm dev parent so children don't respawn).
+    if [ -f "{{pid_file}}" ]; then
+      pid="$(cat "{{pid_file}}" 2>/dev/null || true)"
+      if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
+        echo "• stopping launcher pid $pid"
+        kill "$pid" 2>/dev/null || true
+      fi
+      rm -f "{{pid_file}}"
+    fi
+    # Then sweep anything still bound to the app ports.
     for port in {{web_port}} {{api_port}}; do
       pids="$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
       if [ -n "$pids" ]; then
@@ -144,10 +205,15 @@ status:
     else
       echo "launchd agent: not loaded — run 'just build' or 'just install-agent'"
     fi
-    for port in {{web_port}} {{api_port}}; do
-      if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
-        echo "port $port: LISTENING"
+    for pair in "web {{web_port}}" "api {{api_port}}"; do
+      set -- $pair
+      pids="$(lsof -nP -tiTCP:"$2" -sTCP:LISTEN 2>/dev/null | tr '\n' ' ' || true)"
+      if [ -n "$pids" ]; then
+        echo "port $2 ($1): LISTENING [pid $pids]"
       else
-        echo "port $port: free"
+        echo "port $2 ($1): free"
       fi
     done
+    if [ -f "{{pid_file}}" ]; then
+      echo "recorded launcher pid: $(cat "{{pid_file}}" 2>/dev/null || echo '?')  ({{pid_file}})"
+    fi

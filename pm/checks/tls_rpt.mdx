@@ -21,6 +21,7 @@ explicitly below.
 - [MTA-STS](./mta_sts.mdx) — the policy TLS-RPT most often reports failures against; deploy them together.
 - [DANE/TLSA](./dane_tlsa.mdx) — the other policy layer whose validation failures land in TLS-RPT reports.
 - [Opportunistic TLS / STARTTLS transport](./tls_transport.mdx) — the underlying transport whose downgrades TLS-RPT surfaces.
+- [../emails.mdx](../emails.mdx) — the authoritative spec for ingesting the **TLS-RPT report emails** this record requests (`application/tlsrpt+gzip` JSON): decode/parse pipeline and how success/failure counts become the `infra.tls_rpt_reports_ingested` finding. This check audits the DNS record; `emails.mdx` covers the reports that come back.
 - [../spam_checks.mdx](../spam_checks.mdx) — master catalog; [../engineering.mdx](../engineering.mdx) — Checker/Finding contract and file store; [../overview.mdx](../overview.mdx), [../dashboard.mdx](../dashboard.mdx), [../scheduled_checks.mdx](../scheduled_checks.mdx).
 
 **Category:** DNS & Infrastructure. **checkId prefix:** `infra` (TLS-RPT sub-family, `infra.tls_rpt_*`).
@@ -69,7 +70,7 @@ failures into a dated, structured feed.
 | `infra.tls_rpt_endpoint_reachable` | (Advisory) mailto domain resolves + has MX, or https host resolves | For `mailto:` extract domain → `resolveMx`; for `https:` → `resolve4/6` of host | warning: `rua` mailbox domain has no MX → reports will bounce | Point `rua` at a domain with valid MX, or fix the reporting mailbox's DNS |
 | `infra.tls_rpt_rua_external_authorized` | (Advisory) cross-org `rua` (3rd-party report processor) is intended | Compare `rua` domain to audited domain; note when external | info: reports go to a third party (`rua=mailto:...@report-vendor.com`) | Confirm the external processor is intended; RFC 8460 allows external rua without an authorization record |
 | `infra.tls_rpt_ttl_sane` | (Advisory) record TTL isn't pathologically low/high | Read TTL (future: via `dig`, not exposed by node:dns) | info: TTL 60s causes excess lookups; 7d slows fixes | Set TTL 3600–86400 |
-| `infra.tls_rpt_reports_ingested` | **(FUTURE)** Actual JSON reports are being received/parsed; failure volume + trend | Requires a live mailbox/HTTPS endpoint + report parser; correlate against MTA-STS/DANE checks | warning: spike in `starttls`/`certificate-host-mismatch`/`validation-failure` report entries | Investigate the reported policy layer (fix MTA-STS policy, roll TLSA, fix cert SAN) |
+| `infra.tls_rpt_reports_ingested` | **(FUTURE — see [../emails.mdx](../emails.mdx))** Actual JSON reports are being received/parsed; failure volume + trend | The report-email ingestion pipeline in [../emails.mdx](../emails.mdx) (mailbox/drop-folder → gunzip → parse `summary`/`failure-details`); correlate against MTA-STS/DANE checks | warning: spike in `starttls`/`certificate-host-mismatch`/`validation-failure` report entries | Investigate the reported policy layer (fix MTA-STS policy, roll TLSA, fix cert SAN) |
 
 ## 3. How it is measured
 

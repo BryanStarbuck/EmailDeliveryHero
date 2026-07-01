@@ -65,11 +65,18 @@ Left_Nav:
           order: 4
           description: "DNS blacklist (DNSBL) status for your sending IPs, with delisting steps."
 
+        - id: reports
+          label: "Reports"
+          icon: "Mailbox"
+          route: "/reports"
+          order: 5
+          description: "Ingested DMARC aggregate (rua) & TLS-RPT report emails: who sent as your domain, SPF/DKIM alignment, and inbound TLS health — with the fix for each problem. See pm/emails.mdx."
+
         - id: settings
           label: "Settings"
           icon: "Settings"
           route: "/settings"
-          order: 5
+          order: 6
           description: "Account, scheduling, and app configuration."
 
       # Footer: account block (avatar/name/email) -> popup menu (expands UP).

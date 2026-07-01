@@ -129,6 +129,9 @@ client whenever the API changes.
 * **Domains** (`pages/domains/`) — the Monitored Domains table (CRUD) + a per-domain detail view.
 * **Audits** (`pages/audits/`) — audit history and the findings of a selected run.
 * **Blacklists** (`pages/blacklists/`) — DNSBL status across all domains/IPs.
+* **Reports** (`pages/reports/`) — ingested DMARC aggregate (`rua`) + TLS-RPT report emails per
+  domain: the report-derived problems, an expandable per-source-IP table, and copy-the-fix controls.
+  See [Report-email ingestion](./emails.mdx).
 * **Settings** (`pages/settings/`) — app + per-user settings; **Admin** sub-area gated by
   `role:admin`.
 

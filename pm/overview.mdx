@@ -36,12 +36,23 @@ All MDX specifications in this directory and its subdirectories:
   app performs, grouped into the six dashboard categories (SPF, DKIM, DMARC, Blacklists, DNS &
   Infrastructure, Spam & Content): what each sub-check measures, how it is measured, and the
   concrete remediation.
+* [Report-email ingestion](./emails.mdx) — the **inbound report emails** receivers send back to a
+  monitored domain: DMARC aggregate (`rua`) XML reports and SMTP TLS Reporting (TLS-RPT) JSON
+  reports. How to recognize/decode/parse a `.eml`, the deliverability problems the reports reveal
+  (unauthorized senders, SPF/DKIM-alignment gaps, spoofing, silent TLS/MTA-STS breakage) and their
+  concrete fixes, the receive→classify→decode→parse→findings→store pipeline, the Reports UI, and the
+  proactive health checks that hunt the same problems. Feeds `dmarc.real_pass_rate` and
+  `infra.tls_rpt_reports_ingested`. Sample corpus: the 10 real `act3ai.com` reports under `emails/`.
 * [Per-check engineering specs](./checks/overview.mdx) — the `checks/` subdirectory: one deep spec
   per check topic (SPF, DKIM, DMARC, ARC, Blacklists, MX, PTR, TLS/STARTTLS, MTA-STS, TLS-RPT,
   DANE/TLSA, DNSSEC, DNS health, domain reputation, SMTP security, BIMI, content scoring,
   List-Unsubscribe, link/URL reputation, reputation metrics, inbox placement). Each expands a slice
   of the catalog with its sub-checks, detection method, a **User Interface** section, an
   **Information Schema (database schema)** section, and when the check runs.
+* [User Interface](./ui.mdx) — the consolidated UI spec: the shared design language (six locked
+  categories, four status colors, the StatusCell, the brand header, the account slot), a walkthrough
+  of every screen (Dashboard, Domains, Run detail, Audits, Blacklists, Settings), the two left bars,
+  the common finding-presentation pattern, and a Use Cases section on how a user flows through the app.
 * [Dashboard](./dashboard.mdx) — the main screen: the big "Email Delivery Hero" brand header, the
   TanStack table (one run per day × six color-coded category columns), the metric cell text, and
   the top-right **Run checks** button + scheduled-checks toggle/chevron.
@@ -83,7 +94,7 @@ The load-bearing constants for the app, stored here as the single reference poin
 | Backend REST API port | `9312` (NestJS, served under `/api`; API only — not opened directly in a browser). |
 | Runtime | Node >= 20, **TypeScript** (strict) throughout. |
 | Repo layout | pnpm workspace monorepo under `code/` (`packages/backend`, `packages/frontend`). |
-| Auth | OpenAuthFederated federated Google Workspace SSO (no email/password). |
+| Auth | **Login optional** — logged-out = the `default` user; sign-in is OpenAuthFederated Google Workspace SSO (no email/password). Only admin actions require a session. See [Security](./security.mdx). |
 | Storage | On-disk JSON/YAML under `~/T/_emaildeliveryhero/` — no database. |
 | Git remote | `https://github.com/BryanStarbuck/EmailDeliveryHero.git` |
 
@@ -98,8 +109,10 @@ determining whether a company's email sending domains are being caught by spam f
 on blacklists, and telling the user how to fix them. It runs **periodic checks**, surfaces the
 specific problems it finds, and prescribes the **exact remediation** to apply.
 
-The app is **fully auth-gated**: nobody gets in without logging in. Access is federated Google
-Workspace SSO for our two company domains — see [Authentication](./authentication.mdx).
+**Login is optional.** The app is fully usable logged out under a single **`default`** user; signing
+in is an upgrade to a per-person identity and to admin-only actions. The only way to *sign in* is
+federated Google Workspace SSO for our two company domains — see [Security](./security.mdx) (the
+authoritative model) and [Authentication](./authentication.mdx) (the sign-in mechanics).
 
 ### What it does
 
@@ -188,6 +201,9 @@ The app's primary navigation is a left bar with these sections (the data source 
 * **Domains** — the Monitored Domains CRUD.
 * **Audits** — audit history and the findings of any given run.
 * **Blacklists** — DNSBL status across all monitored domains/IPs.
+* **Reports** — ingested DMARC aggregate (`rua`) and TLS-RPT report emails per domain: who sent as
+  your domain, SPF/DKIM alignment, and inbound-TLS health, each with the concrete fix. See
+  [Report-email ingestion](./emails.mdx).
 * **Settings** — app and per-user settings.
 * **Account block (bottom):** avatar / name / email → menu with **Settings**, **Admin** (gated by
   the `role:admin` claim), and **Log out**.
@@ -215,6 +231,7 @@ EmailDeliveryHero/
 │   ├── authentication.mdx
 │   ├── engineering.mdx
 │   ├── spam_checks.mdx      # full catalog of every deliverability health check
+│   ├── emails.mdx           # inbound report-email ingestion (DMARC aggregate + TLS-RPT)
 │   ├── dashboard.mdx        # the TanStack table dashboard (6 columns, status cells)
 │   ├── domains.mdx          # Monitored Domains CRUD + per-domain schedule toggle
 │   ├── scheduled_checks.mdx # recurring checks: config page + per-OS scheduling

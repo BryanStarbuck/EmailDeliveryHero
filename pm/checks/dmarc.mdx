@@ -27,6 +27,10 @@ checkId prefix.
 - [./dkim.mdx](./dkim.mdx) — DKIM is the more robust half of DMARC alignment (`adkim`).
 - [./arc.mdx](./arc.mdx) — ARC preserves prior authentication across forwarders/mailing lists so
   legitimate indirect mail still passes DMARC.
+- [../emails.mdx](../emails.mdx) — the authoritative spec for ingesting the **aggregate (`rua`)
+  reports** this record requests: how the report emails are decoded/parsed and how their per-source
+  data becomes `dmarc.real_pass_rate` + `dmarc.report_*` findings. This check audits the DNS record;
+  `emails.mdx` covers the reports that come back.
 
 ---
 
@@ -90,7 +94,8 @@ Comprehensive set for the `dmarc` category. Each remediation is the exact record
 | `dmarc.org_domain` | The record is found at the correct **org-domain** boundary via public-suffix walk-up. | Compute the org domain (PSL) and confirm the record is published there, not on an unreachable label. | **warning:** record only on a deep subdomain while the org domain has none → most `From:` domains uncovered. | Publish the DMARC record at the **organizational** domain (`_dmarc.<org-domain>`), then override per-subdomain as needed. |
 | `dmarc.enforcement_readiness` *(advisory)* | Cross-check: are SPF and DKIM already aligned enough to safely move `p=none` → `reject`? | Combine this run's `spf.*` and `dkim.*` findings for the domain; if both are healthy and aligned, advise promotion. | **info:** SPF+DKIM aligned but still `p=none` → safe to enforce. | Move to `p=quarantine` then `p=reject`; monitor `rua` for one full `ri` cycle at each step. |
 | `dmarc.deprecated_tags` | No obsolete/unknown tags lingering (`pct`, `rf` misuse, vendor tags). | Diff observed tags against the DMARCbis-valid set. | **info:** deprecated tags present. | Remove deprecated tags at next DNS edit; keep the record minimal. |
-| `dmarc.real_pass_rate` *(future)* | Actual SPF/DKIM/DMARC pass rates measured from ingested `rua` XML. | Ingest aggregate reports from a mailbox/HTTPS endpoint, parse per-source-IP dispositions. | **warning:** high volume from unaligned sources before enforcing → will break mail if you `reject` now. | Fix or authorize the failing sources (add to SPF `include:`, add DKIM selector) **before** raising policy. |
+| `dmarc.real_pass_rate` *(future — see [../emails.mdx](../emails.mdx))* | Actual SPF/DKIM/DMARC pass rates measured from ingested `rua` XML. | Ingest aggregate reports from a mailbox/drop-folder, parse per-source-IP dispositions/alignment (the pipeline in [../emails.mdx](../emails.mdx)). | **warning:** high volume from unaligned sources before enforcing → will break mail if you `reject` now. | Fix or authorize the failing sources (add to SPF `include:`, add DKIM selector) **before** raising policy. |
+| `dmarc.report_*` *(future — see [../emails.mdx](../emails.mdx))* | Per-source findings derived from ingested aggregate reports: unaligned/unknown senders, single-mechanism fragility, active reject/quarantine, new sources. | Parse each `<record>` row (source IP, count, disposition, SPF/DKIM aligned) per [../emails.mdx §3.1/§5](../emails.mdx). | **critical:** a source fails both SPF+DKIM alignment (spoof/unauthorized); **warning:** a real stream passes on only one mechanism (e.g. strict-SPF-misaligned ESP). | Authorize the source (SPF `include:` / DKIM selector), or relax alignment (`aspf=r`/`adkim=r`) / brand the Return-Path. |
 
 ---
 

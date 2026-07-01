@@ -139,10 +139,12 @@ Authentication is **identify, don't gate** for ordinary routes:
 * `GET /auth/me` returns the current user with an `authenticated` boolean: the verified identity when
   signed in, the `default` user (`authenticated: false`) when not. It never returns `401` for "not
   logged in."
-* **Admin actions still require real auth.** Routes/actions gated by **`role:admin`** are enforced by
-  a permissions check that reads `req.user.roles`; the `default` user has none, so it is refused with
-  `403`. This is the one place where being logged out actually stops you. The frontend also hides
-  admin controls as UX, but the backend is authoritative.
+* **Admin actions still require real auth.** A route opts into authorization with the
+  **`@RequireRole("admin")`** decorator (or `@RequirePermission(...)`); a second global guard,
+  **`RolesGuard`**, runs after the auth guard and reads `req.user.roles`/`permissions`. The `default`
+  user has none, so any gated route is refused with **`403`**. This is the one place where being
+  logged out actually stops you. Ungated routes carry no decorator and stay open to everyone. The
+  frontend also hides admin controls as UX, but the backend is authoritative.
 
 ### 3.4 Authentication enforcement points (frontend)
 
