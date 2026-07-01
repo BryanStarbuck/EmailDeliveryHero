@@ -32,6 +32,17 @@ export class CreateDomainDto {
   @ArrayMaxSize(50)
   @IsString({ each: true })
   sendingIps?: string[]
+
+  @ApiPropertyOptional({ example: "Primary marketing domain" })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  label?: string
+
+  @ApiPropertyOptional({ example: true, description: "Include in recurring scheduled checks" })
+  @IsOptional()
+  @IsBoolean()
+  scheduleEnabled?: boolean
 }
 
 export class UpdateDomainDto {
@@ -48,4 +59,15 @@ export class UpdateDomainDto {
   @ArrayMaxSize(50)
   @IsString({ each: true })
   sendingIps?: string[]
+
+  @ApiPropertyOptional({ example: "Primary marketing domain" })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  label?: string
+
+  @ApiPropertyOptional({ example: true, description: "Include in recurring scheduled checks" })
+  @IsOptional()
+  @IsBoolean()
+  scheduleEnabled?: boolean
 }
