@@ -41,3 +41,7 @@ EmailDeliveryHero is a web app (runs on localhost) for **auditing email delivera
   * **NEVER put code under `pm/`.** It is for specifications only.
 * **`code/`** — The source code directory. **Always put source code here.**
   * All code work belongs in `code/`, never in `pm/`.
+
+We have a directory where we store emails that may well be reporting on problems with our domain. When you understand those and improve the specifications and the code for our part, to make sure we are measuring those problems and offering fixes. The email directory is located herre:
+~/BGit/Bryan_git/EmailDeliveryHero/emails/
+

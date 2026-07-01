@@ -36,9 +36,11 @@ function sanitizeForLog(value: string): string {
  * (networkless — the embedded HS256 secret is configured by createFederatedFrontend) via the
  * library's `federatedClient.verifyToken`. The returned value becomes `request.user`.
  *
- * Registered under the name `'jwt'` so the global JwtAuthGuard works unchanged. Domain enforcement
- * is owned by the library (it rejects non-company identities before a token is minted); this adds a
- * cheap defense-in-depth check that a verified token's domain is on the company allowlist.
+ * Registered under the name `'jwt'` so the global JwtAuthGuard works unchanged. Login is OPTIONAL
+ * (pm/security.mdx): when there is NO token this returns `null` quietly (no warning) and the guard
+ * falls back to the `default` user; an actually-present-but-invalid token is logged and also
+ * resolves to `default`. Domain enforcement is owned by the library (it rejects non-company
+ * identities before a token is minted); this adds a cheap defense-in-depth allowlist recheck.
  */
 @Injectable()
 export class AuthFederatedStrategy extends PassportStrategy(Strategy, "jwt") {
@@ -46,12 +48,13 @@ export class AuthFederatedStrategy extends PassportStrategy(Strategy, "jwt") {
     super()
   }
 
-  async validate(req: Request): Promise<AuthUser> {
+  async validate(req: Request): Promise<AuthUser | null> {
     const header = req.headers?.authorization ?? ""
     const token = typeof header === "string" ? header.replace(/^Bearer\s+/i, "") : ""
     if (!token) {
-      logDebug("Rejecting request: missing or empty Authorization bearer token", "AuthStrategy")
-      throw new UnauthorizedException()
+      // Normal logged-out request — not an error. Guard resolves this to the `default` user.
+      logDebug("No Authorization bearer token; continuing as the default (logged-out) user", "AuthStrategy")
+      return null
     }
 
     try {
@@ -77,6 +80,7 @@ export class AuthFederatedStrategy extends PassportStrategy(Strategy, "jwt") {
         orgId: claims.org_id ?? null,
         roles: Array.isArray(claims.roles) ? claims.roles : [],
         permissions: Array.isArray(claims.permissions) ? claims.permissions : [],
+        authenticated: true,
       }
     } catch (err) {
       if (err instanceof UnauthorizedException) throw err

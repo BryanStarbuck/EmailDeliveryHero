@@ -1,0 +1,271 @@
+---
+title: EmailDeliveryHero — Security
+description: The security specification for EmailDeliveryHero — the trust model and the authentication design. Covers the optional-login model (the app is fully usable logged out under a single "default" user), how login works through OpenAuthFederated federated Google Workspace SSO, the Users model (verified email when signed in, the literal "default" user when signed out), how settings are stored per user (including "default"), the Google OAuth credentials read from ~/.credentials/email_delivery_hero.json (Google Cloud login), the sign-in entry point in the account slot at the bottom of the nav, and the backend/frontend enforcement points. This spec supersedes the fully-gated model previously described in authentication.mdx.
+---
+
+# EmailDeliveryHero — Security
+
+This is the **security specification** for EmailDeliveryHero. It defines the app's trust model and,
+in detail, its **authentication** design: how a user signs in, what happens when they don't, who the
+"user" is in each case, where their settings live, and where the Google Cloud credentials come from.
+
+Two documents are siblings:
+
+* This file (`security.mdx`) is the **authoritative** security/authentication spec.
+* [Authentication](./authentication.mdx) documents the OpenAuthFederated integration mechanics
+  (the `@auth/backend` + `@auth/react` packages, the embedded `/api/v1` Frontend API middleware,
+  `federatedClient.verifyToken`, the `oaf_edh` cookie). Everything there still holds **for the
+  signed-in path**. Where the two disagree about *gating*, **this document wins**: EmailDeliveryHero
+  is **not** fully auth-gated — it is **usable logged out** (see §2).
+
+Related: [Storage](./storage.mdx) (where per-user settings land on disk, including the `default`
+user), [Settings](./settings.mdx) (the settings page reachable logged out), [Engineering](./engineering.mdx)
+(the NestJS module/guard wiring).
+
+---
+
+## 1. The core decision: login is optional; there is always a current user
+
+EmailDeliveryHero is a **localhost web app** for auditing email deliverability. It is not a
+multi-tenant SaaS with private customer data behind every route. So the security posture is:
+
+> **The app is fully usable while logged out.** On launch the user lands straight in the app — no
+> forced login screen. Everything they do (auditing domains, running checks, changing **settings**)
+> is attributed to a single built-in user named **`default`**. If they choose to sign in with Google,
+> their identity, settings, and history move to their **own** per-user space.
+
+There is **always a current user** on every request:
+
+* **Signed out →** the current user is the literal **`default`** user.
+* **Signed in →** the current user is the verified Google Workspace identity (their email).
+
+This replaces the earlier "nobody gets in without logging in" rule. Login is now an **upgrade**, not
+a gate.
+
+### Why this model
+
+* **Zero-friction start.** A localhost tool should work the second it launches; making someone
+  configure Google OAuth before they can run a single blacklist check is the wrong tradeoff.
+* **Login still has real value.** Signing in gives a stable per-person settings space (useful in
+  server mode where teammates share one install), unlocks admin-gated actions, and ties audit
+  history to a real identity.
+* **One code path.** "There is always a `AuthUser`" means controllers never branch on
+  authenticated-vs-not for the common path — they just read `@CurrentUser()`, which is `default`
+  when logged out.
+
+---
+
+## 2. Users
+
+The app models **exactly one** notion of "user," resolved per request.
+
+| | Signed out | Signed in |
+| --- | --- | --- |
+| **User id** | `"default"` | OpenAuthFederated `sub` (`user_…`) |
+| **Email / key** | `"default"` | the verified Workspace email |
+| **`authenticated`** | `false` | `true` |
+| **Roles / permissions** | `[]` (no admin) | from Workspace groups (`role:admin`, …) |
+| **Settings on disk** | `users/default/config.yaml` | `users/<email>/config.yaml` |
+
+### 2.1 The `default` user
+
+`default` is a **real, first-class user** — not a null. It is the identity used whenever no valid
+session is present. Its settings persist across restarts exactly like a signed-in user's, under the
+reserved key **`default`** (see [Storage](./storage.mdx) §4). Because `default` carries **no roles
+and no permissions**, admin-gated actions are unavailable until a real sign-in happens.
+
+`default` is a **reserved** username: no signed-in identity may ever resolve to it (verified emails
+always contain `@`, so there is no collision).
+
+### 2.2 Settings are stored per user — including `default`
+
+Settings follow the current user:
+
+* Logged out, every settings write lands in `users/default/config.yaml`.
+* After sign-in, writes land in `users/<verified-email>/config.yaml`.
+* The two spaces are independent; signing in does **not** auto-migrate the `default` user's settings
+  (a future "import my local settings" action may, but it is out of scope here).
+
+App-level (install-wide, admin-owned) settings remain in the top-level `config.yaml` and are shared
+by all users regardless of login state.
+
+---
+
+## 3. Authentication (spec)
+
+### 3.1 The only way to *sign in* is OpenAuthFederated Google Workspace SSO
+
+Being logged out is free; **logging in** has exactly one path. There is **no** email/password login,
+no app-specific accounts, and no non-Google social login. Sign-in is a federated handoff:
+
+* **Identity Provider:** our company **Google Workspace** (domains `whitehatengineering.com` and
+  `act3ai.com`).
+* **Auth layer / Service Provider glue:** **OpenAuthFederated** (`~/BGit/Bryan_git/OpenAuthFederated/`,
+  `https://github.com/BryanStarbuck/OpenAuthFederated.git`) — our open-source Clerk/Auth0 equivalent,
+  consumed as an external library (`@auth/backend` on the server, `@auth/react` in the SPA). We
+  **do not reimplement OAuth/SAML**; we configure the library and read the tokens it issues.
+* **Domain allowlist:** only verified identities on the two company domains may complete sign-in;
+  everything else is rejected by the library before any session is minted. (`AUTH_ALLOWED_DOMAINS`.)
+
+The mechanics — the embedded Frontend API middleware mounted at `/api/v1`, Bearer-token verification
+via `federatedClient.verifyToken`, the `oaf_edh` cookie, dev-vs-prod key selection — are specified in
+[Authentication](./authentication.mdx) §3–§7 and are unchanged. This spec only changes **when** a
+session is *required*: never for ordinary use, only to *become* a non-`default` user and to use
+admin actions.
+
+### 3.2 The login section — how a user signs in
+
+1. On launch the app renders immediately as the **`default`** user; no redirect to a login screen.
+2. The **account slot at the bottom of the nav rail** (where a signed-in user's name/avatar normally
+   sits) shows a **"Sign in"** button while logged out.
+3. Clicking it routes to `/sign-in`, the OpenAuthFederated `<SignIn>` drop-in (Google Workspace only,
+   no password field).
+4. The user completes Google's OIDC consent; OpenAuthFederated verifies the `hd`/`email_verified`
+   claims against the domain allowlist, mints the session (`oaf_edh` cookie + short-lived JWT), and
+   returns the user to the app.
+5. The account slot now shows the signed-in identity and its menu (Settings, Admin [if `role:admin`],
+   Log out). The current user is now their verified email; settings read/write moves to
+   `users/<email>/config.yaml`.
+6. **Log out** returns the app to the `default` user — it does **not** kick the person out of the app.
+
+### 3.3 Authentication enforcement points (backend)
+
+Authentication is **identify, don't gate** for ordinary routes:
+
+* A **global auth guard** runs on every non-`@Public()` route. It attempts to verify an inbound
+  Bearer token; **on success** it attaches the verified `AuthUser`, and **on absence or failure** it
+  attaches the **`default`** `AuthUser` and lets the request proceed (it does **not** return `401`).
+* `@CurrentUser()` therefore always yields an `AuthUser` — real or `default`.
+* `GET /auth/me` returns the current user with an `authenticated` boolean: the verified identity when
+  signed in, the `default` user (`authenticated: false`) when not. It never returns `401` for "not
+  logged in."
+* **Admin actions still require real auth.** Routes/actions gated by **`role:admin`** are enforced by
+  a permissions check that reads `req.user.roles`; the `default` user has none, so it is refused with
+  `403`. This is the one place where being logged out actually stops you. The frontend also hides
+  admin controls as UX, but the backend is authoritative.
+
+### 3.4 Authentication enforcement points (frontend)
+
+* The app shell renders for everyone; it does **not** redirect to `/sign-in` when there is no session.
+  It only shows a brief spinner while the SDK loads, and a "Reconnecting…" state if the auth backend
+  is unreachable (so a server blip never dumps a signed-in user out).
+* The account slot renders a **"Sign in"** button when `!isSignedIn`, and the identity + account menu
+  when signed in.
+* Admin-only nav/controls are hidden unless the session asserts `role:admin` (UX only; backend
+  authoritative).
+
+---
+
+## 4. Credentials — Google Cloud login
+
+Signing in uses a **Google Cloud OAuth 2.0 Web client** (client id + secret). EmailDeliveryHero reads
+those credentials from **one** out-of-repo file and passes them into OpenAuthFederated.
+
+### 4.1 The credentials file
+
+```
+~/.credentials/email_delivery_hero.json
+```
+
+This is the **single, authoritative** credentials location. If any code path still reads Google
+credentials from a different file under `~/.credentials/` (or anywhere else), it must be switched to
+read from **this** file. Shape (only the keys this app reads):
+
+```json
+{
+  "email_delivery_hero": {
+    "google": {
+      "clientId": "…apps.googleusercontent.com",
+      "clientSecret": "GOCSPX-…"
+    }
+  }
+}
+```
+
+* Values are read from the key **`email_delivery_hero.google`**.
+* Resolution order: environment variables **`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`** win when
+  set (deploy/CI override); otherwise the values come from this file. The file path itself may be
+  overridden with **`EDH_CREDENTIALS_FILE`**, but the default and intended location is the path above.
+* The reader lives in `code/packages/backend/src/config/credentials-file.ts`
+  (`googleCredentialsFromFile()`), and `auth-frontend.ts` passes the resolved id/secret into
+  `createFederatedFrontend()` as a `connections` entry. The reusable OpenAuthFederated library holds
+  **no** knowledge of this file path or JSON key — the app owns that.
+
+### 4.2 Google Cloud project & redirect URI
+
+* Google Cloud project: **`bryan-testing-464010`** (project number `195222617091`).
+* The OAuth client must have the app's redirect URI registered:
+  `http://localhost:9312/api/v1/oauth_callback` in dev (override with `GOOGLE_REDIRECT_URI`; swap the
+  origin in prod). The backend logs the exact URI to register when the client is unconfigured.
+
+### 4.3 Handling a missing/misconfigured credentials file
+
+Because login is optional, a **missing credentials file is not fatal**: the app still boots and runs
+fully as the `default` user. Only the **sign-in** path is disabled, and the "Sign in" button surfaces
+the remediation (set the env vars or populate `~/.credentials/email_delivery_hero.json`, and register
+the redirect URI on the Google Cloud OAuth client). Secrets never enter the repo, the state store, or
+browser `localStorage`; if a secret leaks, rotate it in Google Cloud and update the file.
+
+---
+
+## 5. Sessions, transport, and secrets
+
+* **Session model (signed in):** a short-lived JWT verified on every request, refreshed via the
+  rotating `oaf_edh` `HttpOnly` cookie, backed by a server-side session record for immediate
+  revocation. Signed-out requests carry no token and resolve to `default`.
+* **Signing secret:** the app's HS256 session secret is a stable file under the state dir
+  (`.auth_session_secret`, mode 0600), auto-created on first run — never in `.env`, never committed.
+* **Transport/headers:** HTTPS in production; `HttpOnly` + `SameSite` refresh cookie (CSRF defense);
+  strict CORS to the registered origin allowlist (fail-closed at boot if empty); CSP/helmet headers;
+  never store tokens or secrets in `localStorage`.
+* **No password surface:** the app stores no passwords; MFA/lockout/offboarding are inherited from
+  Google Workspace. Suspending a Google account cuts off the ability to sign in (the person can still
+  use the app as `default`, like any logged-out visitor).
+* **Auditing:** log sign-in, sign-out, token refresh, `403` permission-denials, and admin actions to
+  the fault/event trail ([Error handling & logging](./errors.mdx)).
+
+---
+
+## 6. Threat model & non-goals
+
+* **In scope:** protect **admin-only** configuration behind real Google Workspace SSO; keep Google
+  client secrets out of the repo; verify every token locally; fail closed on CORS and on admin gates.
+* **Out of scope (by design):** gating ordinary deliverability auditing behind login. On localhost
+  the audit data is the user's own domains; the `default` user is an acceptable owner for it. Server
+  deployments that need this locked down should put the app behind a network boundary and/or add a
+  policy toggle (future work) that flips the global guard from "identify" back to "require."
+
+---
+
+## 7. Acceptance criteria
+
+The security/authentication design is correct when **all** of the following hold:
+
+1. Launching the app shows the working UI **without** a forced login; there is always a current user,
+   which is **`default`** when logged out.
+2. The account slot at the bottom of the nav shows a **"Sign in"** button while logged out, and the
+   signed-in identity + menu after sign-in; **Log out** returns to the `default` user (not out of the
+   app).
+3. **Settings are reachable and persist while logged out**, stored under `users/default/config.yaml`;
+   after sign-in they read/write `users/<verified-email>/config.yaml`.
+4. The **only** sign-in path is OpenAuthFederated federated Google Workspace SSO on
+   `whitehatengineering.com` / `act3ai.com` — no password field, no other login. Non-company or
+   unverified identities are rejected before a session is minted.
+5. Ordinary backend routes **never** return `401` for "not logged in" — the global guard attaches the
+   `default` user and proceeds; `GET /auth/me` returns the current user with an `authenticated` flag.
+6. **`role:admin`** actions are enforced on the backend; the `default` user (no roles) is refused with
+   `403`. Frontend admin gating is UX only.
+7. Google OAuth client id/secret are read from env **or** `~/.credentials/email_delivery_hero.json`
+   (key `email_delivery_hero.google`) — **this** file, not any other under `~/.credentials/` — and
+   passed into OpenAuthFederated. A missing file disables only sign-in, never the app.
+8. Auth is wired **only** through `@auth/react` (frontend) + `@auth/backend` (backend); no hand-rolled
+   OAuth/SAML or token mint/parse. Gaps in the library are fixed in `~/BGit/Bryan_git/OpenAuthFederated/`.
+
+<!--
+  Invariants to keep as this grows: login is OPTIONAL; there is ALWAYS a current user (`default` when
+  logged out); settings are per-user including `default`; the ONE sign-in path is OpenAuthFederated
+  Google Workspace SSO; Google credentials come from ~/.credentials/email_delivery_hero.json; admin
+  actions require real auth; the app never reimplements OAuth/SAML.
+-->
+</content>
+</invoke>
