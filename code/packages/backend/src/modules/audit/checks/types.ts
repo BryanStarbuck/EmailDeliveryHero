@@ -63,7 +63,13 @@ export function summarize(findings: Finding[]): {
   const score = Math.max(0, 100 - penalty)
 
   const status: Severity =
-    counts.critical > 0 ? "critical" : counts.warning > 0 ? "warning" : counts.info > 0 ? "info" : "ok"
+    counts.critical > 0
+      ? "critical"
+      : counts.warning > 0
+        ? "warning"
+        : counts.info > 0
+          ? "info"
+          : "ok"
 
   return { score, status, counts }
 }

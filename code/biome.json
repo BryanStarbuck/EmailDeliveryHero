@@ -13,6 +13,19 @@
     "rules": { "recommended": true }
   },
   "javascript": {
+    "parser": { "unsafeParameterDecoratorsEnabled": true },
     "formatter": { "quoteStyle": "double", "semicolons": "asNeeded" }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["packages/backend/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "useImportType": "off"
+          }
+        }
+      }
+    }
+  ]
 }

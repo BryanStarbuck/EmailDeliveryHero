@@ -1,5 +1,5 @@
-import type { Checker, Finding } from "./types"
 import { resolveTxt } from "./dns-util"
+import type { Checker, Finding } from "./types"
 
 /**
  * DKIM. For each configured selector, looks up `<selector>._domainkey.<domain>` and confirms a
@@ -19,7 +19,8 @@ export const dkimCheck: Checker = {
           checkId: "dkim",
           title: "No DKIM selectors configured",
           severity: "info",
-          detail: "DKIM selectors are provider-specific and cannot be auto-discovered. No selectors were provided for this domain, so DKIM was not verified.",
+          detail:
+            "DKIM selectors are provider-specific and cannot be auto-discovered. No selectors were provided for this domain, so DKIM was not verified.",
           remediation:
             'Add your sending provider\'s selector(s) to the domain (e.g. "google" for Google Workspace, "s1"/"s2" for many ESPs) so DKIM can be checked.',
         },
@@ -37,11 +38,14 @@ export const dkimCheck: Checker = {
           title: `Could not look up DKIM selector "${selector}"`,
           severity: "warning",
           detail: `DNS lookup for TXT ${name} failed (${error}).`,
-          remediation: "Retry the audit; if it persists, verify the selector name with your email provider.",
+          remediation:
+            "Retry the audit; if it persists, verify the selector name with your email provider.",
         })
         continue
       }
-      const key = records.find((r) => /(^|;)\s*v\s*=\s*dkim1/i.test(r) || /\bp\s*=\s*[A-Za-z0-9+/]/.test(r))
+      const key = records.find(
+        (r) => /(^|;)\s*v\s*=\s*dkim1/i.test(r) || /\bp\s*=\s*[A-Za-z0-9+/]/.test(r),
+      )
       if (!key) {
         findings.push({
           id: `dkim.missing.${selector}`,
@@ -60,7 +64,8 @@ export const dkimCheck: Checker = {
           checkId: "dkim",
           title: `DKIM selector "${selector}" has an empty key (revoked)`,
           severity: "critical",
-          detail: "The DKIM record has an empty p= value, which signals a revoked key. Signatures will fail.",
+          detail:
+            "The DKIM record has an empty p= value, which signals a revoked key. Signatures will fail.",
           remediation: `Republish a valid public key at ${name}.`,
           evidence: key,
         })

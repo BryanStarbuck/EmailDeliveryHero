@@ -9,7 +9,7 @@ export function SsoCallbackPage() {
   return (
     <div className="flex min-h-screen items-center justify-center text-sm text-[var(--edh-muted)]">
       Completing sign-in…
-      <AuthenticateWithRedirectCallback signInFallbackRedirectUrl="/" />
+      <AuthenticateWithRedirectCallback signInForceRedirectUrl="/" />
     </div>
   )
 }

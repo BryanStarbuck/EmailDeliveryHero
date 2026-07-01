@@ -64,7 +64,10 @@ function readCredentialsFile(): CredentialsFileShape {
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code
     if (code !== "ENOENT") {
-      logWarn(`Could not read credentials file ${path}: ${(err as Error).message}`, "CredentialsFile")
+      logWarn(
+        `Could not read credentials file ${path}: ${(err as Error).message}`,
+        "CredentialsFile",
+      )
     }
     cached = {}
   }

@@ -1,18 +1,9 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Get,
-  HttpCode,
-  Param,
-  Patch,
-  Post,
-} from "@nestjs/common"
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post } from "@nestjs/common"
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger"
 import { type AuthUser, CurrentUser } from "@shared/current-user.decorator"
+import type { MonitoredDomain } from "./domain.types"
 import { DomainsService } from "./domains.service"
 import { CreateDomainDto, UpdateDomainDto } from "./dto/domain.dto"
-import type { MonitoredDomain } from "./domain.types"
 
 @ApiTags("domains")
 @ApiBearerAuth()

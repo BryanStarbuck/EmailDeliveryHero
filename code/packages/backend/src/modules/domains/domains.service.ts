@@ -4,8 +4,8 @@ import { ConflictException, Injectable, NotFoundException } from "@nestjs/common
 import { readJson, writeJson } from "@shared/json-store"
 import { logInfo } from "@shared/logging"
 import { resolveStateDir } from "@shared/state-dir"
-import type { CreateDomainDto, UpdateDomainDto } from "./dto/domain.dto"
 import type { MonitoredDomain } from "./domain.types"
+import type { CreateDomainDto, UpdateDomainDto } from "./dto/domain.dto"
 
 /**
  * The monitored-domain store. First round persists the full list as a single JSON file under the

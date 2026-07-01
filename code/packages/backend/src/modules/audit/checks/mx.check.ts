@@ -1,5 +1,5 @@
+import { resolve4, resolveMx, reverse } from "./dns-util"
 import type { Checker, Finding } from "./types"
-import { resolveMx, resolve4, reverse } from "./dns-util"
 
 /**
  * MX + PTR sanity. Confirms the domain has MX records (so it can receive mail — required for DMARC
@@ -32,7 +32,8 @@ export const mxCheck: Checker = {
           title: "No MX records",
           severity: "warning",
           detail: `${ctx.domain} has no MX records, so it cannot receive mail — including DMARC failure reports and bounce messages.`,
-          remediation: "Publish MX records pointing at your mail provider (e.g. Google Workspace's ASPMX hosts).",
+          remediation:
+            "Publish MX records pointing at your mail provider (e.g. Google Workspace's ASPMX hosts).",
         },
       ]
     }
@@ -60,7 +61,8 @@ export const mxCheck: Checker = {
           title: "Primary MX host has no PTR record",
           severity: "info",
           detail: `${primary.exchange} (${ip}) has no reverse-DNS (PTR) record. Many receivers penalize senders without valid rDNS.`,
-          remediation: "Ask your mail host to set a PTR record for the sending IP that resolves back to the mail host name.",
+          remediation:
+            "Ask your mail host to set a PTR record for the sending IP that resolves back to the mail host name.",
         })
       }
     }

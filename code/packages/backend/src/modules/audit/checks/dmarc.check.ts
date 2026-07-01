@@ -1,5 +1,5 @@
-import type { Checker, Finding } from "./types"
 import { resolveTxt } from "./dns-util"
+import type { Checker, Finding } from "./types"
 
 /**
  * DMARC. Looks up the `_dmarc.<domain>` TXT record and inspects the policy (`p=`). A missing DMARC
@@ -20,7 +20,8 @@ export const dmarcCheck: Checker = {
           title: "Could not look up DMARC",
           severity: "warning",
           detail: `DNS lookup for TXT ${name} failed (${error}).`,
-          remediation: "Retry the audit; if it persists, verify the domain's nameservers respond for _dmarc.",
+          remediation:
+            "Retry the audit; if it persists, verify the domain's nameservers respond for _dmarc.",
         },
       ]
     }
@@ -35,7 +36,11 @@ export const dmarcCheck: Checker = {
           severity: "critical",
           detail: `${name} has no v=DMARC1 record. Without DMARC, spoofed mail from your domain is not rejected and major providers increasingly penalize deliverability.`,
           remediation:
-            'Publish a TXT record at _dmarc.' + ctx.domain + ' — start with "v=DMARC1; p=none; rua=mailto:dmarc@' + ctx.domain + '" to collect reports, then move to p=quarantine and finally p=reject.',
+            "Publish a TXT record at _dmarc." +
+            ctx.domain +
+            ' — start with "v=DMARC1; p=none; rua=mailto:dmarc@' +
+            ctx.domain +
+            '" to collect reports, then move to p=quarantine and finally p=reject.',
         },
       ]
     }
@@ -47,7 +52,8 @@ export const dmarcCheck: Checker = {
           checkId: "dmarc",
           title: "Multiple DMARC records",
           severity: "warning",
-          detail: "More than one DMARC record is published; receivers will treat this as no DMARC policy.",
+          detail:
+            "More than one DMARC record is published; receivers will treat this as no DMARC policy.",
           remediation: "Keep exactly one v=DMARC1 TXT record at _dmarc.",
           evidence: dmarc.join(" | "),
         },
@@ -63,8 +69,10 @@ export const dmarcCheck: Checker = {
           checkId: "dmarc",
           title: "DMARC policy is p=none",
           severity: "warning",
-          detail: "p=none only monitors — it does not tell receivers to quarantine or reject failing mail, so spoofing is not blocked.",
-          remediation: "Once your aggregate (rua) reports look clean, tighten the policy to p=quarantine, then p=reject.",
+          detail:
+            "p=none only monitors — it does not tell receivers to quarantine or reject failing mail, so spoofing is not blocked.",
+          remediation:
+            "Once your aggregate (rua) reports look clean, tighten the policy to p=quarantine, then p=reject.",
           evidence: record,
         },
       ]

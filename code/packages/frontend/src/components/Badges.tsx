@@ -1,5 +1,5 @@
-import { cn } from "@/lib/utils"
 import type { Severity } from "@/api/types"
+import { cn } from "@/lib/utils"
 
 const SEVERITY_STYLE: Record<Severity, string> = {
   ok: "bg-emerald-100 text-emerald-800",
@@ -37,7 +37,9 @@ export function ScoreBadge({ score }: { score: number }) {
         ? "bg-amber-100 text-amber-800"
         : "bg-red-100 text-red-800"
   return (
-    <span className={cn("inline-flex items-center rounded-md px-2 py-1 text-sm font-semibold", style)}>
+    <span
+      className={cn("inline-flex items-center rounded-md px-2 py-1 text-sm font-semibold", style)}
+    >
       {score}
       <span className="ml-0.5 text-xs font-normal opacity-70">/100</span>
     </span>

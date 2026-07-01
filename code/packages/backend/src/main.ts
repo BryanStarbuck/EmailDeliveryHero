@@ -66,15 +66,21 @@ async function bootstrap() {
   // Swagger → the front-end's OpenAPI codegen can read this spec at /api-json.
   const swaggerConfig = new DocumentBuilder()
     .setTitle("EmailDeliveryHero API")
-    .setDescription("Audit email deliverability — spam filters, blacklists, and the fixes to apply.")
+    .setDescription(
+      "Audit email deliverability — spam filters, blacklists, and the fixes to apply.",
+    )
     .setVersion("0.1.0")
     .addBearerAuth()
     .build()
   const document = SwaggerModule.createDocument(app, swaggerConfig)
   SwaggerModule.setup("api-docs", app, document, { jsonDocumentUrl: "api-json" })
 
-  process.on("unhandledRejection", (reason) => appLogger.error?.("Unhandled promise rejection", String(reason), "Process"))
-  process.on("uncaughtException", (err) => appLogger.error?.("Uncaught exception", String(err), "Process"))
+  process.on("unhandledRejection", (reason) =>
+    appLogger.error?.("Unhandled promise rejection", String(reason), "Process"),
+  )
+  process.on("uncaughtException", (err) =>
+    appLogger.error?.("Uncaught exception", String(err), "Process"),
+  )
 
   const raw = config.get<string>("PORT") ?? "9312"
   const port = Number(raw)
@@ -82,7 +88,9 @@ async function bootstrap() {
     throw new Error(`Invalid PORT value: ${raw}`)
   }
   await app.listen(port)
-  logger.log(`EmailDeliveryHero backend on http://localhost:${port} (docs: /api-docs, spec: /api-json)`)
+  logger.log(
+    `EmailDeliveryHero backend on http://localhost:${port} (docs: /api-docs, spec: /api-json)`,
+  )
   logger.log(`Logs: ${LOG_DIR} (info.log, error.log)`)
 }
 

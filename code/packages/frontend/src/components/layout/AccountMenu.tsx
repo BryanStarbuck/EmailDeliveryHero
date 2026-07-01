@@ -26,8 +26,9 @@ export function AccountMenu() {
     return () => document.removeEventListener("mousedown", onClick)
   }, [open])
 
-  const email = user?.primaryEmailAddress?.emailAddress ?? user?.emailAddresses?.[0]?.emailAddress ?? ""
-  const name = user?.fullName ?? user?.firstName ?? email.split("@")[0] ?? "Account"
+  const email = user?.primaryEmailAddress ?? ""
+  const name =
+    [user?.firstName, user?.lastName].filter(Boolean).join(" ") || email.split("@")[0] || "Account"
   const initial = (name || "?").charAt(0).toUpperCase()
 
   const gate = (permission?: string): boolean => {

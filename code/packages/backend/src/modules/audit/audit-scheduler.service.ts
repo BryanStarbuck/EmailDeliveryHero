@@ -17,7 +17,10 @@ export class AuditSchedulerService implements OnModuleInit, OnModuleDestroy {
   onModuleInit(): void {
     const minutes = Number(process.env.EDH_PERIODIC_AUDIT_MINUTES ?? "0")
     if (!Number.isFinite(minutes) || minutes <= 0) {
-      logInfo("Periodic audits disabled (set EDH_PERIODIC_AUDIT_MINUTES to enable)", "AuditScheduler")
+      logInfo(
+        "Periodic audits disabled (set EDH_PERIODIC_AUDIT_MINUTES to enable)",
+        "AuditScheduler",
+      )
       return
     }
     const intervalMs = minutes * 60 * 1000

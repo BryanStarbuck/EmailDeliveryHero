@@ -1,8 +1,8 @@
-import { Module } from "@nestjs/common"
 import { DomainsModule } from "@module/domains/domains.module"
+import { Module } from "@nestjs/common"
 import { AuditController } from "./audit.controller"
-import { AuditSchedulerService } from "./audit-scheduler.service"
 import { AuditService } from "./audit.service"
+import { AuditSchedulerService } from "./audit-scheduler.service"
 
 @Module({
   imports: [DomainsModule],

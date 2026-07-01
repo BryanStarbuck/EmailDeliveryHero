@@ -1,5 +1,5 @@
-import type { Checker, Finding } from "./types"
 import { resolve4, resolveMx, reverseIpv4 } from "./dns-util"
+import type { Checker, Finding } from "./types"
 
 /**
  * DNS blacklist (DNSBL) membership. For each sending IP, reverses the octets and queries a set of
@@ -19,7 +19,11 @@ interface Blocklist {
 
 const BLOCKLISTS: Blocklist[] = [
   { zone: "zen.spamhaus.org", name: "Spamhaus ZEN", delistUrl: "https://check.spamhaus.org/" },
-  { zone: "b.barracudacentral.org", name: "Barracuda", delistUrl: "https://www.barracudacentral.org/rbl/removal-request" },
+  {
+    zone: "b.barracudacentral.org",
+    name: "Barracuda",
+    delistUrl: "https://www.barracudacentral.org/rbl/removal-request",
+  },
   { zone: "bl.spamcop.net", name: "SpamCop", delistUrl: "https://www.spamcop.net/bl.shtml" },
 ]
 
@@ -46,8 +50,10 @@ export const blacklistCheck: Checker = {
           checkId: "blacklist",
           title: "No sending IPs to check",
           severity: "info",
-          detail: "No sending IPs were configured and none could be derived from MX records, so DNS blacklists were not checked.",
-          remediation: "Add the IP addresses your mail actually sends from to this domain so blacklist status can be verified.",
+          detail:
+            "No sending IPs were configured and none could be derived from MX records, so DNS blacklists were not checked.",
+          remediation:
+            "Add the IP addresses your mail actually sends from to this domain so blacklist status can be verified.",
         },
       ]
     }

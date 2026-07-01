@@ -11,9 +11,8 @@ export function SettingsPage() {
   const params = useParams({ strict: false }) as { section?: string }
   const section = params.section ?? "account"
 
-  const email =
-    user?.primaryEmailAddress?.emailAddress ?? user?.emailAddresses?.[0]?.emailAddress ?? "—"
-  const name = user?.fullName ?? "—"
+  const email = user?.primaryEmailAddress ?? "—"
+  const name = [user?.firstName, user?.lastName].filter(Boolean).join(" ") || "—"
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -24,8 +23,8 @@ export function SettingsPage() {
           <Row label="Name" value={name} />
           <Row label="Email" value={email} />
           <p className="mt-3 text-sm text-[var(--edh-muted)]">
-            Identity is provided by OpenAuthFederated (Google Workspace SSO). There is no password to
-            manage here.
+            Identity is provided by OpenAuthFederated (Google Workspace SSO). There is no password
+            to manage here.
           </p>
         </Panel>
       )}
@@ -33,9 +32,9 @@ export function SettingsPage() {
       {section === "scheduling" && (
         <Panel title="Scheduling">
           <p className="text-sm text-slate-600">
-            Periodic re-audits run on the backend when <code>EDH_PERIODIC_AUDIT_MINUTES</code> is set
-            to a positive number of minutes. When enabled, every monitored domain is re-checked on
-            that interval so newly-introduced problems surface automatically.
+            Periodic re-audits run on the backend when <code>EDH_PERIODIC_AUDIT_MINUTES</code> is
+            set to a positive number of minutes. When enabled, every monitored domain is re-checked
+            on that interval so newly-introduced problems surface automatically.
           </p>
         </Panel>
       )}

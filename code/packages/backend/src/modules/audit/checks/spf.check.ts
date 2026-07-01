@@ -1,5 +1,5 @@
-import type { Checker, Finding } from "./types"
 import { resolveTxt } from "./dns-util"
+import type { Checker, Finding } from "./types"
 
 /**
  * SPF (Sender Policy Framework). Looks up the domain's TXT records for a single `v=spf1` record and
@@ -19,7 +19,8 @@ export const spfCheck: Checker = {
           title: "Could not look up SPF",
           severity: "warning",
           detail: `DNS lookup for TXT ${ctx.domain} failed (${error}).`,
-          remediation: "Retry the audit. If it persists, check the domain's authoritative nameservers.",
+          remediation:
+            "Retry the audit. If it persists, check the domain's authoritative nameservers.",
         },
       ]
     }
@@ -47,7 +48,8 @@ export const spfCheck: Checker = {
           title: "Multiple SPF records",
           severity: "critical",
           detail: `${ctx.domain} publishes ${spf.length} v=spf1 records. Per RFC 7208 this is a permerror and receivers will ignore SPF entirely.`,
-          remediation: "Merge the SPF records into a single TXT record with one v=spf1 and one terminating all mechanism.",
+          remediation:
+            "Merge the SPF records into a single TXT record with one v=spf1 and one terminating all mechanism.",
           evidence: spf.join(" | "),
         },
       ]
@@ -62,7 +64,8 @@ export const spfCheck: Checker = {
         checkId: "spf",
         title: "SPF has no 'all' mechanism",
         severity: "warning",
-        detail: "The SPF record does not end in an 'all' mechanism, so receivers have no default policy for unlisted senders.",
+        detail:
+          "The SPF record does not end in an 'all' mechanism, so receivers have no default policy for unlisted senders.",
         remediation: 'Append "~all" (softfail) or "-all" (hardfail) to the end of the SPF record.',
         evidence: record,
       })
@@ -72,7 +75,8 @@ export const spfCheck: Checker = {
         checkId: "spf",
         title: "SPF ends in '+all' (allows anyone)",
         severity: "critical",
-        detail: "'+all' authorizes ANY server to send for this domain — effectively no SPF protection at all.",
+        detail:
+          "'+all' authorizes ANY server to send for this domain — effectively no SPF protection at all.",
         remediation: 'Change "+all" to "~all" (softfail) or "-all" (hardfail).',
         evidence: record,
       })

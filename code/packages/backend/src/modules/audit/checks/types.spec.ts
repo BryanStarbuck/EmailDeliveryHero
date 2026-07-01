@@ -17,7 +17,12 @@ describe("summarize", () => {
     expect(s1.score).toBe(88)
     expect(s1.status).toBe("warning")
 
-    const s2 = summarize([finding("critical"), finding("critical"), finding("critical"), finding("critical")])
+    const s2 = summarize([
+      finding("critical"),
+      finding("critical"),
+      finding("critical"),
+      finding("critical"),
+    ])
     expect(s2.score).toBe(0)
     expect(s2.status).toBe("critical")
   })

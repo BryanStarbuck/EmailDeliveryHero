@@ -1,12 +1,7 @@
 import { useAuth } from "@auth/react"
 import { Link, useLocation } from "@tanstack/react-router"
 import { ArrowLeft } from "lucide-react"
-import {
-  appNavItems,
-  appTitle,
-  settingsBackRoute,
-  settingsGroups,
-} from "@/config/left_bar"
+import { appNavItems, appTitle, settingsBackRoute, settingsGroups } from "@/config/left_bar"
 import { cn } from "@/lib/utils"
 import { AccountMenu } from "./AccountMenu"
 import { NavIcon } from "./NavIcon"

@@ -1,10 +1,10 @@
 import { join } from "node:path"
+import type { MonitoredDomain } from "@module/domains/domain.types"
+import { DomainsService } from "@module/domains/domains.service"
 import { Injectable } from "@nestjs/common"
 import { readJson, writeJson } from "@shared/json-store"
 import { logError, logInfo } from "@shared/logging"
 import { resolveStateDir } from "@shared/state-dir"
-import { DomainsService } from "@module/domains/domains.service"
-import type { MonitoredDomain } from "@module/domains/domain.types"
 import { CHECKERS } from "./checks"
 import { type AuditResult, type Finding, summarize } from "./checks/types"
 

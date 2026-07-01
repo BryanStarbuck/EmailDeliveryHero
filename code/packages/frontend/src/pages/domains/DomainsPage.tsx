@@ -1,5 +1,5 @@
-import { useState } from "react"
 import { Trash2 } from "lucide-react"
+import { useState } from "react"
 import { toast } from "sonner"
 import { type CreateDomainInput, useCreateDomain, useDeleteDomain, useDomains } from "@/api/domains"
 

@@ -1,5 +1,5 @@
-import { useState } from "react"
 import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react"
+import { useState } from "react"
 import { toast } from "sonner"
 import { useAuditResults, useRunAudit } from "@/api/audit"
 import { useDomains } from "@/api/domains"
@@ -79,8 +79,8 @@ export function AuditsPage() {
                   {r ? (
                     <>
                       <p className="mb-3 text-xs text-[var(--edh-muted)]">
-                        Last run {new Date(r.ranAt).toLocaleString()} · {r.counts.critical} critical ·{" "}
-                        {r.counts.warning} warning · {r.counts.ok} ok
+                        Last run {new Date(r.ranAt).toLocaleString()} · {r.counts.critical} critical
+                        · {r.counts.warning} warning · {r.counts.ok} ok
                       </p>
                       <FindingsList findings={r.findings} />
                     </>

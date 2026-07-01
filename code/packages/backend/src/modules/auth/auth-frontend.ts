@@ -6,7 +6,7 @@ import {
   loadOrCreateSecret,
 } from "@auth/backend"
 import { googleCredentialsFromFile, googleOAuthRemediation } from "@config/credentials-file"
-import type { ConfigService } from "@nestjs/config"
+import { ConfigService } from "@nestjs/config"
 import { logError, logInfo, logWarn } from "@shared/logging"
 import { resolveStateDir } from "@shared/state-dir"
 
@@ -143,9 +143,15 @@ export function buildAuthFrontend(config: ConfigService) {
   const middleware = createFederatedFrontend({ ...frontendConfig, ...hardening })
 
   if (!clientId || !clientSecret) {
-    logWarn(`${googleOAuthRemediation(redirectUri)} — sign-in is disabled until this is set.`, "AuthFrontend")
+    logWarn(
+      `${googleOAuthRemediation(redirectUri)} — sign-in is disabled until this is set.`,
+      "AuthFrontend",
+    )
   } else {
-    logInfo(`OpenAuthFederated frontend ready (issuer=${APP_TOKEN_ISSUER}, redirect=${redirectUri})`, "AuthFrontend")
+    logInfo(
+      `OpenAuthFederated frontend ready (issuer=${APP_TOKEN_ISSUER}, redirect=${redirectUri})`,
+      "AuthFrontend",
+    )
   }
 
   return middleware

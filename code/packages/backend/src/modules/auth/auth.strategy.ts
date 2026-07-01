@@ -11,7 +11,10 @@ import { Strategy } from "passport-custom"
 function emailDomain(email: string): string {
   const at = email.lastIndexOf("@")
   if (at < 0) return ""
-  return email.slice(at + 1).trim().toLowerCase()
+  return email
+    .slice(at + 1)
+    .trim()
+    .toLowerCase()
 }
 
 /**

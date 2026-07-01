@@ -1,7 +1,7 @@
 import { credentialsFileExists, googleCredentialsFromFile } from "@config/credentials-file"
+import { Public } from "@module/auth/public.decorator"
 import { Controller, Get } from "@nestjs/common"
 import { ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger"
-import { Public } from "@module/auth/public.decorator"
 
 /**
  * Unauthenticated health + auth-config probes. These are the only routes reachable before sign-in
