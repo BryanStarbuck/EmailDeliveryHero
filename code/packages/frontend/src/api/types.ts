@@ -197,8 +197,13 @@ export interface DnssecResults {
 }
 
 export interface AuditResult {
+  /** Unique id of this run (pm/dashboard.mdx §1). Optional: pre-history persisted data lacks it. */
+  runId?: string
   domainId: string
   domain: string
+  /** ISO date-times the run started/stopped (pm/dashboard.mdx §1). Optional on old data. */
+  startedAt?: string
+  finishedAt?: string
   ranAt: string
   score: number
   status: Severity
