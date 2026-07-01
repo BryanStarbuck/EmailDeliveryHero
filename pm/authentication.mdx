@@ -1,0 +1,274 @@
+---
+title: EmailDeliveryHero — Authentication
+description: How authentication works for EmailDeliveryHero — federated Google Workspace SSO consumed from OpenAuthFederated as an external open-source library (@auth/backend + @auth/react). Covers the embedded Frontend API middleware at /api/v1, Bearer-token verification via federatedClient.verifyToken, the global NestJS JwtAuthGuard, allowed company domains, the oaf_edh cookie prefix, the out-of-repo credentials file, and the dev-vs-prod story. We consume the library — we do not reimplement SAML/OAuth ourselves.
+---
+
+# EmailDeliveryHero — Authentication
+
+This document specifies **how authentication works for EmailDeliveryHero**. The app is
+**fully auth-gated**: per the [Overview](./overview.mdx) charter, **nobody gets in without logging
+in.** This spec makes that concrete by defining the single rule that gates all access:
+
+> **Access requirement:** every route requires a signed-in user, and the only way to sign in is an
+> active Google Workspace account on one of our two company domains — **`whitehatengineering.com`**
+> or **`act3ai.com`**. There is no email/password login, no "sign up with email," no other social
+> login, and no anonymous access.
+
+Authentication is **not implemented in this app**. We **consume OpenAuthFederated** — our
+open-source, self-hosted identity layer (`~/BGit/Bryan_git/OpenAuthFederated/`,
+`https://github.com/BryanStarbuck/OpenAuthFederated.git`) — as an **external library brought down
+separately**, not copied into this repo. This is the **same way the reference internal app**
+(`~/BGit/all/app/`) uses it. The backend consumes the `@auth/backend` package; the frontend
+consumes the `@auth/react` package. Both are linked from `~/BGit/Bryan_git/OpenAuthFederated/`.
+
+> **We do not reimplement SAML/OAuth ourselves.** EmailDeliveryHero is functionally a service
+> provider, but the SAML 2.0 / OIDC service-provider code, the Google handoff, domain enforcement,
+> session issuance, and token verification all live in OpenAuthFederated. Our job is to (a) drop in
+> the `@auth/react` UI, (b) mount the library's embedded Frontend API middleware, (c) verify the
+> tokens it issues, and (d) read the role claims it asserts. Where OpenAuthFederated's own side is
+> incomplete, we fix it in `~/BGit/Bryan_git/OpenAuthFederated/` rather than working around it in
+> this app.
+
+---
+
+## 1. The core decision: federated Google Workspace SSO is the only way in
+
+EmailDeliveryHero does **not** maintain its own primary login. There are no app-specific passwords,
+no email codes, no generic social logins, and no anonymous access. Instead:
+
+* **Identity Provider (IdP):** our company **Google Workspace** (domains
+  `whitehatengineering.com` and `act3ai.com`). Google authenticates the human.
+* **Service Provider (SP):** EmailDeliveryHero, via **OpenAuthFederated** acting as the
+  identity/auth layer between the app and Google.
+* **Trust direction:** the app trusts Google Workspace (through OpenAuthFederated) to assert who the
+  user is. The app never sees or stores the user's Google password.
+
+The set of people who can log in is **exactly** the set of employees with an active account on one
+of the two allowed Workspace domains. Onboarding/offboarding therefore happens in **one place**
+(Google Admin), not in the app.
+
+### Why this model
+
+* **One source of truth.** Employees already live in Google Workspace; we do not maintain a second,
+  drifting list.
+* **No password surface.** The app never handles employee credentials, so there is no password
+  database to leak, reset, or rotate.
+* **Centralized policy.** MFA, lockout, and suspicious-login handling are enforced by Google for the
+  whole company; the app inherits them.
+* **Instant offboarding.** Suspending the Google account cuts off app access.
+
+---
+
+## 2. Allowed company domains
+
+Federating to Google is not enough on its own — a generic "Sign in with Google" would let any
+Google account in. Access is restricted to our two company Workspace domains:
+
+```env
+# Domain enforcement — both company domains are allowed, nothing else.
+AUTH_ALLOWED_DOMAINS=whitehatengineering.com,act3ai.com
+```
+
+* Only identities whose **verified** primary email is on `whitehatengineering.com` or `act3ai.com`
+  may complete sign-in.
+* Any sign-in with a non-company domain, an unverified email, or a Google account outside our
+  Workspace is **rejected** by OpenAuthFederated — no user is provisioned, no session is issued.
+* On the OIDC path, require and verify the Google hosted-domain (`hd`) claim is one of the two
+  allowed domains and that `email_verified` is true. Never trust an unverified claim.
+
+Adding a third company domain later is one more allowlist entry plus one more SSO connection on the
+OpenAuthFederated side — never a code change in this app.
+
+---
+
+## 3. How the app consumes OpenAuthFederated
+
+OpenAuthFederated exposes the standard three surfaces; EmailDeliveryHero programs against them the
+same way a consumer of a hosted identity provider would:
+
+| Surface | Credential | Who calls it | What we use it for |
+| --- | --- | --- | --- |
+| **Frontend API** | Publishable key (`pk_…`, browser-safe) + session token | The browser, via `@auth/react` | Run the interactive sign-in flow, bootstrap the session, mint short-lived JWTs. |
+| **Backend API** | Secret key (`sk_…`, server-only) | The NestJS backend, via `@auth/backend` | Verify tokens, read users/sessions, force-revoke sessions. |
+| **Platform API** | Secret key (admin scope) | One-time setup / IaC | Create the org, the SSO connections, verify domains, define roles. |
+
+The secret key never reaches the browser; the publishable key never grants write access.
+
+### 3.1 Embedded Frontend API middleware at `/api/v1`
+
+The backend **mounts OpenAuthFederated's embedded Frontend API middleware at `/api/v1`**. This is
+the library's own handler set (the browser sign-in/session endpoints); the app simply mounts it
+under the `/api/v1` base path so the SPA's `@auth/react` client and the backend are same-origin on
+localhost. The app's own REST resources live under `/api` (see
+[Engineering](./engineering.mdx)); the mounted auth middleware owns everything under `/api/v1`.
+
+### 3.2 Bearer-token verification via `federatedClient.verifyToken`
+
+Every inbound request to an app route carries a short-lived **Bearer** JWT that `@auth/react`
+obtained from the active session. The backend verifies each token with the library's
+**`federatedClient.verifyToken`** (from `@auth/backend`), which validates the signature against
+OpenAuthFederated's issuer/JWKS and returns the claims. Verification is **local/networkless** — no
+per-request round-trip to the identity layer.
+
+```ts
+// backend — the JWT strategy delegates to the library, nothing hand-rolled.
+import { federatedClient } from '@auth/backend'; // reads the secret key + backend API from env
+
+const claims = await federatedClient.verifyToken(bearerToken);
+// → { sub, email, org_id, roles, permissions, ... }
+```
+
+### 3.3 Global NestJS `JwtAuthGuard` (auth on every route)
+
+A **global `JwtAuthGuard`** is registered app-wide (`APP_GUARD`), so **every route requires a
+signed-in user** by default. It extracts the Bearer token, calls `federatedClient.verifyToken`, and
+attaches the resulting user to the request (`@CurrentUser()`). Routes that must be reachable without
+a session (health check, the mounted `/api/v1` auth middleware itself) are opted out with a
+**`@Public()`** decorator that the guard honors. Everything else is closed by default — the safe
+direction.
+
+```ts
+// A route reachable without auth is explicitly marked:
+@Public()
+@Get('/api/health')
+health() { return { status: 'ok' }; }
+```
+
+### 3.4 Permission gates via token claims (`role:admin`)
+
+Authentication (who you are) is Google Workspace. **Authorization** (what you may do) reads the
+claims OpenAuthFederated puts in the token, derived from the user's Workspace groups. First round
+uses a single elevated gate:
+
+* **`role:admin`** — unlocks admin-only sections (the **Admin** item in the account menu, plus any
+  admin-only settings). Enforced on the backend by a permissions guard reading `req.user`; the
+  frontend additionally hides/disables admin controls as UX only (backend is authoritative).
+
+---
+
+## 4. Cookie prefix
+
+The rotating session cookie that OpenAuthFederated issues for this app is namespaced with the
+prefix **`oaf_edh`** (OpenAuthFederated · EmailDeliveryHero), so it never collides with cookies from
+other OpenAuthFederated-backed apps running on localhost. The cookie is `HttpOnly`, `SameSite`, and
+(in production) `Secure`; it carries the refresh material, while the short-lived JWT rides in the
+`Authorization: Bearer` header.
+
+---
+
+## 5. Credentials — Google OAuth client id/secret
+
+The Google OAuth Web client credentials that OpenAuthFederated needs come from **either** environment
+variables **or** an **out-of-repo credentials file**:
+
+```
+~/.credentials/email_delivery_hero.json
+```
+
+Read the values under the key **`email_delivery_hero.google`**:
+
+```json
+{
+  "email_delivery_hero": {
+    "google": {
+      "clientId": "…apps.googleusercontent.com",
+      "clientSecret": "…"
+    }
+  }
+}
+```
+
+* The app **reads its own credentials** (env first, then the file) and **passes the values into**
+  OpenAuthFederated's API when it configures the identity layer — the way a consumer of a hosted-IdP
+  SDK passes keys. The reusable OpenAuthFederated library holds **no** knowledge of this app's file
+  path or JSON key.
+* The credentials file lives **outside the repo** (under `~/.credentials/`) so secrets are never
+  committed. If a secret leaks, rotate it.
+
+---
+
+## 6. Dev vs. prod
+
+The same code runs in both environments; only values and origin strictness differ.
+
+* **Dev (localhost).** Frontend on `http://localhost:9311/`, backend on `http://localhost:9312/`
+  (API under `/api`, embedded auth middleware under `/api/v1`). The SPA uses the `pk_test_`
+  publishable key; the backend uses the `sk_test_` secret key. Register `http://localhost:9311` as
+  an allowed origin. The two-domain enforcement, the Google handoff, and token issuance all behave
+  exactly as in production — only origin/email strictness is relaxed.
+* **Prod.** Swap to `pk_live_` / `sk_live_` keys and register the production origin(s). HTTPS only;
+  the `oaf_edh` cookie is `Secure`. Nothing else in the integration changes.
+
+---
+
+## 7. Sessions, security, offboarding
+
+* **Hybrid session model:** a short-lived JWT access token verified on every request, refreshed via
+  the rotating `oaf_edh` `HttpOnly` cookie, backed by a server-side session record for **immediate
+  revocation**. Short TTLs mean a suspended user's session dies quickly; explicit revocation cuts it
+  off immediately.
+* **No password surface:** the app stores no employee passwords; MFA is inherited from Google
+  Workspace.
+* **Offboarding:** suspend/delete the Google account → the user can no longer complete sign-in, and
+  (with SCIM/webhooks on the OpenAuthFederated side) existing sessions are revoked proactively.
+* **Transport/headers:** HTTPS in production; `HttpOnly` refresh cookie; `SameSite` (CSRF defense);
+  CSP headers; strict CORS to registered origins; never store long-lived secrets in `localStorage`.
+* **Auditing:** log sign-in, sign-out, token refresh, permission-denied, and admin actions.
+
+---
+
+## 8. We consume the library — we do not reimplement it
+
+Restating the boundary, because it is the security spine of this design:
+
+* **The app stays a clean consumer.** It only ever (a) drops in the `@auth/react` UI, (b) mounts the
+  embedded Frontend API middleware at `/api/v1`, (c) verifies tokens with
+  `federatedClient.verifyToken` behind the global `JwtAuthGuard`, and (d) reads `role:admin` and
+  other claims. No re-implemented SAML/OAuth, no bespoke token format, no second login path, no
+  domain enforcement smuggled into the SPA.
+* **The app owns:** which routes are `@Public()`, which permission gates which route, which two
+  domains are allowed, and where its own Google client id/secret come from (env or
+  `~/.credentials/email_delivery_hero.json`).
+* **OpenAuthFederated owns:** authenticating the human, enforcing the domain, issuing/revoking
+  sessions, and asserting roles/permissions.
+* **If OpenAuthFederated's side is incomplete** — domain enforcement, the embedded `/api/v1`
+  middleware, `verifyToken`, session revocation, the `role:admin` claim — **fix it in
+  `~/BGit/Bryan_git/OpenAuthFederated/`**, not with a workaround in this app. See the reference
+  login use case at
+  `/Users/bryan/BGit/all/app/pm/use_cases/openauthfed_login.mdx`.
+
+---
+
+## 9. Acceptance criteria
+
+The authentication system is correct when **all** of the following hold:
+
+1. The sign-in screen offers **only** federated Google Workspace SSO — **no** email/password field —
+   on both localhost and production.
+2. An employee with an active `@whitehatengineering.com` **or** `@act3ai.com` Workspace account can
+   sign in and reach the app; anyone outside those two domains is **rejected** (no user created, no
+   session issued).
+3. **Every** NestJS route requires a valid OpenAuthFederated Bearer JWT via the global
+   `JwtAuthGuard`; only routes marked `@Public()` are reachable without a session. Missing/invalid →
+   `401`, insufficient permission → `403`.
+4. Inbound tokens are verified with `federatedClient.verifyToken` **locally** (no per-request IdP
+   round-trip), and the library's embedded Frontend API middleware is mounted at `/api/v1`.
+5. Admin-only sections are gated by the **`role:admin`** claim on the backend (frontend gating is UX
+   only).
+6. The session cookie uses the **`oaf_edh`** prefix; the app stores **no** employee passwords; MFA
+   is inherited from Google.
+7. Google client credentials are read from env **or** `~/.credentials/email_delivery_hero.json`
+   (key `email_delivery_hero.google`) and **passed into** OpenAuthFederated; the library holds no
+   app-specific credential knowledge.
+8. Auth is wired **only** through the installed OpenAuthFederated packages — `@auth/react`
+   (frontend) and `@auth/backend` (backend) — with **no** hand-rolled SAML/OAuth, token mint/parse,
+   or vendored auth library. Where the library's own side is incomplete, the gap is fixed in
+   `~/BGit/Bryan_git/OpenAuthFederated/`.
+
+<!--
+  This file is meant to grow. Keep the invariants: auth-gated everywhere; the only way in is a
+  Workspace account on whitehatengineering.com or act3ai.com via federated SSO; the app consumes
+  @auth/backend + @auth/react and never reimplements SAML/OAuth; secrets live out-of-repo; grow
+  OpenAuthFederated when its side is incomplete.
+-->
+</content>

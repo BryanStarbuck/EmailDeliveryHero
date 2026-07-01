@@ -1,0 +1,301 @@
+---
+title: EmailDeliveryHero — Engineering
+description: Architecture and engineering standards for EmailDeliveryHero — the pnpm monorepo layout (code/packages/backend, code/packages/frontend), the NestJS module list, the React 19 + Vite frontend, ports 9311/9312, the pluggable audit-engine design, the on-disk JSON/YAML store, and how periodic checks run.
+---
+
+# EmailDeliveryHero — Engineering
+
+This document defines **how we build EmailDeliveryHero**. It is a **Node app that runs TypeScript
+code**, with **authentication required for all access** (see the [Overview](./overview.mdx) charter
+and [Authentication](./authentication.mdx)). It runs on **localhost** and audits email
+deliverability.
+
+The stack decisions below are **fixed** for the first round. They follow the same house patterns as
+the reference internal app (`~/BGit/all/app/`): pnpm monorepo, NestJS backend, React 19 + Vite
+frontend, OpenAuthFederated for auth. Where this app differs from that reference — a **file-based
+store, no database** — is called out explicitly.
+
+---
+
+## 1. Foundational decisions
+
+| Decision | Standard |
+| --- | --- |
+| Language | **TypeScript**, `strict: true` |
+| Runtime | **Node ≥ 20** (pin via `.nvmrc`) |
+| Package manager | **pnpm** with **workspaces** (never mix npm/yarn) |
+| Repo shape | **Monorepo**: `code/packages/backend`, `code/packages/frontend` |
+| Backend framework | **NestJS** (REST under `/api`), port **9312** |
+| Frontend | **React 19 + Vite + Tailwind + shadcn/ui + lucide-react + TanStack Router/Query**, port **9311** |
+| Auth | **OpenAuthFederated** (`@auth/backend` + `@auth/react`), consumed as an external library |
+| Storage | On-disk **JSON/YAML** under a state dir (default `~/.email_delivery_hero/`) — **no database** |
+| DNS | Node's native **`node:dns/promises`**; shelling out to Brew tools (`dig`) is a future enhancement |
+| Lint/format | **Biome 2** (single tool); husky + lint-staged pre-commit |
+
+---
+
+## 2. Monorepo layout
+
+```
+code/
+├── package.json                 # workspace root; pnpm workspaces
+├── pnpm-workspace.yaml          # packages: ["packages/*"]
+└── packages/
+    ├── backend/                 # NestJS REST API — port 9312
+    │   ├── src/
+    │   │   ├── main.ts          # bootstrap; global ValidationPipe; global JwtAuthGuard; Swagger
+    │   │   ├── app.module.ts    # wires the modules below
+    │   │   ├── auth/            # OpenAuthFederated integration (see Authentication)
+    │   │   ├── health/         # liveness/readiness (@Public())
+    │   │   ├── domains/        # Monitored Domains CRUD
+    │   │   ├── audit/          # the audit engine + checkers
+    │   │   ├── scheduler/      # periodic re-audits
+    │   │   ├── store/          # on-disk JSON/YAML persistence layer
+    │   │   └── shared/         # dtos base, filters, pagination, config
+    │   └── package.json
+    └── frontend/                # React 19 + Vite SPA — port 9311
+        ├── src/
+        │   ├── main.tsx         # <AuthProvider> root + router
+        │   ├── router/          # TanStack Router routes + auth guard
+        │   ├── pages/           # dashboard, domains, audits, blacklists, settings
+        │   ├── @api/            # axios instance + generated TanStack-Query hooks
+        │   ├── components/ui/   # shadcn/ui primitives
+        │   ├── shared/          # cross-feature components/hooks/utils
+        │   └── config/          # left_bar.yaml consumer
+        └── package.json
+```
+
+> The `code/` directory is owned by a separate process; this spec describes its intended shape so
+> the two stay consistent. This `pm/` directory only holds the prose specs.
+
+---
+
+## 3. Backend (NestJS)
+
+### 3.1 Module list
+
+Module-per-feature, thin controllers delegating to services (services hold all logic):
+
+| Module | Responsibility | Key routes (under `/api`) |
+| --- | --- | --- |
+| **auth** | OpenAuthFederated integration: the `federatedClient.verifyToken` JWT strategy, the global `JwtAuthGuard`, the `@Public()` decorator, the `role:admin` permissions guard, and mounting the embedded Frontend API middleware at `/api/v1`. See [Authentication](./authentication.mdx). | `/api/v1/*` (mounted middleware) |
+| **health** | Liveness/readiness for localhost tooling. Marked `@Public()`. | `GET /api/health` |
+| **domains** | Monitored Domains CRUD; persists to the file store. | `GET/POST /api/domains`, `GET/PATCH/DELETE /api/domains/:id` |
+| **audit** | The audit engine: runs the pluggable checkers against a domain, produces findings, computes the score/status, and persists audit runs. | `POST /api/domains/:id/audit`, `GET /api/domains/:id/audits`, `GET /api/audits/:auditId` |
+| **scheduler** | Periodic re-audits (see §6). Exposes status and a manual "run now". | `GET /api/scheduler`, `POST /api/scheduler/run` |
+
+Cross-cutting code (base DTOs, exception filters, pagination/filter/sort helpers, config) lives in
+`src/shared/`.
+
+### 3.2 Conventions
+
+* **REST + Swagger.** Every endpoint is annotated with `@nestjs/swagger`; the spec is served at
+  `/api-json`. The frontend generates its typed client from it (§4).
+* **Validation.** `class-validator` + `class-transformer` DTOs behind a global `ValidationPipe`
+  (`whitelist`, `transform`, `forbidNonWhitelisted`). DTOs split into `Create*Dto` / `Update*Dto`
+  (request) vs `*Dto` / `*ListDto` (response).
+* **Auth is global.** `JwtAuthGuard` is registered as an `APP_GUARD`; every route is closed unless
+  marked `@Public()`. `@CurrentUser()` resolves the signed-in user.
+* **No magic numbers**; split files over ~200–300 lines; DRY via services/helpers.
+
+---
+
+## 4. The end-to-end API contract
+
+The backend annotates every endpoint with Swagger and exposes a spec at `/api-json`. The frontend
+runs `pnpm codegen` (OpenAPI codegen), which reads that spec and generates typed **TanStack-Query
+hooks** + DTO types into `src/@api/gen/`. UI code calls the generated hooks and imports backend DTO
+types directly — **type-safe across the wire with zero hand-written client types**. Regenerate the
+client whenever the API changes.
+
+---
+
+## 5. Frontend (React 19 + Vite)
+
+| Concern | Standard |
+| --- | --- |
+| Framework | **React 19** + TypeScript strict (named imports from `react`) |
+| Build tool | **Vite** (dev server on **9311**, proxies `/api` → backend on **9312**) |
+| Routing | **TanStack Router** (type-safe, file-based) + an auth guard that redirects unauthenticated users to sign-in |
+| Server state | **TanStack Query** (React Query) over the generated hooks |
+| HTTP transport | **axios** — one shared instance; request interceptor injects `Authorization: Bearer <jwt>` from the `@auth/react` session; response interceptor handles `401` (sign out) and `403` (permission toast) |
+| Styling | **Tailwind CSS** + **shadcn/ui** on Radix; `cn()` = `twMerge(clsx(...))` |
+| Icons | **lucide-react** |
+| Auth | **`@auth/react`** — `<AuthProvider>`, drop-in sign-in UI, `useAuth()`/`useUser()`, `<Protect>` for `role:admin` gating |
+
+### 5.1 Page structure (mirrors the left bar)
+
+* **Dashboard** (`pages/dashboard/`) — all domains with latest score/status and open-problem counts.
+* **Domains** (`pages/domains/`) — the Monitored Domains table (CRUD) + a per-domain detail view.
+* **Audits** (`pages/audits/`) — audit history and the findings of a selected run.
+* **Blacklists** (`pages/blacklists/`) — DNSBL status across all domains/IPs.
+* **Settings** (`pages/settings/`) — app + per-user settings; **Admin** sub-area gated by
+  `role:admin`.
+
+The left bar is data-driven from `pm/left_bar.yaml` (written by a separate process); the frontend
+reads its own mirrored copy under `src/config/`.
+
+---
+
+## 6. The audit engine (each check is a pluggable checker)
+
+The heart of the app. The design goal: **adding a new deliverability check is adding one file.**
+
+### 6.1 The `Checker` contract
+
+Every check implements a single interface and returns findings. Nothing else in the engine needs to
+change to add a checker:
+
+```ts
+// packages/backend/src/audit/checker.ts
+export type Severity = 'ok' | 'info' | 'warning' | 'critical';
+
+export interface Finding {
+  checkId: string;        // e.g. 'spf', 'dkim', 'dmarc', 'mx', 'ptr', 'dnsbl'
+  severity: Severity;
+  title: string;          // short human summary
+  detail: string;         // what was observed (the actual record / lookup result)
+  remediation: string;    // the concrete "how to fix" string
+}
+
+export interface CheckContext {
+  domain: string;         // e.g. 'whitehatengineering.com'
+  sendingIps: string[];   // resolved sending IPs for PTR/DNSBL checks
+  selectors: string[];    // known DKIM selectors to probe
+}
+
+export interface Checker {
+  id: string;             // stable check id
+  label: string;          // display name
+  run(ctx: CheckContext): Promise<Finding[]>;
+}
+```
+
+### 6.2 The registry + runner
+
+* A **registry** holds the array of checkers. The runner iterates them (in parallel where safe),
+  collects all findings, and rolls them into an **audit result**:
+
+  ```ts
+  export interface AuditResult {
+    id: string;
+    domain: string;
+    startedAt: string;      // ISO timestamp
+    finishedAt: string;
+    findings: Finding[];
+    score: number;          // 0–100, derived from finding severities
+    status: 'ok' | 'warning' | 'critical';  // worst severity present
+  }
+  ```
+
+* **Score/status derivation:** the domain's `status` is the worst severity among its findings; the
+  numeric `score` is computed by deducting weighted points per finding (critical > warning > info).
+  This makes the dashboard sortable and lets periodic checks detect regressions.
+
+### 6.3 First-round checkers
+
+Each is a file under `src/audit/checkers/`, registered in the registry:
+
+| File | `checkId` | How it checks (first round: `node:dns/promises`) |
+| --- | --- | --- |
+| `spf.checker.ts` | `spf` | `resolveTxt(domain)` → find `v=spf1` records; assert exactly one, sane mechanisms, one `all` qualifier, ≤10 DNS lookups. |
+| `dkim.checker.ts` | `dkim` | For each selector: `resolveTxt('<selector>._domainkey.<domain>')` → parse `v=DKIM1; k=…; p=…`. |
+| `dmarc.checker.ts` | `dmarc` | `resolveTxt('_dmarc.<domain>')` → require `v=DMARC1` + a `p=` policy; flag `p=none` as weak. |
+| `mx.checker.ts` | `mx` | `resolveMx(domain)` → require ≥1 record, valid priorities, resolvable hosts. |
+| `ptr.checker.ts` | `ptr` | For each sending IP: `reverse(ip)` → require a PTR that forward-resolves back to the IP (FCrDNS). |
+| `dnsbl.checker.ts` | `dnsbl` | For each sending IP: reverse the octets and `resolve4('<rev-ip>.<zone>')` against DNSBL zones (Spamhaus ZEN, Barracuda, SpamCop). A resolving A record = listed. |
+
+> **Future enhancement (noted, not first round):** any checker may shell out to Brew-installed tools
+> (`dig`, etc.) instead of `node:dns/promises` for richer output or to sidestep resolver caching —
+> the project charter (`~/BGit/Bryan_git/EmailDeliveryHero/CLAUDE.md`) notes we often use
+> Brew-installed tools. The `Checker` contract does not change; only a checker's internals do.
+
+### 6.4 Remediation is mandatory
+
+Every non-`ok` finding must carry a **concrete** `remediation` string — the exact record to publish
+or the delisting step — never a generic "check your DNS." Examples:
+
+* SPF missing → `Publish a TXT record at the apex: "v=spf1 include:_spf.google.com ~all".`
+* DMARC missing → `Publish a TXT record at _dmarc.<domain>: "v=DMARC1; p=quarantine; rua=mailto:dmarc@<domain>".`
+* DNSBL listed → the delisting URL and steps for that specific blocklist (see
+  [Domain on a blacklist](./use_cases/domain_on_blacklist.mdx)).
+
+---
+
+## 7. On-disk store (no database)
+
+First round persists to **JSON/YAML files** under a **state dir**, default
+`~/.email_delivery_hero/` (overridable via env, e.g. `EDH_STATE_DIR`). No database.
+
+```
+~/.email_delivery_hero/
+├── config.yaml              # app-level config (state dir, DNSBL zones, schedule cadence)
+├── domains.json             # the Monitored Domains list (the source of truth for CRUD)
+└── audits/
+    └── <domainId>/
+        └── <auditId>.json   # one file per audit run (findings + score/status + timestamps)
+```
+
+* A thin **`store` module** wraps all reads/writes: atomic writes (write-temp-then-rename), a simple
+  per-file mutex to avoid concurrent-write corruption, and schema validation on read.
+* The store layer is deliberately isolated behind an interface so a later move to a real database is
+  a single-module change; services never touch the filesystem directly.
+* Because everything is flat files under a state dir, the app behaves **identically on a developer's
+  laptop and on a server** — copy the state dir and you have moved the data.
+
+---
+
+## 8. Periodic checks
+
+Scheduled re-audits re-run the same checkers on a cadence and surface **new** problems.
+
+* The **scheduler module** runs an in-process interval job (first round: a NestJS scheduled task /
+  `setInterval`-style timer read from `config.yaml`, e.g. every 6 hours). No external queue is
+  required for the first round.
+* On each tick it iterates the monitored domains, runs a full audit per domain via the same engine
+  (§6), and writes a new audit run file.
+* **Regression detection:** each new run is diffed against the domain's previous run; any finding
+  that newly appears (or worsens in severity) is flagged as a **new problem** and surfaced on the
+  Dashboard. This is what makes "runs periodic checks and looks for problems" real.
+* A **manual "run now"** (`POST /api/scheduler/run`, and per-domain `POST /api/domains/:id/audit`)
+  triggers the same path on demand.
+
+> **Future enhancement:** if scheduling needs to survive restarts or scale out, move the scheduler
+> to a durable job runner. The engine and store contracts do not change.
+
+---
+
+## 9. Quality, tooling, deployment
+
+* **Lint/format:** Biome 2 (2-space indent, double quotes, semicolons); husky + lint-staged on
+  staged files. Generated API code (`src/@api/gen/`) is excluded.
+* **Tests:** Vitest for frontend units, Jest + supertest for backend; each checker gets unit tests
+  with recorded DNS fixtures so audits are deterministic in CI.
+* **Run locally:** `pnpm --filter backend dev` (9312) and `pnpm --filter frontend dev` (9311); the
+  Vite dev server proxies `/api` to the backend.
+* **Deploy:** localhost-first; a `Dockerfile` + `docker-compose.yml` package the two services and
+  mount the state dir as a volume.
+
+---
+
+## 10. Summary — the buildable stack
+
+* **Monorepo:** pnpm workspaces, `code/packages/{backend,frontend}`.
+* **Backend:** NestJS REST + Swagger on **9312**, modules `auth / health / domains / audit /
+  scheduler / store`, global `JwtAuthGuard`, `class-validator` DTOs.
+* **Frontend:** React 19 + Vite + Tailwind + shadcn/ui + lucide-react + TanStack Router/Query on
+  **9311**, generated typed API client, `@auth/react`.
+* **Audit engine:** a `Checker` interface + registry + runner; six first-round checkers producing
+  severity-tagged findings with mandatory remediation.
+* **Storage:** flat JSON/YAML under `~/.email_delivery_hero/`, no database, isolated behind a store
+  module.
+* **Periodic checks:** in-process scheduler re-running the engine and diffing for regressions.
+* **Auth:** OpenAuthFederated consumed as an external library.
+
+<!--
+  This file is meant to grow. Keep the fixed decisions honest (NestJS 9312, React/Vite 9311, pnpm
+  monorepo, file store under ~/.email_delivery_hero/, pluggable Checker engine). When a checker is
+  added, add a row in §6.3. When storage or scheduling graduates past files/in-process, note it as a
+  future enhancement and keep the Checker/store contracts stable.
+-->
+</content>

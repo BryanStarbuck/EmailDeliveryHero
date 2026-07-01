@@ -1,0 +1,170 @@
+---
+title: EmailDeliveryHero — Overview
+description: Product charter and table of contents for EmailDeliveryHero — an open-source, localhost web app for auditing email deliverability (spam filtering, blacklists) and prescribing the exact fixes.
+---
+
+# EmailDeliveryHero — Overview
+
+This directory holds the MDX specifications for **EmailDeliveryHero**. Every `.mdx` file in this
+directory (and its subdirectories) is part of that spec set, and this `overview.mdx` is the table
+of contents that links to all of them.
+
+EmailDeliveryHero is an **open source project**. Git remote (origin):
+`https://github.com/BryanStarbuck/EmailDeliveryHero.git`.
+
+## Charter
+
+EmailDeliveryHero is a **web app that runs on localhost** for **auditing email deliverability** —
+determining whether a company's email sending domains are being caught by spam filters or landing
+on blacklists, and telling the user how to fix them. It runs **periodic checks**, surfaces the
+specific problems it finds, and prescribes the **exact remediation** to apply.
+
+The app is **fully auth-gated**: nobody gets in without logging in. Access is federated Google
+Workspace SSO for our two company domains — see [Authentication](./authentication.mdx).
+
+### What it does
+
+* **Monitors your sending domains.** You register the email domains you send from (e.g.
+  `whitehatengineering.com`, `act3ai.com`) and the app watches them.
+* **Checks whether your email is getting caught by spam filters** — by auditing the DNS records
+  that mailbox providers use to decide inbox-vs-spam (SPF, DKIM, DMARC, MX, PTR).
+* **Checks whether your domains/IPs are on blacklists** — querying well-known DNS blacklists
+  (DNSBLs) for the domain's sending IPs.
+* **Tells you how to fix any problem it finds** — every finding carries a concrete remediation
+  string ("how to fix"), not just a red/green light.
+* **Runs periodic re-checks** and reports newly-introduced problems as they appear.
+
+## Who uses it
+
+| Persona | What they get from EmailDeliveryHero |
+| --- | --- |
+| **Deliverability owner / ops** | Adds the company's sending domains, runs audits, works the list of open problems and their fixes. |
+| **Engineer / DNS admin** | Reads the exact record-level remediation (the SPF/DKIM/DMARC TXT to publish) and applies it at the DNS provider. |
+| **Admin** | Same as above, plus admin-only settings/sections gated by the `role:admin` token claim. |
+
+Everyone who signs in is an employee on one of the two allowed company Google Workspace domains;
+there is no anonymous or external access.
+
+## Feature set (first round)
+
+* **Monitored Domains** — CRUD over the set of email sending domains under audit. A domain is the
+  primary object in the app; everything else hangs off it.
+* **Deliverability Audit** — for each domain, run a battery of checks (below) that each produce
+  **findings**. Every finding has a **severity** (`ok` / `info` / `warning` / `critical`) and a
+  **remediation** string. An audit rolls its findings up into a **score/status** for the domain.
+* **Blacklist monitoring** — checks whether the domain's sending IPs appear on DNS blacklists and,
+  when they do, shows the delisting steps. See
+  [Domain on a blacklist](./use_cases/domain_on_blacklist.mdx).
+* **Periodic checks** — scheduled re-audits that re-run the same checks on a cadence and surface
+  any *new* problems since the last run.
+* **Reporting** — a dashboard of all domains, each with its latest audit score/status and the list
+  of open problems (with fixes).
+
+## The deliverability checks performed
+
+Each check is an independent **checker** that returns zero or more findings for a domain. First
+round:
+
+| Check | What it verifies | Typical critical finding |
+| --- | --- | --- |
+| **SPF** | A single, valid `v=spf1` TXT record exists, with a sane mechanism list and one `all` qualifier; no multiple SPF records; within the 10-DNS-lookup limit. | No SPF record, or two SPF records (invalid), or `+all`. |
+| **DKIM** | For each known selector, a `selector._domainkey.<domain>` TXT record exists and parses as a public key (`v=DKIM1; k=rsa; p=…`). | No DKIM record found for the configured selector(s). |
+| **DMARC** | A `_dmarc.<domain>` TXT record exists with `v=DMARC1` and a policy (`p=none/quarantine/reject`); reports on weak/`none` policy. | No DMARC record, or malformed policy. |
+| **MX** | The domain publishes resolvable MX records with valid priorities and reachable hosts. | No MX records. |
+| **Reverse DNS / PTR** | Each sending IP has a PTR record and it matches forward DNS (FCrDNS sanity). | Missing PTR, or PTR that does not resolve back to the IP. |
+| **DNS Blacklist (DNSBL)** | The domain's sending IPs are not listed on well-known blocklists — Spamhaus ZEN, Barracuda, SpamCop, and similar. | IP is listed on one or more DNSBLs. |
+
+The full engine design (each checker is a pluggable module returning findings) is in
+[Engineering](./engineering.mdx).
+
+## Tech stack (at a glance)
+
+* **Language/runtime:** Node + **TypeScript** (strict), **pnpm** workspaces monorepo.
+* **Backend:** **NestJS** REST API under `/api`, on port **9312**.
+* **Frontend:** **React 19 + Vite + Tailwind + shadcn/ui + lucide-react + TanStack Router/Query**,
+  on port **9311**.
+* **Auth:** **OpenAuthFederated**, consumed as an external open-source library (`@auth/backend` +
+  `@auth/react`) — federated Google Workspace SSO, no email/password. See
+  [Authentication](./authentication.mdx).
+* **Storage:** first round uses on-disk **JSON/YAML files** under a state dir (default
+  `~/.email_delivery_hero/`) — **no database**.
+* **DNS checks:** Node's native `node:dns/promises` (TXT/MX/reverse); shelling out to
+  Brew-installed tools (`dig`, etc.) is noted as a future enhancement.
+
+See [Engineering](./engineering.mdx) for the full, buildable architecture.
+
+## Ports
+
+| Port | Surface | Browser URL |
+| --- | --- | --- |
+| **9311** | Frontend (React 19 + Vite) | `http://localhost:9311/` |
+| **9312** | Backend (NestJS REST API under `/api`) | API only — not opened directly in a browser |
+
+## Left navigation
+
+The app's primary navigation is a left bar with these sections (the data source of truth is
+`pm/left_bar.yaml`, written by a separate process; here we describe it in prose):
+
+* **Dashboard** — the landing view: all domains with their latest score/status and open problems.
+* **Domains** — the Monitored Domains CRUD.
+* **Audits** — audit history and the findings of any given run.
+* **Blacklists** — DNSBL status across all monitored domains/IPs.
+* **Settings** — app and per-user settings.
+* **Account block (bottom):** avatar / name / email → menu with **Settings**, **Admin** (gated by
+  the `role:admin` claim), and **Log out**.
+
+## Relationship to OpenAuthFederated
+
+EmailDeliveryHero does **not** implement authentication itself. It **consumes OpenAuthFederated**
+— our open-source, self-hosted identity layer (`~/BGit/Bryan_git/OpenAuthFederated/`,
+`https://github.com/BryanStarbuck/OpenAuthFederated.git`) — as an external library, the same way
+the reference internal app (`~/BGit/all/app/`) does. The backend uses `@auth/backend`; the
+frontend uses `@auth/react`. OpenAuthFederated is brought down separately and linked in; it is
+**not** copied into this repo. The full model is specified in
+[Authentication](./authentication.mdx).
+
+## Project structure
+
+```
+EmailDeliveryHero/
+├── code/                    # application code (pnpm monorepo; owned by another process)
+│   └── packages/
+│       ├── backend/         # NestJS REST API (port 9312)
+│       └── frontend/        # React 19 + Vite SPA (port 9311)
+├── pm/                      # product management — this directory of MDX specs
+│   ├── overview.mdx         # this file
+│   ├── authentication.mdx
+│   ├── engineering.mdx
+│   ├── left_bar.yaml        # nav source of truth (written by a separate process)
+│   └── use_cases/
+│       ├── audit_a_domain.mdx
+│       └── domain_on_blacklist.mdx
+└── CLAUDE.md                # project charter
+```
+
+## Table of contents
+
+All MDX specifications in this directory and its subdirectories:
+
+* [Overview](./overview.mdx) — this file: charter, personas, feature set, the deliverability
+  checks, tech stack, ports, and the OpenAuthFederated relationship.
+* [Authentication](./authentication.mdx) — how access is gated: OpenAuthFederated federated Google
+  Workspace SSO consumed as an external library (`@auth/backend` + `@auth/react`), embedded
+  Frontend API middleware at `/api/v1`, Bearer-token verification, the global NestJS
+  `JwtAuthGuard`, allowed domains, cookie prefix `oaf_edh`, and the out-of-repo credentials file.
+* [Engineering](./engineering.mdx) — architecture: the pnpm monorepo layout, the NestJS module
+  list, the frontend structure, ports 9311/9312, the pluggable audit-engine design, the on-disk
+  JSON/YAML store, and how periodic checks run.
+* Use cases:
+  * [Audit a domain](./use_cases/audit_a_domain.mdx) — a user adds a domain, runs an audit, and
+    sees the findings plus the exact fixes.
+  * [Domain on a blacklist](./use_cases/domain_on_blacklist.mdx) — an audit finds the domain's IP
+    on a DNSBL and shows the delisting remediation.
+
+<!--
+  TOC maintenance: when a new .mdx file is added anywhere under this directory, add a bullet here
+  linking to it (relative ./path/to/file.mdx) with a one-line description. Keep subdirectory specs
+  grouped and indented under a parent bullet.
+-->
+</content>
+</invoke>

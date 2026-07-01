@@ -1,0 +1,113 @@
+---
+title: "Use case: audit a domain"
+description: End-to-end walkthrough — a signed-in user adds an email sending domain to EmailDeliveryHero, runs a deliverability audit, and reads the findings plus the exact fixes to apply.
+---
+
+# Use case: audit a domain
+
+This walkthrough shows the core loop of EmailDeliveryHero: **add a domain → run an audit → read the
+findings and their fixes.** It builds on the sibling specs and does not repeat them:
+
+* [Overview](../overview.mdx) — the product charter and the list of checks performed.
+* [Authentication](../authentication.mdx) — the user is already signed in via federated Google
+  Workspace SSO; every route requires it.
+* [Engineering](../engineering.mdx) — the pluggable audit engine, the findings shape, and the file
+  store this flow reads and writes.
+
+---
+
+## 1. Persona and goal
+
+| | |
+| --- | --- |
+| **Persona** | A deliverability owner at the company (signed in as `bryan@whitehatengineering.com`). |
+| **Goal** | Find out whether `whitehatengineering.com` email is at risk of being spam-filtered, and get the exact fixes. |
+| **Precondition** | The user has an active Google Workspace account on `whitehatengineering.com` or `act3ai.com` and is signed in. |
+
+---
+
+## 2. Step-by-step walkthrough
+
+### 2.1 Add the domain
+
+1. The user opens **Domains** in the left bar (`http://localhost:9311/` → Domains).
+2. They click **Add domain** and enter `whitehatengineering.com`. Optionally they add:
+   * one or more **sending IPs** (the IPs their mail actually leaves from — used by the PTR and
+     DNSBL checks), and
+   * one or more **DKIM selectors** (e.g. `google`, `selector1`) so the DKIM check knows where to
+     look. If none are given, the app probes common defaults.
+3. Submitting `POST /api/domains` creates the record and appends it to `domains.json` in the state
+   dir (`~/.email_delivery_hero/domains.json`). The new domain appears in the table with status
+   **"Not yet audited."**
+
+### 2.2 Run the audit
+
+1. From the domain's row (or its detail view) the user clicks **Run audit**
+   (`POST /api/domains/:id/audit`).
+2. The backend's **audit engine** runs every registered checker against the domain in parallel (see
+   [Engineering §6](../engineering.mdx)):
+   * **SPF** — resolves TXT at the apex, looks for a single valid `v=spf1` record.
+   * **DKIM** — resolves TXT at `<selector>._domainkey.whitehatengineering.com` for each selector.
+   * **DMARC** — resolves TXT at `_dmarc.whitehatengineering.com`, checks the policy.
+   * **MX** — resolves MX records and their reachability.
+   * **PTR** — reverse-resolves each sending IP and checks forward-confirmed reverse DNS.
+   * **DNSBL** — queries Spamhaus ZEN, Barracuda, and SpamCop for each sending IP.
+3. Each checker returns zero or more **findings**, each with a **severity**
+   (`ok` / `info` / `warning` / `critical`) and a **remediation** string. The runner rolls them into
+   an **audit result** with a numeric **score** and an overall **status** (the worst severity
+   present), and writes it to `~/.email_delivery_hero/audits/<domainId>/<auditId>.json`.
+
+### 2.3 Read the findings and fixes
+
+1. The UI navigates to the audit result (also reachable later under **Audits**). The user sees the
+   domain's **status badge** and **score** at the top, then a list of findings grouped by check.
+2. A healthy check shows a green **ok** finding (e.g. "MX: 2 valid records, reachable"). A problem
+   shows a **warning** or **critical** finding with a plain-English `detail` (what was observed) and
+   a concrete `remediation` (what to publish).
+
+An example result for `whitehatengineering.com`:
+
+| Check | Severity | Detail (observed) | Remediation (how to fix) |
+| --- | --- | --- | --- |
+| SPF | **ok** | One record: `v=spf1 include:_spf.google.com ~all` | — |
+| DKIM | **critical** | No TXT at `google._domainkey.whitehatengineering.com` | Enable DKIM in Google Admin and publish the provided `google._domainkey` TXT key. |
+| DMARC | **warning** | `_dmarc` present but `p=none` (monitor only) | Strengthen to `v=DMARC1; p=quarantine; rua=mailto:dmarc@whitehatengineering.com`. |
+| MX | **ok** | `1 aspmx.l.google.com`, `5 alt1.aspmx.l.google.com` | — |
+| PTR | **ok** | Sending IP resolves FCrDNS-clean | — |
+| DNSBL | **ok** | Not listed on ZEN / Barracuda / SpamCop | — |
+
+3. The user reads the **DKIM critical** and **DMARC warning** remediation lines, applies the exact
+   TXT records at their DNS provider / Google Admin, and clicks **Run audit** again. On the re-run
+   those findings flip to **ok** and the domain's status improves to **ok**.
+
+---
+
+## 3. What happens on the Dashboard afterward
+
+* The **Dashboard** now lists `whitehatengineering.com` with its latest **score/status** and its
+  count of **open problems**.
+* From this point the **periodic scheduler** (see [Engineering §8](../engineering.mdx)) re-audits the
+  domain on its cadence and flags any **newly appearing** finding as a new problem — so a regression
+  (e.g. someone deletes the DKIM record months later) is surfaced automatically without the user
+  re-running anything by hand.
+
+---
+
+## 4. Acceptance criteria
+
+1. A signed-in user can add an email sending domain (with optional sending IPs and DKIM selectors),
+   persisted to the file store.
+2. Running an audit executes all first-round checkers and produces findings with a severity and a
+   **concrete remediation** for every non-`ok` finding.
+3. The audit result shows a per-domain score/status and the grouped findings, and is persisted as a
+   file under the state dir.
+4. Applying the prescribed fixes and re-running the audit flips the corresponding findings to `ok`.
+5. The domain then appears on the Dashboard with its latest status and open-problem count, and is
+   picked up by the periodic scheduler.
+
+<!--
+  Keep this walkthrough aligned with the audit engine in ../engineering.mdx (the Checker contract,
+  the six first-round checks) and the check list in ../overview.mdx. Every non-ok finding must carry
+  a concrete "how to fix" string — that is the product's whole promise.
+-->
+</content>

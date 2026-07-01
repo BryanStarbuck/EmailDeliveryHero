@@ -1,0 +1,20 @@
+{
+  "name": "email-delivery-hero",
+  "version": "0.1.0",
+  "private": true,
+  "description": "EmailDeliveryHero — a localhost web app that audits email deliverability (spam filters, blacklists) and tells you how to fix problems. Node + TypeScript; auth via OpenAuthFederated.",
+  "packageManager": "pnpm@11.0.9",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @edh/frontend --filter @edh/backend --parallel dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "biome check .",
+    "format": "biome check --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.0"
+  }
+}

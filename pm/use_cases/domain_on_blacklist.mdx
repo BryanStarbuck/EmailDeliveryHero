@@ -1,0 +1,123 @@
+---
+title: "Use case: domain's IP on a DNS blacklist"
+description: Walkthrough — a periodic audit discovers that a monitored domain's sending IP is listed on a DNS blacklist (DNSBL), EmailDeliveryHero raises a critical finding on the Blacklists view and Dashboard, and shows the specific delisting remediation. The user fixes the underlying cause, requests delisting, and re-audits to confirm removal.
+---
+
+# Use case: domain's IP on a blacklist
+
+This walkthrough shows how EmailDeliveryHero handles the **blacklist monitoring** feature: an audit
+finds one of a domain's **sending IPs on a DNS blacklist (DNSBL)**, raises it as a critical problem,
+and prescribes the **exact delisting steps**. It builds on the sibling specs and does not repeat
+them:
+
+* [Overview](../overview.mdx) — blacklist monitoring is a first-round feature; the DNSBL check is in
+  the list of checks performed.
+* [Engineering](../engineering.mdx) — the `dnsbl.checker.ts` checker, the findings shape, and the
+  periodic scheduler that catches this without the user asking.
+* [Audit a domain](./audit_a_domain.mdx) — the base add-domain / run-audit loop.
+
+---
+
+## 1. Persona and goal
+
+| | |
+| --- | --- |
+| **Persona** | A deliverability owner (signed in as `bryan@whitehatengineering.com`). |
+| **Goal** | Learn that the company's sending IP got blacklisted (which is why email started bouncing), and get the precise steps to get delisted. |
+| **Precondition** | `whitehatengineering.com` is already a monitored domain with at least one **sending IP** registered, so the DNSBL check has an IP to test. |
+
+---
+
+## 2. How the listing is discovered
+
+There are two paths, and both run the **same** DNSBL checker:
+
+* **Automatically (periodic scheduler).** On its cadence (see
+  [Engineering §8](../engineering.mdx)), the scheduler re-audits every domain. This run diffs against
+  the previous run; a **DNSBL finding that newly appears** is flagged as a **new problem** and pushed
+  onto the Dashboard — the user is alerted without doing anything.
+* **On demand.** The user clicks **Run audit** on the domain (or opens the **Blacklists** view and
+  triggers a recheck).
+
+### How the DNSBL check works
+
+For each registered sending IP, `dnsbl.checker.ts` reverses the IP's octets and does a DNS `A`
+lookup of `<reversed-ip>.<zone>` against each configured blocklist **zone** (Spamhaus ZEN,
+Barracuda, SpamCop, and any others in `config.yaml`). If that hostname **resolves to an A record**,
+the IP is **listed** on that blocklist; a `TXT` lookup at the same name usually returns the reason.
+Example: to test `203.0.113.24` against `zen.spamhaus.org`, it looks up
+`24.113.0.203.zen.spamhaus.org` — a returned `127.0.0.x` answer means listed.
+
+---
+
+## 3. The finding EmailDeliveryHero raises
+
+The audit produces a **critical** DNSBL finding on the domain. It appears in three places: the
+audit result, the **Blacklists** left-bar view (which aggregates DNSBL status across all monitored
+domains/IPs), and the **Dashboard** as an open critical problem.
+
+An example finding:
+
+| Field | Value |
+| --- | --- |
+| **checkId** | `dnsbl` |
+| **severity** | `critical` |
+| **title** | Sending IP `203.0.113.24` is listed on Spamhaus ZEN |
+| **detail** | `24.113.0.203.zen.spamhaus.org` returned `127.0.0.4`; TXT reason: "listed in XBL — possible compromised host / bot traffic." |
+| **remediation** | See the delisting steps below (mirrored into the finding's `remediation` string). |
+
+### The delisting remediation (the "how to fix")
+
+The finding's `remediation` is **specific to the blocklist that listed the IP**, not a generic note:
+
+1. **Fix the root cause first — delisting before this is pointless.** For a Spamhaus ZEN/XBL
+   listing, the usual cause is spam/bot traffic from the IP: find and stop the source (a compromised
+   host, an open relay, a misconfigured app blasting mail, or missing rate limits). Confirm SPF,
+   DKIM, and DMARC are healthy (the other checks in this same audit) so future mail authenticates.
+2. **Use the blocklist's own removal/lookup tool.** For Spamhaus, look the IP up at the Spamhaus IP
+   check / removal page and follow its delisting request. For Barracuda, use the Barracuda IP removal
+   request form. For SpamCop, use the SpamCop blocklist lookup and its removal process. The
+   remediation string includes the correct lookup/removal URL for the specific zone that flagged the
+   IP.
+3. **Request delisting** and provide the requested attestation that the underlying issue is fixed.
+4. **Wait for propagation**, then **re-audit** to confirm the IP is clear.
+
+> The exact removal URLs and the reason text come from the DNSBL response and the configured zone
+> metadata, so the user is handed the right tool for the specific list — Spamhaus, Barracuda, or
+> SpamCop — rather than a one-size-fits-all link.
+
+---
+
+## 4. The user resolves it and confirms
+
+1. The user reads the critical finding on the **Blacklists** view and follows the remediation:
+   stops the offending traffic source, verifies SPF/DKIM/DMARC are green in the same audit, then
+   submits the delisting request at the blocklist's removal page.
+2. After the blocklist processes the request, the user clicks **Run audit** (or waits for the next
+   periodic run).
+3. On the clean re-run the DNSBL check returns **ok** for `203.0.113.24`, the critical finding
+   clears, the domain's status improves, and the open-problem count on the Dashboard drops. Because
+   the scheduler diffs runs, the clearing is recorded as a resolved problem.
+
+---
+
+## 5. Acceptance criteria
+
+1. The DNSBL checker tests every registered sending IP for a domain against the configured
+   blocklist zones (Spamhaus ZEN, Barracuda, SpamCop, …) using reversed-IP DNS lookups.
+2. A listed IP produces a **critical** finding naming the **specific blocklist** and, where
+   available, the **reason** from the blocklist's TXT response.
+3. The finding's remediation gives the **delisting steps for that specific blocklist**, including the
+   correct removal/lookup URL and a "fix the root cause first" instruction — not a generic message.
+4. The listing surfaces on the **Blacklists** view and the **Dashboard**, and — when found by the
+   periodic scheduler — is flagged as a **newly appearing problem** without the user manually
+   triggering an audit.
+5. After the user fixes the cause and gets delisted, a re-audit flips the finding to `ok` and clears
+   the problem.
+
+<!--
+  Keep this aligned with dnsbl.checker.ts in ../engineering.mdx (reversed-IP lookups against
+  configured zones) and the scheduler's regression-diff behavior. The remediation must always be
+  blocklist-specific: fix the root cause, then use that blocklist's own removal tool.
+-->
+</content>

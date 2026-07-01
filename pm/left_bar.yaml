@@ -1,0 +1,135 @@
+# ============================================================================
+# EmailDeliveryHero — Left Navigation Bar Specification
+# ============================================================================
+# Single source of truth for every left-side navigation bar in the app.
+# The frontend imports THIS file directly (code/packages/frontend/src/config/left_bar.ts,
+# via Vite `?raw`) — there is no separate code copy. Human companion spec: pm/overview.mdx.
+#
+# There are two left bars:
+#   1. app       — the main app: a flat list of the primary sections.
+#   2. settings  — the left bar shown inside Settings (/settings/*).
+#
+# Product context (see pm/overview.mdx + pm/authentication.mdx):
+#   - Localhost web app that audits email deliverability. Node + TypeScript.
+#     React 19 + Vite + Tailwind + TanStack Router/Query frontend; NestJS backend.
+#   - Auth: OpenAuthFederated federated Google-Workspace SSO
+#     (whitehatengineering.com / act3ai.com). No email/password.
+#   - Fully auth-gated: every bar renders only for a signed-in user.
+#   - Permission gates use OpenAuthFederated claims: e.g. role:admin.
+# ============================================================================
+
+Left_Nav:
+  Left_bars:
+
+    # ==========================================================================
+    # LEFT BAR 1: app — the main app
+    # ==========================================================================
+    - Location: app
+      name: "EmailDeliveryHero — Main Left Bar"
+      description: "Primary navigation: Dashboard, Domains, Audits, Blacklists, Settings."
+      auth_system: "openauth_federated"
+      sidebar_width: 256px
+
+      header:
+        kind: logo
+        label: "EmailDeliveryHero"
+        alt_text: "EmailDeliveryHero — email deliverability auditing"
+        click_route: "/"
+
+      nav_items:
+        - id: dashboard
+          label: "Dashboard"
+          icon: "LayoutDashboard"
+          route: "/"
+          order: 1
+          description: "Overview of every monitored domain, its latest score and open problems."
+
+        - id: domains
+          label: "Domains"
+          icon: "Globe"
+          route: "/domains"
+          order: 2
+          description: "Add and manage the email-sending domains you monitor."
+
+        - id: audits
+          label: "Audits"
+          icon: "ShieldCheck"
+          route: "/audits"
+          order: 3
+          description: "Deliverability audit results — SPF, DKIM, DMARC, MX, and blacklist findings."
+
+        - id: blacklists
+          label: "Blacklists"
+          icon: "Ban"
+          route: "/blacklists"
+          order: 4
+          description: "DNS blacklist (DNSBL) status for your sending IPs, with delisting steps."
+
+        - id: settings
+          label: "Settings"
+          icon: "Settings"
+          route: "/settings"
+          order: 5
+          description: "Account, scheduling, and app configuration."
+
+      # Footer: account block (avatar/name/email) -> popup menu (expands UP).
+      footer:
+        - id: account_block
+          type: account
+          expands_upward: true
+          shows: ["avatar", "name", "email"]
+          menu_items:
+            - id: settings
+              label: "Settings"
+              icon: "Settings"
+              route: "/settings"
+            - id: admin
+              label: "Admin"
+              icon: "ShieldAlert"
+              route: "/settings/admin"
+              permission_gate: "role:admin"
+            - id: logout
+              label: "Log out"
+              icon: "LogOut"
+              action: "sign_out"
+
+    # ==========================================================================
+    # LEFT BAR 2: settings — shown inside Settings (/settings/*)
+    # ==========================================================================
+    - Location: settings
+      name: "EmailDeliveryHero — Settings Left Bar"
+      description: "Settings categories, plus a back link to the app."
+      sidebar_width: 256px
+
+      header:
+        kind: back
+        label: "Settings"
+        back_button: true
+        back_route: "/"
+
+      groups:
+        - id: general
+          label: "General"
+          order: 1
+          items:
+            - id: account
+              label: "Account"
+              icon: "User"
+              route: "/settings"
+              default: true
+            - id: scheduling
+              label: "Scheduling"
+              icon: "Clock"
+              route: "/settings/scheduling"
+              description: "How often periodic re-audits run."
+
+        - id: administration
+          label: "Administration"
+          order: 2
+          items:
+            - id: admin
+              label: "Admin"
+              icon: "ShieldAlert"
+              route: "/settings/admin"
+              permission_gate: "role:admin"
+              description: "Admin-only configuration."

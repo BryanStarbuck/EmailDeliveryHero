@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+:root {
+  --edh-bg: #f8fafc;
+  --edh-card: #ffffff;
+  --edh-border: #e2e8f0;
+  --edh-primary: #0f766e;
+  --edh-muted: #64748b;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--edh-bg);
+  color: #0f172a;
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
