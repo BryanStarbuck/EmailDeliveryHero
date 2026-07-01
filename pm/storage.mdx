@@ -216,9 +216,12 @@ holds the shared, admin-owned settings; each person's **personal** preferences l
 ```
 
 * `<email>` is the user's **verified** email from the OpenAuthFederated JWT (the Google Workspace
-  identity — [Authentication](./authentication.mdx)). Because the app is fully SSO-gated, every
-  request carries a trusted, verified email; we never guess it. (The stable `sub` claim is an
-  acceptable alternative key; email is chosen so the tree is human-browsable.)
+  identity — [Authentication](./authentication.mdx)) when signed in, or the reserved literal
+  **`default`** when logged out. Login is **optional** ([Security](./security.mdx)): there is always
+  a current user, so every request resolves to a folder key — a trusted verified email, or `default`.
+  Verified emails always contain `@`, so a real identity can never collide with the `default` key.
+  (The stable `sub` claim is an acceptable alternative key for signed-in users; email is chosen so
+  the tree is human-browsable.)
 * In **server mode** this cleanly separates every teammate's settings on one shared install. In
   **local mode** there is usually one user, but the same folder is used, so the shape is identical.
 * The folder is created **lazily** on the first write for that user. Reading a user who has no folder

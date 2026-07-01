@@ -33,7 +33,7 @@ createRoot(rootElement).render(
       publishableKey={env.VITE_AUTH_PUBLISHABLE_KEY}
       frontendApi={apiBase}
       signInUrl={env.VITE_AUTH_SIGN_IN_URL ?? "/sign-in"}
-      afterSignOutUrl="/sign-in"
+      afterSignOutUrl="/"
       allowedDomains={allowedDomains}
     >
       {/* Registers useAuth().getToken/reloadSession for the axios layer. */}

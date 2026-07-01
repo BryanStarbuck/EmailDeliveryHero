@@ -5,14 +5,22 @@ description: How authentication works for EmailDeliveryHero — federated Google
 
 # EmailDeliveryHero — Authentication
 
-This document specifies **how authentication works for EmailDeliveryHero**. The app is
-**fully auth-gated**: per the [Overview](./overview.mdx) charter, **nobody gets in without logging
-in.** This spec makes that concrete by defining the single rule that gates all access:
+> **Superseded on gating by [Security](./security.mdx).** This document describes the mechanics of
+> the OpenAuthFederated integration for the **signed-in path**, and those mechanics are unchanged.
+> But the app is **no longer fully auth-gated**: login is **optional** — the app is fully usable
+> logged out under a single **`default`** user, and signing in is an upgrade to a per-person
+> identity (and to admin actions). Wherever this file says "every route requires a signed-in user"
+> or "no anonymous access," read the current rule in [Security](./security.mdx) §1–§3 instead:
+> ordinary routes resolve to the `default` user when logged out; only **admin** actions require a
+> real session.
 
-> **Access requirement:** every route requires a signed-in user, and the only way to sign in is an
-> active Google Workspace account on one of our two company domains — **`whitehatengineering.com`**
-> or **`act3ai.com`**. There is no email/password login, no "sign up with email," no other social
-> login, and no anonymous access.
+This document specifies **how authentication works for EmailDeliveryHero** on the **signed-in path**.
+The one and only way to *sign in* is defined here:
+
+> **Sign-in requirement:** the only way to sign in is an active Google Workspace account on one of our
+> two company domains — **`whitehatengineering.com`** or **`act3ai.com`**. There is no email/password
+> login, no "sign up with email," and no other social login. (Being *logged out* is allowed — see
+> [Security](./security.mdx); this section only governs what happens when a user chooses to sign in.)
 
 Authentication is **not implemented in this app**. We **consume OpenAuthFederated** — our
 open-source, self-hosted identity layer (`~/BGit/Bryan_git/OpenAuthFederated/`,
@@ -118,17 +126,19 @@ const claims = await federatedClient.verifyToken(bearerToken);
 // → { sub, email, org_id, roles, permissions, ... }
 ```
 
-### 3.3 Global NestJS `JwtAuthGuard` (auth on every route)
+### 3.3 Global NestJS `JwtAuthGuard` ("identify, don't gate")
 
-A **global `JwtAuthGuard`** is registered app-wide (`APP_GUARD`), so **every route requires a
-signed-in user** by default. It extracts the Bearer token, calls `federatedClient.verifyToken`, and
-attaches the resulting user to the request (`@CurrentUser()`). Routes that must be reachable without
-a session (health check, the mounted `/api/v1` auth middleware itself) are opted out with a
-**`@Public()`** decorator that the guard honors. Everything else is closed by default — the safe
-direction.
+A **global `JwtAuthGuard`** is registered app-wide (`APP_GUARD`). It extracts the Bearer token, calls
+`federatedClient.verifyToken`, and attaches the resulting user to the request (`@CurrentUser()`).
+Per [Security](./security.mdx) §3.3 the guard is **non-gating**: when no token is present or it is
+invalid, it attaches the **`default`** user and lets the request proceed — it does **not** return
+`401`. Routes are therefore always reachable (the `@Public()` decorator still exists for routes that
+skip the strategy entirely, e.g. the health check and the mounted `/api/v1` auth middleware). The one
+exception is **admin** actions, refused with `403` for the `default` user by a separate `role:admin`
+check.
 
 ```ts
-// A route reachable without auth is explicitly marked:
+// A route reachable without even running the strategy is explicitly marked:
 @Public()
 @Get('/api/health')
 health() { return { status: 'ok' }; }
@@ -248,9 +258,11 @@ The authentication system is correct when **all** of the following hold:
 2. An employee with an active `@whitehatengineering.com` **or** `@act3ai.com` Workspace account can
    sign in and reach the app; anyone outside those two domains is **rejected** (no user created, no
    session issued).
-3. **Every** NestJS route requires a valid OpenAuthFederated Bearer JWT via the global
-   `JwtAuthGuard`; only routes marked `@Public()` are reachable without a session. Missing/invalid →
-   `401`, insufficient permission → `403`.
+3. The global `JwtAuthGuard` runs on every non-`@Public()` route and **verifies** any Bearer JWT
+   present, but is **non-gating**: with no/invalid token it attaches the **`default`** user and the
+   request proceeds (no `401`). Only **admin** actions require a real session — insufficient
+   permission → `403`. (See [Security](./security.mdx); this replaces the earlier "every route
+   requires a session, missing/invalid → 401" rule.)
 4. Inbound tokens are verified with `federatedClient.verifyToken` **locally** (no per-request IdP
    round-trip), and the library's embedded Frontend API middleware is mounted at `/api/v1`.
 5. Admin-only sections are gated by the **`role:admin`** claim on the backend (frontend gating is UX
@@ -266,7 +278,8 @@ The authentication system is correct when **all** of the following hold:
    `~/BGit/Bryan_git/OpenAuthFederated/`.
 
 <!--
-  This file is meant to grow. Keep the invariants: auth-gated everywhere; the only way in is a
+  This file is meant to grow. Keep the invariants: login is OPTIONAL (logged-out = the `default`
+  user; see security.mdx) — only admin actions require a session; the only way to SIGN IN is a
   Workspace account on whitehatengineering.com or act3ai.com via federated SSO; the app consumes
   @auth/backend + @auth/react and never reimplements SAML/OAuth; secrets live out-of-repo; grow
   OpenAuthFederated when its side is incomplete.

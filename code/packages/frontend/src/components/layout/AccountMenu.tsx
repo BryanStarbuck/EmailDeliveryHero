@@ -1,5 +1,6 @@
 import { useAuth, useUser } from "@auth/react"
 import { Link } from "@tanstack/react-router"
+import { LogIn } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import { accountMenuItems } from "@/config/left_bar"
 import { logger } from "@/lib/logger"
@@ -7,12 +8,14 @@ import { cn } from "@/lib/utils"
 import { NavIcon } from "./NavIcon"
 
 /**
- * Bottom-left account block: avatar/name/email that opens an upward popup menu (Settings, Admin
- * [gated], Log out). Identity comes from the OpenAuthFederated session (useUser); Log out calls the
- * SDK's signOut — we never clear the session ourselves.
+ * Bottom-of-the-nav account block. Login is OPTIONAL (pm/security.mdx §3.2): when logged out this
+ * shows a single "Sign in" button (the user is the `default` user until they click it); when signed
+ * in it shows the avatar/name/email that opens an upward popup menu (Settings, Admin [gated], Log
+ * out). Identity comes from the OpenAuthFederated session (useUser); Log out calls the SDK's signOut
+ * — which returns the app to the `default` user, it never boots the person out of the app.
  */
 export function AccountMenu() {
-  const { signOut, has } = useAuth()
+  const { isSignedIn, signOut, has } = useAuth()
   const { user } = useUser()
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -25,6 +28,29 @@ export function AccountMenu() {
     document.addEventListener("mousedown", onClick)
     return () => document.removeEventListener("mousedown", onClick)
   }, [open])
+
+  // Logged out → the account slot is a "Sign in" entry point to the Google Workspace SSO flow.
+  if (!isSignedIn) {
+    return (
+      <div className="border-t border-[var(--edh-border)] p-2">
+        <Link
+          to="/sign-in"
+          className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm font-medium text-[var(--edh-primary)] hover:bg-slate-100"
+          title="Sign in with your company Google Workspace account"
+        >
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-200 text-slate-500">
+            <LogIn className="h-4 w-4" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate">Sign in</span>
+            <span className="block truncate text-xs font-normal text-[var(--edh-muted)]">
+              Using default settings
+            </span>
+          </span>
+        </Link>
+      </div>
+    )
+  }
 
   const email = user?.primaryEmailAddress ?? ""
   const name =
@@ -42,7 +68,8 @@ export function AccountMenu() {
   }
 
   const onSignOut = () => {
-    signOut({ redirectUrl: "/sign-in" }).catch((err) => logger.error("Sign-out failed", err))
+    // Return to the app as the `default` user (pm/security.mdx §3.2) — not to the sign-in screen.
+    signOut({ redirectUrl: "/" }).catch((err) => logger.error("Sign-out failed", err))
   }
 
   return (

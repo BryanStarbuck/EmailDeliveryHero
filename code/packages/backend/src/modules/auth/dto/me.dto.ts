@@ -9,7 +9,10 @@ export class MeDto {
   @ApiProperty({ example: "user_2ab...", description: '`"default"` when logged out' })
   userId!: string
 
-  @ApiProperty({ example: "bryan@whitehatengineering.com", description: '`"default"` when logged out' })
+  @ApiProperty({
+    example: "bryan@whitehatengineering.com",
+    description: '`"default"` when logged out',
+  })
   email!: string
 
   @ApiProperty({

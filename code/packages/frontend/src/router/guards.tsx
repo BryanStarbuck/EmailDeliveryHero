@@ -24,9 +24,27 @@ function Reconnecting({ reload }: { reload: () => Promise<boolean> }) {
 }
 
 /**
- * Route protection (UX gating only — the backend is authoritative). Bounces to /sign-in ONLY when
- * the auth backend authoritatively reports no active session; while it is unreachable it shows a
- * reconnecting state and retries.
+ * The app gate for OPTIONAL login (pm/security.mdx §3.4). Login is NOT required: the app renders for
+ * everyone. This never redirects to /sign-in — it only waits for the auth SDK to load (so we know
+ * whether there's a session before painting the account slot), and shows a reconnecting state if the
+ * auth backend is unreachable (so a blip never disturbs a signed-in user). Logged-out users fall
+ * through and use the app as the `default` user; the account slot offers a "Sign in" button.
+ */
+export function AppReady({ children }: { children: ReactNode }) {
+  const { isLoaded, loadState, reloadSession } = useAuth()
+  if (!isLoaded) {
+    if (loadState === "failed" || loadState === "degraded") {
+      return <Reconnecting reload={reloadSession} />
+    }
+    return <FullPageSpinner />
+  }
+  return <>{children}</>
+}
+
+/**
+ * Hard auth gate for the FEW places that genuinely require a signed-in user (e.g. an admin-only
+ * route). Bounces to /sign-in only when the backend authoritatively reports no session; retries
+ * while the backend is unreachable. Ordinary pages use <AppReady> instead and stay open logged out.
  */
 export function RequireAuth({ children }: { children: ReactNode }) {
   const { isLoaded, isSignedIn, loadState, reloadSession } = useAuth()

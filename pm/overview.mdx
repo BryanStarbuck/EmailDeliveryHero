@@ -18,10 +18,17 @@ All MDX specifications in this directory and its subdirectories:
 
 * [Overview](./overview.mdx) — this file: charter, personas, feature set, the deliverability
   checks, tech stack, ports, and the OpenAuthFederated relationship.
-* [Authentication](./authentication.mdx) — how access is gated: OpenAuthFederated federated Google
-  Workspace SSO consumed as an external library (`@auth/backend` + `@auth/react`), embedded
-  Frontend API middleware at `/api/v1`, Bearer-token verification, the global NestJS
-  `JwtAuthGuard`, allowed domains, cookie prefix `oaf_edh`, and the out-of-repo credentials file.
+* [Security](./security.mdx) — the authoritative security & authentication spec: **login is
+  optional** (the app is fully usable logged out as a single `default` user), how sign-in works
+  through OpenAuthFederated Google Workspace SSO, the Users model (`default` vs. verified email),
+  per-user settings (including `default`), the Google Cloud credentials read from
+  `~/.credentials/email_delivery_hero.json`, the "Sign in" button in the account slot, and the
+  backend/frontend enforcement points. Supersedes the gating described in Authentication.
+* [Authentication](./authentication.mdx) — the OpenAuthFederated integration mechanics for the
+  **signed-in path**: the external library (`@auth/backend` + `@auth/react`), embedded Frontend API
+  middleware at `/api/v1`, Bearer-token verification, the global NestJS `JwtAuthGuard`, allowed
+  domains, cookie prefix `oaf_edh`, and the out-of-repo credentials file. See Security for the
+  optional-login/`default`-user model that governs when a session is actually required.
 * [Engineering](./engineering.mdx) — architecture: the pnpm monorepo layout, the NestJS module
   list, the frontend structure, ports, the pluggable audit-engine design, the on-disk
   JSON/YAML store, and how periodic checks run.

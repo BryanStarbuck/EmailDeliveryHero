@@ -53,7 +53,10 @@ export class AuthFederatedStrategy extends PassportStrategy(Strategy, "jwt") {
     const token = typeof header === "string" ? header.replace(/^Bearer\s+/i, "") : ""
     if (!token) {
       // Normal logged-out request — not an error. Guard resolves this to the `default` user.
-      logDebug("No Authorization bearer token; continuing as the default (logged-out) user", "AuthStrategy")
+      logDebug(
+        "No Authorization bearer token; continuing as the default (logged-out) user",
+        "AuthStrategy",
+      )
       return null
     }
 
