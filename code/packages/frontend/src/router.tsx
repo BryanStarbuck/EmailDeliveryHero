@@ -78,6 +78,10 @@ const domainsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/domains",
   component: DomainsPage,
+  // `?edit=<domainId>` opens that domain's editor on arrival — the dashboard row-menu's
+  // "Edit domain" action (pm/dashboard.mdx §4.3).
+  validateSearch: (search: Record<string, unknown>): { edit?: string } =>
+    typeof search.edit === "string" && search.edit ? { edit: search.edit } : {},
 })
 const runDetailRoute = createRoute({
   getParentRoute: () => appLayoutRoute,

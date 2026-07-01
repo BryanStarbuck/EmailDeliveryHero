@@ -246,7 +246,7 @@ export type PortalUserState = "unverified" | "verified_clean" | "problem_reporte
 
 export interface BlacklistIpTarget {
   ip: string
-  source: "sending_ips" | "mx_resolved" | "spf_authorized" | "primary"
+  source: "sending_ips" | "mx_resolved" | "spf_authorized" | "email_report" | "primary"
   ptr: string | null
   fcrdns_ok: boolean | null
   asn: { number: number | null; org: string | null } | null
@@ -344,4 +344,32 @@ export interface BlacklistHistoryEntry {
   clean: number
   inconclusive: number
   worst_severity: Severity
+}
+
+/** One effective catalog row from GET /blacklists/zones (pm/checks/blacklists.mdx §18). */
+export interface BlocklistZoneRow {
+  zone: string
+  name: string
+  kind: ZoneKind
+  tier: ZoneTier
+  weight: number
+  lookup_url: string
+  delist_url: string
+  enabled: boolean
+  severity: Severity
+  requires_registration?: boolean
+  is_paid?: boolean
+  paid_delist_offered?: boolean
+  auto_expires?: string
+  positive?: boolean
+  notes?: string
+}
+
+/** The effective registry view — checked-in blacklists.yaml ⊕ operator overrides (§17.1 panel 5). */
+export interface BlacklistRegistryInfo {
+  compiled: string
+  lists_total: number
+  zones: BlocklistZoneRow[]
+  dead_zones: Array<{ zone: string; name: string; died?: string | number; reason?: string }>
+  aggregators: Array<{ name: string; url: string; description: string }>
 }

@@ -22,6 +22,7 @@ import {
   spfLiteralIps,
   worstSeverity,
 } from "./engine"
+import { collectEmailReportIps } from "./email-targets"
 import {
   applyPortalStates,
   readLatestBlacklistRun,
@@ -110,7 +111,8 @@ async function queryAsn(resolver: Resolver, ip: string): Promise<IpTarget["asn"]
   return { number: asn, org }
 }
 
-/** §11.1 target discovery: configured sending IPs, else MX-derived, plus SPF ip4 literals. */
+/** §11.1 target discovery: configured sending IPs, else MX-derived, plus SPF ip4 literals, plus
+ *  IPs mined from ingested DMARC report emails that authenticated as this domain (§19). */
 async function discoverIpTargets(
   resolver: Resolver,
   domain: string,
@@ -135,6 +137,11 @@ async function discoverIpTargets(
     for (const ip of spfLiteralIps(spf)) {
       if (!sources.has(ip)) sources.set(ip, "spf_authorized")
     }
+  }
+  // §19: IPs observed actually sending as this domain in DMARC rua reports (last 30 days),
+  // capped at the top 20 by message volume. Dedupe keeps the stronger config-derived source tag.
+  for (const rep of collectEmailReportIps(domain).ips) {
+    if (!sources.has(rep.ip)) sources.set(rep.ip, "email_report")
   }
 
   return mapLimit([...sources.entries()], QUERY_CONCURRENCY, async ([ip, source]) => {

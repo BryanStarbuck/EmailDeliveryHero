@@ -4,6 +4,7 @@ import type { MonitoredDomain } from "@module/domains/domain.types"
 import { DomainsService } from "@module/domains/domains.service"
 import { Injectable } from "@nestjs/common"
 import { mapLimit } from "@shared/concurrency"
+import { readAppConfig } from "@shared/config-store"
 import { readJson, writeJson } from "@shared/json-store"
 import { logError, logInfo } from "@shared/logging"
 import { resolveStateDir } from "@shared/state-dir"
@@ -65,10 +66,14 @@ export class AuditService {
       this.saveAll(map)
 
       const runs = [result, ...this.loadRuns()]
-      // Cap the history at the newest RUNS_KEPT_PER_DOMAIN runs per domain.
+      // Prune history older than the admin retention window (config.yaml → storage.retentionDays,
+      // pm/storage.mdx §6) AND cap at the newest RUNS_KEPT_PER_DOMAIN runs per domain.
+      const retentionDays = readAppConfig().storage.retentionDays
+      const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString()
       const perDomain: Record<string, number> = {}
       this.saveRuns(
         runs.filter((r) => {
+          if ((r.startedAt ?? r.finishedAt ?? "") < cutoff) return false
           perDomain[r.domainId] = (perDomain[r.domainId] ?? 0) + 1
           return perDomain[r.domainId] <= RUNS_KEPT_PER_DOMAIN
         }),
@@ -123,9 +128,20 @@ export class AuditService {
    * are audited in parallel with a small concurrency cap (pm/progress_ui.mdx §4.2); each result is
    * persisted through the write-lock so concurrent scans never clobber one another.
    */
-  async runForAll(): Promise<AuditResult[]> {
-    const domains = this.domains.list()
-    logInfo(`Check run started (${domains.length} domain(s))`, "AuditService")
+  async runForAll(trigger: "manual" | "scheduled" = "manual"): Promise<AuditResult[]> {
+    // A domain rides the recurring schedule only when its own per-domain scheduleEnabled flag
+    // (domains.yaml — pm/storage.mdx §5, pm/domains.mdx §6) is on; a manual run-all covers everything.
+    const domains =
+      trigger === "scheduled"
+        ? this.domains.list().filter((d) => d.scheduleEnabled)
+        : this.domains.list()
+    // The required timestamped start lines (pm/errors.mdx §4): a manual run-all reads
+    // "Manual check started (all domains)"; a scheduled run includes the domain count.
+    if (trigger === "scheduled") {
+      logInfo(`Scheduled check run started (${domains.length} domain(s))`, "AuditScheduler")
+    } else {
+      logInfo("Manual check started (all domains)", "AuditService")
+    }
     const results = await mapLimit(domains, AUDIT_CONCURRENCY, async (domain) => {
       const result = await this.auditDomain(domain)
       await this.persistResult(result)

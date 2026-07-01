@@ -82,7 +82,11 @@ async function bootstrap() {
   process.on("unhandledRejection", (reason) =>
     appLogger.logError("Unhandled promise rejection", reason, "Process"),
   )
-  process.on("uncaughtException", (err) => appLogger.logFatal("Uncaught exception", err, "Process"))
+  process.on("uncaughtException", (err) => {
+    // The write is synchronous, so the FATAL line is on disk before we exit (pm/errors.mdx §3, §6).
+    appLogger.logFatal("Uncaught exception", err, "Process")
+    process.exit(1)
+  })
 
   const raw = config.get<string>("PORT") ?? "9312"
   const port = Number(raw)

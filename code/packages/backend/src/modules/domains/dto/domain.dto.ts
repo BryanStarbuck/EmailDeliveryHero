@@ -3,6 +3,7 @@ import {
   ArrayMaxSize,
   IsArray,
   IsBoolean,
+  IsIP,
   IsOptional,
   IsString,
   Matches,
@@ -11,6 +12,11 @@ import {
 
 // A permissive but real domain-name shape: labels of letters/digits/hyphens separated by dots.
 const DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i
+
+// A DKIM selector token (pm/domains.mdx §4.1): letters, digits, and hyphens only.
+const SELECTOR_RE = /^[a-z0-9-]{1,63}$/i
+const SELECTOR_MSG = "each DKIM selector must contain only letters, digits, and hyphens"
+const IP_MSG = "each sending IP must be a valid IPv4 or IPv6 address"
 
 export class CreateDomainDto {
   @ApiProperty({ example: "whitehatengineering.com" })

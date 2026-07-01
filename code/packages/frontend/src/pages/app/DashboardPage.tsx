@@ -3,6 +3,7 @@ import { ChevronRight, Loader2, MoreVertical, Play, RefreshCw } from "lucide-rea
 import { useEffect, useState } from "react"
 import { useAuditResults, useAuditRuns, useDeleteRun } from "@/api/audit"
 import { useDeleteDomain, useDomains, useUpdateDomain } from "@/api/domains"
+import { useSchedulerStatus, useSetScheduleEnabled } from "@/api/scheduler"
 import type { AuditResult, MonitoredDomain } from "@/api/types"
 import { BrandHeader } from "@/components/BrandHeader"
 import { StatusCell } from "@/components/StatusCell"
@@ -59,6 +60,12 @@ export function DashboardPage() {
       ) : (
         <>
           <DomainHealthTable domains={list} results={results ?? []} />
+          {(results ?? []).length === 0 && (
+            <p className="mt-2 text-sm text-[var(--edh-muted)]">
+              No checks have run yet — press <span className="font-medium">Run checks</span> to
+              audit every domain.
+            </p>
+          )}
           <RunsTable runs={runs ?? []} />
         </>
       )}
@@ -170,7 +177,11 @@ function DomainHealthTable({
                           label: "Open newest report",
                           onClick: () => navigate({ to: "/domains/$id", params: { id: d.id } }),
                         },
-                        { label: "Edit domain", onClick: () => navigate({ to: "/domains" }) },
+                        {
+                          // Lands on the Domains page with this domain's editor open (§4.3).
+                          label: "Edit domain",
+                          onClick: () => navigate({ to: "/domains", search: { edit: d.id } }),
+                        },
                         {
                           label: d.scheduleEnabled
                             ? "Scheduled checks: turn off"
@@ -367,18 +378,27 @@ function RowMenu({
 
 /**
  * The recurring-checks on/off switch with a chevron to the scheduling page (pm/dashboard.mdx §7.2).
- * The on/off preference is stored client-side for now (the first-round backend enables periodic
- * audits via EDH_PERIODIC_AUDIT_MINUTES); the chevron always routes to the scheduling settings.
+ * The toggle reflects/sets whether recurring checks are enabled through the scheduler contract
+ * (GET /api/scheduler + PUT /api/scheduler/config, pm/scheduled_checks.mdx). While the scheduler
+ * module isn't reachable it degrades to the client-side preference so the switch stays usable.
+ * The chevron only navigates to the scheduling settings — it never flips the toggle.
  */
 function ScheduledToggle() {
+  const status = useSchedulerStatus()
+  const setEnabled = useSetScheduleEnabled()
   const [on, setOn] = useState(false)
   useEffect(() => {
-    setOn(localStorage.getItem("edh.scheduled") === "on")
-  }, [])
+    if (status.data) {
+      setOn(status.data.enabled)
+    } else if (status.isError) {
+      setOn(localStorage.getItem("edh.scheduled") === "on")
+    }
+  }, [status.data, status.isError])
   const toggle = () => {
     const next = !on
-    setOn(next)
+    setOn(next) // optimistic; the status query refetch settles the truth
     localStorage.setItem("edh.scheduled", next ? "on" : "off")
+    setEnabled.mutate(next)
   }
   return (
     <div className="inline-flex items-center gap-2 rounded-md border border-[var(--edh-border)] bg-white px-3 py-1.5 text-sm">
@@ -407,12 +427,20 @@ function ScheduledToggle() {
   )
 }
 
+/** Loading skeletons sized like the two tables so there is no layout shift (pm/dashboard.mdx §8). */
 function SkeletonGrid() {
   return (
-    <div className="space-y-2">
-      {["a", "b", "c"].map((k) => (
-        <div key={k} className="h-11 animate-pulse rounded-md bg-slate-100" />
-      ))}
+    <div>
+      <div className="space-y-2">
+        {["a", "b", "c"].map((k) => (
+          <div key={k} className="h-11 animate-pulse rounded-md bg-slate-100" />
+        ))}
+      </div>
+      <div className="mt-10 space-y-2">
+        {["a", "b", "c", "d"].map((k) => (
+          <div key={k} className="h-11 animate-pulse rounded-md bg-slate-100" />
+        ))}
+      </div>
     </div>
   )
 }

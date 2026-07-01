@@ -1,4 +1,4 @@
-import { useNavigate } from "@tanstack/react-router"
+import { useNavigate, useSearch } from "@tanstack/react-router"
 import { ArrowUpRight, ChevronRight, Pencil, Play, Plus, RefreshCw, Trash2, X } from "lucide-react"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
@@ -32,6 +32,16 @@ export function DomainsPage() {
   const [dialog, setDialog] = useState<
     { mode: "add" } | { mode: "edit"; domain: MonitoredDomain } | null
   >(null)
+
+  // `?edit=<domainId>` (the dashboard row-menu's "Edit domain", pm/dashboard.mdx §4.3): once the
+  // list is loaded, open that domain's editor and clear the param so refresh/back don't re-open it.
+  const { edit } = useSearch({ strict: false }) as { edit?: string }
+  useEffect(() => {
+    if (!edit || !domains) return
+    const domain = domains.find((d) => d.id === edit)
+    if (domain) setDialog({ mode: "edit", domain })
+    navigate({ to: "/domains", search: {}, replace: true })
+  }, [edit, domains, navigate])
 
   const byId = new Map((results ?? []).map((r) => [r.domainId, r]))
   const list = domains ?? []

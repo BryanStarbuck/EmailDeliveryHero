@@ -5,6 +5,7 @@ import {
   LayoutDashboard,
   LogOut,
   type LucideIcon,
+  Mailbox,
   Settings,
   ShieldAlert,
   ShieldCheck,
@@ -17,6 +18,7 @@ const ICONS: Record<string, LucideIcon> = {
   Globe,
   ShieldCheck,
   Ban,
+  Mailbox,
   Settings,
   ShieldAlert,
   User,
@@ -24,7 +26,9 @@ const ICONS: Record<string, LucideIcon> = {
   LogOut,
 }
 
+/** Resolves a lucide icon by yaml name; an unknown name renders NO icon (pm/leftbar.mdx §6). */
 export function NavIcon({ name, className }: { name?: string; className?: string }) {
-  const Icon = (name && ICONS[name]) || Globe
+  const Icon = name ? ICONS[name] : undefined
+  if (!Icon) return null
   return <Icon className={className ?? "h-4 w-4"} aria-hidden />
 }

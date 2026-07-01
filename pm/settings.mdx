@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — Settings
-description: The Settings page for EmailDeliveryHero — a sectioned settings surface (Monitored domains, Checks configuration, Scheduled checks, Notifications, Storage & data, Tools & environment, Account & access, Appearance) that reads/writes the file-based config.yaml and domains.yaml under ~/.email_delivery_hero/. Documents each group's fields, where each persists, which fields are admin-only (role:admin), the REST contract (GET/PUT /api/settings), and the permission matrix.
+description: The Settings page for EmailDeliveryHero — a sectioned settings surface (Monitored domains, Checks configuration, Scheduling, Notifications, Storage & data, Tools & environment, Account & access, Appearance) that reads/writes the file-based config.yaml and domains.yaml under the state dir. §3 is the grown Scheduling tab (/settings/scheduling): use case, UI, and storage for scheduled re-audits — DEFAULT OFF with a one-flip enable that seeds 06:00 daily, one or more times of day (multiple runs per day), weekday chips, computed next run, and the GET/PUT /api/scheduler(/config) + POST /api/scheduler/run contract. Documents each group's fields, where each persists, which fields are admin-only (role:admin), the REST contract (GET/PUT /api/settings), and the permission matrix.
 ---
 
 # EmailDeliveryHero — Settings
@@ -56,7 +56,7 @@ rejects writes to admin-only fields regardless of what the UI shows.
 │  AUDITING                │   [x] SPF        [x] DKIM      [x] DMARC              │
 │   • Monitored domains    │   [x] Blacklists [x] DNS & Infra  [ ] Spam & Content │
 │   • Checks configuration │                                                      │
-│   • Scheduled checks  →  │  DNSBL zones to query                (admin-only) 🔒 │
+│   • Scheduling           │  DNSBL zones to query                (admin-only) 🔒 │
 │                          │   zen.spamhaus.org           [remove]                │
 │  ALERTS                  │   b.barracudacentral.org     [remove]                │
 │   • Notifications        │   bl.spamcop.net             [remove]                │
@@ -96,7 +96,7 @@ applied to newly added domains.
 | **Default DKIM selectors** | string[] | Global fallback probed when a domain has no selectors of its own. | `config.yaml checks.dkim.defaultSelectors` |
 
 Actions: **Add domain**, **Edit**, **Remove**, and **Audit now** (fires
-`POST /api/domains/:id/audit`, the same on-demand path as the Domains area). Adding or removing a
+`POST /api/audit/run/:domainId`, the same on-demand path as the Domains area). Adding or removing a
 domain is available to **all users**; editing the **global default selectors** is **admin-only**
 (it changes behavior for every domain that relies on the fallback).
 
@@ -124,22 +124,163 @@ judged, but cannot save changes.
 
 ---
 
-## 3. Scheduled checks
+## 3. Scheduling (the Scheduled-checks tab)
 
-A **summary + link out**. The authoritative scheduling config (on/off, cadence, per-domain
-overrides, run history) lives in [Scheduled checks](./scheduled_checks.mdx) and is backed by the
-`scheduler` module (see [Engineering](./engineering.mdx)). Settings surfaces the essentials and a
-button to open the full page.
+Route **`/settings/scheduling`** — the **Scheduling** item in the settings left bar
+(`pm/left_bar.yaml`, settings bar → General → Scheduling). This tab **is** the scheduling
+configuration surface: the Dashboard's top-right **scheduled toggle** mirrors the same on/off flag,
+and its **chevron** navigates here (see [Dashboard](./dashboard.mdx) §7.2 and
+[Scheduled checks](./scheduled_checks.mdx), which this section supersedes where they disagree on
+defaults and permissions).
 
-| Field | Type | Meaning | Persists to |
-| --- | --- | --- | --- |
-| Periodic checks on/off | boolean | Master switch for scheduled re-audits. | `config.yaml schedule.enabled` **(admin-only)** |
-| Cadence | enum/cron | How often re-audits run (e.g. every 6h). | `config.yaml schedule.cadence` **(admin-only)** |
-| Last run / next run | read-only | Status surfaced from `GET /api/scheduler`. | (runtime, not persisted here) |
-| Run now | action | Triggers `POST /api/scheduler/run` immediately. | (action) |
+### 3.1 Use case
 
-Toggling scheduling and cadence is **admin-only**. "Run now" is available to **all users** (it is a
-manual, read-only-in-effect re-audit).
+The manual **Run checks** button answers *"how healthy am I right now?"* — but deliverability
+breaks **while nobody is looking**: an IP lands on a DNSBL overnight, a DKIM key gets rotated
+badly during an unrelated DNS change, an expiring DNSSEC signature ticks toward failure on a
+weekend. Scheduling exists so the app notices these **before the user's recipients do**, and
+surfaces them as *new problems* on the [Dashboard](./dashboard.mdx) the next time the user looks.
+
+Design intents, in priority order:
+
+1. **Off by default, deliberately.** A fresh install must not start firing DNSBL queries, SMTP
+   probes, and HTTP fetches on a timer the user never asked for — scheduled traffic against
+   rate-limited public blocklists is something the user opts into, not discovers. `schedule.enabled`
+   defaults to **`false`**.
+2. **One flip to a working schedule.** Turning scheduling on must never dead-end in an unconfigured
+   state. Enabling with no times configured **seeds the default schedule — `06:00`, every day** —
+   so a single toggle flip (on the Dashboard *or* on this tab) yields a schedule that runs before
+   the workday starts and has fresh results waiting at 9am. No second step is required.
+3. **The user picks the time(s) of day.** A daily audit is most useful when it completes just
+   before the user habitually checks the Dashboard, so the primary control is a **time-of-day
+   picker**, not an opaque "every N hours" interval.
+4. **More than once per day is a first-class case.** A sender actively fighting a blacklist
+   listing, or one who sends both morning and evening campaigns, wants **multiple runs per day**
+   (e.g. `06:00` *and* `18:00`) so a mid-day listing is caught within hours and a delisting is
+   confirmed the same day. The times list accepts any number of entries.
+5. **Enabling covers everything by default.** The global switch is ANDed with each domain's
+   `scheduleEnabled` (see [Domains](./domains.mdx) §6), and per-domain toggles default **on** — so
+   flipping the one global switch immediately covers every monitored domain, and the user opts
+   *individual* domains out rather than opting each one in.
+6. **Anyone may turn it on.** Scheduling is an **all-users** setting (including the logged-out
+   `default` user per [Security](./security.mdx)) — it must be *easy* to turn on, and a
+   scheduled run does nothing a manual "Run checks" click couldn't. This supersedes the earlier
+   admin-only marking of this group.
+
+### 3.2 User interface
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Settings › Scheduling                                                     │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│  Scheduled checks                                        ( ●====  OFF )    │
+│  Re-audit every monitored domain automatically and flag new problems.     │
+│  ⓘ Scheduling is off — checks only run when you press "Run checks".       │
+│                                                                            │
+│  ── Time(s) of day ───────────────────────────────────────────────────    │
+│   [ 06:00 ]  (–)                                                           │
+│   [ 18:00 ]  (–)                                                           │
+│   [ + Add another time ]                                                   │
+│   Times use this machine's local timezone.                                 │
+│                                                                            │
+│  ── Days ─────────────────────────────────────────────────────────────    │
+│   [✓Mon] [✓Tue] [✓Wed] [✓Thu] [✓Fri] [✓Sat] [✓Sun]     (default: every day)│
+│                                                                            │
+│  ── Status ───────────────────────────────────────────────────────────    │
+│   Next run:  —  (scheduling is off)                                        │
+│   Last run:  today 06:00 · scheduled  →  view in Runs                      │
+│   Covers:    4 of 5 monitored domains   (per-domain toggles → Domains)     │
+│   Runs while the app is closed:  launchd agent installed ✓                 │
+│                                                                            │
+│   [ Run a scheduled check now ]                                            │
+│                                                                            │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                        [ Cancel ]   [ Save ]               │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+Controls, top to bottom:
+
+* **Master toggle.** The single on/off for the whole feature (`schedule.enabled`, default
+  **off**). It sits first and largest; it is the same flag as the Dashboard top-right toggle, and
+  the two stay in sync (both read `GET /api/scheduler`, both write
+  `PUT /api/scheduler/config`). The toggle **saves immediately** (optimistic, no Save click
+  needed) so "turn it on" is truly one action. If no times are configured when it flips on, the
+  backend seeds `times: ["06:00"]`, every day.
+* **Off-state banner.** While off, a quiet info line states the consequence ("checks only run when
+  you press Run checks"). The times/days form stays **fully editable while off** — a user can lay
+  out the schedule first and flip the switch last; nothing fires until enabled.
+* **Time(s) of day.** One or more `HH:MM` rows (native `<input type="time">`). **+ Add another
+  time** appends a row — this is how the audit runs **multiple times per day**. Each row has a
+  remove **(–)**; the last remaining row cannot be removed (at least one time is always
+  configured). Duplicates are collapsed and the list is stored sorted. Times are interpreted in
+  the machine's **local timezone** (an IANA timezone picker is the noted enhancement in
+  [Scheduled checks](./scheduled_checks.mdx); this tab does not offer it first round).
+* **Days.** Seven weekday chips, all selected by default (= every day). Deselecting lets a user
+  skip weekends (or run *only* weekends). At least one day must remain selected. Daily times +
+  weekday chips replace the older cadence enum ("every N hours" stays a
+  [Scheduled checks](./scheduled_checks.mdx) enhancement, not a control on this tab).
+* **Status block** (read-only, from `GET /api/scheduler`):
+  * **Next run** — the computed next fire time, or "— (scheduling is off)". The Dashboard
+    chevron's tooltip shows the same value.
+  * **Last run** — timestamp and trigger source (`scheduled` / `manual`), linking to the
+    Dashboard's Runs table.
+  * **Covers** — "N of M monitored domains", reflecting the AND with per-domain
+    `scheduleEnabled`; links to [Domains](./domains.mdx) where the per-domain toggles live.
+  * **Runs while the app is closed** — whether the OS-level agent (launchd on macOS) is
+    installed, per [Scheduled checks](./scheduled_checks.mdx). Read-only here; install/uninstall
+    is `just install-agent` / the Scheduled-checks page.
+* **Run a scheduled check now.** Fires `POST /api/scheduler/run` with `{ "force": true }` — runs
+  the scheduled set immediately (even while the toggle is off) so the user can see exactly what a
+  scheduled run will do before committing to one.
+* **Save / Cancel.** The times and days form uses an explicit **Save** (dirty-state bar);
+  validation (≥ 1 time, ≥ 1 day, `HH:MM` shape) happens on Save and inline.
+
+### 3.3 Storage
+
+**User intent** lives in the `schedule:` block of `config.yaml` under the state dir
+(`EDH_STATE_DIR`, per [Storage](./storage.mdx)), written through the shared atomic YAML store
+(`shared/yaml-store.ts` — temp-file + rename, hand-editable):
+
+```yaml
+# <state dir>/config.yaml
+schedule:
+  enabled: false            # DEFAULT OFF — the master switch (Dashboard toggle + this tab)
+  times:                    # HH:MM, 24h, local time; one or more = multiple runs per day
+    - "06:00"
+  weekdays: [mon, tue, wed, thu, fri, sat, sun]   # all seven = every day (default)
+```
+
+**Runtime state** is *not* mixed into user intent — the scheduler keeps its telemetry in
+`scheduler.json` next to it (`lastRunAt`, `lastTrigger: "scheduled" | "manual"`); `nextRunAt` is
+always **computed** from `times` × `weekdays`, never persisted. Scheduled runs write ordinary run
+records to `audits.json` / `runs.json` exactly like manual runs.
+
+**Which domains run:** a scheduled run audits the monitored domains whose
+`domains.yaml scheduleEnabled` is `true` (global switch AND per-domain switch). Manual runs
+(`POST /api/audit/run`, per-domain play buttons) ignore `scheduleEnabled` entirely.
+
+REST contract (backend `scheduler` module, NestJS on **9312**):
+
+| Method + route | Purpose | Access |
+| --- | --- | --- |
+| `GET /api/scheduler` | Status: `enabled`, `times`, `weekdays`, computed `nextRunAt`, `lastRunAt`, `lastTrigger`, `running`, and the covered-domain counts. Backs this tab's status block and the Dashboard toggle/tooltip. | all users |
+| `GET /api/scheduler/config` | The raw `schedule:` block. | all users |
+| `PUT /api/scheduler/config` | Write the `schedule:` block (whole or partial); validates, seeds `times: ["06:00"]` when enabling with none, persists to `config.yaml`, and **re-arms the in-process timer** to match. | all users |
+| `POST /api/scheduler/run` | Trigger a scheduled run now. Honors the flag: when `enabled: false` it **skips** (`{ started: false, reason: "disabled" }`) unless the body carries `{ "force": true }`. Also skips if a scheduled run started within the last 5 minutes (dedupe — protects against the in-process timer and the OS agent firing together). | all users |
+
+Two scheduling layers consume this storage (details in
+[Scheduled checks](./scheduled_checks.mdx)):
+
+* **In-process** — the backend's scheduler service arms a timer for the next `times` ×
+  `weekdays` slot whenever the config is loaded or PUT; it replaces the old
+  `EDH_PERIODIC_AUDIT_MINUTES` env interval, which is retired.
+* **OS-level (launchd)** — `just install-agent` installs
+  `com.emaildeliveryhero.scheduler.plist`, which runs `code/deploy/launchd/trigger-scheduler.mjs`
+  → `POST /api/scheduler/run`. Because that endpoint checks `enabled` and dedupes, the agent can
+  stay installed while the toggle is off (it becomes a no-op) and can coexist with the in-process
+  timer without double-running.
 
 ---
 
@@ -278,9 +419,10 @@ checks:                                  # §2 — admin-only
     warning: 15
     info: 0
 
-schedule:                                # §3 — summary here; full config in scheduled_checks.mdx
-  enabled: true                          # admin-only
-  cadence: "0 */6 * * *"                 # admin-only (every 6h)
+schedule:                                # §3 — the Scheduling tab (all-users)
+  enabled: false                         # DEFAULT OFF; one flip on the Dashboard or §3 enables it
+  times: ["06:00"]                       # HH:MM local; multiple entries = multiple runs per day
+  weekdays: [mon, tue, wed, thu, fri, sat, sun]   # all seven = every day (default)
 
 notifications:                           # §4
   webhook:                               # admin-only (shared channel)
@@ -364,8 +506,8 @@ setting (read-only where they cannot edit); only writes are gated.
 | Enabled check categories (§2) | | 🔒 |
 | DNSBL zones (§2) | | 🔒 |
 | Score thresholds / severity weights / SPF lookup limit (§2) | | 🔒 |
-| Scheduling on/off + cadence (§3) | | 🔒 |
-| "Audit now" / "Run now" (§1/§3) | ✅ | |
+| Scheduling on/off + times of day + weekdays (§3) | ✅ | |
+| "Audit now" / "Run a scheduled check now" (§1/§3) | ✅ | |
 | My notification preferences: desktop, email, severity, mode (§4) | ✅ | |
 | Shared webhook URL + SMTP relay (§4) | | 🔒 |
 | Send test notification (§4) | ✅ | |
@@ -395,8 +537,15 @@ The Settings page is correct when **all** of the following hold:
 3. **Checks configuration** (§2) enables/disables the six check categories, edits the DNSBL zone
    list, default DKIM selectors, and score thresholds/weights, persisting to `config.yaml`; all of
    §2 is **admin-only** and non-admins see it read-only.
-4. **Scheduled checks** (§3) shows the on/off + cadence summary and last/next run, links to
-   [Scheduled checks](./scheduled_checks.mdx), and "Run now" fires `POST /api/scheduler/run`.
+4. **Scheduling** (§3) lives at `/settings/scheduling`: scheduling defaults **off**
+   (`schedule.enabled: false` on a fresh install); the master toggle saves immediately and enabling
+   with no times configured seeds `06:00` every day, so one flip yields a working schedule; the
+   user can set **one or more times of day** (multiple runs per day via "+ Add another time") and
+   narrow the weekdays; the status block shows computed next run, last run + trigger source, and
+   the covered-domain count; "Run a scheduled check now" fires
+   `POST /api/scheduler/run` `{ force: true }`; intent persists to the `schedule:` block of
+   `config.yaml`, runtime state to `scheduler.json`, and a scheduled run audits only domains with
+   `scheduleEnabled: true`. All of §3 is **all-users**.
 5. **Notifications** (§4) lets each user set their own desktop/email/severity/mode preferences
    (per-user block keyed by OAF `sub`), while the shared webhook and SMTP channels are admin-only;
    "Send test notification" works.
@@ -420,6 +569,11 @@ The Settings page is correct when **all** of the following hold:
   (config.yaml + domains.yaml under ~/.email_delivery_hero/, no DB), NestJS 9312 / React+Vite 4444,
   auth via OpenAuthFederated with role:admin gating the Admin section. When a new setting is added,
   add its row to the relevant §, its key to the config model, and its line to the Permissions table
-  (mark admin-only fields). Scheduling detail stays in ./scheduled_checks.mdx; the six check
-  categories stay catalogued in ./spam_checks.mdx — Settings only toggles/parameterizes them.
+  (mark admin-only fields). §3 (Scheduling) is the authoritative spec for the /settings/scheduling
+  tab — default OFF, times-of-day (multiple per day), weekday chips, config.yaml schedule: block,
+  scheduler.json runtime state, and the /api/scheduler endpoints; ./scheduled_checks.mdx keeps the
+  OS-level (launchd/cron/systemd/schtasks) detail and the noted enhancements (interval cadence,
+  IANA timezone, domain subsets) and must not contradict §3 on defaults (OFF) or permissions
+  (all-users). The six check categories stay catalogued in ./spam_checks.mdx — Settings only
+  toggles/parameterizes them.
 -->

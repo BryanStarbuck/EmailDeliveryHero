@@ -85,9 +85,14 @@ function cellFor(key: CategoryKey, findings: Finding[]): CellStatus {
   const failing = findings.filter((f) => f.severity === "warning" || f.severity === "critical")
   const top = [...failing].sort((a, b) => WORST[b.severity] - WORST[a.severity])[0]
 
-  // Blacklists is count-oriented ("N problems"); every other category is "K of M fail".
+  // Metric text per test (pm/dashboard.mdx §5.2 / pm/ui.mdx §1.3): Blacklists is count-oriented
+  // ("N problems"); Spam & Content is naturally a percentage (inbox placement — until seed-list
+  // placement data exists, the passing-sub-test rate is the percent); everything else is
+  // "K of M fail". Healthy cells show the literal "Healthy" except the percent-style cell.
   let label: string
-  if (failing.length === 0) {
+  if (key === "spamContent") {
+    label = `${Math.round(((findings.length - failing.length) / findings.length) * 100)}%`
+  } else if (failing.length === 0) {
     label = "Healthy"
   } else if (key === "blacklists") {
     label = failing.length === 1 ? "1 problem" : `${failing.length} problems`

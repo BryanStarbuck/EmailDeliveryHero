@@ -1,7 +1,14 @@
 import { useAuth } from "@auth/react"
 import { Link, useLocation } from "@tanstack/react-router"
 import { ArrowLeft } from "lucide-react"
-import { appNavItems, appTitle, settingsBackRoute, settingsGroups } from "@/config/left_bar"
+import {
+  appNavItems,
+  appTitle,
+  appTitleRoute,
+  settingsBackRoute,
+  settingsGroups,
+  settingsHeaderLabel,
+} from "@/config/left_bar"
 import { cn } from "@/lib/utils"
 import { AccountMenu } from "./AccountMenu"
 import { NavIcon } from "./NavIcon"
@@ -35,26 +42,35 @@ export function Sidebar({ variant }: { variant: SidebarVariant }) {
 
 function AppSidebar() {
   const pathname = useLocation({ select: (l) => l.pathname })
+  const gate = useGate()
   const isActive = (route: string) =>
     route === "/" ? pathname === "/" : pathname === route || pathname.startsWith(`${route}/`)
 
   return (
     <nav className={SHELL}>
       <div className="flex h-14 items-center gap-2 border-b border-[var(--edh-border)] px-4">
-        <span className="text-lg font-semibold text-[var(--edh-primary)]">{appTitle}</span>
+        {/* Wordmark: spaced "Email Delivery Hero", green, normal tracking, routes to / (§1). */}
+        <Link
+          to={appTitleRoute}
+          className="text-lg font-semibold tracking-normal text-[var(--edh-primary)]"
+        >
+          {appTitle}
+        </Link>
       </div>
       <div className="flex-1 space-y-1 overflow-y-auto p-2">
-        {appNavItems.map((item) => (
-          <Link
-            key={item.id}
-            to={item.route}
-            className={cn(ITEM, isActive(item.route) && ACTIVE)}
-            title={item.description}
-          >
-            <NavIcon name={item.icon} />
-            {item.label}
-          </Link>
-        ))}
+        {appNavItems
+          .filter((item) => gate(item.permission_gate))
+          .map((item) => (
+            <Link
+              key={item.id}
+              to={item.route}
+              className={cn(ITEM, isActive(item.route) && ACTIVE)}
+              title={item.description}
+            >
+              <NavIcon name={item.icon} />
+              {item.label}
+            </Link>
+          ))}
       </div>
       <AccountMenu />
     </nav>
@@ -70,7 +86,7 @@ function SettingsSidebar() {
     <nav className={SHELL}>
       <div className="flex h-14 items-center border-b border-[var(--edh-border)] px-2">
         <Link to={settingsBackRoute} className={cn(ITEM, "font-medium")}>
-          <ArrowLeft className="h-4 w-4" /> Back to app
+          <ArrowLeft className="h-4 w-4" /> {settingsHeaderLabel}
         </Link>
       </div>
       <div className="flex-1 space-y-4 overflow-y-auto p-2">

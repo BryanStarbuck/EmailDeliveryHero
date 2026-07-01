@@ -14,7 +14,24 @@ import {
   readLatestBlacklistRun,
   writePortalState,
 } from "../audit/checks/blacklist/store"
-import { PROVIDER_PORTALS } from "../audit/checks/blacklist/zones"
+import {
+  loadRegistry,
+  loadZones,
+  PROVIDER_PORTALS,
+  type BlacklistRegistry,
+} from "../audit/checks/blacklist/zones"
+import type { BlocklistZone } from "../audit/checks/blacklist/blacklist-types"
+
+/** The effective registry view served to the §17 dashboard and the Blocklist Zones admin panel. */
+export interface BlacklistRegistryInfo {
+  compiled: string
+  /** Every entry in the checked-in registry, including web-only and disabled lists. */
+  lists_total: number
+  /** The effective queryable catalog (registry defaults ⊕ operator overrides, dead zones excluded). */
+  zones: BlocklistZone[]
+  dead_zones: BlacklistRegistry["dead_zones"]
+  aggregators: BlacklistRegistry["aggregators"]
+}
 
 /**
  * The Blacklists technology API (pm/checks/blacklists.mdx §13). Serves the per-run
@@ -32,6 +49,22 @@ export class UpdatePortalStateDto {
 @ApiTags("blacklists")
 @Controller("blacklists")
 export class BlacklistsController {
+  @Get("zones")
+  @ApiOperation({
+    summary:
+      "The effective blocklist registry — checked-in blacklists.yaml merged with operator overrides",
+  })
+  zones(): BlacklistRegistryInfo {
+    const reg = loadRegistry()
+    return {
+      compiled: reg.compiled,
+      lists_total: reg.blacklists.length,
+      zones: loadZones(),
+      dead_zones: reg.dead_zones,
+      aggregators: reg.aggregators,
+    }
+  }
+
   @Get("results")
   @ApiOperation({ summary: "Latest blacklist run for every domain that has one" })
   latestAll(): BlacklistRunResults[] {

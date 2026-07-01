@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "@tanstack/react-router"
 import { ChevronRight, MoreVertical } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { useAuditRuns, useDeleteRun } from "@/api/audit"
 import type { AuditResult } from "@/api/types"
@@ -19,8 +19,14 @@ const NEWEST = 10
  * in the existing view-one-report design (/domains/$id/runs/$runId, RunDetailPage).
  */
 export function ReportsPage() {
-  const { data: runs, isLoading } = useAuditRuns()
+  const { data: runs, isLoading, isError, error } = useAuditRuns()
   const navigate = useNavigate()
+
+  // Error state (pm/reports.mdx §5): the standard query-error toast; the page keeps its last
+  // rendered rows if it has any (react-query retains the cached data on a failed refetch).
+  useEffect(() => {
+    if (isError) toast.error(errMsg(error, "Could not load the report history"))
+  }, [isError, error])
 
   const all = runs ?? []
   const newest = all.slice(0, NEWEST)
@@ -45,6 +51,11 @@ export function ReportsPage() {
 
       {isLoading ? (
         <SkeletonTable />
+      ) : isError && runs === undefined ? (
+        // A failed initial load has no rows to keep (§5) — say so rather than claiming "No reports".
+        <div className="rounded-lg border border-dashed border-[var(--edh-border)] p-10 text-center">
+          <p className="text-slate-600">Could not load the report history — see the error toast.</p>
+        </div>
       ) : newest.length === 0 ? (
         <div className="rounded-lg border border-dashed border-[var(--edh-border)] p-10 text-center">
           <p className="text-slate-600">

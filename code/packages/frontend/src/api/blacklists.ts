@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "./axios"
 import type {
   BlacklistHistoryEntry,
+  BlacklistRegistryInfo,
   BlacklistRunResults,
   PortalUserState,
   ProviderPortal,
@@ -10,6 +11,15 @@ import type {
 /** The Blacklists technology API (pm/checks/blacklists.mdx §13) — latest runs, history, portals. */
 
 const RUNS_KEY = ["blacklists", "results"] as const
+
+/** The effective blocklist registry — feeds the §17 dashboard registry-health panel. */
+export function useBlacklistRegistry() {
+  return useQuery({
+    queryKey: ["blacklists", "zones"] as const,
+    queryFn: async () => (await api.get<BlacklistRegistryInfo>("/blacklists/zones")).data,
+    staleTime: 5 * 60 * 1000,
+  })
+}
 
 /** Latest blacklist run for every domain that has one (the summary cards). */
 export function useBlacklistRuns() {

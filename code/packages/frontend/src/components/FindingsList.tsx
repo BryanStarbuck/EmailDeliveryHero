@@ -1,10 +1,13 @@
 import { Wrench } from "lucide-react"
 import type { Finding } from "@/api/types"
 import { SeverityBadge } from "./Badges"
+import { CopyFixButton } from "./CopyFixButton"
 
 /**
- * Render a domain's audit findings. Problems (warning/critical) sort to the top; each shows its
- * detail, the DNS evidence, and — the whole point of the app — the concrete remediation.
+ * Render a domain's audit findings using the common finding-presentation pattern (pm/ui.mdx §1.4).
+ * Problems (warning/critical) sort to the top; each shows its detail, the DNS evidence, and — the
+ * whole point of the app — the concrete remediation with a Copy-fix button so the user pastes the
+ * exact record without retyping.
  */
 const ORDER = { critical: 0, warning: 1, info: 2, ok: 3 } as const
 
@@ -29,12 +32,15 @@ export function FindingsList({ findings }: { findings: Finding[] }) {
                 <p className="mt-1 break-all font-mono text-xs text-slate-500">{f.evidence}</p>
               )}
               {f.remediation && (
-                <div className="mt-2 flex items-start gap-2 rounded-md bg-slate-50 p-2 text-sm text-slate-700">
-                  <Wrench className="mt-0.5 h-4 w-4 shrink-0 text-[var(--edh-primary)]" />
-                  <span>
-                    <span className="font-medium">Fix: </span>
-                    {f.remediation}
+                <div className="mt-2 flex items-start justify-between gap-2 rounded-md bg-slate-50 p-2 text-sm text-slate-700">
+                  <span className="flex items-start gap-2">
+                    <Wrench className="mt-0.5 h-4 w-4 shrink-0 text-[var(--edh-primary)]" />
+                    <span>
+                      <span className="font-medium">Fix: </span>
+                      {f.remediation}
+                    </span>
                   </span>
+                  {f.severity !== "ok" && <CopyFixButton text={f.evidence ?? f.remediation} />}
                 </div>
               )}
             </div>

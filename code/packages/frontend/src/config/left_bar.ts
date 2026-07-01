@@ -37,7 +37,7 @@ export interface SettingsGroup {
 
 interface RawBar {
   Location?: string
-  header?: { label?: string; back_route?: string }
+  header?: { label?: string; click_route?: string; back_route?: string }
   nav_items?: NavItem[]
   groups?: SettingsGroup[]
   footer?: Array<{ menu_items?: AccountMenuItem[] }>
@@ -64,6 +64,9 @@ function barAt(location: string): RawBar | undefined {
 /** The app bar's title (from its header) — spaced "Email Delivery Hero" (pm/leftbar.mdx §1). */
 export const appTitle: string = barAt("app")?.header?.label ?? "Email Delivery Hero"
 
+/** Where clicking the wordmark routes (yaml `header.click_route`) — the Dashboard. */
+export const appTitleRoute: string = barAt("app")?.header?.click_route ?? "/"
+
 /** Primary app nav items, ordered. */
 export const appNavItems: NavItem[] = [...(barAt("app")?.nav_items ?? [])].sort(
   (a, b) => (a.order ?? 0) - (b.order ?? 0),
@@ -79,3 +82,6 @@ export const settingsGroups: SettingsGroup[] = [...(barAt("settings")?.groups ??
 )
 
 export const settingsBackRoute: string = barAt("settings")?.header?.back_route ?? "/"
+
+/** The settings bar's back-header label (yaml `header.label`) — "Settings" (pm/leftbar.mdx §4). */
+export const settingsHeaderLabel: string = barAt("settings")?.header?.label ?? "Settings"

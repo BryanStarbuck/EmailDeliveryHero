@@ -27,6 +27,13 @@ Related specs: [Overview](./overview.mdx) · [Engineering](./engineering.mdx) ·
 
 ## Enabling scheduled checks
 
+Scheduling is **OFF by default** on a fresh install (`schedule.enabled: false`) — scheduled DNSBL/
+SMTP/HTTP traffic is opt-in, never a surprise. Turning it on is one flip, from either home of the
+same flag: the dashboard toggle, or the **Settings → Scheduling** tab at `/settings/scheduling`
+([Settings §3](./settings.mdx) — the authoritative spec for that tab's use case, UI, and storage;
+enabling with no times configured seeds `06:00` every day so one flip yields a working schedule).
+Scheduling is an **all-users** setting.
+
 The dashboard toggle is the single on/off switch for the whole scheduling feature.
 
 * **Toggle ON** → sets `schedule.enabled: true` in the file-store config
@@ -118,7 +125,7 @@ The schedule lives as one block in the on-disk config
 ```yaml
 # ~/.email_delivery_hero/config.yaml
 schedule:
-  enabled: true              # the dashboard toggle / on-off switch
+  enabled: true              # the dashboard toggle / on-off switch — DEFAULT false (off)
   cadence: daily             # "interval" | "daily" | "weekly"
   everyHours: 6              # used only when cadence: interval
   times:                     # used by daily/weekly — supports multiple per day

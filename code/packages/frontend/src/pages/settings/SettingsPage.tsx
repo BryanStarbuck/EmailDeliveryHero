@@ -1,12 +1,14 @@
-import { useUser } from "@auth/react"
-import { useParams } from "@tanstack/react-router"
+import { useAuth, useUser } from "@auth/react"
+import { Link, useParams } from "@tanstack/react-router"
 
 /**
  * Settings. First round is intentionally thin: an Account panel (identity from the
- * OpenAuthFederated session), a read-only Scheduling note, and an Admin placeholder. The settings
- * left bar (Sidebar variant="settings") drives navigation between these sections.
+ * OpenAuthFederated session, or the `default` user with a Sign-in prompt — pm/ui.mdx §7.4), a
+ * read-only Scheduling note, and an Admin placeholder. The settings left bar
+ * (Sidebar variant="settings") drives navigation between these sections.
  */
 export function SettingsPage() {
+  const { isSignedIn } = useAuth()
   const { user } = useUser()
   const params = useParams({ strict: false }) as { section?: string }
   const section = params.section ?? "account"
@@ -20,12 +22,30 @@ export function SettingsPage() {
 
       {section === "account" && (
         <Panel title="Account">
-          <Row label="Name" value={name} />
-          <Row label="Email" value={email} />
-          <p className="mt-3 text-sm text-[var(--edh-muted)]">
-            Identity is provided by OpenAuthFederated (Google Workspace SSO). There is no password
-            to manage here.
-          </p>
+          {isSignedIn ? (
+            <>
+              <Row label="Name" value={name} />
+              <Row label="Email" value={email} />
+              <p className="mt-3 text-sm text-[var(--edh-muted)]">
+                Identity is provided by OpenAuthFederated (Google Workspace SSO). There is no
+                password to manage here.
+              </p>
+            </>
+          ) : (
+            <>
+              <Row label="Current user" value="default" />
+              <p className="mt-3 text-sm text-slate-600">
+                You are using the app as the <code>default</code> user — settings persist under that
+                account until you sign in. Signing in is optional and never required.
+              </p>
+              <Link
+                to="/sign-in"
+                className="mt-3 inline-block rounded-md bg-[var(--edh-primary)] px-3 py-2 text-sm font-medium text-white"
+              >
+                Sign in
+              </Link>
+            </>
+          )}
         </Panel>
       )}
 

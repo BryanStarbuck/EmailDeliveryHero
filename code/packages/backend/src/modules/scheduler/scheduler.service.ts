@@ -1,0 +1,240 @@
+import { join } from "node:path"
+import { AuditService } from "@module/audit/audit.service"
+import { DomainsService } from "@module/domains/domains.service"
+import { Injectable, type OnModuleDestroy, type OnModuleInit } from "@nestjs/common"
+import { mapLimit } from "@shared/concurrency"
+import { readJson, writeJson } from "@shared/json-store"
+import { logError, logInfo } from "@shared/logging"
+import { resolveStateDir } from "@shared/state-dir"
+import type { AuditResult } from "../audit/checks/types"
+import { computeNextRun } from "./next-run"
+import {
+  installArtifact,
+  previewArtifact,
+  uninstallArtifact,
+} from "./os-artifact"
+import {
+  normalizeSchedule,
+  readScheduleConfig,
+  writeScheduleConfig,
+} from "./schedule-config.store"
+import type {
+  OsArtifactPreview,
+  RunTrigger,
+  ScheduleConfig,
+  SchedulerStatus,
+} from "./schedule.types"
+
+/** How many domains a scheduled run audits concurrently (matches AuditService's manual path). */
+const SCHEDULED_RUN_CONCURRENCY = 4
+
+/** Scheduler telemetry persisted across restarts (lastRunAt survives a backend reboot). */
+interface SchedulerState {
+  lastRunAt: string | null
+  lastTrigger: RunTrigger | null
+}
+
+/**
+ * The scheduled-checks service (pm/scheduled_checks.mdx). Owns the `schedule:` block of
+ * config.yaml, runs the IN-PROCESS scheduling layer (a timer armed to the next tz-aware slot;
+ * fires only while the backend runs), and manages the OS-LEVEL layer's native artifact
+ * (launchd / cron / systemd / schtasks) so audits can fire even when the app is closed. Exactly
+ * one layer is active at a time (`runner`); both trigger the very same audit engine a manual
+ * "Run checks" uses.
+ */
+@Injectable()
+export class SchedulerService implements OnModuleInit, OnModuleDestroy {
+  private readonly stateFile = join(resolveStateDir(), "scheduler-state.json")
+  private timer: NodeJS.Timeout | null = null
+  /** The instant the armed in-process timer will fire (also reported for the os runner). */
+  private armedFor: string | null = null
+  /** Guard so overlapping triggers (timer + POST /run) never run two audits at once. */
+  private running = false
+
+  constructor(
+    private readonly audit: AuditService,
+    private readonly domains: DomainsService,
+  ) {}
+
+  onModuleInit(): void {
+    const cfg = this.getConfig()
+    if (cfg.enabled) {
+      logInfo(
+        `Scheduled checks enabled (${cfg.cadence}, runner: ${cfg.runner})`,
+        "Scheduler",
+      )
+    } else {
+      logInfo("Scheduled checks disabled (turn on from the dashboard toggle)", "Scheduler")
+    }
+    this.rearm(cfg)
+  }
+
+  onModuleDestroy(): void {
+    this.disarm()
+  }
+
+  /* ------------------------------------ config ------------------------------------ */
+
+  getConfig(): ScheduleConfig {
+    return readScheduleConfig()
+  }
+
+  /**
+   * PUT /api/scheduler/config — merge + persist the schedule block, (re)start or stop the
+   * in-process job, and, when the OS layer is active and installed, regenerate the artifact so
+   * the native schedule matches the saved config.
+   */
+  async updateConfig(patch: Record<string, unknown>): Promise<ScheduleConfig> {
+    const current = this.getConfig()
+    // Merge over the current block so the dashboard toggle can PUT { enabled } alone.
+    const merged = normalizeSchedule({
+      ...(current as unknown as Record<string, unknown>),
+      ...patch,
+      os: { ...current.os, ...((patch.os as Record<string, unknown> | undefined) ?? {}) },
+    })
+    writeScheduleConfig(merged)
+    logInfo(
+      `Schedule config saved (enabled: ${merged.enabled}, cadence: ${merged.cadence}, runner: ${merged.runner})`,
+      "Scheduler",
+    )
+    this.rearm(merged)
+    if (merged.runner === "os" && merged.os.installed) {
+      // Keep the installed native schedule in sync with what was just saved.
+      try {
+        await installArtifact(merged)
+      } catch (err) {
+        logError("Could not regenerate the OS-level schedule after save", err, "Scheduler")
+      }
+    }
+    return merged
+  }
+
+  /* ------------------------------------ status ------------------------------------ */
+
+  /** GET /api/scheduler — enabled, active runner, nextRunAt, lastRunAt, OS-install status. */
+  status(): SchedulerStatus {
+    const cfg = this.getConfig()
+    const state = this.loadState()
+    return {
+      enabled: cfg.enabled,
+      runner: cfg.runner,
+      nextRunAt: computeNextRun(cfg, new Date(), state.lastRunAt),
+      lastRunAt: state.lastRunAt,
+      lastTrigger: state.lastTrigger,
+      os: cfg.os,
+    }
+  }
+
+  /* ------------------------------------- runs ------------------------------------- */
+
+  /**
+   * POST /api/scheduler/run — run a full scheduled audit NOW for the configured scope
+   * ("all" monitored domains or the selected subset; per-domain scheduleEnabled is honored for
+   * scheduled triggers per pm/domains.mdx §6). This is what the OS-level artifacts call.
+   */
+  async runNow(trigger: RunTrigger = "manual"): Promise<AuditResult[]> {
+    if (this.running) {
+      logInfo(`Scheduled run skipped — a run is already in progress (${trigger})`, "Scheduler")
+      return []
+    }
+    this.running = true
+    try {
+      const cfg = this.getConfig()
+      const all = this.domains.list()
+      const scoped =
+        cfg.domains === "all" ? all : all.filter((d) => (cfg.domains as string[]).includes(d.id))
+      // The global switch ANDs with each domain's own scheduleEnabled flag (pm/domains.mdx §6);
+      // a manual trigger of the scheduler endpoint keeps the same scoping.
+      const included = scoped.filter((d) => d.scheduleEnabled)
+      logInfo(
+        `Scheduled check run started (${trigger}; ${included.length}/${all.length} domain(s))`,
+        "Scheduler",
+      )
+      const results = await mapLimit(included, SCHEDULED_RUN_CONCURRENCY, (d) =>
+        this.audit.runForDomain(d.id),
+      )
+      this.saveState({ lastRunAt: new Date().toISOString(), lastTrigger: trigger })
+      logInfo(`Scheduled check run finished (${results.length} domain(s))`, "Scheduler")
+      return results
+    } finally {
+      this.running = false
+      // A completed run moves the next slot forward — re-arm against the fresh lastRunAt.
+      this.rearm(this.getConfig())
+    }
+  }
+
+  /* --------------------------------- OS-level layer --------------------------------- */
+
+  /** GET /api/scheduler/os/preview — the rendered native artifact for the detected OS. */
+  preview(): OsArtifactPreview {
+    return previewArtifact(this.getConfig())
+  }
+
+  /** POST /api/scheduler/os/install — write + load the native schedule; marks os.installed. */
+  async install(): Promise<ScheduleConfig> {
+    const cfg = this.getConfig()
+    await installArtifact(cfg)
+    const next = { ...cfg, os: { ...cfg.os, installed: true } }
+    writeScheduleConfig(next)
+    return next
+  }
+
+  /** POST /api/scheduler/os/uninstall — unload + remove the native schedule. */
+  async uninstall(): Promise<ScheduleConfig> {
+    const cfg = this.getConfig()
+    await uninstallArtifact(cfg)
+    const next = { ...cfg, os: { ...cfg.os, installed: false } }
+    writeScheduleConfig(next)
+    return next
+  }
+
+  /* --------------------------------- in-process layer --------------------------------- */
+
+  private disarm(): void {
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = null
+    this.armedFor = null
+  }
+
+  /**
+   * Arm (or stop) the in-process timer to the next tz-aware slot. Only the "in-process" runner
+   * keeps a live timer — with `runner: os` the OS artifact does the firing (exactly one layer
+   * active at a time, acceptance criterion 10).
+   */
+  private rearm(cfg: ScheduleConfig): void {
+    this.disarm()
+    if (!cfg.enabled || cfg.runner !== "in-process") return
+    const nextIso = computeNextRun(cfg, new Date(), this.loadState().lastRunAt)
+    if (!nextIso) return
+    // Chunk long waits below the 32-bit setTimeout ceiling; re-check the slot at each hop so a
+    // config change mid-wait (rearm already ran) or clock drift never fires stale.
+    const MAX_CHUNK = 2 ** 31 - 1
+    const delay = Math.max(0, Date.parse(nextIso) - Date.now())
+    this.armedFor = nextIso
+    this.timer = setTimeout(
+      () => {
+        if (delay > MAX_CHUNK) {
+          this.rearm(this.getConfig())
+          return
+        }
+        this.runNow("in-process").catch((err) =>
+          logError("Scheduled check run failed", err, "Scheduler"),
+        )
+      },
+      Math.min(delay, MAX_CHUNK),
+    )
+    // Don't keep the event loop alive solely for the schedule.
+    this.timer.unref?.()
+    logInfo(`Next scheduled run armed for ${nextIso}`, "Scheduler")
+  }
+
+  /* ------------------------------------ telemetry ------------------------------------ */
+
+  private loadState(): SchedulerState {
+    return readJson<SchedulerState>(this.stateFile, { lastRunAt: null, lastTrigger: null })
+  }
+
+  private saveState(state: SchedulerState): void {
+    writeJson(this.stateFile, state)
+  }
+}

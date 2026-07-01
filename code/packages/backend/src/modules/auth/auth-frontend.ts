@@ -60,6 +60,19 @@ function resolveCookieSecure(isProd: boolean, webappOrigin: string | undefined):
 }
 
 /**
+ * The OAuth redirect URI to register on the Google Cloud client (pm/security.mdx §4.2).
+ * `GOOGLE_REDIRECT_URI` wins when set (prod swaps the origin this way); the default is the
+ * BACKEND origin — `http://localhost:9312/api/v1/oauth_callback` in dev — because the embedded
+ * Frontend API that handles the callback is mounted on the NestJS server itself.
+ */
+export function resolveGoogleRedirectUri(config: ConfigService): string {
+  const override = config.get<string>("GOOGLE_REDIRECT_URI")?.trim()
+  if (override) return override
+  const backendPort = config.get<string>("PORT") ?? "9312"
+  return `http://localhost:${backendPort}/api/v1/oauth_callback`
+}
+
+/**
  * Build the embedded OpenAuthFederated Frontend API middleware from config. The browser is
  * redirected to Google for a real OIDC consent + id_token; the app session and short-lived access
  * tokens are signed/verified in-process with the app's on-disk secret (embedded mode), so there is
@@ -78,8 +91,7 @@ export function buildAuthFrontend(config: ConfigService) {
     .split(",")[0]
     ?.trim()
 
-  const redirectUri =
-    config.get<string>("GOOGLE_REDIRECT_URI") ?? `${webappOrigin}/api/v1/oauth_callback`
+  const redirectUri = resolveGoogleRedirectUri(config)
 
   // Env var wins (deploy/CI override); otherwise fall back to the out-of-repo credentials file.
   const fileCreds = googleCredentialsFromFile()

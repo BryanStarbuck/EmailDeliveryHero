@@ -1,3 +1,5 @@
+import type { ArcConfig } from "../audit/checks/types"
+
 /** A monitored email-sending domain. Persisted as YAML under the state dir (no database). */
 export interface MonitoredDomain {
   id: string
@@ -15,6 +17,12 @@ export interface MonitoredDomain {
    * (pm/domains.mdx §6). Manual runs ignore it.
    */
   scheduleEnabled: boolean
+  /**
+   * ARC / forwarding configuration (pm/checks/arc.mdx §4): whether the domain sends through
+   * forwarders/mailing lists, and the declared forwarders (the `arc_forwarders` reference table
+   * mapped onto the YAML store). Absent = no forwarding declared.
+   */
+  arc?: ArcConfig
   /** Who added it (email from the auth token). */
   addedBy: string
   createdAt: string
