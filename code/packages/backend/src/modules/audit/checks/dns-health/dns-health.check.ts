@@ -6,8 +6,8 @@ import {
   resolveNs,
   resolveSoa,
   resolveTxt,
-} from "./dns-util"
-import type { Checker, CheckOutcome, Finding } from "./types"
+} from "../dns-util"
+import type { Checker, CheckOutcome, Finding } from "../types"
 
 /**
  * DNS Zone & Nameserver Health (infra.dns_health). Audits the delegation plumbing every other

@@ -1,6 +1,6 @@
 ---
 title: Blacklists (DNSBL / RHSBL / IP & Domain Reputation Blocklists)
-description: How EmailDeliveryHero queries DNS-based blocklists for a domain's sending IPs and domain names, interprets 127.0.0.x return codes and TXT reasons, weights per-zone impact, and hands the user the exact per-zone delisting URL and reason code for every listing. Includes the complete tiered catalog of every blocklist we know (where it lives, how to look it up, how to delist), the dead-zone do-not-check registry, provider reputation portals, the Brew/Node test toolchain, the test plan and test_results.yaml schema, the summary-card + chevron full-page UI, the UX layout, the fix-recommendation playbook, and the catalog of problem states with a diagnosis deep-dive for each.
+description: How EmailDeliveryHero queries DNS-based blocklists for a domain's sending IPs and domain names, interprets 127.0.0.x return codes and TXT reasons, weights per-zone impact, and hands the user the exact per-zone delisting URL and reason code for every listing. Includes the complete tiered catalog of every blocklist we know (where it lives, how to look it up, how to delist), the dead-zone do-not-check registry, provider reputation portals, the Brew/Node test toolchain, the test plan and test_results.yaml schema, the summary-card + chevron full-page UI, the UX layout, the fix-recommendation playbook, the catalog of problem states with a diagnosis deep-dive for each, the left-bar Blacklists Dashboard (§17), the checked-in blacklists.yaml source-of-truth registry (§18), and the email-derived IP/domain target pipeline (§19).
 ---
 
 # Blacklists (DNSBL / RHSBL / IP & Domain Reputation Blocklists)
@@ -71,7 +71,7 @@ The table above is the **default-enabled** set. The **complete catalog** — eve
 
 ## 3. How it is measured
 
-**Targets.** For IP zones the checker iterates `ctx.sendingIps` (from `sending_ips`); if empty, it derives candidate IPs by resolving the domain's MX hosts and SPF `a`/`mx`/`ip4`/`ip6` mechanisms and testing those (an unexpected listing on an SPF-authorized IP is still your deliverability problem). For RHSBL/domain zones the target is `ctx.domain` and any additional envelope domains (Return-Path, DKIM `d=`).
+**Targets.** For IP zones the checker iterates `ctx.sendingIps` (from `sending_ips`); if empty, it derives candidate IPs by resolving the domain's MX hosts and SPF `a`/`mx`/`ip4`/`ip6` mechanisms and testing those (an unexpected listing on an SPF-authorized IP is still your deliverability problem). For RHSBL/domain zones the target is `ctx.domain` and any additional envelope domains (Return-Path, DKIM `d=`). A fourth IP source is the **email-report pipeline** ([§19](#19-email-derived-targets--ips-and-domains-mined-from-ingested-report-emails)): source IPs mined from ingested DMARC aggregate reports in `emails/` that authenticated as this domain join the target set with `source: email_report` — these are IPs *actually observed sending your mail* that no static config listed.
 
 **Query construction.**
 - IPv4: split the dotted quad, reverse, join with `.`, append `zone_host`. `203.0.113.24` + `zen.spamhaus.org` → `24.113.0.203.zen.spamhaus.org`.
@@ -200,6 +200,10 @@ CREATE INDEX idx_dnsbl_results_run           ON dnsbl_check_results (audit_run_i
 12. Every audit writes the [test_results.yaml](#12-test-results--the-yaml-we-persist-per-run) structure (schema §12) and every non-healthy run maps to at least one named [problem state](#16-problem-states--the-catalog-of-healthy-and-unhealthy-situations) (§16), which the UI names verbatim.
 13. The Blacklists summary card (§13.1) shows the pass/fail roll-up and worst problem, and its chevron opens the full-page Blacklists technology view (§13.2) with the layout of §14.
 14. Each problem-state deep-dive page (§16) shows the concept explanation, the observed data fields, the diagnose-it-yourself commands, and the "progress forward" checklist for that state.
+15. Clicking **Blacklists** in the left bar opens the Blacklists Dashboard (§17) at `/blacklists`: the stats strip, the cross-domain Needs-attention table, the per-domain status grid, and the registry-health panel all render from live data, and every row's chevron drills to the per-domain full page (§13.2) or deeper to a problem-state page (§16).
+16. The blocklist registry is the checked-in `blacklists.yaml` (§18) in the source tree: the backend loads, validates, and serves it (zone list = registry rows, dead-zone registry enforced from its `dead_zones` block); `zones.ts` contains no hard-coded catalog rows, only the loader; a malformed registry fails the boot loudly, not silently.
+17. Every registry entry carries at minimum `name`, `url`, `type` (`ip`/`domain`/`both`), `description`, plus the machine fields needed to query and interpret it (`zone`, `tier`, `weight`, `severity`, `return_codes`, `refusal_codes` where applicable, `lookup_url`, `delist_url`, `access`, `auto_expires`, `paid_delist_offered`, liveness `status`).
+18. IPs mined from ingested report emails (§19) that authenticated as the domain are swept against every enabled IP zone exactly like configured sending IPs, appear in `test_results.yaml` with `source: email_report`, and a listed email-derived IP produces the same per-zone delisting remediation as any other listed IP.
 
 ---
 
@@ -402,7 +406,7 @@ resolver:
 targets:
   ips:
     - ip: 203.0.113.24
-      source: sending_ips        # sending_ips | mx_resolved | spf_authorized
+      source: sending_ips        # sending_ips | mx_resolved | spf_authorized | email_report (S19)
       ptr: mail.whitehatengineering.com
       fcrdns_ok: true
       asn: { number: 64500, org: "Example Hosting LLC" }
@@ -474,7 +478,7 @@ Field rules: `severity` is the **post-weighting** value (§3), so the UI never r
 
 ## 13. User interface — summary card and the chevron full page
 
-The Blacklists technology follows the product-wide pattern: **one summary surface on the main view, a chevron (`›`) that opens a full page dedicated purely to this one technology.** (This grows §4; the design language — colors, StatusCell, finding rows — is locked by [../ui.mdx](../ui.mdx).)
+The Blacklists technology follows the product-wide pattern: **one summary surface on the main view, a chevron (`›`) that opens a full page dedicated purely to this one technology.** (This grows §4; the design language — colors, StatusCell, finding rows — is locked by [../ui.mdx](../ui.mdx).) The left-bar **Blacklists** entry does *not* land on a bare card list — it opens the **Blacklists Dashboard** specified in [§17](#17-the-blacklists-dashboard--what-the-left-bar-tab-opens); the summary card below is the Blacklists surface *inside other views* (main dashboard, per-domain audit detail) and the dashboard reuses its status language.
 
 ### 13.1 The summary card (main view)
 
@@ -629,6 +633,183 @@ Severity shown is the default after §3 weighting.
 
 **Concept (consumer-protection state).** The only open listings are on operators that sell "express" removal (UCEPROTECT/whitelisted.org, Backscatterer express, some SPFBL flows). The industry position (RFC 6471) is that payment-for-removal is abusive; these listings auto-expire and barely affect major-receiver placement. This state exists so the product actively stops the user from paying out of panic. **Data fields:** all open `results[]` rows have catalog flag `paid_delist_offered=true`; expiry windows; `diff` recurrence. **Diagnose & debug:** confirm no HIGH-tier co-listing (if Spamhaus is also red, *that* is the real problem — this state only fires when paid-trap zones are the *only* hits); verify the auto-expiry clock from the operator's lookup page. **Tools:** dig, the operator lookup pages, §9.1 matrix. **Further health metrics:** placement evidence (bounces naming these lists are rare — ask for real NDRs before caring). **Progress forward:** ① do not pay — the page says so in bold with the RFC 6471 citation, ② fix any genuine cause (backscatter → stop bounce-after-accept on the MTA, [./smtp_security.mdx](./smtp_security.mdx)), ③ wait for auto-expiry (countdown shown), ④ if a real correspondent's server uses these lists, hand them the RFC 6471 context via a pre-drafted note.
 
+---
+
+## 17. The Blacklists Dashboard — what the left-bar tab opens
+
+Clicking **Blacklists** in the left bar ([../left_bar.yaml](../left_bar.yaml) item `blacklists`, route `/blacklists`) must answer the operator's question at the *fleet* level — "**across everything I monitor, am I listed anywhere, is it new, and what do I do first?**" — not merely show one card per domain. This is the charter promise ("checks whether your domains are on blacklists… reports the problems and the specific fixes") rendered as a single triage surface. The dashboard is read-only aggregation over the same per-run `test_results.yaml` documents (§12); it computes nothing new, it *arranges* what the runs already know.
+
+### 17.1 Page anatomy (top → bottom, fixed order)
+
+```
+Blacklists                                              [Re-check all]
+──────────────────────────────────────────────────────────────────────
+┌─────────┬─────────┬──────────┬──────────┬──────────┬───────────────┐
+│ 4       │ 11      │ 47       │ 3        │ ▲ 1 new  │ 2 unknown     │
+│ domains │ targets │ zones on │ listed   │ today    │ (resolver)    │
+└─────────┴─────────┴──────────┴──────────┴──────────┴───────────────┘
+
+Needs attention (3)                                     worst first
+┌──────────┬──────────────┬──────────────┬─────────────┬──────┬─────────┐
+│ Severity │ Domain       │ List (tier)  │ Target      │ Since│ Fix     │
+├──────────┼──────────────┼──────────────┼─────────────┼──────┼─────────┤
+│ ●CRITICAL│ act3ai.com   │ Spamhaus XBL │ 203.0.113.24│ new  │[Delist↗]│ ›
+│ ●WARNING │ whitehat….com│ SpamCop      │ 198.51.100.7│ 3d   │[Delist↗]│ ›
+│ ●WARNING │ act3ai.com   │ Spamhaus DBL │ act3ai.com  │ 12d  │[Delist↗]│ ›
+└──────────┴──────────────┴──────────────┴─────────────┴──────┴─────────┘
+
+Domains (4)
+┌──────────────────────┬─────────────────────┬──────────────────┬──────┐
+│ ● act3ai.com         │ 2 listed · 44 clean │ ▲ 1 new · 09:30  │  ›   │
+│ ● whitehateng….com   │ 1 listed · 45 clean │ unchanged · 09:31│  ›   │
+│ ● example.org        │ 0 listed · 46 clean │ ▼ 1 resolved     │  ›   │
+│ ○ newdomain.io       │ never checked       │ [Run check]      │  ›   │
+└──────────────────────┴─────────────────────┴──────────────────┴──────┘
+
+Email-derived targets (§19)                              last 30 days
+  5 IPs seen sending as your domains in DMARC reports · 1 listed ›
+
+Registry health                                          blacklists.yaml
+  62 lists in registry · 47 enabled (31 IP · 16 domain) · 24 dead
+  (never queried) · 2 blocked this run (resolver) — [Blocklist Zones ▸]
+```
+
+1. **Stats strip** — six tiles, straight from the latest run of every domain: monitored domains, distinct targets (IPs + domains, all sources), zones enabled, currently-listed count, the diff chip (`▲ N new` / `▼ N resolved` / steady), inconclusive count. A tile is a number + noun, never a chart. The listed tile carries the status color of the fleet's worst weighted severity — this tile is the page's verdict.
+2. **Needs-attention table** — every currently-listed (and PS-9-escalated) row across **all** domains in one table, sorted worst-first by weighted severity, then tier, then first-seen. Columns as §14.2 plus a leading `Domain` column. Row chevron `›` → that domain's full page (§13.2) with the row's debug drawer pre-expanded; `[Delist ↗]` works directly from here — the user should be able to start the fix without any navigation. Empty state: a single green line "No listings across N zones × M targets."
+3. **Domains grid** — one compact row per monitored domain (whether or not it has ever been checked): status dot (four locked colors), listed/clean/unknown counts, diff chip + last-run time, chevron → `/blacklists/:domain`. Never-checked domains render gray with an inline `[Run check]`. This grid is the §13.1 card content flattened to rows so 20 domains fit on one screen.
+4. **Email-derived targets strip** — the §19 rollup: how many report-mined IPs were swept, how many are listed, chevron to the per-domain page section listing them. Hidden entirely until the first report email is ingested.
+5. **Registry-health panel** — the operator's trust anchor: registry file name, total entries, enabled split (IP/domain), dead-zone count (with "never queried" phrasing so users understand dead ≠ failing), zones blocked/inconclusive *this run* with the cause (PS-9/PS-10 language), and the link into the admin **Blocklist Zones** panel (§4). This panel is how a user discovers *why* "47 zones" isn't "62 zones".
+
+**Interactions & states.** `[Re-check all]` fans out the Blacklists category run for every domain (progress via the §progress_ui dock, one tick line per domain). Auto-refresh when a scheduled run lands. *Loading:* skeleton tiles + rows. *No domains yet:* single CTA to add a domain. *All clean:* stats strip green, Needs-attention collapses to its empty line, domains grid becomes the page body. Route stays `/blacklists`; deep pages remain `/blacklists/:domain` and `/blacklists/:domain/state/:psId` — the dashboard adds no new route shape.
+
+### 17.2 Why this layout (UX rationale)
+
+The left-bar tab is the page users open *on rumor of trouble* ("a customer said our mail bounced"). The stats strip answers "am I in trouble?" in the first 100px exactly like the §14 verdict band does per-domain; the Needs-attention table is the fleet-wide analog of the §14 problems table — same columns, same severity language, so the eye trained on one reads the other; the domains grid exists for orientation and drill-down, not triage (that's why it sits *below* the problems, not above); registry health sits last because it is about *us* (our query fabric), not about the user's domains — but it must exist on this page, because "you're clean on 47 zones" is only trustworthy next to "and here is what we didn't/couldn't query, and why."
+
+---
+
+## 18. The checked-in registry — `blacklists.yaml` as the single source of truth
+
+The complete §9 research — every blocklist we know, where it lives, how to query it, what its answers mean, how to get off it — is **data, not code**, and it changes on operators' schedules, not ours. It therefore lives in one hierarchical YAML file **checked into the source tree**:
+
+```
+code/packages/backend/src/modules/blacklists/registry/blacklists.yaml
+```
+
+Rules: reviewed like code (a zone edit is a normal PR/diff), shipped with the app (no network fetch to know the catalog), loaded and validated at backend boot, and **never** edited at runtime — runtime/operator overrides still go to `<stateDir>/blacklist_zones.yaml` (merged by `zone`, override wins), preserving the §5 config contract. `zones.ts` becomes a *loader* (read → parse → validate → freeze); a registry that fails validation aborts boot with the offending entry named — a silently-empty catalog would report every domain "clean."
+
+### 18.1 Schema (`registry_version: 1`)
+
+Top level is `blacklists:` — the list of queryable lists — plus three sibling blocks that complete the §9 research: `dead_zones:`, `aggregators:`, `provider_portals:`.
+
+```yaml
+registry_version: 1
+compiled: 2026-07              # when the research snapshot was verified
+sources:                       # where the research came from (S9 provenance)
+  - https://multirbl.valli.org
+  - https://www.dnsbl.com
+  - operator sites (verified per entry)
+
+blacklists:
+  - name: Spamhaus ZEN                     # REQUIRED - human name of the list
+    url: https://www.spamhaus.org          # REQUIRED - operator's home page
+    type: ip                               # REQUIRED - ip | domain | both
+    description: >-                        # REQUIRED - one paragraph: what it
+      Combined SBL+CSS+XBL+PBL zone;       # lists, who uses it, why a hit hurts
+      the single highest-impact IP list.
+    # ---- how to query it ----------------------------------------------------
+    zone: zen.spamhaus.org                 # DNS zone we query (omit for web-only)
+    query:
+      method: dnsbl                        # dnsbl (reversed-IP A) | rhsbl (direct domain A) | web_only
+      record_types: [A, TXT]
+      ipv6: false                          # zone documents IPv6 nibble support
+      rfc5782_probe: true                  # liveness test-point pair applies
+    # ---- how to interpret it -------------------------------------------------
+    return_codes:
+      "127.0.0.2":  { label: "SBL (manual spam listing)", severity: critical, problem_state: PS-1 }
+      "127.0.0.4":  { label: "XBL (compromised host)",    severity: critical, problem_state: PS-2 }
+      "127.0.0.10": { label: "PBL (ISP dynamic policy)",  severity: warning,  problem_state: PS-3 }
+    refusal_codes: ["127.255.255.252", "127.255.255.254", "127.255.255.255"]  # inconclusive, never a listing
+    # ---- how much it matters -------------------------------------------------
+    tier: high                             # high | medium | low  (drives default weight, S3)
+    weight: 1.0
+    severity: critical                     # default when no return-code match
+    enabled: true                          # default-on set = S2; rest ship disabled
+    # ---- how to check and get off it -----------------------------------------
+    lookup_url: https://check.spamhaus.org
+    delist_url: https://check.spamhaus.org
+    auto_expires: null                     # e.g. "~24h after reports stop" (SpamCop)
+    paid_delist_offered: false             # true triggers the PS-13 never-pay advisory
+    # ---- how to reach it ------------------------------------------------------
+    access:
+      cost: free                           # free | registration | paid
+      notes: "Free low-volume via own resolver; DQS key otherwise"
+      dqs_zone: "{key}.zen.dq.spamhaus.net"  # host template when a key is configured
+    status: { alive: true }                # liveness bookkeeping (S9.5)
+
+dead_zones:                                # the do-not-check registry (S9.5) - engine hard-blocks these
+  - zone: dnsbl.sorbs.net                  # one entry per dead zone host (all 18 SORBS zones enumerated)
+    name: SORBS
+    died: 2024-06
+    reason: "Proofpoint decommissioned; dead zones may wildcard and list the world"
+  - zone: ix.dnsbl.manitu.net
+    name: NiX Spam
+    died: 2025-01
+    reason: shut down
+
+aggregators:                               # S9.6 link-out services
+  - name: MultiRBL (valli.org)
+    url: https://multirbl.valli.org
+    description: "~892 active + ~588 dead zones tracked; per-zone liveness"
+
+provider_portals:                          # S9.7 invisible blacklists
+  - provider: google_postmaster
+    name: Google Postmaster Tools
+    check_url: https://postmaster.google.com
+    delist_url: https://support.google.com/mail/contact/gmail_bulk_sender_escalation
+    description: "Domain/IP reputation and spam rate; no delist portal - fix reputation"
+```
+
+Field rules: `name`, `url`, `type`, `description` are required on every entry — they are the four the user asked of the research ("name, URL, type, description"); everything else exists so the engine can *query and understand* a listing without touching code: `zone`+`query` say how to ask, `return_codes`+`refusal_codes` say what the answer means, `tier`/`weight`/`severity` say how much to care, `lookup_url`/`delist_url`/`auto_expires`/`paid_delist_offered` say how to get off, `access` says what credentials gate it, `status`/`dead_zones` say whether to ask at all. Entries with `query.method: web_only` (Cloudmark, Proofpoint, invaluement's public face) carry no `zone` and surface as link-outs, never DNS queries. `type: both` entries are queried on both sweeps (IP and domain) — SPFBL, 0spam, NordSpam, Suomispam are of this kind.
+
+### 18.2 Loader contract & serving
+
+- **Load once at boot** (sync read + YAML parse via the shared yaml-store), validate every entry (unique `zone`, valid `type`/`tier`/`severity`, parseable return codes, required fields present, no entry whose `zone` also appears in `dead_zones`), then freeze.
+- **Merge order:** registry defaults ← `<stateDir>/blacklist_zones.yaml` operator overrides (same row shape, matched by `zone`; `enabled: false` disables a default; unknown zones append — but a zone on `dead_zones` can never be enabled from anywhere).
+- **Serve it:** `GET /api/blacklists/zones` returns the effective merged registry (entries + dead-zone count + per-zone last liveness) — this feeds the §17 registry-health panel and the §4 Blocklist Zones admin panel; the panel writes overrides to the state-dir file, never to the checked-in registry.
+- **Keep §9 and the file in lockstep:** §9 is the human research narrative; `blacklists.yaml` is its machine twin. A change to one without the other is a spec violation (checked in review, noted in maintenance).
+
+---
+
+## 19. Email-derived targets — IPs and domains mined from ingested report emails
+
+The `emails/` directory at the repo root (and the [../emails.mdx](../emails.mdx) ingestion pipeline behind it) receives DMARC aggregate (rua) and TLS-RPT report messages — Google, Microsoft, and Outlook.com routinely deliver these today. Every DMARC rua row names a **`source_ip` that actually transmitted mail claiming to be your domain**. That is exactly the population the blacklist check exists to protect, and it routinely contains IPs *no static config knows about* — an ESP's rotating pool, a forgotten marketing tool, a misconfigured relay. This section closes that loop.
+
+### 19.1 What we extract
+
+From each ingested report (parsed per [../emails.mdx](../emails.mdx); `parsedmarc` is the §10 oracle):
+
+| Extracted | From | Becomes |
+|---|---|---|
+| `source_ip` of rows where SPF **or** DKIM passed and aligned | DMARC rua `<row>` | **Blacklist IP target**, `source: email_report` — this is *our* mail stream; a listing here is our delisting problem |
+| `source_ip` of rows that failed both | DMARC rua `<row>` | **Context only** — spoofers/phishers sending as us; recorded on the Reports page and the §16 deep dives, but *not* delist-targeted (their listings are good news). A high-volume failing IP cross-referenced as *listed* is corroborating evidence for the DMARC story, shown as `info` |
+| DKIM `d=` / SPF envelope domains seen authenticating for us | rua `<auth_results>` | **RHSBL domain targets** when they are ours (subdomains, ESP bounce domains we own); third-party ESP domains are checked `info`-only |
+| Receiving-MX names and their IPs | TLS-RPT reports | **Context** for [./tls_transport.mdx](./tls_transport.mdx); not blacklist targets (inbound, not outbound) |
+
+**Windowing & hygiene.** Only IPs seen in reports covering the last **30 days** join the sweep (older pools rotate away); each carries `first_seen`/`last_seen`/`message_count` so the UI can say "203.0.113.99 — seen in 4 reports, 1,240 messages, last 2026-06-28". Private/reserved ranges (RFC 1918, CGNAT) are dropped. The per-audit target cap stays bounded: email-derived IPs are deduped against configured `sending_ips` (a duplicate keeps the stronger `sending_ips` source tag) and capped at the top N (default 20) by message volume, with the truncation logged — never silent.
+
+### 19.2 How it flows into the check
+
+Target discovery (§3, test 1 of §11) gains the fourth source: `sending_ips` ∪ `mx_resolved` ∪ `spf_authorized` ∪ `email_report`. Email-derived IPs are swept against every enabled IP zone **identically** to configured IPs — same return-code decoding, same weighting, same problem states, same delisting remediation. `test_results.yaml` records them under `targets.ips[*]` with `source: email_report` plus the windowing fields above. The diff engine treats a newly-observed listed IP as a **new problem** (that's the headline scenario this section exists for: "your ESP quietly moved you onto a listed IP — here is the delisting path and the evidence trail from your own DMARC reports").
+
+### 19.3 Where the user sees it
+
+- **§17 dashboard, Email-derived targets strip** — the fleet rollup (IPs seen / listed) with drill-down.
+- **§13.2 per-domain full page** — email-derived targets appear in the problems table and the all-zones matrix like any target, tagged with a small `via DMARC reports` chip; the debug drawer shows the report evidence (reporter, window, message count) alongside the DNS evidence.
+- **Reports page** ([../left_bar.yaml](../left_bar.yaml) `reports`) — the inverse view: per report, each source IP's blacklist verdict as one column, cross-linking here.
+
+**Fixes.** For a listed aligned IP the remediation is the standard per-zone delisting playbook (§15) *plus* the stream-level advice: if the IP belongs to an ESP/shared pool, open a ticket with the ESP citing the zone + return code (pre-drafted, [Copy]); if it's yours, run the §16 state's cause-first flow. IP delisting portals are the same per-zone `delist_url`s — there is no separate "IP removal" universe; the registry (§18) already carries every one.
+
 <!--
 MAINTENANCE NOTES
 - Keep zone hosts, return-code maps, and delisting URLs current: DNSBL operators change codes and portals (Spamhaus moved to check.spamhaus.org / DQS; SORBS is DEAD as of 2024-06, NiX Spam as of 2025-01 — the do-not-check registry is §9.5; verify each zone is still live via its RFC 5782 test point before shipping). Track https://www.dnsbl.com for zone deaths.
@@ -637,4 +818,5 @@ MAINTENANCE NOTES
 - Keep the sub-check list and checkId prefixes in sync with ../spam_checks.mdx (Blacklists category) and the Checker/Finding contract in ../engineering.mdx.
 - Domain/URI zones overlap ./link_url_reputation.mdx — keep the split clear: this spec = sending domain + sending IPs; that spec = domains found inside message bodies.
 - Revisit per-zone weights as real-world placement data accrues; weights are config, not code.
+- §9 (research narrative) and the checked-in registry code/packages/backend/src/modules/blacklists/registry/blacklists.yaml (§18) are twins — never update one without the other. The §17 dashboard and §19 email-derived pipeline read only run outputs + the registry; they hold no catalog data of their own.
 -->

@@ -1,5 +1,5 @@
-import { resolve4, resolve6, resolveCname, resolveMx } from "./dns-util"
-import type { Checker, CheckOutcome, Finding } from "./types"
+import { resolve4, resolve6, resolveCname, resolveMx } from "../dns-util"
+import type { Checker, CheckOutcome, Finding } from "../types"
 
 /**
  * MX & Mail Routing (RFC 5321 §5.1, RFC 7505 null MX, RFC 2181 §10.3). Resolves the domain's MX

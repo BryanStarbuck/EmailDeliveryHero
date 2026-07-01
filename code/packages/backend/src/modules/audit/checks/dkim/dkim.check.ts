@@ -1,7 +1,7 @@
 import { createHash, createPublicKey } from "node:crypto"
 import { mapLimit } from "@shared/concurrency"
-import { resolveCname, resolveMx, resolveTxt } from "./dns-util"
-import type { Checker, CheckOutcome, Finding } from "./types"
+import { resolveCname, resolveMx, resolveTxt } from "../dns-util"
+import type { Checker, CheckOutcome, Finding } from "../types"
 
 /**
  * DKIM (pm/checks/dkim.mdx). Audits the DNS-published key side of DKIM per selector: presence

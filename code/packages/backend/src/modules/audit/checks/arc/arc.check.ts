@@ -1,5 +1,5 @@
-import { resolveTxt } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import { resolveTxt } from "../dns-util"
+import type { Checker, Finding } from "../types"
 
 /**
  * ARC (Authenticated Received Chain, RFC 8617) — advisory companion to DMARC. ARC lets a forwarder

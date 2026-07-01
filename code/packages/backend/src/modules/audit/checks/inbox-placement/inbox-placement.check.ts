@@ -1,4 +1,4 @@
-import type { Checker, Finding } from "./types"
+import type { Checker, Finding } from "../types"
 
 /**
  * Inbox Placement Testing (seed-list / deliverability testing) — the empirical "did our mail actually

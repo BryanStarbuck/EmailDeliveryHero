@@ -12,6 +12,32 @@ export function useAuditResults() {
   })
 }
 
+/** Run history, newest first — the dashboard's Runs table (pm/dashboard.mdx §4.2). */
+export function useAuditRuns() {
+  return useQuery({
+    queryKey: ["audit", "runs"] as const,
+    queryFn: async () => (await api.get<AuditResult[]>("/audit/runs")).data,
+  })
+}
+
+/** One historical run in full — the run report for a Runs-table row. */
+export function useAuditRun(runId: string | undefined) {
+  return useQuery({
+    queryKey: ["audit", "runs", runId] as const,
+    queryFn: async () => (await api.get<AuditResult>(`/audit/runs/${runId}`)).data,
+    enabled: !!runId,
+  })
+}
+
+/** Delete one run from the history (Runs-row ⋮ menu). */
+export function useDeleteRun() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (runId: string) => (await api.delete(`/audit/runs/${runId}`)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["audit", "runs"] }),
+  })
+}
+
 /** Run a fresh audit for one domain. */
 export function useRunAudit() {
   const qc = useQueryClient()

@@ -1,4 +1,4 @@
-import type { Checker, Finding } from "./types"
+import type { Checker, Finding } from "../types"
 
 /**
  * List-Unsubscribe (RFC 2369) & one-click unsubscribe (RFC 8058).

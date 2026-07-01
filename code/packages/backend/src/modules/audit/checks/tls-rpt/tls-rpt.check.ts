@@ -1,5 +1,5 @@
-import { resolve4, resolve6, resolveMx, resolveTxt } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import { resolve4, resolve6, resolveMx, resolveTxt } from "../dns-util"
+import type { Checker, Finding } from "../types"
 
 /**
  * TLS-RPT (SMTP TLS Reporting, RFC 8460). Inspects the TXT record at `_smtp._tls.<domain>` that tells

@@ -43,7 +43,7 @@ export function AccountMenu() {
           </span>
           <span className="min-w-0 flex-1">
             <span className="block truncate">Sign in</span>
-            <span className="block truncate text-xs font-normal text-[var(--edh-muted)]">
+            <span className="block truncate text-xs font-normal text-black">
               Using default settings
             </span>
           </span>
@@ -116,8 +116,8 @@ export function AccountMenu() {
           {initial}
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium">{name}</span>
-          <span className="block truncate text-xs text-[var(--edh-muted)]">{email}</span>
+          <span className="block truncate text-sm font-medium text-black">{name}</span>
+          <span className="block truncate text-xs text-black">{email}</span>
         </span>
       </button>
     </div>

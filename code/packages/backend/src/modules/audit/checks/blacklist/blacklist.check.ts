@@ -8,7 +8,7 @@ import type {
   PositiveReputation,
   ZoneHealth,
   ZoneResult,
-} from "./blacklist/blacklist-types"
+} from "./blacklist-types"
 import {
   buildQueryName,
   classifyAnswer,
@@ -21,16 +21,16 @@ import {
   reverseIpv4,
   spfLiteralIps,
   worstSeverity,
-} from "./blacklist/engine"
+} from "./engine"
 import {
   applyPortalStates,
   readLatestBlacklistRun,
   readPortalStates,
   saveBlacklistRun,
-} from "./blacklist/store"
-import { loadZones, PROVIDER_PORTALS } from "./blacklist/zones"
-import { resolveMx, resolveTxt, resolve4 as utilResolve4 } from "./dns-util"
-import type { Checker, CheckOutcome, Finding, Severity } from "./types"
+} from "./store"
+import { loadZones, PROVIDER_PORTALS } from "./zones"
+import { resolveMx, resolveTxt, resolve4 as utilResolve4 } from "../dns-util"
+import type { Checker, CheckOutcome, Finding, Severity } from "../types"
 
 /**
  * DNS blacklist (DNSBL/RHSBL) membership — the full pm/checks/blacklists.mdx implementation:

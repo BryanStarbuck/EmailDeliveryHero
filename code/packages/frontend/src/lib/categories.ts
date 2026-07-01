@@ -54,6 +54,7 @@ export const TECH_PAGE_ROUTES = {
   spf: "/domains/$id/spf",
   dkim: "/domains/$id/dkim",
   dmarc: "/domains/$id/dmarc",
+  dnsInfra: "/domains/$id/dns",
 } as const
 
 export function techPageRoute(

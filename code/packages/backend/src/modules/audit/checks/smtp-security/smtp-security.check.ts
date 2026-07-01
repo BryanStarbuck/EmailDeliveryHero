@@ -1,5 +1,5 @@
-import { resolveMx } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import { resolveMx } from "../dns-util"
+import type { Checker, Finding } from "../types"
 
 /**
  * SMTP Server Security & Hardening (pm/checks/smtp_security.mdx).

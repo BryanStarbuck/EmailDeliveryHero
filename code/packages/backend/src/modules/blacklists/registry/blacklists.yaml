@@ -1,0 +1,1270 @@
+# ============================================================================
+# EmailDeliveryHero — Blocklist Registry (single source of truth)
+# ============================================================================
+# The machine twin of pm/checks/blacklists.mdx §9 (research narrative) per §18.
+# Every email blocklist we know: where it lives (zone / url), how to query it
+# (query.method + return_codes), how much it matters (tier / weight / severity),
+# and how to get off it (lookup_url / delist_url / auto_expires).
+#
+# Rules (pm/checks/blacklists.mdx §18):
+#   * Edited only via PR — reviewed like code. Never written at runtime.
+#   * Runtime/operator overrides go to <stateDir>/blacklist_zones.yaml,
+#     merged by `zone` (override wins). A zone in dead_zones can NEVER be
+#     enabled from anywhere.
+#   * Loaded + validated at backend boot by
+#     src/modules/audit/checks/blacklist/zones.ts — a malformed entry aborts
+#     boot loudly (a silently-empty catalog would report every domain clean).
+#   * Keep this file and §9 in lockstep — updating one without the other is a
+#     spec violation.
+#
+# Entry fields:
+#   name / url / type / description  — required on every entry.
+#   type: ip | domain | both         — both = queried on the IP and domain sweeps.
+#   zone                             — DNS zone queried; omit for web_only lists.
+#   query.method: dnsbl | rhsbl | web_only
+#   return_codes                     — exact 127.x answer → meaning.
+#   bitmask                          — SURBL/URIBL-style bit decode of the last octet.
+#   refusal_codes                    — in-band "query refused" answers (never a listing).
+#   tier: high | medium | low        — drives default weight/severity (§3).
+#   access.cost: free | registration | paid
+#   paid_delist_offered: true        — triggers the PS-13 never-pay advisory.
+#   positive: true                   — being listed is GOOD (DNSWL).
+#   advisory: true                   — reputation feed handled by the positive-
+#                                      reputation probes, not the listing sweep.
+#   status.alive                     — liveness bookkeeping (§9.5).
+# ============================================================================
+
+registry_version: 1
+compiled: 2026-07
+sources:
+  - https://multirbl.valli.org
+  - https://www.dnsbl.com
+  - https://mxtoolbox.com/blacklists.aspx
+  - operator sites (verified per entry)
+
+blacklists:
+  # ==========================================================================
+  # Tier HIGH — IP blocklists (used by major receivers; a hit really hurts)
+  # ==========================================================================
+  - name: Spamhaus ZEN
+    url: https://www.spamhaus.org
+    type: ip
+    description: >-
+      Combined Spamhaus IP zone packing SBL (manual spam operations), CSS
+      (snowshoe), XBL (compromised hosts, ex-CBL) and PBL (dynamic-range
+      policy) into one query with distinct return codes. The single
+      highest-impact IP list — a hit here craters placement at every major
+      receiver.
+    zone: zen.spamhaus.org
+    query: { method: dnsbl, record_types: [A, TXT], rfc5782_probe: true }
+    tier: high
+    weight: 1.0
+    severity: critical
+    enabled: true
+    lookup_url: https://check.spamhaus.org
+    delist_url: https://check.spamhaus.org
+    return_codes:
+      "127.0.0.2": { label: "SBL (manual spam listing)", severity: critical, problem_state: PS-1 }
+      "127.0.0.3": { label: "CSS (snowshoe spam)", severity: critical, problem_state: PS-1 }
+      "127.0.0.4": { label: "XBL (compromised host)", severity: critical, problem_state: PS-2 }
+      "127.0.0.5": { label: "XBL (compromised host)", severity: critical, problem_state: PS-2 }
+      "127.0.0.6": { label: "XBL (compromised host)", severity: critical, problem_state: PS-2 }
+      "127.0.0.7": { label: "XBL (compromised host)", severity: critical, problem_state: PS-2 }
+      "127.0.0.10": { label: "PBL (ISP policy: dynamic range)", severity: warning, problem_state: PS-3 }
+      "127.0.0.11": { label: "PBL (Spamhaus policy: dynamic range)", severity: warning, problem_state: PS-3 }
+    refusal_codes: ["127.255.255.252", "127.255.255.254", "127.255.255.255"]
+    access:
+      cost: free
+      notes: "Free low-volume via your own recursive resolver; commercial/high volume needs the free-tier DQS key."
+      dqs_zone: "{key}.zen.dq.spamhaus.net"
+    status: { alive: true }
+
+  - name: Barracuda BRBL
+    url: https://www.barracudacentral.org
+    type: ip
+    description: >-
+      Barracuda Reputation Block List — feeds Barracuda's widely deployed
+      appliances/gateways. Free, but queries only resolve after registering
+      your resolver IPs.
+    zone: b.barracudacentral.org
+    query: { method: dnsbl, record_types: [A, TXT], rfc5782_probe: true }
+    tier: high
+    weight: 1.0
+    severity: critical
+    enabled: true
+    lookup_url: https://www.barracudacentral.org/lookups
+    delist_url: https://www.barracudacentral.org/rbl/removal-request
+    return_codes:
+      "127.0.0.2": { label: "Barracuda listed", severity: critical, problem_state: PS-1 }
+    access:
+      cost: registration
+      notes: "Register your resolver IPs at barracudacentral.org before queries resolve; removal form usually processes <24h."
+    status: { alive: true }
+
+  - name: SpamCop SCBL
+    url: https://www.spamcop.net
+    type: ip
+    description: >-
+      Cisco's spam-trap and user-report driven list. Forgiving — listings
+      auto-expire ~24h after reports stop, so treat as warning unless
+      persistent.
+    zone: bl.spamcop.net
+    query: { method: dnsbl, record_types: [A, TXT], rfc5782_probe: true }
+    tier: high
+    weight: 0.7
+    severity: warning
+    enabled: true
+    lookup_url: https://www.spamcop.net/bl.shtml
+    delist_url: https://www.spamcop.net/bl.shtml
+    auto_expires: "~24h after reports stop"
+    return_codes:
+      "127.0.0.2": { label: "SCBL (spam-trap reports)", severity: warning, problem_state: PS-5 }
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: PSBL
+    url: https://psbl.org
+    type: ip
+    description: >-
+      Passive Spam Block List (surriel.com) — trap-driven, auto-expiring in
+      2–4 weeks, with instant no-questions self-removal.
+    zone: psbl.surriel.com
+    query: { method: dnsbl, record_types: [A, TXT], rfc5782_probe: true }
+    tier: high
+    weight: 0.7
+    severity: warning
+    enabled: true
+    lookup_url: https://psbl.org
+    delist_url: https://psbl.org/remove
+    auto_expires: "2–4 weeks; instant self-removal"
+    return_codes:
+      "127.0.0.2": { label: "PSBL (passive spam trap)", severity: warning, problem_state: PS-5 }
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: DroneBL
+    url: https://dronebl.org
+    type: ip
+    description: >-
+      Botnet drones, open proxies, and DDoS sources. Like XBL, a hit means a
+      compromised host — clean the compromise before requesting removal.
+    zone: dnsbl.dronebl.org
+    query: { method: dnsbl, record_types: [A, TXT], rfc5782_probe: true }
+    tier: high
+    weight: 0.9
+    severity: critical
+    enabled: true
+    lookup_url: https://dronebl.org/lookup
+    delist_url: https://dronebl.org/lookup
+    return_codes:
+      "127.0.0.3": { label: "IRC drone", severity: critical, problem_state: PS-2 }
+      "127.0.0.8": { label: "SOCKS proxy", severity: critical, problem_state: PS-2 }
+      "127.0.0.9": { label: "HTTP proxy", severity: critical, problem_state: PS-2 }
+      "127.0.0.10": { label: "proxy", severity: critical, problem_state: PS-2 }
+      "127.0.0.13": { label: "DDoS drone", severity: critical, problem_state: PS-2 }
+      "127.0.0.14": { label: "breached host", severity: critical, problem_state: PS-2 }
+      "127.0.0.16": { label: "autorooted host", severity: critical, problem_state: PS-2 }
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Invaluement ivmSIP
+    url: https://www.invaluement.com
+    type: ip
+    description: >-
+      Subscriber-only IP reputation feed (ivmSIP + ivmSIP/24) used by
+      commercial filters. No public DNS zone — the web lookup is free, the
+      feed is paid.
+    query: { method: web_only }
+    tier: high
+    weight: 0.8
+    severity: warning
+    enabled: false
+    lookup_url: https://www.invaluement.com/lookup/
+    delist_url: https://www.invaluement.com/removal/
+    access: { cost: paid, notes: "Paid feed/licensed resolver; free removal form." }
+    status: { alive: true }
+
+  # ==========================================================================
+  # Tier HIGH — domain / URI blocklists (RHSBL)
+  # ==========================================================================
+  - name: Spamhaus DBL
+    url: https://www.spamhaus.org
+    type: domain
+    description: >-
+      The Spamhaus Domain Block List — the name itself is listed, so every
+      message carrying the domain is suspect no matter which IP sends it.
+      Codes distinguish bad domains (spam/phish/malware/C&C) from
+      "abused-legit" compromises, which need a different fix.
+    zone: dbl.spamhaus.org
+    query: { method: rhsbl, record_types: [A, TXT], rfc5782_probe: true }
+    tier: high
+    weight: 1.0
+    severity: critical
+    enabled: true
+    lookup_url: https://check.spamhaus.org
+    delist_url: https://check.spamhaus.org
+    return_codes:
+      "127.0.1.2": { label: "spam domain", severity: critical, problem_state: PS-4 }
+      "127.0.1.4": { label: "phishing domain", severity: critical, problem_state: PS-4 }
+      "127.0.1.5": { label: "malware domain", severity: critical, problem_state: PS-4 }
+      "127.0.1.6": { label: "botnet C&C domain", severity: critical, problem_state: PS-4 }
+      "127.0.1.102": { label: "abused-legit: spam", severity: warning, problem_state: PS-4 }
+      "127.0.1.103": { label: "abused-legit: redirector", severity: warning, problem_state: PS-4 }
+      "127.0.1.104": { label: "abused-legit: phish", severity: warning, problem_state: PS-4 }
+      "127.0.1.105": { label: "abused-legit: malware", severity: warning, problem_state: PS-4 }
+      "127.0.1.106": { label: "abused-legit: botnet", severity: warning, problem_state: PS-4 }
+      "127.0.1.255": { label: "IP queried at DBL (query bug — never a listing)", severity: info }
+    refusal_codes: ["127.255.255.252", "127.255.255.254", "127.255.255.255"]
+    access:
+      cost: free
+      notes: "Same terms as ZEN (free low-volume / DQS key)."
+      dqs_zone: "{key}.dbl.dq.spamhaus.net"
+    status: { alive: true }
+
+  - name: Spamhaus ZRD
+    url: https://www.spamhaus.org
+    type: domain
+    description: >-
+      Zero Reputation Domains — every domain observed <24h old, by
+      definition. Ages out automatically at 24 hours; a maturity gate, not
+      an accusation (PS-11).
+    zone: zrd.dq.spamhaus.net
+    query: { method: rhsbl, record_types: [A, TXT], rfc5782_probe: false }
+    tier: medium
+    weight: 0.3
+    severity: info
+    enabled: false
+    lookup_url: https://check.spamhaus.org
+    delist_url: https://check.spamhaus.org
+    auto_expires: "24h after first observation"
+    access:
+      cost: registration
+      notes: "Requires the free-tier Spamhaus DQS key."
+      dqs_zone: "{key}.zrd.dq.spamhaus.net"
+    status: { alive: true }
+
+  - name: SURBL multi
+    url: https://www.surbl.org
+    type: domain
+    description: >-
+      Multi-source domain/URI list (phishing, malware, abuse, cracked
+      sites) consulted by SpamAssassin and most commercial engines; the
+      answer's last octet is a bitmask naming the sub-list.
+    zone: multi.surbl.org
+    query: { method: rhsbl, record_types: [A, TXT], rfc5782_probe: true }
+    tier: high
+    weight: 1.0
+    severity: critical
+    enabled: true
+    lookup_url: https://www.surbl.org/surbl-analysis
+    delist_url: https://www.surbl.org/surbl-analysis
+    bitmask:
+      "8": { label: "PH (phishing)", severity: critical, problem_state: PS-4 }
+      "16": { label: "MW (malware)", severity: critical, problem_state: PS-4 }
+      "64": { label: "ABUSE", severity: warning, problem_state: PS-4 }
+      "128": { label: "CR (cracked site)", severity: warning, problem_state: PS-4 }
+    access: { cost: free, notes: "Free public DNS <250k queries/day; data feed for commercial volume." }
+    status: { alive: true }
+
+  - name: URIBL
+    url: https://uribl.com
+    type: domain
+    description: >-
+      Domain/URI list (black/grey/red sub-zones by confidence). Bit 1
+      (127.0.0.1) is URIBL_BLOCKED — a query refusal from public resolvers
+      or over-limit clients, never a listing.
+    zone: multi.uribl.com
+    query: { method: rhsbl, record_types: [A, TXT], rfc5782_probe: true }
+    tier: high
+    weight: 0.9
+    severity: warning
+    enabled: true
+    lookup_url: https://admin.uribl.com/?section=lookup
+    delist_url: https://admin.uribl.com/?section=lookup
+    bitmask:
+      "2": { label: "black", severity: critical, problem_state: PS-4 }
+      "4": { label: "grey", severity: warning, problem_state: PS-4 }
+      "8": { label: "red", severity: warning, problem_state: PS-4 }
+    refusal_codes: ["127.0.0.1"]
+    access: { cost: free, notes: "Free low volume via a real recursive resolver; 127.0.0.1 = blocked/over limit." }
+    status: { alive: true }
+
+  - name: Invaluement ivmURI
+    url: https://www.invaluement.com
+    type: domain
+    description: >-
+      Subscriber-only domain/URI reputation feed, sister of ivmSIP. Web
+      lookup free; feed paid. Overlaps pm/checks/link_url_reputation.mdx.
+    query: { method: web_only }
+    tier: high
+    weight: 0.8
+    severity: warning
+    enabled: false
+    lookup_url: https://www.invaluement.com/lookup/
+    delist_url: https://www.invaluement.com/removal/
+    access: { cost: paid }
+    status: { alive: true }
+
+  # ==========================================================================
+  # Tier MEDIUM — actively maintained, meaningful coverage
+  # ==========================================================================
+  - name: Abusix Mail Intelligence
+    url: https://abusix.com
+    type: both
+    description: >-
+      Combined IP + domain zones (black, exploit, dyn, noptr, dblack) with a
+      free API key embedded in the query name. Off until a key is configured
+      in Settings.
+    zone: combined.mail.abusix.zone
+    query: { method: dnsbl, record_types: [A, TXT], rfc5782_probe: true, key_template: "{key}.combined.mail.abusix.zone" }
+    tier: medium
+    weight: 0.7
+    severity: warning
+    enabled: false
+    lookup_url: https://lookup.abusix.com
+    delist_url: https://lookup.abusix.com
+    access: { cost: registration, notes: "Free account + API key at app.abusix.com; key goes in the query name." }
+    status: { alive: true }
+
+  - name: SpamRATS
+    url: https://www.spamrats.com
+    type: ip
+    description: >-
+      RATS-Dyna / NoPtr / Spam / Auth — mostly rDNS-policy and
+      auth-attack listings. A hit usually means a missing or generic PTR
+      (fix FCrDNS first), not spam.
+    zone: all.spamrats.com
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.6
+    severity: warning
+    enabled: true
+    lookup_url: https://www.spamrats.com/lookup.php
+    delist_url: https://www.spamrats.com/removal.php
+    return_codes:
+      "127.0.0.36": { label: "RATS-Dyna (dynamic-looking PTR)", severity: warning, problem_state: PS-7 }
+      "127.0.0.37": { label: "RATS-NoPtr (missing PTR)", severity: warning, problem_state: PS-7 }
+      "127.0.0.38": { label: "RATS-Spam", severity: warning, problem_state: PS-5 }
+      "127.0.0.43": { label: "RATS-Auth (auth attacks)", severity: warning, problem_state: PS-2 }
+    access: { cost: free, notes: "Fix the PTR to a proper FQDN before the removal form." }
+    status: { alive: true }
+
+  - name: Mailspike BL
+    url: https://mailspike.io
+    type: ip
+    description: >-
+      Bitsight/AnubisNetworks blacklist zone; sister zones cover zero-hour
+      outbreaks and continuous reputation.
+    zone: bl.mailspike.net
+    query: { method: dnsbl, record_types: [A, TXT], rfc5782_probe: true }
+    tier: medium
+    weight: 0.6
+    severity: warning
+    enabled: true
+    lookup_url: https://mailspike.io/ip_verify
+    delist_url: https://mailspike.io/ip_verify
+    return_codes:
+      "127.0.0.2": { label: "Mailspike blacklist", severity: warning, problem_state: PS-5 }
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Mailspike zero-hour
+    url: https://mailspike.io
+    type: ip
+    description: >-
+      Zero-hour outbreak list — flags IPs participating in an active spam
+      wave; drops automatically within hours.
+    zone: z.mailspike.net
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.5
+    severity: warning
+    enabled: true
+    lookup_url: https://mailspike.io/ip_verify
+    delist_url: https://mailspike.io/ip_verify
+    auto_expires: "hours (zero-hour outbreak list)"
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Mailspike reputation
+    url: https://mailspike.io
+    type: ip
+    description: >-
+      Continuous 0–100-style reputation zone (127.0.0.10 worst … .20 best).
+      Advisory — consumed by the positive-reputation probes, not the
+      listing sweep.
+    zone: rep.mailspike.net
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: false }
+    tier: medium
+    weight: 0.0
+    severity: info
+    enabled: false
+    advisory: true
+    lookup_url: https://mailspike.io/ip_verify
+    delist_url: https://mailspike.io/ip_verify
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Lashback UBL
+    url: https://www.lashback.com
+    type: ip
+    description: >-
+      Unsubscribe Blacklist — senders who mailed unsubscribe-abuse traps. A
+      list-hygiene problem, not an infection.
+    zone: ubl.lashback.com
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.5
+    severity: warning
+    enabled: true
+    lookup_url: https://blacklist.lashback.com
+    delist_url: https://blacklist.lashback.com
+    return_codes:
+      "127.0.0.2": { label: "unsubscribe-abuse trap", severity: warning, problem_state: PS-5 }
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: WPBL
+    url: http://wpbl.info
+    type: ip
+    description: >-
+      Weighted Private Block List — a private trap network; auto-ages ~10
+      days after spam stops.
+    zone: db.wpbl.info
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.5
+    severity: warning
+    enabled: true
+    lookup_url: http://wpbl.info
+    delist_url: http://wpbl.info
+    auto_expires: "~10 days after spam stops"
+    return_codes:
+      "127.0.0.2": { label: "WPBL (private trap network)", severity: warning, problem_state: PS-5 }
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: 0spam
+    url: https://0spam.org
+    type: ip
+    description: >-
+      0spam Project primary IP zone (sister zones rbl./nbl.; domain zone
+      url.0spam.org). Free self-service delisting portal.
+    zone: bl.0spam.org
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.4
+    severity: warning
+    enabled: true
+    lookup_url: https://0spam.org
+    delist_url: https://0spam.org
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: 0spam URL
+    url: https://0spam.org
+    type: domain
+    description: >-
+      0spam Project domain/URL zone — the RHSBL side of the 0spam project.
+    zone: url.0spam.org
+    query: { method: rhsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.4
+    severity: warning
+    enabled: true
+    lookup_url: https://0spam.org
+    delist_url: https://0spam.org
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: s5h.net
+    url: https://usan.s5h.net
+    type: ip
+    description: >-
+      Community trap-driven IP list with self-service removal via its query
+      page.
+    zone: all.s5h.net
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.4
+    severity: warning
+    enabled: true
+    lookup_url: https://usan.s5h.net/query/
+    delist_url: https://usan.s5h.net/query/
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Blocklist.de
+    url: https://www.blocklist.de
+    type: ip
+    description: >-
+      Brute-force attack sources (ssh/imap/smtp) reported by fail2ban
+      installations — a hit suggests a compromised host. Auto-expires 48h–1
+      month after attacks stop.
+    zone: bl.blocklist.de
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.4
+    severity: warning
+    enabled: true
+    lookup_url: https://www.blocklist.de/en/search.html
+    delist_url: https://www.blocklist.de/en/delist.html
+    auto_expires: "48h–1 month after attacks stop"
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: GBUdb Truncate
+    url: http://www.gbudb.com
+    type: ip
+    description: >-
+      Message Sniffer's GBUdb "Truncate" zone — bad-behaving IPs; drops
+      automatically when good traffic is seen.
+    zone: truncate.gbudb.net
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.4
+    severity: warning
+    enabled: true
+    lookup_url: http://www.gbudb.com/truncate/
+    delist_url: http://www.gbudb.com/truncate/
+    auto_expires: "auto — drops when good traffic is seen"
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Interserver RBL
+    url: https://rbl.interserver.net
+    type: ip
+    description: >-
+      InterServer's hosting-provider RBL with self-service lookup and
+      delisting on the same page.
+    zone: rbl.interserver.net
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.3
+    severity: warning
+    enabled: true
+    lookup_url: https://rbl.interserver.net
+    delist_url: https://rbl.interserver.net
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Hostkarma
+    url: https://www.junkemailfilter.com
+    type: ip
+    description: >-
+      JunkEmailFilter's mixed-verdict zone: white/black/yellow/brown/NOBL
+      codes — only 127.0.0.2 (black) is bad; .1 and .5 are positive.
+    zone: hostkarma.junkemailfilter.com
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.4
+    severity: warning
+    enabled: true
+    lookup_url: https://ipadmin.junkemailfilter.com/remove.php
+    delist_url: https://ipadmin.junkemailfilter.com/remove.php
+    return_codes:
+      "127.0.0.1": { label: "whitelisted (good)", severity: ok }
+      "127.0.0.2": { label: "blacklisted", severity: warning }
+      "127.0.0.3": { label: "yellow (mixed)", severity: info }
+      "127.0.0.4": { label: "brown (dynamic)", severity: info, problem_state: PS-3 }
+      "127.0.0.5": { label: "NOBL (no blacklisting)", severity: ok }
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: SPFBL
+    url: https://spfbl.net
+    type: ip
+    description: >-
+      Brazilian/LATAM community reputation and blocklist — significant
+      coverage in Brazil. May charge for expedited delisting; advise
+      waiting for the free path instead.
+    zone: dnsbl.spfbl.net
+    query: { method: dnsbl, record_types: [A, TXT], rfc5782_probe: true }
+    tier: medium
+    weight: 0.4
+    severity: warning
+    enabled: true
+    lookup_url: https://spfbl.net/en/dnsbl/
+    delist_url: https://spfbl.net/en/dnsbl/
+    paid_delist_offered: true
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: SPFBL DBL
+    url: https://spfbl.net
+    type: domain
+    description: >-
+      The domain-side zone of SPFBL — the RHSBL twin of dnsbl.spfbl.net.
+    zone: dbl.spfbl.net
+    query: { method: rhsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.4
+    severity: warning
+    enabled: true
+    lookup_url: https://spfbl.net/en/dnsbl/
+    delist_url: https://spfbl.net/en/dnsbl/
+    paid_delist_offered: true
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: NordSpam
+    url: https://www.nordspam.com
+    type: ip
+    description: >-
+      Nordic/EU regional IP list. Delist by emailing delist@nordspam.com
+      from the affected domain with evidence of the fix.
+    zone: bl.nordspam.com
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.3
+    severity: warning
+    enabled: true
+    lookup_url: https://www.nordspam.com
+    delist_url: https://www.nordspam.com
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: NordSpam DBL
+    url: https://www.nordspam.com
+    type: domain
+    description: >-
+      NordSpam's domain zone — the RHSBL side of the Nordic list.
+    zone: dbl.nordspam.com
+    query: { method: rhsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.3
+    severity: warning
+    enabled: true
+    lookup_url: https://www.nordspam.com
+    delist_url: https://www.nordspam.com
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Suomispam
+    url: http://suomispam.net
+    type: ip
+    description: >-
+      Finnish regional IP blocklist (sister zones gl. greylist and dbl.
+      domains). Email-based delisting.
+    zone: bl.suomispam.net
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.3
+    severity: warning
+    enabled: true
+    lookup_url: http://suomispam.net/lookup/
+    delist_url: http://suomispam.net/lookup/
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Suomispam DBL
+    url: http://suomispam.net
+    type: domain
+    description: >-
+      Suomispam's domain zone — the RHSBL side of the Finnish list.
+    zone: dbl.suomispam.net
+    query: { method: rhsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.3
+    severity: warning
+    enabled: true
+    lookup_url: http://suomispam.net/lookup/
+    delist_url: http://suomispam.net/lookup/
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Team Cymru Bogons
+    url: https://www.team-cymru.com
+    type: ip
+    description: >-
+      Unallocated/leaked IP space (fullbogons). A hit is a routing or
+      allocation config bug, not spam — not delistable; fix the network.
+    zone: bogons.cymru.com
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: false }
+    tier: medium
+    weight: 0.2
+    severity: info
+    enabled: true
+    lookup_url: https://www.team-cymru.com/bogon-networks
+    delist_url: https://www.team-cymru.com/bogon-networks
+    access: { cost: free }
+    status: { alive: true }
+
+  # ==========================================================================
+  # Positive reputation — being listed is GOOD
+  # ==========================================================================
+  - name: DNSWL (whitelist)
+    url: https://www.dnswl.org
+    type: ip
+    description: >-
+      The DNS *white*list — presence is a positive trust signal
+      (127.0.x.y: x = category, y = trust 0–3). Absence is only info; the
+      prevention playbook recommends free self-registration.
+    zone: list.dnswl.org
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: medium
+    weight: 0.0
+    severity: info
+    enabled: true
+    positive: true
+    lookup_url: https://www.dnswl.org
+    delist_url: https://www.dnswl.org
+    access: { cost: free, notes: "Self-register (free tier) — being ON this list is good." }
+    status: { alive: true }
+
+  - name: Validity Sender Score
+    url: https://senderscore.org
+    type: ip
+    description: >-
+      Advisory 0–100 IP reputation (127.0.4.<score>); not a blocklist.
+      Consumed by the positive-reputation probes, not the listing sweep.
+    zone: score.senderscore.com
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: false }
+    tier: medium
+    weight: 0.0
+    severity: info
+    enabled: false
+    advisory: true
+    lookup_url: https://senderscore.org
+    delist_url: https://senderscore.org
+    access: { cost: free }
+    status: { alive: true }
+
+  # ==========================================================================
+  # Tier LOW / controversial — check but label clearly, never panic the user
+  # ==========================================================================
+  - name: UCEPROTECT L1
+    url: https://www.uceprotect.net
+    type: ip
+    description: >-
+      Single-IP listing; auto-expires 7 days after spam stops. The paid
+      "express" delisting via whitelisted.org is extortion-adjacent
+      (RFC 6471) — NEVER pay.
+    zone: dnsbl-1.uceprotect.net
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.2
+    severity: warning
+    enabled: true
+    lookup_url: https://www.uceprotect.net/en/rblcheck.php
+    delist_url: https://www.uceprotect.net/en/rblcheck.php
+    paid_delist_offered: true
+    auto_expires: "7 days after spam stops — NEVER pay for express delisting (RFC 6471)"
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: UCEPROTECT L2 (allocation)
+    url: https://www.uceprotect.net
+    type: ip
+    description: >-
+      Allocation-wide collateral listing — your provider's netblock, your
+      neighbors' fault. Gmail/Microsoft/Yahoo do not use it; informational
+      only.
+    zone: dnsbl-2.uceprotect.net
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: true
+    lookup_url: https://www.uceprotect.net/en/rblcheck.php
+    delist_url: https://www.uceprotect.net/en/rblcheck.php
+    paid_delist_offered: true
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: UCEPROTECT L3 (whole ASN)
+    url: https://www.uceprotect.net
+    type: ip
+    description: >-
+      Whole-ASN collateral listing — pure noise for most senders; nothing
+      an end sender can do.
+    zone: dnsbl-3.uceprotect.net
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.05
+    severity: info
+    enabled: true
+    lookup_url: https://www.uceprotect.net/en/rblcheck.php
+    delist_url: https://www.uceprotect.net/en/rblcheck.php
+    paid_delist_offered: true
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Backscatterer
+    url: https://www.backscatterer.org
+    type: ip
+    description: >-
+      Bounce-after-accept backscatter sources. Only matters when a receiver
+      runs it in SAFE mode; auto-expires 4 weeks. Same paid-express caveat
+      as UCEPROTECT — never pay.
+    zone: ips.backscatterer.org
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: true
+    lookup_url: https://www.backscatterer.org/?target=test
+    delist_url: https://www.backscatterer.org/?target=test
+    paid_delist_offered: true
+    auto_expires: "4 weeks after last event"
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: SEM-BLACK
+    url: https://spameatingmonkey.com
+    type: ip
+    description: >-
+      Spam Eating Monkey trap-driven IP list; trap listings expire after 15
+      idle days.
+    zone: bl.spameatingmonkey.net
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.2
+    severity: warning
+    enabled: true
+    lookup_url: https://spameatingmonkey.com/lookup
+    delist_url: https://spameatingmonkey.com/lookup
+    auto_expires: "trap listings expire 15 days idle"
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: SEM netblock
+    url: https://spameatingmonkey.com
+    type: ip
+    description: >-
+      Spam Eating Monkey range listing — collateral from network neighbors.
+    zone: netbl.spameatingmonkey.net
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: true
+    lookup_url: https://spameatingmonkey.com/lookup
+    delist_url: https://spameatingmonkey.com/lookup
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: SEM-URI
+    url: https://spameatingmonkey.com
+    type: domain
+    description: >-
+      Spam Eating Monkey domain/URI list (sister zone URIRED).
+    zone: uribl.spameatingmonkey.net
+    query: { method: rhsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.2
+    severity: warning
+    enabled: true
+    lookup_url: https://spameatingmonkey.com/lookup
+    delist_url: https://spameatingmonkey.com/lookup
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: SEM-FRESH (new domains)
+    url: https://spameatingmonkey.com
+    type: domain
+    description: >-
+      Domain-age heuristic (domains registered within days) — not an
+      accusation; new domains age out automatically (PS-11).
+    zone: fresh.spameatingmonkey.net
+    query: { method: rhsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: true
+    lookup_url: https://spameatingmonkey.com/lookup
+    delist_url: https://spameatingmonkey.com/lookup
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: dan.me.uk Tor exit nodes
+    url: https://www.dan.me.uk
+    type: ip
+    description: >-
+      Tor node/exit-node list — a hit means you send from a Tor node or
+      share its IP; drops automatically when the node leaves Tor.
+    zone: torexit.dan.me.uk
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: false }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: false
+    lookup_url: https://www.dan.me.uk/dnsbl
+    delist_url: https://www.dan.me.uk/dnsbl
+    auto_expires: "auto — drops when the node leaves Tor"
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: MSRBL
+    url: http://www.msrbl.com
+    type: ip
+    description: >-
+      Combined MSRBL zone. Stale maintenance — verify the RFC 5782 test
+      point before trusting; disabled by default.
+    zone: combined.rbl.msrbl.net
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: false
+    lookup_url: http://www.msrbl.com
+    delist_url: http://www.msrbl.com
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: JustSpam
+    url: http://www.justspam.org
+    type: ip
+    description: >-
+      Tiny independent IP list with self-service removal.
+    zone: dnsbl.justspam.org
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: false
+    lookup_url: http://www.justspam.org
+    delist_url: http://www.justspam.org
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Woody's SMTP Blacklist
+    url: http://blacklist.woody.ch
+    type: both
+    description: >-
+      Small Swiss list (IP zone + uri. domain zone); auto-expiring,
+      email-based contact.
+    zone: blacklist.woody.ch
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: false
+    lookup_url: http://blacklist.woody.ch
+    delist_url: http://blacklist.woody.ch
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Fabel spamsources
+    url: https://www.fabel.dk
+    type: ip
+    description: >-
+      Small Danish regional list; delist by emailing spam@fabel.dk.
+    zone: spamsources.fabel.dk
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: false
+    lookup_url: https://www.fabel.dk/spam/
+    delist_url: https://www.fabel.dk/spam/
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: ImproWare spamrbl
+    url: http://antispam.imp.ch
+    type: ip
+    description: >-
+      Small Swiss regional list (sister zone wormrbl.imp.ch); auto-expires
+      ~2 weeks.
+    zone: spamrbl.imp.ch
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: false
+    lookup_url: http://antispam.imp.ch
+    delist_url: http://antispam.imp.ch
+    auto_expires: "~2 weeks"
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: rbl.jp
+    url: http://www.rbl.jp
+    type: both
+    description: >-
+      JIPPG's Japan-focused lists (all./virus. IP zones, url. domain zone);
+      email-based delisting.
+    zone: all.rbl.jp
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: false
+    lookup_url: http://www.rbl.jp
+    delist_url: http://www.rbl.jp
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Anonmails
+    url: https://anonmails.de
+    type: ip
+    description: >-
+      Small German list with self-service delisting.
+    zone: spam.dnsbl.anonmails.de
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: false
+    lookup_url: https://anonmails.de/dnsbl.php
+    delist_url: https://anonmails.de/dnsbl.php
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Abuse.ro
+    url: https://abuse.ro
+    type: both
+    description: >-
+      Romanian regional list (rbl. IP zone + uribl. domain zone); email
+      delist@abuse.ro; auto-expires.
+    zone: rbl.abuse.ro
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: false
+    lookup_url: https://abuse.ro
+    delist_url: https://abuse.ro
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Virusfree.cz
+    url: https://www.virusfree.cz
+    type: ip
+    description: >-
+      Czech regional list with self-service delisting.
+    zone: bip.virusfree.cz
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: false
+    lookup_url: https://www.virusfree.cz
+    delist_url: https://www.virusfree.cz
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: Tornevall / FraudBL
+    url: https://www.tornevall.net
+    type: ip
+    description: >-
+      Fraud/abuse list in maintenance mode (stable, not developed);
+      self-service/API removal.
+    zone: dnsbl.tornevall.org
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.1
+    severity: info
+    enabled: false
+    lookup_url: https://www.tornevall.net/removal/
+    delist_url: https://www.tornevall.net/removal/
+    access: { cost: free }
+    status: { alive: true }
+
+  - name: korea.services.net
+    url: http://korea.services.net
+    type: ip
+    description: >-
+      Geographic policy list (Korean IP space). Not delistable; only
+      matters if your recipients use it.
+    zone: korea.services.net
+    query: { method: dnsbl, record_types: [A], rfc5782_probe: true }
+    tier: low
+    weight: 0.05
+    severity: info
+    enabled: false
+    lookup_url: http://korea.services.net
+    delist_url: http://korea.services.net
+    access: { cost: free }
+    status: { alive: true }
+
+# ============================================================================
+# DEAD zones — the do-not-check registry (pm/checks/blacklists.mdx §9.5)
+# ============================================================================
+# Dead lists sometimes wildcard on shutdown and "list the world" (AHBL,
+# SpamCannibal). The engine hard-blocks every zone here (suffix match) even if
+# an operator override adds it. Track https://www.dnsbl.com for new deaths.
+dead_zones:
+  - zone: sorbs.net
+    name: SORBS (all 18 sub-zones)
+    died: 2024-06
+    reason: "Proofpoint decommissioned SORBS 2024-06-05"
+  - zone: ix.dnsbl.manitu.net
+    name: NiX Spam
+    died: 2025-01
+    reason: "Shut down 2025-01-16"
+  - zone: ubl.unsubscore.com
+    name: Lashback unsubscore mirror
+    died: 2021
+    reason: "Dead sister zone of ubl.lashback.com — never check"
+  - zone: combined.abuse.ch
+    name: abuse.ch combined
+    died: 2015
+    reason: "abuse.ch DNSBLs retired"
+  - zone: drone.abuse.ch
+    name: abuse.ch drone
+    died: 2015
+    reason: "abuse.ch DNSBLs retired"
+  - zone: spam.abuse.ch
+    name: abuse.ch spam
+    died: 2015
+    reason: "abuse.ch DNSBLs retired"
+  - zone: dnsbl.inps.de
+    name: inps.de
+    died: 2020
+    reason: "Shut down"
+  - zone: all.rbl.webiron.net
+    name: WebIron
+    died: 2020
+    reason: "Shut down"
+  - zone: bsb.spamlookup.net
+    name: BSB spamlookup
+    died: 2020
+    reason: "Shut down"
+  - zone: rbl.megarbl.net
+    name: MegaRBL
+    died: 2019
+    reason: "Shut down"
+  - zone: bl.emailbasura.org
+    name: EmailBasura
+    died: 2019
+    reason: "Shut down"
+  - zone: bl.spamcannibal.org
+    name: SpamCannibal
+    died: 2018
+    reason: "Wildcarded on death — listed the world"
+  - zone: dnsbl.cyberlogic.net
+    name: Cyberlogic
+    died: 2018
+    reason: "Shut down"
+  - zone: exitnodes.tor.dnsbl.sectoor.de
+    name: Sectoor Tor
+    died: 2018
+    reason: "Shut down"
+  - zone: dnsbl.ahbl.org
+    name: AHBL
+    died: 2015
+    reason: "Intentionally wildcarded on death"
+  - zone: rbl.orbitrbl.com
+    name: OrbitRBL
+    died: 2014
+    reason: "Shut down"
+  - zone: l2.apews.org
+    name: APEWS
+    died: 2013
+    reason: "Zombie — stale data, no delisting; ignore entirely"
+  - zone: dnsbl.njabl.org
+    name: NJABL
+    died: 2013
+    reason: "Shut down"
+  - zone: dul.ru
+    name: dul.ru
+    died: 2015
+    reason: "Shut down"
+  - zone: no-more-funn.moensted.dk
+    name: no-more-funn
+    died: 2012
+    reason: "Shut down"
+  - zone: dnsbl.burnt-tech.com
+    name: Burnt-Tech
+    died: 2015
+    reason: "Shut down"
+  - zone: anonwhois.org
+    name: AnonWhois
+    died: 2017
+    reason: "Shut down"
+  - zone: relays.osirusoft.com
+    name: Osirusoft
+    died: 2003
+    reason: "Shut down under DDoS; famously wildcarded"
+  - zone: list.dsbl.org
+    name: DSBL
+    died: 2008
+    reason: "Shut down"
+  - zone: relays.ordb.org
+    name: ORDB
+    died: 2006
+    reason: "Shut down"
+  - zone: cbl.abuseat.org
+    name: CBL
+    reason: "Not dead — fully absorbed into Spamhaus XBL; never check separately (double-counting)"
+
+# ============================================================================
+# Aggregate lookup services (§9.6) — link-outs for the user; cross-checks for us
+# ============================================================================
+aggregators:
+  - name: MultiRBL (valli.org)
+    url: https://multirbl.valli.org
+    description: "Gold standard: ~892 active + ~588 dead zones tracked, per-zone detail pages with delist URLs and liveness."
+  - name: MXToolbox Blacklist Check
+    url: https://mxtoolbox.com/blacklists.aspx
+    description: "~100 curated lists; the de-facto industry UI; paid monitoring tiers."
+  - name: HetrixTools
+    url: https://hetrixtools.com/blacklist-check/
+    description: "Free checker + paid monitoring API (best programmatic option); per-list delist guides."
+  - name: DNSChecker
+    url: https://dnschecker.org/ip-blacklist-checker.php
+    description: "~50 lists, free."
+  - name: BlacklistMaster
+    url: https://www.blacklistmaster.com
+    description: "~100 zones with detail pages."
+  - name: Debouncer
+    url: https://www.debouncer.com
+    description: "Free, includes domain-based lists."
+  - name: dnsbl.info
+    url: https://www.dnsbl.info
+    description: "36 zones but stale (still shows dead zones) — cross-check only."
+  - name: dnsbl.com
+    url: https://www.dnsbl.com
+    description: "Not a checker — the authoritative alive/dead registry we track for dead_zones."
+
+# ============================================================================
+# Provider reputation portals (§9.7) — the "invisible blacklists" (no DNS zone)
+# ============================================================================
+provider_portals:
+  - provider: google_postmaster
+    name: Google Postmaster Tools
+    check_url: https://postmaster.google.com
+    delist_url: https://support.google.com/mail/contact/gmail_bulk_sender_escalation
+    description: "Domain/IP reputation + spam rate (needs DNS-verified domain). No delist portal — fix reputation; escalate via the bulk-sender form."
+  - provider: microsoft_snds
+    name: Microsoft SNDS (Outlook/Hotmail)
+    check_url: https://sendersupport.olc.protection.outlook.com/snds/
+    delist_url: https://sendersupport.olc.protection.outlook.com/pm/
+    description: "Consumer Outlook/Hotmail per-IP data + JMRP feedback loop; delist via the sender-support portal."
+  - provider: microsoft_365
+    name: Microsoft 365 delist portal
+    check_url: https://sender.office.com
+    delist_url: https://sender.office.com
+    description: "Exchange Online blocks name the code (5.7.606-649); self-service Delist IP, up to 24h."
+  - provider: yahoo_sender_hub
+    name: Yahoo/AOL Sender Hub
+    check_url: https://senders.yahooinc.com
+    delist_url: https://senders.yahooinc.com/contact/
+    description: "Yahoo/AOL sender reputation + complaint feedback loop signup."
+  - provider: cloudmark_csi
+    name: Cloudmark CSI (carrier filters)
+    check_url: https://csi.cloudmark.com/en/reset/
+    delist_url: https://csi.cloudmark.com/en/reset/
+    description: "Proofpoint's Cloudmark reputation used by carriers; self-service reset on the same page."
+  - provider: proofpoint_pdr
+    name: Proofpoint IP reputation
+    check_url: https://ipcheck.proofpoint.com
+    delist_url: https://ipcheck.proofpoint.com
+    description: "Proofpoint Dynamic Reputation; lookup + delist form on the same page."
+  - provider: cisco_talos
+    name: Cisco Talos reputation
+    check_url: https://talosintelligence.com/reputation_center
+    delist_url: https://talosintelligence.com/reputation_center
+    description: "IronPort/ESA reputation; dispute via the reputation center."
+  - provider: comcast_postmaster
+    name: Comcast/Xfinity postmaster
+    check_url: https://postmaster.comcast.net
+    delist_url: https://postmaster.xfinity.com/block-removal-request.html
+    description: "Block-removal requests (≤5×/day per IP; often <30min)."
+  - provider: validity_senderscore
+    name: Validity Sender Score
+    check_url: https://senderscore.org
+    delist_url: https://senderscore.org
+    description: "0-100 IP reputation (also DNS zone score.senderscore.com) — reputation, not a list."

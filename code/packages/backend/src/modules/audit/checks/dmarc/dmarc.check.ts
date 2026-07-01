@@ -1,5 +1,5 @@
-import { resolveTxt } from "./dns-util"
-import type { Checker, CheckOutcome, Finding } from "./types"
+import { resolveTxt } from "../dns-util"
+import type { Checker, CheckOutcome, Finding } from "../types"
 
 /**
  * DMARC (pm/checks/dmarc.mdx). Resolves `_dmarc.<domain>`, parses the full tag map, and runs the

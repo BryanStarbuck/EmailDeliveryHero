@@ -9,8 +9,10 @@ import { NavIcon } from "./NavIcon"
 export type SidebarVariant = "app" | "settings"
 
 const SHELL = "flex h-full w-64 shrink-0 flex-col border-r border-[var(--edh-border)] bg-white"
+// Left-bar text is BLACK (pm/leftbar.mdx §2): green stays green (active item, wordmark),
+// medium grey becomes black. Hover keeps its light-grey fill.
 const ITEM =
-  "flex items-center gap-2 rounded-md px-2 py-2 text-sm text-slate-700 transition-colors hover:bg-slate-100"
+  "flex items-center gap-2 rounded-md px-2 py-2 text-sm text-black transition-colors hover:bg-slate-100"
 const ACTIVE = "bg-[var(--edh-primary)]/10 font-medium text-[var(--edh-primary)]"
 
 /** Hide an item whose permission gate the signed-in user doesn't satisfy. */
@@ -77,7 +79,7 @@ function SettingsSidebar() {
           if (items.length === 0) return null
           return (
             <div key={group.id}>
-              <div className="px-2 pb-1 text-xs font-semibold uppercase tracking-wide text-[var(--edh-muted)]">
+              <div className="px-2 pb-1 text-xs font-semibold uppercase tracking-wide text-black">
                 {group.label}
               </div>
               <div className="space-y-1">

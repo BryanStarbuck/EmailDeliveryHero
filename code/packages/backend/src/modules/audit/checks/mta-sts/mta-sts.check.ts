@@ -1,5 +1,5 @@
-import { resolveTxt } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import { resolveTxt } from "../dns-util"
+import type { Checker, Finding } from "../types"
 
 /**
  * MTA-STS (SMTP MTA Strict Transport Security, RFC 8461). MTA-STS has two moving parts on different

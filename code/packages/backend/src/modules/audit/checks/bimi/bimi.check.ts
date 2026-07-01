@@ -1,5 +1,5 @@
-import { resolve4, resolve6, resolveCname, resolveTxt } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import { resolve4, resolve6, resolveCname, resolveTxt } from "../dns-util"
+import type { Checker, Finding } from "../types"
 
 /**
  * BIMI (Brand Indicators for Message Identification). Looks up the `default._bimi.<domain>` TXT

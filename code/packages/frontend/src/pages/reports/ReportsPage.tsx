@@ -1,0 +1,253 @@
+import { Link, useNavigate } from "@tanstack/react-router"
+import { ChevronRight, MoreVertical } from "lucide-react"
+import { useState } from "react"
+import { toast } from "sonner"
+import { useAuditRuns, useDeleteRun } from "@/api/audit"
+import type { AuditResult } from "@/api/types"
+import { ScoreBadge } from "@/components/Badges"
+import { StatusCell } from "@/components/StatusCell"
+import { CATEGORIES, NEVER_CELL, rollupCategories } from "@/lib/categories"
+import { useScanRunner } from "@/scan/ScanProgressContext"
+
+/** The library shows the newest N reports across all domains (pm/reports.mdx §3.2). */
+const NEWEST = 10
+
+/**
+ * The Reports page (pm/reports.mdx) — the report library. A report is the rendered view of one RUN;
+ * this page is one stacked table of the newest 10 runs read from the on-disk run history
+ * (GET /api/audit/runs → runs.json in the state dir). Clicking anywhere in a row opens that report
+ * in the existing view-one-report design (/domains/$id/runs/$runId, RunDetailPage).
+ */
+export function ReportsPage() {
+  const { data: runs, isLoading } = useAuditRuns()
+  const navigate = useNavigate()
+
+  const all = runs ?? []
+  const newest = all.slice(0, NEWEST)
+
+  const openReport = (r: AuditResult) => {
+    // Pre-history rows lack a runId (pm/reports.mdx §3.3) — fall back to the newest report.
+    if (r.runId) {
+      navigate({ to: "/domains/$id/runs/$runId", params: { id: r.domainId, runId: r.runId } })
+    } else {
+      navigate({ to: "/domains/$id", params: { id: r.domainId } })
+    }
+  }
+
+  return (
+    <div className="mx-auto max-w-6xl">
+      <header className="mb-6">
+        <h1 className="text-2xl font-bold">Reports</h1>
+        <p className="mt-1 text-sm text-[var(--edh-muted)]">
+          Every health-check run, newest first — click a report to open it.
+        </p>
+      </header>
+
+      {isLoading ? (
+        <SkeletonTable />
+      ) : newest.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-[var(--edh-border)] p-10 text-center">
+          <p className="text-slate-600">
+            No reports yet. Run checks from the Dashboard and every run will file its report here.
+          </p>
+          <Link to="/" className="mt-2 inline-block text-[var(--edh-primary)] underline">
+            Go to Dashboard →
+          </Link>
+        </div>
+      ) : (
+        <>
+          <div className="overflow-hidden rounded-lg border border-[var(--edh-border)] bg-white">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-left text-xs uppercase text-[var(--edh-muted)]">
+                <tr>
+                  <th className="px-4 py-2">Date</th>
+                  <th className="px-4 py-2">Domain</th>
+                  <th className="px-2 py-2 text-center">Score</th>
+                  {CATEGORIES.map((c) => (
+                    <th key={c.key} className="px-2 py-2 text-center">
+                      {c.header}
+                    </th>
+                  ))}
+                  <th className="px-2 py-2" aria-label="Row actions" />
+                </tr>
+              </thead>
+              <tbody>
+                {newest.map((r) => (
+                  <ReportRow
+                    key={r.runId ?? `${r.domainId}-${r.ranAt}`}
+                    run={r}
+                    onOpen={openReport}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-2 text-xs text-[var(--edh-muted)]">
+            {all.length > NEWEST
+              ? `Showing the newest ${NEWEST} of ${all.length} reports`
+              : `${all.length} report${all.length === 1 ? "" : "s"}`}
+          </p>
+        </>
+      )}
+    </div>
+  )
+}
+
+function ReportRow({ run, onOpen }: { run: AuditResult; onOpen: (r: AuditResult) => void }) {
+  const cells = rollupCategories(run.findings)
+  return (
+    <tr
+      onClick={() => onOpen(run)}
+      className="cursor-pointer border-t border-[var(--edh-border)] hover:bg-slate-50"
+    >
+      <td className="whitespace-nowrap px-4 py-3 tabular-nums">
+        {formatDate(run.startedAt ?? run.ranAt)}
+      </td>
+      <td className="px-4 py-3 font-medium">{run.domain}</td>
+      <td className="px-2 py-2 text-center">
+        <ScoreBadge score={run.score} />
+      </td>
+      {CATEGORIES.map((c) => (
+        <td key={c.key} className="px-2 py-2">
+          <StatusCell status={cells[c.key] ?? NEVER_CELL} />
+        </td>
+      ))}
+      <td className="px-2 py-2">
+        {/* Row controls (pm/reports.mdx §3.4) — every control stops propagation so a click never
+            double-fires the whole-row navigation. */}
+        <div className="flex items-center justify-end gap-1">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              onOpen(run)
+            }}
+            aria-label={`Open the report for ${run.domain}`}
+            className="text-[var(--edh-muted)] hover:text-slate-700"
+          >
+            <ChevronRight className="h-4 w-4" />
+          </button>
+          <ReportMenu run={run} onOpen={onOpen} />
+        </div>
+      </td>
+    </tr>
+  )
+}
+
+/** The ⋮ menu — Open report / Run checks again / Delete report (pm/reports.mdx §3.4). */
+function ReportMenu({ run, onOpen }: { run: AuditResult; onOpen: (r: AuditResult) => void }) {
+  const [open, setOpen] = useState(false)
+  const runDomains = useScanRunner()
+  const del = useDeleteRun()
+
+  const onRunAgain = () => {
+    setOpen(false)
+    runDomains([{ id: run.domainId, name: run.domain }])
+  }
+
+  const onDelete = () => {
+    setOpen(false)
+    if (!window.confirm(`Delete this report for ${run.domain}? The domain itself is unaffected.`)) {
+      return
+    }
+    if (!run.runId) {
+      toast.error("This legacy report has no run id and cannot be deleted individually.")
+      return
+    }
+    del.mutate(run.runId, {
+      onSuccess: () => toast.success(`Deleted the report for ${run.domain}`),
+      onError: (err) => toast.error(errMsg(err, "Could not delete the report")),
+    })
+  }
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          setOpen((o) => !o)
+        }}
+        aria-label={`Actions for the ${run.domain} report`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="text-[var(--edh-muted)] hover:text-slate-700"
+      >
+        <MoreVertical className="h-4 w-4" />
+      </button>
+      {open && (
+        <>
+          {/* Click-away backdrop — closes the menu without triggering anything underneath. */}
+          <button
+            type="button"
+            aria-label="Close menu"
+            onClick={(e) => {
+              e.stopPropagation()
+              setOpen(false)
+            }}
+            className="fixed inset-0 z-10 cursor-default"
+          />
+          <div
+            role="menu"
+            className="absolute right-0 z-20 mt-1 w-44 overflow-hidden rounded-md border border-[var(--edh-border)] bg-white py-1 text-left shadow-lg"
+          >
+            <MenuItem label="Open report" onClick={() => onOpen(run)} />
+            <MenuItem label="Run checks again" onClick={onRunAgain} />
+            <MenuItem label="Delete report" destructive onClick={onDelete} />
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function MenuItem({
+  label,
+  onClick,
+  destructive = false,
+}: {
+  label: string
+  onClick: () => void
+  destructive?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick()
+      }}
+      className={`block w-full px-3 py-1.5 text-left text-sm hover:bg-slate-50 ${
+        destructive ? "text-red-700" : "text-slate-700"
+      }`}
+    >
+      {label}
+    </button>
+  )
+}
+
+/** `YYYY-MM-DD HH:mm` in local time (pm/reports.mdx §3.2). */
+function formatDate(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const pad = (n: number) => String(n).padStart(2, "0")
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function SkeletonTable() {
+  return (
+    <div className="space-y-2">
+      {Array.from({ length: NEWEST }, (_, i) => `row-${i}`).map((k) => (
+        <div key={k} className="h-11 animate-pulse rounded-md bg-slate-100" />
+      ))}
+    </div>
+  )
+}
+
+function errMsg(err: unknown, fallback: string): string {
+  const e = err as { response?: { data?: { message?: string | string[] } } }
+  const m = e?.response?.data?.message
+  if (Array.isArray(m)) return m.join(", ")
+  return m ?? fallback
+}

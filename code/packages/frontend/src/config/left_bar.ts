@@ -61,8 +61,8 @@ function barAt(location: string): RawBar | undefined {
   return bars().find((b) => b.Location === location)
 }
 
-/** The app bar's title (from its header). */
-export const appTitle: string = barAt("app")?.header?.label ?? "EmailDeliveryHero"
+/** The app bar's title (from its header) — spaced "Email Delivery Hero" (pm/leftbar.mdx §1). */
+export const appTitle: string = barAt("app")?.header?.label ?? "Email Delivery Hero"
 
 /** Primary app nav items, ordered. */
 export const appNavItems: NavItem[] = [...(barAt("app")?.nav_items ?? [])].sort(

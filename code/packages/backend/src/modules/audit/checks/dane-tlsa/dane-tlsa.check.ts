@@ -1,5 +1,5 @@
-import { dig, resolveCname, resolveMx } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import { dig, resolveCname, resolveMx } from "../dns-util"
+import type { Checker, Finding } from "../types"
 
 /**
  * DANE / TLSA for SMTP (RFC 7672, on RFC 6698/7671). For each inbound MX host of a domain this checker

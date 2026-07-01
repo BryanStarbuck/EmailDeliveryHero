@@ -1,4 +1,4 @@
-import type { Checker, Finding } from "./types"
+import type { Checker, Finding } from "../types"
 
 /**
  * Message content spam scoring (SpamAssassin-style). Scores a user-supplied sample message — the raw

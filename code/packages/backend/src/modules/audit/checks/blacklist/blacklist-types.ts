@@ -10,7 +10,12 @@ import type { Severity } from "../types"
 export type ZoneTier = "high" | "medium" | "low"
 export type ZoneKind = "ip" | "domain"
 export type ZoneHealthStatus = "ok" | "dead" | "wildcarding" | "blocked" | "slow"
-export type TargetSource = "sending_ips" | "mx_resolved" | "spf_authorized" | "primary"
+export type TargetSource =
+  | "sending_ips"
+  | "mx_resolved"
+  | "spf_authorized"
+  | "email_report"
+  | "primary"
 
 /** Problem states PS-0..PS-13 from pm/checks/blacklists.mdx §16. */
 export type ProblemStateId =

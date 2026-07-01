@@ -1,5 +1,5 @@
-import { dig, resolve4, resolve6, resolveMx, resolveTxt } from "./dns-util"
-import type { Checker, CheckOutcome, Finding } from "./types"
+import { dig, resolve4, resolve6, resolveMx, resolveTxt } from "../dns-util"
+import type { Checker, CheckOutcome, Finding } from "../types"
 
 /**
  * SPF (pm/checks/spf.mdx). Fetches the domain's `v=spf1` TXT record and runs the first-round

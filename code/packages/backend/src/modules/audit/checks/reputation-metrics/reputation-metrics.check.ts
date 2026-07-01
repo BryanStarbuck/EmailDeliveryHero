@@ -1,5 +1,5 @@
-import { resolve4, resolveMx, resolveTxt } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import { resolve4, resolveMx, resolveTxt } from "../dns-util"
+import type { Checker, Finding } from "../types"
 
 /**
  * Sender Reputation Metrics (Spam & Content family, `content` checkId prefix).

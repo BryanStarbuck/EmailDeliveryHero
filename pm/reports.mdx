@@ -1,0 +1,223 @@
+---
+title: EmailDeliveryHero — Reports
+description: The Reports surface (route /reports) — the report library. A report is the rendered view of one RUN (a dated, per-domain execution of all checks). The page is one stacked TanStack Table of the newest 10 reports read from the on-disk run history (runs.json in the state dir, served by GET /api/audit/runs) — Date, Domain, Score, then the six locked test columns — and clicking any row opens that report in the existing view-one-report design (/domains/$domainId/runs/$runId). Defines the table layout, the row → report navigation, the disk/data mapping, empty/loading states, and the relationship to the planned report-email (DMARC rua / TLS-RPT) section.
+---
+
+# EmailDeliveryHero — Reports
+
+**Reports** is the report library: every time checks run — a manual **Run checks**, a per-domain
+play button, or the scheduler — the engine writes one **run** to disk, and this page is where the
+user comes back to **see those reports and open one**. The page is deliberately simple: a heading
+and **one stacked table of the newest 10 reports**; clicking a report opens it in the existing
+**view-one-report** design.
+
+The left bar's **Reports** item (order 5, icon `Mailbox`, route `/reports` — source of truth
+`pm/left_bar.yaml`) lands here.
+
+This spec builds on the siblings and does not repeat them:
+
+* [Overview](./overview.mdx) — the product charter, personas, ports (UI **4444**, API **9312**).
+* [UI](./ui.mdx) — the design language every screen shares: the six locked test categories, the
+  four status colors, the `StatusCell`, the app frame.
+* [Dashboard](./dashboard.mdx) — defines the **Run → Test → Sub-test** vocabulary (§1), the
+  `AuditRun` record, the run-history backend requirement, and the Runs table this page is the
+  library view of.
+* [View a health-check run](./use_cases/view_health_check_run.mdx) — the **view-one-report** page a
+  row click opens.
+* [Storage](./storage.mdx) — the out-of-repo state directory everything below persists into.
+* [Report-email ingestion](./emails.mdx) — the **planned** second content block on this page
+  (ingested DMARC `rua` + TLS-RPT report emails); see §6.
+
+---
+
+## 1. What a report is (vocabulary)
+
+| Term | Definition |
+| --- | --- |
+| **Run** | One execution of all checks for **one domain** ([Dashboard §1](./dashboard.mdx), LOCKED): `runId`, `domainId`, `domain`, `startedAt`, `finishedAt`, `score`, `status`, `findings`, `counts`. |
+| **Report** | The **rendered view of one run** — what the user reads: the summary header, the six test chips, and every sub-test finding with its fix. "Open a report" = navigate to that run's report page. |
+| **Reports page** | Route `/reports` — the library listing the newest runs as openable reports. |
+
+One run produces exactly one report. There is no separate report record on disk — a report **is** a
+run, read back from the run history and rendered.
+
+---
+
+## 2. Where the data lives on disk (the mapping)
+
+The Reports page invents **no new storage**. It reads exactly what the engine already writes when
+tests run:
+
+* **State directory** — `~/T/_emaildeliveryhero/` (override: `EDH_STATE_DIR`), per
+  [Storage §1](./storage.mdx). Resolved by `packages/backend/src/shared/state-dir.ts`.
+* **`runs.json`** — the run history. `AuditService.persistResult` **prepends every finished run**
+  (manual all-domains, manual per-domain, and scheduled runs all pass through it), capped at the
+  newest **50 runs per domain**, written through the service's write-lock so parallel per-domain
+  scans never clobber each other ([Run orchestration](./run_checks.mdx)).
+* **`audits.json`** — the *latest result per domain* map. The Dashboard's health grid reads this;
+  the Reports page does **not** (it is history-oriented, so it reads `runs.json`).
+
+The REST contract (already served by `modules/audit/audit.controller.ts`):
+
+| Endpoint | Used for |
+| --- | --- |
+| `GET /api/audit/runs` | The table's rows — all kept runs, newest `startedAt` first (optional `?domainId=`). The page renders the first **10**. |
+| `GET /api/audit/runs/:runId` | One run in full — the data behind the view-one-report page. |
+| `DELETE /api/audit/runs/:runId` | Remove one report from the history (row ⋮ menu, §3.4). |
+
+Frontend access is through the existing TanStack Query hooks in `src/api/audit.ts`
+(`useAuditRuns`, `useAuditRun`, `useDeleteRun`) — no new API code.
+
+---
+
+## 3. Layout — the Reports dashboard (route `/reports`)
+
+The page renders inside the standard app frame ([UI §2](./ui.mdx)): 256px left bar, scrolling
+content, `max-w-6xl` centered content column (same width as the Dashboard).
+
+```
+┌────────────┬───────────────────────────────────────────────────────────────────────────┐
+│            │  Reports                                                                   │
+│  LEFT BAR  │  Every health-check run, newest first — click a report to open it.         │
+│            ├───────────────────────────────────────────────────────────────────────────┤
+│ Dashboard  │ Date              Domain          Score  SPF    DKIM   DMARC  Blkl  DNS&I  Spam    │
+│ Domains    ├───────────────────────────────────────────────────────────────────────────┤
+│ Audits     │ 2026-07-01 09:14  whitehat….com   62     Hlthy  1of1f  Hlthy  Hlthy 1of10  92%  › ⋮│ ← click → this report
+│ Blacklists │ 2026-07-01 09:14  act3ai.com      88     Hlthy  Hlthy  1of7f  Hlthy Hlthy  88%  › ⋮│
+│ Reports ◀  │ 2026-06-30 03:00  whitehat….com   94     Hlthy  Hlthy  Hlthy  Hlthy Hlthy  95%  › ⋮│
+│ Settings   │ …                                        (up to 10 rows)                   │
+│            ├───────────────────────────────────────────────────────────────────────────┤
+│  [account] │ Showing the newest 10 of 37 reports                                        │
+└────────────┴───────────────────────────────────────────────────────────────────────────┘
+```
+
+### 3.1 Page header
+
+* **Title** — `Reports`, `text-2xl font-bold` (the per-page pattern, like Domains — the big brand
+  wordmark belongs to the Dashboard only).
+* **Subtitle** — one muted line under the title: *"Every health-check run, newest first — click a
+  report to open it."*
+* No top-right action buttons in the first round. Runs are started from the Dashboard / Domains /
+  report pages; this page is for **reading** what ran.
+
+### 3.2 The reports table (one stacked table, newest 10)
+
+A **TanStack Table**, one row per report, sorted by `startedAt` **descending** (the newest report
+is the top row), truncated to the newest **10** rows across all domains.
+
+Column order (LOCKED left-to-right):
+
+| # | Column | Content |
+| --- | --- | --- |
+| 1 | **Date** | The run's `startedAt`, formatted `YYYY-MM-DD HH:mm` (local time). The primary sort key. |
+| 2 | **Domain** | The domain name captured at run time (`run.domain`). |
+| 3 | **Score** | The run's numeric score, rendered as the standard `ScoreBadge` (`62/100`). |
+| 4–9 | **The six locked test columns** | SPF · DKIM · DMARC · Blacklists · DNS & Infrastructure · Spam & Content — each a `StatusCell` rolled up from **that run's** findings via `rollupCategories` (same four colors and metric text rules as the Dashboard, [UI §1.2–1.3](./ui.mdx)). |
+| 10 | **Row controls** | Right-aligned: a **› chevron** (`ChevronRight`) and a **⋮ menu** (`MoreVertical`), §3.4. |
+
+* Header row: same treatment as the Dashboard grid (`bg-slate-50`, uppercase, muted).
+* **Below the table** a muted caption sizes the library: `Showing the newest 10 of N reports`
+  (N = total rows returned by `GET /api/audit/runs`). When N ≤ 10 the caption reads
+  `N report(s)`.
+
+### 3.3 Row click → open the report
+
+**Clicking anywhere in a row opens that report** in the existing **view-one-report** design (§4):
+
+* Navigate to **`/domains/$domainId/runs/$runId`** — the historical-run report route.
+* The whole row is the hit target (`cursor-pointer`, hover highlight), routed via TanStack Router.
+* **Fallback:** a pre-history row without a `runId` (old persisted data — the field is optional on
+  `AuditResult`) opens the domain's **newest** report instead (`/domains/$domainId`).
+
+### 3.4 Row controls
+
+Trailing cell, right-aligned, clicks **stop propagation** (they never double-fire the row
+navigation):
+
+* **› Chevron** — same destination as the row click; the visible affordance that a row opens.
+* **⋮ Menu** — actions for that report:
+  * **Open report** — same as the row click.
+  * **Run checks again** — a fresh run for the same domain (`POST /api/audit/run/:domainId`,
+    through the scan runner so the progress card shows, [Progress UI](./progress_ui.mdx)). The new
+    report appears at the top of the table when it finishes (query invalidation).
+  * **Delete report** — `DELETE /api/audit/runs/:runId`, confirm dialog first. Removes the row;
+    it does **not** touch the domain or the latest-per-domain result.
+
+---
+
+## 4. The view-one-report page (where a row click lands)
+
+Opening a report navigates to the **existing run report** — this spec adds **no second report
+design**. It is the page specified in [UI §5](./ui.mdx) /
+[View a health-check run](./use_cases/view_health_check_run.mdx) and implemented by
+`RunDetailPage`, which serves both routes:
+
+* `/domains/$domainId/runs/$runId` — **this specific report** (data: `GET /api/audit/runs/:runId`).
+* `/domains/$domainId` — the domain's newest report (the `runId`-less fallback).
+
+What the user sees there (recap only — the layout is owned by [UI §5](./ui.mdx)): the summary
+header (domain, score, status badge, open-problem count, started/finished times), the **six test
+chips**, and every sub-test finding grouped by test with the severity badge → observed detail →
+**copy-able fix** pattern. **Back to dashboard** returns to `/`; the browser Back button returns
+to `/reports`.
+
+---
+
+## 5. States
+
+* **Loading** — skeleton rows sized to the table's columns (10 shimmer rows), no layout shift.
+* **Empty (no reports yet)** — the table is replaced by a dashed card: *"No reports yet. Run
+  checks from the Dashboard and every run will file its report here."* with a **Go to Dashboard →**
+  link (`/`). This is also what a brand-new install shows (no `runs.json` on disk yet → the API
+  returns `[]`).
+* **Error** — the standard query-error toast ([Errors](./errors.mdx)); the page keeps its last
+  rendered rows if it has any.
+* **Refetch after a run** — existing rows stay visible until the new data replaces them; a
+  just-finished run appears as the new top row.
+
+---
+
+## 6. Relationship to report-email ingestion (planned)
+
+[Report-email ingestion](./emails.mdx) specifies a second kind of report — **inbound** DMARC
+aggregate (`rua`) and TLS-RPT report emails that *receivers* send about your domain. When that
+ships, it lands **on this same page as a second section below the reports table** (grouped by
+report kind, with the per-source-IP drill-down and **Ingest now**, per [UI §7.3](./ui.mdx)). The
+two blocks answer complementary questions: the reports table is *"what did **our** checks find?"*;
+the email section is *"what do **receivers** say happened?"*. No seventh test category is added,
+and this spec's table is unaffected. Until then, `/reports` is the run-report library alone.
+
+---
+
+## 7. Acceptance criteria
+
+1. The left bar's **Reports** item routes to `/reports` and the page **renders** (today it 404s —
+   the route must exist and mount inside the app frame for everyone, signed in or `default`).
+2. The page shows the title **Reports**, the one-line subtitle, and **one stacked table of the
+   newest 10 reports** across all domains, sorted by `startedAt` descending, fed by
+   `GET /api/audit/runs` (which reads `runs.json` in the state dir — the same file every manual,
+   per-domain, and scheduled run appends to; **no new storage**).
+3. Columns, in order: **Date** (`YYYY-MM-DD HH:mm`), **Domain**, **Score** (ScoreBadge), the **six
+   locked test columns** as `StatusCell`s rolled up from that run's findings (four colors + metric
+   text per [UI §1.2–1.3](./ui.mdx)), then the row controls.
+4. **Clicking anywhere in a row opens that report** at `/domains/$domainId/runs/$runId` (the
+   existing view-one-report design); a `runId`-less legacy row opens `/domains/$domainId`. The
+   chevron does the same; row controls stop propagation.
+5. The **⋮ menu** offers Open report / Run checks again / Delete report (confirm first;
+   `DELETE /api/audit/runs/:runId`), and mutations refresh the table via query invalidation.
+6. The caption under the table reads `Showing the newest 10 of N reports` (or `N report(s)` when
+   N ≤ 10).
+7. Loading, empty, and error states render per §5 with no layout shift; the empty state links to
+   the Dashboard.
+8. No new backend endpoint, store, or report record is introduced — the page is a pure read of the
+   existing run history.
+
+<!--
+  reports.mdx maintenance: this page is the run-report LIBRARY over runs.json — keep it in lockstep
+  with pm/dashboard.mdx §1 (Run → Test → Sub-test, the AuditRun record, the 50-per-domain cap) and
+  ui.mdx §1 (six locked tests, four colors, StatusCell). The view-one-report design is OWNED by
+  ui.mdx §5 / use_cases/view_health_check_run.mdx — never redefine it here. If the newest-10 cap or
+  the column order changes, update §3.2 and acceptance #2/#3. When report-email ingestion
+  (emails.mdx) ships its section on this page, expand §6 into a full layout section rather than
+  moving the table. Left bar lives in pm/left_bar.yaml — never redefine it here.
+-->

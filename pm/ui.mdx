@@ -25,8 +25,9 @@ It builds on the siblings and does not repeat their internals:
   logged out). This is why no screen ever gates behind a sign-in wall.
 * [Engineering](./engineering.mdx) — the audit engine, the `Finding` / `AuditResult` shape, the REST
   contract, and the React 19 + Vite + Tailwind + lucide-react + TanStack Router/Query frontend.
-* [Dashboard](./dashboard.mdx) · [Domains](./domains.mdx) · [Settings](./settings.mdx) ·
-  [Scheduled checks](./scheduled_checks.mdx) — the per-screen specs this consolidates.
+* [Dashboard](./dashboard.mdx) · [Domains](./domains.mdx) · [Reports](./reports.mdx) ·
+  [Settings](./settings.mdx) · [Scheduled checks](./scheduled_checks.mdx) — the per-screen specs
+  this consolidates.
 * [View a health-check run](./use_cases/view_health_check_run.mdx) ·
   [Audit a domain](./use_cases/audit_a_domain.mdx) ·
   [Domain on a blacklist](./use_cases/domain_on_blacklist.mdx) — the flows expanded in §8.
@@ -158,7 +159,7 @@ A flat, ordered list; the account slot pinned to the bottom.
 | 2 | **Domains** | `Globe` | `/domains` | Add/manage the sending domains under audit. |
 | 3 | **Audits** | `ShieldCheck` | `/audits` | Per-domain audit results and every finding's fix. |
 | 4 | **Blacklists** | `Ban` | `/blacklists` | DNSBL status + delisting steps across all domains. |
-| 5 | **Reports** | `Mailbox` | `/reports` | Ingested DMARC (`rua`) + TLS-RPT report emails: who sent as your domain, alignment, TLS health, with fixes. |
+| 5 | **Reports** | `Mailbox` | `/reports` | The report library — the newest 10 health-check reports (one per run), each opening the view-one-report page ([Reports](./reports.mdx)). |
 | 6 | **Settings** | `Settings` | `/settings` | Account, scheduling, app config. |
 
 Header: the **"Email Delivery Hero"** wordmark (spaces between the three words, green, normal
@@ -309,26 +310,26 @@ URL for the specific blocklist, never a generic note. Empty state prompts an aud
 
 ### 7.3 Reports (`/reports`)
 
-The inbound-report surface — the receivers' own account of your mail. It reads the ingested **DMARC
-aggregate (`rua`)** and **TLS-RPT** report emails ([Report-email ingestion](./emails.mdx)) and, per
-domain over a rolling window, answers the user's three-step need: *see the problem → open the details
-→ get the fix.*
+The **report library** — full spec in [Reports](./reports.mdx). A *report* is the rendered view of
+one **run** ([Dashboard §1](./dashboard.mdx)); this page lists the newest ones so the user can come
+back and open any of them.
 
-* Grouped by report kind, each group header showing report count, reporters, volume, and the window
-  (e.g. "DMARC aggregate · 5 reports · google.com, outlook.com · 1,195 msgs · 06-24→06-30").
-* Each problem is a standard [finding row](#14-the-common-finding-presentation-pattern): severity
-  badge → observed detail → copy-able fix. Examples: *SPF-alignment fragility* on an ESP stream (fix:
-  `aspf=r` or a branded Return-Path), an *unauthorized/unaligned sender* (spoof vs. forgot-to-
-  authorize), *own mail being rejected/quarantined*, or *inbound-TLS failures* from TLS-RPT.
-* **Open the details** — expanding a DMARC finding reveals the **per-source-IP table** (`Source IP ·
-  Count · Disposition · SPF eval/align · DKIM eval/align · DMARC · Header-From · Envelope`); a TLS-RPT
-  finding expands to per-reporter/day success/failure counts and `failure-details`.
-* **Ingest now** triggers an on-demand mailbox/drop-folder scan. Empty state explains how to publish
-  `rua=` and point the mailbox at the app (Settings → Admin).
-* These same report findings also appear **in the run detail** (§5) — `dmarc.report_*` under DMARC,
-  `infra.tls_rpt_reports_ingested` under DNS & Infrastructure — each tagged with a **"from reports"**
-  chip so the evidence source is clear. They roll into the **existing** DMARC and DNS & Infrastructure
-  cells; no seventh category is added.
+* A page title (`Reports`) + one-line subtitle over **one stacked table of the newest 10 reports**
+  across all domains, newest `startedAt` first, read from the on-disk run history (`runs.json` via
+  `GET /api/audit/runs` — no new storage).
+* Columns: **Date** (`YYYY-MM-DD HH:mm`) · **Domain** · **Score** · the **six locked test columns**
+  as StatusCells (§1.2–1.3) · row controls (**› chevron**, **⋮ menu**: Open report / Run checks
+  again / Delete report).
+* **Clicking anywhere in a row opens that report** at `/domains/$domainId/runs/$runId` — the
+  existing **run detail / view-one-report** design (§5). No second report design exists.
+* A caption sizes the library: `Showing the newest 10 of N reports`.
+* **Planned second section — report-email ingestion** ([Report-email ingestion](./emails.mdx)):
+  the receivers' own account of your mail. Ingested **DMARC aggregate (`rua`)** and **TLS-RPT**
+  report emails render below the table, grouped by report kind, each problem a standard
+  [finding row](#14-the-common-finding-presentation-pattern) expanding to the per-source-IP (or
+  per-reporter/day) detail table, plus an **Ingest now** action. Those findings also appear in the
+  run detail (§5) tagged **"from reports"**, rolling into the existing DMARC / DNS & Infrastructure
+  cells — no seventh category.
 
 ### 7.4 Settings (`/settings/*`)
 
@@ -442,10 +443,10 @@ watch cells go green. See [View a health-check run](./use_cases/view_health_chec
 5. **Domains** supports add (validated, duplicates rejected), edit (`PATCH`), remove (confirm), run-
    now (`POST /api/audit/run/:id`), and open-detail, and shows each domain's six latest category cells.
 6. **Audits**, **Blacklists**, **Reports**, and **Settings** render per §7, using the common finding-
-   presentation pattern and the settings sub-nav. **Reports** groups ingested DMARC-aggregate + TLS-RPT
-   findings, expands each to a per-source-IP (or per-reporter/day) detail table, offers a copy-able fix
-   and **Ingest now**, and rolls its findings into the existing DMARC / DNS & Infrastructure cells (no
-   seventh category); the same findings also appear in the run detail tagged "from reports".
+   presentation pattern and the settings sub-nav. **Reports** shows the newest-10 report table per
+   [Reports](./reports.mdx) — every row opens the run detail (§5) — with the ingested DMARC-aggregate +
+   TLS-RPT email section (per-source-IP drill-down, **Ingest now**, findings rolled into the existing
+   DMARC / DNS & Infrastructure cells, no seventh category) as its **planned** second block.
 7. The **two left bars** are driven by `pm/left_bar.yaml`; the account slot offers **Sign in** when
    logged out and the identity + gated menu (Settings / Admin / Log out) when signed in.
 8. Every non-`ok` finding presents a **concrete, copy-able remediation** — the product's whole promise.

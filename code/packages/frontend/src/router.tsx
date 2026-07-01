@@ -12,10 +12,13 @@ import { DkimPage } from "@/pages/domains/DkimPage"
 import { DkimProblemPage } from "@/pages/domains/DkimProblemPage"
 import { DmarcPage } from "@/pages/domains/DmarcPage"
 import { DmarcProblemPage } from "@/pages/domains/DmarcProblemPage"
+import { DnsPage } from "@/pages/domains/DnsPage"
+import { DnsProblemPage } from "@/pages/domains/DnsProblemPage"
 import { DomainsPage } from "@/pages/domains/DomainsPage"
 import { RunDetailPage } from "@/pages/domains/RunDetailPage"
 import { SpfPage } from "@/pages/domains/SpfPage"
 import { SpfProblemPage } from "@/pages/domains/SpfProblemPage"
+import { ReportsPage } from "@/pages/reports/ReportsPage"
 import { SettingsPage } from "@/pages/settings/SettingsPage"
 import { SignInPage } from "@/pages/sign-in/SignInPage"
 import { SsoCallbackPage } from "@/pages/sso-callback/SsoCallbackPage"
@@ -98,6 +101,17 @@ const dmarcProblemRoute = createRoute({
   path: "/domains/$id/dmarc/$problemId",
   component: DmarcProblemPage,
 })
+// The DNS & Infrastructure full page (pm/checks/dns.mdx §6.2) and its problem drill-downs.
+const dnsRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/dns",
+  component: DnsPage,
+})
+const dnsProblemRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/dns/$problemId",
+  component: DnsProblemPage,
+})
 const dkimRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/domains/$id/dkim",
@@ -139,6 +153,12 @@ const blacklistStateRoute = createRoute({
   path: "/blacklists/$domain/state/$psId",
   component: BlacklistStatePage,
 })
+// The report library (pm/reports.mdx) — the left bar's Reports item lands here.
+const reportsRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/reports",
+  component: ReportsPage,
+})
 const settingsIndexRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/settings",
@@ -160,6 +180,8 @@ const routeTree = rootRoute.addChildren([
     runReportRoute,
     dmarcRoute,
     dmarcProblemRoute,
+    dnsRoute,
+    dnsProblemRoute,
     dkimRoute,
     dkimProblemRoute,
     spfRoute,
@@ -168,6 +190,7 @@ const routeTree = rootRoute.addChildren([
     blacklistsRoute,
     blacklistDomainRoute,
     blacklistStateRoute,
+    reportsRoute,
     settingsIndexRoute,
     settingsSectionRoute,
   ]),

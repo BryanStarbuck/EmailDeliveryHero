@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
-import { dig, resolveSoa } from "./dns-util"
-import type { Checker, CheckOutcome, Finding } from "./types"
+import { dig, resolveSoa } from "../dns-util"
+import type { Checker, CheckOutcome, Finding } from "../types"
 
 /**
  * DNSSEC (DNS Security Extensions, RFC 4033/4034/4035). Verifies that a mail domain's zone is signed

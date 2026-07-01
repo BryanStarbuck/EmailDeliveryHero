@@ -1,6 +1,6 @@
 import { Link, useNavigate, useParams } from "@tanstack/react-router"
 import { ArrowLeft, ChevronRight, RefreshCw, Wrench } from "lucide-react"
-import { useAuditResults } from "@/api/audit"
+import { useAuditResults, useAuditRun } from "@/api/audit"
 import { useDomains } from "@/api/domains"
 import type { Finding } from "@/api/types"
 import { ScoreBadge, SeverityBadge } from "@/components/Badges"
@@ -18,21 +18,23 @@ import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext"
 const ORDER = { critical: 0, warning: 1, info: 2, ok: 3 } as const
 
 /**
- * The run detail (pm/ui.mdx §5) — one domain's latest audit in full. A summary header (score, status,
- * open-problem count), the six colored category chips, and every finding grouped by the six
- * categories with a Copy-fix control on each non-ok problem. This is where the product delivers its
- * promise: the exact record to publish for every problem.
+ * The run report (pm/ui.mdx §5, pm/dashboard.mdx §6) — one RUN in full: a summary header (score,
+ * status, open-problem count, start/stop times), the six colored TEST chips, and every SUB-TEST
+ * finding grouped by test with a Copy-fix control on each non-ok problem. Serves both routes:
+ * /domains/$id (the domain's newest run) and /domains/$id/runs/$runId (a historical run from the
+ * dashboard's Runs table).
  */
 export function RunDetailPage() {
-  const { id = "" } = useParams({ strict: false }) as { id?: string }
+  const { id = "", runId } = useParams({ strict: false }) as { id?: string; runId?: string }
   const { data: domains } = useDomains()
   const { data: results } = useAuditResults()
+  const { data: historicalRun } = useAuditRun(runId)
   const runDomains = useScanRunner()
   const scanning = useScanProgress().some((s) => s.domainId === id)
   const navigate = useNavigate()
 
   const domain = (domains ?? []).find((d) => d.id === id)
-  const result = (results ?? []).find((r) => r.domainId === id)
+  const result = runId ? historicalRun : (results ?? []).find((r) => r.domainId === id)
   const cells = rollupCategories(result?.findings)
 
   // Runs through the shared scan runner so a "Running <domain>" card shows in the dock.
@@ -82,7 +84,10 @@ export function RunDetailPage() {
             <span>
               {openProblems} open problem{openProblems === 1 ? "" : "s"}
             </span>
-            <span>· ran {new Date(result.ranAt).toLocaleString()}</span>
+            <span>
+              · started {new Date(result.startedAt ?? result.ranAt).toLocaleString()}
+              {result.finishedAt && <> · finished {new Date(result.finishedAt).toLocaleString()}</>}
+            </span>
           </div>
 
           {/* Six category chips, colored to match the Dashboard cells. */}

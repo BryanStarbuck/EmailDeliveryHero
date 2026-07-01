@@ -1,7 +1,7 @@
 import { request as httpsRequest } from "node:https"
 import { domainToUnicode } from "node:url"
-import { resolveNs } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import { resolveNs } from "../dns-util"
+import type { Checker, Finding } from "../types"
 
 /**
  * Domain Registration Reputation (WHOIS/RDAP). Reads each sending domain's registration record via

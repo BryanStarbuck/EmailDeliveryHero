@@ -1,5 +1,5 @@
-import { resolve4, resolveTxt } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import { resolve4, resolveTxt } from "../dns-util"
+import type { Checker, Finding } from "../types"
 
 /**
  * Link / URL Reputation (content.url_*). Extracts every link from a sample message, reduces each

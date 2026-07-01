@@ -49,6 +49,10 @@ All MDX specifications in this directory and its subdirectories:
   List-Unsubscribe, link/URL reputation, reputation metrics, inbox placement). Each expands a slice
   of the catalog with its sub-checks, detection method, a **User Interface** section, an
   **Information Schema (database schema)** section, and when the check runs.
+* [Reports](./reports.mdx) — the report library at `/reports`: one stacked table of the newest 10
+  health-check reports (a report = the rendered view of one run, read from the on-disk run history
+  `runs.json`), each row opening the existing view-one-report page. Also fixes the left-bar Reports
+  route, which previously pointed at a page that did not exist.
 * [User Interface](./ui.mdx) — the consolidated UI spec: the shared design language (six locked
   categories, four status colors, the StatusCell, the brand header, the account slot), a walkthrough
   of every screen (Dashboard, Domains, Run detail, Audits, Blacklists, Settings), the two left bars,
@@ -212,9 +216,10 @@ The app's primary navigation is a left bar with these sections (the data source 
 * **Domains** — the Monitored Domains CRUD.
 * **Audits** — audit history and the findings of any given run.
 * **Blacklists** — DNSBL status across all monitored domains/IPs.
-* **Reports** — ingested DMARC aggregate (`rua`) and TLS-RPT report emails per domain: who sent as
-  your domain, SPF/DKIM alignment, and inbound-TLS health, each with the concrete fix. See
-  [Report-email ingestion](./emails.mdx).
+* **Reports** — the report library: the newest 10 health-check reports (one per run, read from the
+  on-disk run history), each opening the full view-one-report page. See [Reports](./reports.mdx).
+  A **planned** second section adds the ingested DMARC aggregate (`rua`) and TLS-RPT report emails
+  per [Report-email ingestion](./emails.mdx).
 * **Settings** — app and per-user settings.
 * **Account block (bottom):** avatar / name / email → menu with **Settings**, **Admin** (gated by
   the `role:admin` claim), and **Log out**.
@@ -247,6 +252,7 @@ EmailDeliveryHero/
 │   ├── domains.mdx          # Monitored Domains CRUD + per-domain schedule toggle
 │   ├── scheduled_checks.mdx # recurring checks: config page + per-OS scheduling
 │   ├── run_checks.mdx       # run orchestration: triggers, stage graph, concurrency, per-OS tools
+│   ├── reports.mdx          # the report library at /reports (newest 10 runs → view-one-report)
 │   ├── settings.mdx         # the Settings page
 │   ├── storage.mdx          # on-disk state: config.yaml, per-user config, domains.yaml, logs
 │   ├── errors.mdx           # error handling & logging: log.log + error.err, rolling writer, filter

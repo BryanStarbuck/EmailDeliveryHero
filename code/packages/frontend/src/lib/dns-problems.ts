@@ -51,7 +51,7 @@ export const DNS_PROBLEM_STATES: DnsProblemState[] = [
     ],
     concept: [
       "An absent, dangling, CNAME'd, or private-IP MX doesn't just break inbound mail: receivers check that the From: domain has a valid MX or A record (a Gmail requirement), and a domain that can't take bounces or feedback-loop mail accumulates reputation damage invisibly.",
-      "RFC 5321 §5.1 and RFC 2181 §10.3 forbid MX targets that are CNAMEs; RFC 7505's null MX (MX 0 \".\") declares a domain no-mail and must be the only MX record when used.",
+      'RFC 5321 §5.1 and RFC 2181 §10.3 forbid MX targets that are CNAMEs; RFC 7505\'s null MX (MX 0 ".") declares a domain no-mail and must be the only MX record when used.',
     ],
     dataFields: [
       "mx_routing.mx_found / null_mx / implicit_a_fallback",
@@ -175,7 +175,9 @@ export const DNS_PROBLEM_STATES: DnsProblemState[] = [
     ],
     commands: ["dig SOA <domain> +multiline", "dig MX <domain>   # read the TTL column"],
     tools: ["dig", "intoDNS (flags out-of-range SOA values with RFC citations)"],
-    metrics: ["TTL history across scheduled runs — a TTL that drops without a migration is a flag."],
+    metrics: [
+      "TTL history across scheduled runs — a TTL that drops without a migration is a flag.",
+    ],
     pathForward: [
       "Adopt the modern default set: refresh 14400, retry 3600, expire 1209600, minimum 3600.",
       "Use the YYYYMMDDnn serial convention and bump it on every zone edit.",
@@ -239,9 +241,7 @@ export const DNS_PROBLEM_STATES: DnsProblemState[] = [
       "dnsviz probe <domain> | dnsviz grok",
     ],
     tools: ["dnsviz, delv (bind), drill (ldns), kdig +dnssec (brew install dnsviz bind ldns knot)"],
-    metrics: [
-      "Future probe reads RRSIG inception/expiration and warns under 7 days from expiry.",
-    ],
+    metrics: ["Future probe reads RRSIG inception/expiration and warns under 7 days from expiry."],
     pathForward: [
       "If BROKEN (DS mismatch): re-sign or fix the DS at the registrar today — resolvers are SERVFAILing the zone right now. Pulling the DS temporarily beats staying bogus.",
       "If unsigned: enable automated signing at your DNS provider (algorithm 13), then publish the DS at the registrar (SHA-256 digest).",
@@ -265,7 +265,7 @@ export const DNS_PROBLEM_STATES: DnsProblemState[] = [
       "dane_without_dnssec",
     ],
     concept: [
-      "DANE publishes a TLSA record at _25._tcp.<mx-host> binding the MX certificate into DNS, closing the STARTTLS-stripping hole for senders that validate it (Postfix dane mode, Exchange Online). The \"3 1 1\" profile (DANE-EE, SubjectPublicKeyInfo, SHA-256) survives certificate renewals that keep the same key pair.",
+      'DANE publishes a TLSA record at _25._tcp.<mx-host> binding the MX certificate into DNS, closing the STARTTLS-stripping hole for senders that validate it (Postfix dane mode, Exchange Online). The "3 1 1" profile (DANE-EE, SubjectPublicKeyInfo, SHA-256) survives certificate renewals that keep the same key pair.',
       "The hard prerequisite is DNSSEC — an unsigned TLSA is ignored. And a TLSA that stops matching the live certificate makes DANE-validating senders bounce your inbound mail, which is worse than publishing nothing.",
     ],
     dataFields: [

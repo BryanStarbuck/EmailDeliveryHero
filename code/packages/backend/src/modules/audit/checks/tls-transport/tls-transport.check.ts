@@ -1,5 +1,5 @@
-import { resolveMx } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import { resolveMx } from "../dns-util"
+import type { Checker, Finding } from "../types"
 
 /**
  * STARTTLS Transport Encryption & MX TLS Certificate Health (pm/checks/tls_transport.mdx).

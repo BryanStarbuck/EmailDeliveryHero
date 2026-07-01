@@ -1,6 +1,6 @@
 import { isIPv6 } from "node:net"
-import { resolve4, resolve6, resolveCname, resolveMx, reverse, reverseIpv4 } from "./dns-util"
-import type { Checker, CheckOutcome, Finding } from "./types"
+import { resolve4, resolve6, resolveCname, resolveMx, reverse, reverseIpv4 } from "../dns-util"
+import type { Checker, CheckOutcome, Finding } from "../types"
 
 /**
  * Reverse DNS / PTR / FCrDNS. For every sending IP the domain claims, audits the reverse-lookup

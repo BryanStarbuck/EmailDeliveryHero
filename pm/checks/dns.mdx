@@ -881,7 +881,8 @@ land. Because the store module fronts all of this, the file→DB move is a singl
 | DANE TLSA presence/profile per MX | ✅ (DNS side) | ⛔ live cert↔TLSA match via STARTTLS probe |
 | DNSSEC signed/DS/algorithms | ✅ via dig fallback (DS/DNSKEY) | RRSIG validity-window reads, full chain validation (dnsviz-grade) |
 | NS sanity/diversity/parent-child/glue | ✅ full | per-NS latency trending, TCP/EDNS conformance |
-| SOA + TTL ranges + wildcard + apex hygiene | ✅ full | TTL-history trending across runs |
+| SOA ranges + wildcard + apex hygiene | ✅ full | — |
+| Record-TTL ranges (`ttl_sanity`, `mx_ttl`) | `.pending` only (node:dns exposes no TTLs) | ⛔ dig-parsed TTLs + history trending |
 | Registration (RDAP age/expiry/locks/status) | ✅ full (cached daily) | NRD-feed cross-check, registrar-reputation feed |
 | SMTP hardening (relay/VRFY/AUTH) | `.pending` only | ⛔ opt-in SMTP probe under the `smtp25` semaphore |
 | Structured snapshots | ✅ mx_routing, reverse_dns, dns_health, dnssec | mta_sts, tls_rpt, dane_tlsa, domain_reputation, tls_transport, smtp_security payloads |
