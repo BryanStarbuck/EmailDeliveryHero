@@ -46,6 +46,19 @@ export function categoryOf(checkId: string): CategoryKey | null {
   return PREFIX_TO_KEY[checkId.split(".")[0]] ?? null
 }
 
+/**
+ * Categories that have a dedicated full-page technology view (pm/checks/*.mdx §6): the chevron on
+ * their Dashboard cell / run-detail chip routes here. Extend as more check pages are built.
+ */
+export const TECH_PAGE_ROUTES = {
+  spf: "/domains/$id/spf",
+  dmarc: "/domains/$id/dmarc",
+} as const
+
+export function techPageRoute(key: CategoryKey): "/domains/$id/spf" | "/domains/$id/dmarc" | null {
+  return key in TECH_PAGE_ROUTES ? TECH_PAGE_ROUTES[key as keyof typeof TECH_PAGE_ROUTES] : null
+}
+
 /** The never-run cell — no audit has produced this category yet. */
 export const NEVER_CELL: CellStatus = { color: "gray", label: "Never", title: "Never run" }
 

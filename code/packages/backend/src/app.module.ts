@@ -1,6 +1,7 @@
 import { AppConfigModule } from "@config/app-config.module"
 import { AuditModule } from "@module/audit/audit.module"
 import { AuthModule } from "@module/auth/auth.module"
+import { BlacklistsModule } from "@module/blacklists/blacklists.module"
 import { JwtAuthGuard } from "@module/auth/jwt-auth.guard"
 import { RolesGuard } from "@module/auth/roles.guard"
 import { DomainsModule } from "@module/domains/domains.module"
@@ -25,6 +26,7 @@ import { APP_GUARD } from "@nestjs/core"
     HealthModule,
     DomainsModule,
     AuditModule,
+    BlacklistsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },

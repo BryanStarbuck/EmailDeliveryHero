@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — Settings
-description: The Settings page for EmailDeliveryHero — a sectioned settings surface (Monitored domains, Checks configuration, Scheduled checks, Notifications, Storage & data, Tools & environment, Account & access, Appearance) that reads/writes the file-based config.yaml and domains.json under ~/.email_delivery_hero/. Documents each group's fields, where each persists, which fields are admin-only (role:admin), the REST contract (GET/PUT /api/settings), and the permission matrix.
+description: The Settings page for EmailDeliveryHero — a sectioned settings surface (Monitored domains, Checks configuration, Scheduled checks, Notifications, Storage & data, Tools & environment, Account & access, Appearance) that reads/writes the file-based config.yaml and domains.yaml under ~/.email_delivery_hero/. Documents each group's fields, where each persists, which fields are admin-only (role:admin), the REST contract (GET/PUT /api/settings), and the permission matrix.
 ---
 
 # EmailDeliveryHero — Settings
@@ -22,7 +22,7 @@ Related specs:
 
 * [Overview](./overview.mdx) — the charter, personas, the left nav, and where Settings fits.
 * [Engineering](./engineering.mdx) — the file store (`~/.email_delivery_hero/config.yaml`,
-  `domains.json`), the NestJS module list, and the audit engine these settings drive.
+  `domains.yaml`), the NestJS module list, and the audit engine these settings drive.
 * [Authentication](./authentication.mdx) — how `role:admin` gates the Admin sub-section.
 * [Dashboard](./dashboard.mdx) — where notifications about *new* problems ultimately surface.
 * [Scheduled checks](./scheduled_checks.mdx) — the full periodic-re-audit config that Settings
@@ -34,7 +34,7 @@ Related specs:
 > primary CRUD surface for the domains under audit and their per-domain detail. Settings hosts the
 > **global defaults** (default DKIM selectors to probe, default enabled checks, default DNSBL zones)
 > and a compact management view of the same domain list. Editing a domain in either place writes the
-> same `domains.json`.
+> same `domains.yaml`.
 
 ---
 
@@ -76,7 +76,7 @@ rejects writes to admin-only fields regardless of what the UI shows.
 
 All settings groups persist to the file store described in [Engineering](./engineering.mdx) — the
 user-tunable, global config lives in `~/.email_delivery_hero/config.yaml`; per-domain data lives in
-`~/.email_delivery_hero/domains.json`. There is **no database**.
+`~/.email_delivery_hero/domains.yaml`. There is **no database**.
 
 ---
 
@@ -88,11 +88,11 @@ applied to newly added domains.
 
 | Field | Type | Meaning | Persists to |
 | --- | --- | --- | --- |
-| Domain | string (FQDN) | The sending domain, e.g. `whitehatengineering.com`. Unique. | `domains.json[].domain` |
-| Sending IPs | string[] (IPv4/IPv6) | The IPs mail is sent from — used by the PTR and DNSBL checkers. | `domains.json[].sendingIps` |
-| DKIM selectors | string[] | Per-domain selectors to probe (e.g. `google`, `s1`). Overrides the global default. | `domains.json[].selectors` |
-| Enabled | boolean | Whether this domain is included in scheduled runs. | `domains.json[].enabled` |
-| Notes | string | Free-text operator note. | `domains.json[].notes` |
+| Domain | string (FQDN) | The sending domain, e.g. `whitehatengineering.com`. Unique. | `domains.yaml[].domain` |
+| Sending IPs | string[] (IPv4/IPv6) | The IPs mail is sent from — used by the PTR and DNSBL checkers. | `domains.yaml[].sendingIps` |
+| DKIM selectors | string[] | Per-domain selectors to probe (e.g. `google`, `s1`). Overrides the global default. | `domains.yaml[].selectors` |
+| Enabled | boolean | Whether this domain is included in scheduled runs. | `domains.yaml[].enabled` |
+| Notes | string | Free-text operator note. | `domains.yaml[].notes` |
 | **Default DKIM selectors** | string[] | Global fallback probed when a domain has no selectors of its own. | `config.yaml checks.dkim.defaultSelectors` |
 
 Actions: **Add domain**, **Edit**, **Remove**, and **Audit now** (fires
@@ -176,7 +176,7 @@ file store (`~/.email_delivery_hero/`, overridable via `EDH_STATE_DIR`).
 | State directory | read-only path | The active state dir (default `~/.email_delivery_hero/`, or `EDH_STATE_DIR`). | (resolved at boot from env) |
 | Open state dir | action | Reveal the state dir in Finder. | (action) |
 | History retention | number (days) or count | How long/many audit run files per domain to keep before pruning `audits/<domainId>/`. | `config.yaml storage.retentionDays` **(admin-only)** |
-| Export | action | Download a zip of `config.yaml` + `domains.json` + `audits/` for backup/migration. | (action) |
+| Export | action | Download a zip of `config.yaml` + `domains.yaml` + `audits/` for backup/migration. | (action) |
 | Import | action | Restore from a previously exported archive (validated on read). | (action) **(admin-only)** |
 | Reset audit history | action | Delete all `audits/**` run files (keeps domains + config). | (action) **(admin-only)** |
 | Reset app | action | Clear the entire state dir back to defaults. | (action) **(admin-only)** |
@@ -252,7 +252,7 @@ All **all-users** — appearance never affects audits or other users.
 
 Settings read and write the same on-disk files described in [Engineering](./engineering.mdx) §7 —
 no database. Global and admin-owned settings live in `config.yaml`; per-domain facts live in
-`domains.json`; per-user preferences are namespaced by the user's OpenAuthFederated `sub` inside
+`domains.yaml`; per-user preferences are namespaced by the user's OpenAuthFederated `sub` inside
 `config.yaml`.
 
 ```yaml
@@ -316,7 +316,7 @@ appearance:                              # §8 — per-user
 ```
 
 ```yaml
-# ~/.email_delivery_hero/domains.json  (§1 — per-domain facts; also owned by the Domains area)
+# ~/.email_delivery_hero/domains.yaml  (§1 — per-domain facts; also owned by the Domains area)
 # [
 #   {
 #     "id": "dom_whitehat",
@@ -342,7 +342,7 @@ frontend calls the generated TanStack-Query hooks (see [Engineering](./engineeri
 | `PUT /api/settings/admin` | Update **admin-only** global fields (checks, dnsbl zones, thresholds, schedule, shared channels, retention, tools, access). Rejected `403` without `role:admin`. | `role:admin` |
 | `POST /api/settings/notifications/test` | Send a test notification on the selected channels. | signed-in (webhook/SMTP config edits still admin-only) |
 | `POST /api/settings/tools/detect` | Re-probe the environment for `dig`/`swaks` and return status. | signed-in |
-| `GET /api/settings/export` | Stream a zip of `config.yaml` + `domains.json` + `audits/`. | signed-in |
+| `GET /api/settings/export` | Stream a zip of `config.yaml` + `domains.yaml` + `audits/`. | signed-in |
 | `POST /api/settings/import` | Restore from an exported archive (validated on read). | `role:admin` |
 | `POST /api/settings/reset` | Reset audit history or the whole app (body selects scope). | `role:admin` |
 
@@ -390,8 +390,8 @@ The Settings page is correct when **all** of the following hold:
 
 1. Settings renders a **left sub-nav of setting groups** and a **right content pane**, driven by the
    `settings` left bar in `pm/left_bar.yaml`, and every route is reachable only by a signed-in user.
-2. **Monitored domains** (§1) lists the domains from `domains.json` and can add/edit/remove them and
-   trigger "Audit now"; edits write the same `domains.json` the Domains area uses.
+2. **Monitored domains** (§1) lists the domains from `domains.yaml` and can add/edit/remove them and
+   trigger "Audit now"; edits write the same `domains.yaml` the Domains area uses.
 3. **Checks configuration** (§2) enables/disables the six check categories, edits the DNSBL zone
    list, default DKIM selectors, and score thresholds/weights, persisting to `config.yaml`; all of
    §2 is **admin-only** and non-admins see it read-only.
@@ -410,14 +410,14 @@ The Settings page is correct when **all** of the following hold:
 9. **Appearance** (§8) applies theme/density per-user and never affects audits or other users.
 10. Reads use `GET /api/settings`; all-users/per-user writes use `PUT /api/settings`; admin-only
     writes use `PUT /api/settings/admin` (and the admin actions) and return `403` without
-    `role:admin`. All persistence goes through the file store — `config.yaml` + `domains.json` under
+    `role:admin`. All persistence goes through the file store — `config.yaml` + `domains.yaml` under
     `~/.email_delivery_hero/` — with **no database**.
 11. No setting is enforced by the frontend alone: for every admin-only field, the backend rejects an
     unauthorized write even if the UI would have allowed it.
 
 <!--
   This file is meant to grow. Keep it consistent with the siblings: file store only
-  (config.yaml + domains.json under ~/.email_delivery_hero/, no DB), NestJS 9312 / React+Vite 4444,
+  (config.yaml + domains.yaml under ~/.email_delivery_hero/, no DB), NestJS 9312 / React+Vite 4444,
   auth via OpenAuthFederated with role:admin gating the Admin section. When a new setting is added,
   add its row to the relevant §, its key to the config model, and its line to the Permissions table
   (mark admin-only fields). Scheduling detail stays in ./scheduled_checks.mdx; the six check

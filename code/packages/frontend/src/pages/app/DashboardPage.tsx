@@ -5,7 +5,7 @@ import { useAuditResults } from "@/api/audit"
 import { useDomains } from "@/api/domains"
 import { BrandHeader } from "@/components/BrandHeader"
 import { StatusCell } from "@/components/StatusCell"
-import { CATEGORIES, NEVER_CELL, rollupCategories } from "@/lib/categories"
+import { CATEGORIES, NEVER_CELL, rollupCategories, techPageRoute } from "@/lib/categories"
 import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext"
 
 /**
@@ -78,11 +78,31 @@ export function DashboardPage() {
                     className="cursor-pointer border-t border-[var(--edh-border)] hover:bg-slate-50"
                   >
                     <td className="px-4 py-3 font-medium">{d.name}</td>
-                    {CATEGORIES.map((c) => (
-                      <td key={c.key} className="px-2 py-2">
-                        <StatusCell status={cells[c.key] ?? NEVER_CELL} />
-                      </td>
-                    ))}
+                    {CATEGORIES.map((c) => {
+                      // Categories with a full-page view (pm/checks/*.mdx §6.1): the chevron on
+                      // the cell routes there; the rest of the row still opens the run detail.
+                      const techRoute = techPageRoute(c.key)
+                      return (
+                        <td key={c.key} className="px-2 py-2">
+                          {techRoute ? (
+                            <span className="group flex items-center gap-1">
+                              <StatusCell status={cells[c.key] ?? NEVER_CELL} />
+                              <Link
+                                to={techRoute}
+                                params={{ id: d.id }}
+                                onClick={(e) => e.stopPropagation()}
+                                aria-label={`Open the ${c.header} page for ${d.name}`}
+                                className="text-[var(--edh-muted)] opacity-0 transition-opacity hover:text-slate-700 group-hover:opacity-100"
+                              >
+                                <ChevronRight className="h-4 w-4" />
+                              </Link>
+                            </span>
+                          ) : (
+                            <StatusCell status={cells[c.key] ?? NEVER_CELL} />
+                          )}
+                        </td>
+                      )
+                    })}
                   </tr>
                 )
               })}

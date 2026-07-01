@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — Domains
-description: The Domains area of EmailDeliveryHero — the CRUD surface for the email sending domains under audit. An "Add domain" form plus a TanStack Table of every monitored domain showing its latest status per the six locked check categories, each domain's own per-domain scheduled-checks toggle (distinct from and ANDed with the global scheduler switch), and per-row actions (run audit now, edit, remove, toggle schedule, open run history).
+description: The Domains area of EmailDeliveryHero — the CRUD surface for the email sending domains under audit. An "Add domain" form (only the domain shown by default; optional fields behind an Advanced disclosure) and a "Run all" button, plus a TanStack Table of every monitored domain showing its latest status per the six locked check categories, each domain's own per-domain scheduled-checks toggle (distinct from and ANDed with the global scheduler switch), and per-row actions (run audit now, edit, remove, toggle schedule, open run history). The list persists as domains.yaml under the state dir.
 ---
 
 # EmailDeliveryHero — Domains
@@ -16,7 +16,7 @@ This spec builds on the siblings and does not repeat them:
 * [Overview](./overview.mdx) — the product charter, the left navigation, and the list of checks; a
   domain is the primary object everything hangs off.
 * [Engineering](./engineering.mdx) — the `domains` module and its endpoints, the audit engine, the
-  scheduler, and the on-disk `domains.json` store; the React 19 + Vite + Tailwind + shadcn/ui +
+  scheduler, and the on-disk `domains.yaml` store; the React 19 + Vite + Tailwind + shadcn/ui +
   lucide-react + TanStack Table/Router/Query frontend on port **4444** and the NestJS backend on
   **9312**.
 * [Dashboard](./dashboard.mdx) — the day-by-day roll-up grid; the Domains table reuses the same six
@@ -54,14 +54,14 @@ unauthenticated user is redirected to sign-in.
 ## 2. Layout
 
 Four regions: the **left bar** (see Overview), a **header** with the page title on the left and the
-**Add domain** button top-right, the **domains table** filling the body, and the **Add / Edit domain
-form** that opens as a modal (or right-hand side panel) over the table.
+**Run all** and **Add domain** buttons top-right, the **domains table** filling the body, and the
+**Add / Edit domain form** that opens as a modal (or right-hand side panel) over the table.
 
 ```
 ┌────────────┬──────────────────────────────────────────────────────────────────────────┐
-│            │  Domains                                                  ┌───────────────┐ │
-│  LEFT BAR  │  (page title, left)                                      │ + Add domain  │ │  ← header
-│            │                                                          └───────────────┘ │
+│            │  Domains                                    ┌───────────┐ ┌───────────────┐ │
+│  LEFT BAR  │  (page title, left)                        │ ⟳ Run all │ │ + Add domain  │ │  ← header
+│            │                                            └───────────┘ └───────────────┘ │
 │ Dashboard  ├──────────────────────────────────────────────────────────────────────────┤
 │ Domains  ◄ │ Domain            SPF   DKIM  DMARC Blkl  DNS  Spam  Sched   Actions        │
 │ Audits     ├──────────────────────────────────────────────────────────────────────────┤
@@ -81,7 +81,13 @@ form** that opens as a modal (or right-hand side panel) over the table.
 └────────────┴──────────────────────────────────────────────────────────────────────────┘
 ```
 
-* The **Add domain** button is the sole top-right control; it opens the Add form (`/domains/new`).
+* The top-right holds two controls: **Run all** and **Add domain**.
+  * **Run all** kicks off a **manual audit of every monitored domain at once** — the same fan-out as
+    the Dashboard's global run (§5). It fans out one scan per domain (bounded concurrency), shows
+    live per-domain progress, and recolors each row's cells as that domain finishes; it is disabled
+    while a scan is already running or when there are no domains. Like all manual runs it **ignores**
+    both the global and per-domain scheduled toggles (§6.4).
+  * **Add domain** opens the Add form (`/domains/new`).
 * The **table** starts below the header and scrolls independently; the header row is sticky.
 * Each of the six category cells uses the **same color coding and metric text as the Dashboard**
   ([Dashboard §4](./dashboard.mdx)).
@@ -152,7 +158,7 @@ export type CategoryKey =
   | "dnsInfra"
   | "spamContent";
 
-// One monitored domain = one row. Persisted in domains.json (§7); the six
+// One monitored domain = one row. Persisted in domains.yaml (§7); the six
 // category cells are the domain's most-recent audit roll-up.
 export interface MonitoredDomain {
   id: string;                 // stable id (e.g. slug of the domain)
@@ -247,6 +253,14 @@ Add posts a new record, Edit patches an existing one. It opens as a shadcn `Dial
 | **Label / notes** | `label` | text / short textarea | No | Free text, trimmed, length-capped (e.g. ≤200 chars). Shown as the muted subtitle under the domain in the table. |
 | **Scheduled** | `scheduleEnabled` | switch | No (defaults **on**) | Boolean. Whether this domain is included in **recurring scheduled checks** (§6). |
 
+**Progressive disclosure.** Only **Domain name** is shown by default — it is the one required field
+and the only thing most users need to add a domain. The four optional fields (**Label / notes**,
+**Sending IPs**, **DKIM selectors**, and **Scheduled**) live behind an **"Advanced (optional)"**
+disclosure with an expand/collapse triangle, **collapsed by default** when adding. When **editing** a
+domain the Advanced section is **expanded** by default, since those fields are the point of the edit.
+Sensible defaults apply when the section is never opened: empty label/IPs/selectors and
+`scheduleEnabled` **on**.
+
 Validation is enforced on the client (react-hook-form / zod) **and** on the server via the NestJS
 `ValidationPipe` + `class-validator` DTOs ([Engineering §3.2](./engineering.mdx)) — the client rules
 mirror the `CreateDomainDto` / `UpdateDomainDto`. Field-level errors render inline; the Save button
@@ -260,7 +274,7 @@ calls the generated TanStack-Query hooks ([Engineering §4](./engineering.mdx)):
 | Action | Method + path | Body / result |
 | --- | --- | --- |
 | List domains | `GET /api/domains` | Returns `MonitoredDomain[]` (each with its latest per-category roll-up) — feeds the table. |
-| Add domain | `POST /api/domains` | Body `CreateDomainDto` (`domain`, `sendingIps?`, `selectors?`, `label?`, `scheduleEnabled?`). Appends to `domains.json`; returns the created record (status **never run** until first audit). |
+| Add domain | `POST /api/domains` | Body `CreateDomainDto` (`domain`, `sendingIps?`, `selectors?`, `label?`, `scheduleEnabled?`). Appends to `domains.yaml`; returns the created record (status **never run** until first audit). |
 | Edit domain | `PATCH /api/domains/:id` | Body `UpdateDomainDto` (partial). Also the endpoint the inline **Scheduled** toggle hits with `{ scheduleEnabled }`. |
 | Remove domain | `DELETE /api/domains/:id` | Removes the record (and its audit history under the state dir). Behind the confirm dialog. |
 
@@ -276,9 +290,10 @@ A company runs **many** sending domains, and health checks run **across all of t
 * The table is the roll-up of **every** monitored domain at once; the six category cells let a user
   scan the whole fleet's health in one grid (green/red/amber/gray, same as the Dashboard).
 * A **manual** run can audit **any or all** domains: per-row **Run audit now**
-  (`POST /api/domains/:id/audit`) audits one; the Dashboard's global **Run checks**
-  (`POST /api/scheduler/run`, [Dashboard §5.1](./dashboard.mdx)) audits them all. Manual runs are
-  independent of the scheduled toggles (§6).
+  (`POST /api/domains/:id/audit`) audits one; the Domains header's **Run all** button and the
+  Dashboard's global **Run checks** ([Dashboard §5.1](./dashboard.mdx)) both audit every domain by
+  fanning out one `POST /api/domains/:id/audit` per domain with bounded concurrency (progress shown
+  per domain). Manual runs are independent of the scheduled toggles (§6).
 * The **[Dashboard](./dashboard.mdx)** is the time series (one row per day); **Domains** is the object
   list (one row per domain). Both share the six locked columns and four status colors so a user reads
   them the same way.
@@ -333,50 +348,59 @@ scheduler, never manual runs.
 
 ## 7. Persistence
 
-The monitored-domains list is the source of truth for CRUD and persists to **`domains.json`** under
-the state dir (default `~/.email_delivery_hero/domains.json`) — **no database**
-([Engineering §7](./engineering.mdx)). It is an array of domain records, each carrying its
-`scheduleEnabled` flag; the latest per-category status shown in the table is derived at read time from
-the domain's most recent audit run under `audits/<domainId>/` (it is not duplicated into this file).
+The monitored-domains list is the source of truth for CRUD and persists to a single, human-readable
+**`domains.yaml`** file under the state dir — **no database** ([Engineering §7](./engineering.mdx)).
+YAML (not JSON) is deliberate: an operator on localhost can read and hand-edit the file. It is a YAML
+sequence of domain records, each carrying its `scheduleEnabled` flag; the latest per-category status
+shown in the table is derived at read time from the domain's most recent audit run under
+`audits/<domainId>/` (it is not duplicated into this file). A one-time migration reads a legacy
+`domains.json` from an earlier install and rewrites it as `domains.yaml`.
 
-```json
-[
-  {
-    "id": "whitehatengineering-com",
-    "domain": "whitehatengineering.com",
-    "label": "Primary marketing domain",
-    "sendingIps": ["203.0.113.10", "203.0.113.11"],
-    "selectors": ["google", "selector1"],
-    "scheduleEnabled": true,
-    "lastAuditId": "2026-07-01T14-03-11-a1b2",
-    "lastAuditedAt": "2026-07-01T14:03:11.204Z"
-  },
-  {
-    "id": "act3ai-com",
-    "domain": "act3ai.com",
-    "label": "Product / transactional",
-    "sendingIps": ["198.51.100.20"],
-    "selectors": ["google"],
-    "scheduleEnabled": true,
-    "lastAuditId": "2026-07-01T14-03-11-c3d4",
-    "lastAuditedAt": "2026-07-01T14:03:11.902Z"
-  },
-  {
-    "id": "mail-example-com",
-    "domain": "mail.example.com",
-    "label": "",
-    "sendingIps": [],
-    "selectors": [],
-    "scheduleEnabled": false
-  }
-]
+```yaml
+- id: 3f1c… (uuid)
+  name: whitehatengineering.com
+  label: Primary marketing domain
+  dkimSelectors:
+    - google
+    - selector1
+  sendingIps:
+    - 203.0.113.10
+    - 203.0.113.11
+  scheduleEnabled: true
+  addedBy: bryan@whitehatengineering.com
+  createdAt: 2026-07-01T14:03:11.204Z
+  updatedAt: 2026-07-01T14:03:11.204Z
+- id: 7a20… (uuid)
+  name: act3ai.com
+  label: Product / transactional
+  dkimSelectors:
+    - google
+  sendingIps:
+    - 198.51.100.20
+  scheduleEnabled: true
+  addedBy: bryan@whitehatengineering.com
+  createdAt: 2026-07-01T14:03:11.902Z
+  updatedAt: 2026-07-01T14:03:11.902Z
+- id: c9e4… (uuid)
+  name: mail.example.com
+  label: ""
+  dkimSelectors: []
+  sendingIps: []
+  scheduleEnabled: false
+  addedBy: default
+  createdAt: 2026-07-01T14:04:00.000Z
+  updatedAt: 2026-07-01T14:04:00.000Z
 ```
 
-Writes go through the thin `store` module (atomic write-temp-then-rename, per-file mutex, schema
-validation on read), so services never touch the filesystem directly
-([Engineering §7](./engineering.mdx)). The third record above (`scheduleEnabled: false`, no
-`lastAuditId`) is a domain that is **off the schedule and never audited** — it renders with all six
-gray never-run cells.
+Writes go through the thin `yaml-store` helper: it serializes with the `yaml` package and does an
+**atomic write-temp-then-rename** with a **per-write unique temp filename** (so concurrent writers
+never clobber a shared temp file), creating the parent dir if needed, and on any write failure it
+cleans up the temp file, logs to `error.err`, and rethrows (never a silent, half-written file). On
+read, an empty or `null` document is treated as an empty list, and older records missing
+`label` / `scheduleEnabled` are backfilled with the create-time defaults. Services never touch the
+filesystem directly ([Engineering §7](./engineering.mdx)). The third record above
+(`scheduleEnabled: false`, never audited) is a domain that is **off the schedule and never audited** —
+it renders with all six gray never-run cells.
 
 ---
 
@@ -384,15 +408,19 @@ gray never-run cells.
 
 1. **Domains** is a top-level left-bar area at `/domains`; it is the full CRUD surface for the email
    sending domains under audit (a domain is the primary object per [Overview](./overview.mdx)).
-2. The screen has a header with an **Add domain** button top-right and a **TanStack Table** of all
-   monitored domains, **one row per domain**.
+2. The screen has a header with **Run all** and **Add domain** buttons top-right and a **TanStack
+   Table** of all monitored domains, **one row per domain**. **Run all** manually audits every
+   domain at once (fan-out with live per-domain progress), is disabled while a scan runs or when
+   there are no domains, and ignores the scheduled toggles.
 3. The table has the **six LOCKED category columns** (SPF, DKIM, DMARC, Blacklists, DNS &
    Infrastructure, Spam & Content) rendering each domain's latest status with the **same four status
    colors** as the [Dashboard](./dashboard.mdx) (dark green healthy / dark red critical / amber some
    problems / light gray never run).
 4. **Add / Edit domain** opens a form (modal or side panel) with fields **domain name, sending IPs,
    DKIM selectors, label/notes, and Scheduled**; domain syntax is validated and duplicates rejected,
-   on both client and server.
+   on both client and server. Only **domain name** shows by default — the four optional fields are
+   behind an **Advanced (optional)** disclosure that is **collapsed** when adding and **expanded**
+   when editing.
 5. CRUD is wired to `GET /api/domains`, `POST /api/domains`, `PATCH /api/domains/:id`, and
    `DELETE /api/domains/:id`; remove is behind a confirm dialog.
 6. Each domain has its **own** `scheduleEnabled` toggle (in the row and the form) controlling whether
@@ -404,12 +432,14 @@ gray never-run cells.
 8. Per-row actions exist: **Run audit now** (`POST /api/domains/:id/audit`), **Edit**, **Remove**
    (confirm), **Toggle schedule**, and **open run history** (`/domains/$id` →
    [Audit a domain](./use_cases/audit_a_domain.mdx)).
-9. The list persists to `~/.email_delivery_hero/domains.json` as an array of domain records including
-   `scheduleEnabled`, through the `store` module — no database.
+9. The list persists to **`domains.yaml`** under the state dir as a YAML sequence of domain records
+   including `label` and `scheduleEnabled`, through the atomic `yaml-store` helper (unique temp file
+   per write, cleanup-and-rethrow on failure, empty/`null` doc → empty list, missing-field backfill)
+   — no database; a legacy `domains.json` is migrated on first read.
 
 <!--
   Keep this page aligned with: the domains module + endpoints and the file store in ./engineering.mdx
-  (GET/POST /api/domains, GET/PATCH/DELETE /api/domains/:id, domains.json); the SIX LOCKED category
+  (GET/POST /api/domains, GET/PATCH/DELETE /api/domains/:id, domains.yaml); the SIX LOCKED category
   columns and FOUR status colors shared with ./dashboard.mdx (do not add, rename, or recolor them);
   and the GLOBAL scheduled-checks switch in ./scheduled_checks.mdx. The KEY invariant is
   isScheduled(domain) = globalScheduledOn && domain.scheduleEnabled, and manual runs ignore both.

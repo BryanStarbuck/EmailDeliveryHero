@@ -30,7 +30,7 @@ export class DomainsController {
   }
 
   @Patch(":id")
-  @ApiOperation({ summary: "Update a monitored domain's DKIM selectors / sending IPs" })
+  @ApiOperation({ summary: "Update a monitored domain (label, DKIM selectors, IPs, schedule)" })
   update(@Param("id") id: string, @Body() dto: UpdateDomainDto): MonitoredDomain {
     return this.domains.update(id, dto)
   }

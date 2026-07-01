@@ -1,0 +1,435 @@
+---
+title: EmailDeliveryHero — Running the Checks
+description: The orchestration spec for a check run — what happens when the user runs one domain, runs all domains, or the scheduler fires. One engine, one code path for all three triggers. Defines the run pipeline (context → dependency-ordered check graph → finalize), which checks run in parallel and which must run serially, the resource-class semaphores (dns / dnsbl / smtp25 / http / cpu), the TypeScript-on-Node concurrency library decision (bounded async mapLimit + semaphores, no worker threads, no queue server), the child-process contract for Brew/OS-installed tools (execFile, stdin/stdout, timeouts, graceful degradation), and how the same code runs on macOS, Linux, and Windows.
+---
+
+# EmailDeliveryHero — Running the Checks
+
+This document specifies **what happens when a check run executes** — the orchestration layer
+between "the user pressed a button (or the clock fired)" and "a finished audit record is on disk
+and the UI recolors."
+
+It is the connective tissue between specs that each own one piece:
+
+* [Engineering](./engineering.mdx) — the `Checker`/`Finding` contract, the registry, the store.
+  This spec defines **how the runner executes that registry**.
+* [Toasts & scan progress](./progress_ui.mdx) — the bottom-left scan-progress dock and the
+  per-domain fan-out. This spec defines **what the backend is doing while a dock card spins**.
+* [Scheduled checks](./scheduled_checks.mdx) — when runs fire automatically. This spec guarantees
+  a scheduled run and a manual run are **the same code**.
+* [Per-check engineering specs](./checks/overview.mdx) — the 21 deep specs. This spec extracts
+  their **dependencies, resource classes, and external tools** into one execution plan.
+* [Error handling & logging](./errors.mdx) — the log lines and failure containment every run obeys.
+* [Storage](./storage.mdx) — where the results land.
+
+---
+
+## 1. What a "run" is — five triggers, one engine
+
+A **run** is: *for a set of domains, execute every enabled check against each domain, produce
+findings, roll them into a per-domain audit result, persist it, and diff it against the previous
+run.* There are five ways a run starts, and they all converge on the **same two service methods**:
+
+| # | Trigger | Entry point | Scope |
+| --- | --- | --- | --- |
+| 1 | **Run checks** (Dashboard, top-right) | UI fans out `POST /api/audit/run/:id` per domain (see [progress_ui.mdx §4.1](./progress_ui.mdx)) | All monitored domains |
+| 2 | **Run audit now** (Domains row) / **Run checks again** (Run detail) | `POST /api/audit/run/:id` | One domain |
+| 3 | **Scheduled — in-process** | The NestJS interval job calls `AuditService.runForAll(scope)` directly | `schedule.domains` (all or subset) |
+| 4 | **Scheduled — OS-level** (launchd / cron / systemd / schtasks) | `POST /api/scheduler/run` (via `curl`) or the headless CLI `edh scheduler run` | `schedule.domains` |
+| 5 | **Programmatic** | `POST /api/audit/run` (audit-all, one response) | All monitored domains |
+
+```
+Dashboard "Run checks"──┐ (per-domain fan-out)
+Domains "Run audit now"─┤
+Run detail "again" ─────┼──▶ POST /api/audit/run/:id ──▶ AuditService.runForDomain(id)
+                        │                                        ▲
+OS scheduler (curl) ────▶ POST /api/scheduler/run ─┐             │ mapLimit(domains, 4)
+In-process timer ──────────────────────────────────┼─▶ AuditService.runForAll(scope)
+CLI: edh scheduler run ────────────────────────────┘
+```
+
+**The invariant:** `runForDomain(id)` is the *only* place a domain gets audited. `runForAll` is
+nothing but a bounded parallel loop over `runForDomain`. There is no scheduler-only path, no
+manual-only path, no CLI-only path — the trigger changes **who calls**, never **what runs**. The
+only trigger-specific data is a `trigger` tag recorded on the audit record and in the log lines
+(§9): `manual` · `scheduled-inprocess` · `scheduled-os` · `api`.
+
+---
+
+## 2. The run pipeline — stages of one domain's run
+
+A single domain's run moves through five stages. Stages 0 and 4 are strictly serial bookends;
+everything between is a **dependency-ordered graph**, not a lockstep sequence — a check starts the
+moment *its own* prerequisites are ready, regardless of what else is still in flight.
+
+```
+Stage 0            Stage 1                  Stage 2               Stage 3          Stage 4
+PREFLIGHT          FOUNDATION (parallel)    DEPENDENT (as ready)  PROBE/CONTENT    FINALIZE
+────────           ─────────────────────    ────────────────────  ─────────────    ────────
+load config   ┌──▶ mx_routing ──────────┬─▶ mta_sts               tls_transport*   score/status
+domain record │    dnssec ──────────────┼─▶ dane_tlsa             smtp_security*   roll-up
+sendingIps    ├──▶ dns_health           │                                          diff vs prev
+selectors     ├──▶ spf ────────┐        └─(mx list also feeds probes)              serialized
+tool locate   ├──▶ dkim ───────┼─▶ dmarc ──▶ bimi                 content_scoring† persist
+DNS memo      ├──▶ tls_rpt     │              └──▶ arc            link_url_rep.†   log lines
+              ├──▶ reverse_dns │                                  list_unsub.†
+              ├──▶ blacklists (dnsbl-capped)                      reputation_m.‡
+              └──▶ domain_reputation (24h cache)                  inbox_place.‡
+
+ * = future SMTP probes (port-25 gate)   † = needs a sample message   ‡ = integration-gated
+```
+
+### Stage 0 — Preflight & context (serial, milliseconds)
+
+Build the immutable `RunContext` every checker receives:
+
+* Load the domain record (`domains.yaml`): domain name, **sending IPs**, **DKIM selectors**,
+  per-domain toggles.
+* Load app config: enabled checks, DNSBL zones, probe gates, timeouts.
+* **Tool discovery** (§5): resolve which external tools are present on this machine, once per run.
+* Create the **per-run DNS memo** — a run-scoped cache so ten checkers asking for the same TXT/MX
+  record cost one query (every per-check spec assumes this dedupe).
+
+### Stage 1 — Foundation checks (all parallel)
+
+Every check with **no upstream dependency** launches simultaneously. All are pure-DNS (fast) except
+where noted:
+
+| Check | Parallel-safe because | Special handling |
+| --- | --- | --- |
+| `mx_routing` | No inputs beyond the domain | Its resolved **MX list is a shared output** — published into the RunContext for Stage 2/3 consumers, which must **not** re-derive it |
+| `dnssec` | Presence-only DNS | Output (`signed?`) is a **hard prerequisite for `dane_tlsa`** |
+| `dns_health` | NS/SOA/zone sanity | Runs early by design — it detects the delegation problems that make other checks misleading |
+| `spf` | TXT walk | Result feeds DMARC alignment |
+| `dkim` | Per-selector TXT | Selector discovery fans out its 17-entry wordlist at concurrency ~6; result feeds DMARC |
+| `tls_rpt` | One TXT + a few lookups | — |
+| `reverse_dns` | Per sending IP | `p-limit(8)`-style cap over the IP list |
+| `blacklists` | Independent DNS zones | **`dnsbl` semaphore (§3): ≤8 queries in flight, process-global**, jittered back-off, per-zone RFC 5782 liveness probe |
+| `domain_reputation` | HTTPS RDAP, not DNS | **24-hour cache** — on a 6h tick it usually answers from cache and makes zero requests |
+
+### Stage 2 — Dependency-gated checks (start as their inputs finish)
+
+These are the **serial edges** in the graph. Each waits for named prerequisites only — there is
+**no barrier**; `mta_sts` can be running while `spf` is still expanding its include graph.
+
+| Check | Waits for | Why (from the per-check specs) |
+| --- | --- | --- |
+| `dmarc` | `spf` + `dkim` | Alignment evaluation and problem-states consume both results |
+| `mta_sts` | `mx_routing` | The policy's `mx:` patterns are validated against the real MX list |
+| `dane_tlsa` | `mx_routing` + `dnssec` | TLSA records live at `_25._tcp.<mx>`; DANE without DNSSEC is meaningless (a SERVFAIL on a signed zone ≠ absent) |
+| `bimi` | `dmarc` | BIMI requires DMARC enforcement; it reads the sibling `dmarc.policy` result |
+| `arc` | `dmarc` | Advisory verdict is framed by the DMARC policy + forwarding config |
+
+### Stage 3 — Probes, content, integrations (gated, mostly future)
+
+These checks are expensive, rate-limit-sensitive, or need inputs beyond DNS. Each is gated by
+config and degrades to an `info` finding when its gate is closed — never an error:
+
+* **SMTP probes** (`tls_transport`, `smtp_security`, MX reachability, DANE cert-match): live
+  connections to ports 25/587/465, one handshake per MX host, through the **`smtp25` semaphore
+  (≤4 hosts, process-global)** with per-IP back-off. Consume the Stage-1 MX list. If outbound 25
+  is blocked (common on residential/cloud networks), the whole family reports one `info`
+  "probe unavailable" finding.
+* **Content checks** (`content_scoring`, `link_url_reputation`, `list_unsubscribe`): run only when
+  a **sample message** exists in the sample store. `content_scoring` is the one **CPU-bound,
+  child-process** check (SpamAssassin, §5); `link_url_reputation` shares the **`dnsbl` semaphore**
+  with blacklists (same zones, same rate limits).
+* **Integration checks** (`reputation_metrics`, `inbox_placement`): their expensive halves
+  (Postmaster Tools sync, seed sends) run on **their own decoupled cadences** (nightly / weekly)
+  outside the run; inside the run they only *read* the locally cached timeseries — cheap and
+  parallel-safe.
+
+### Stage 4 — Finalize (serial, per domain)
+
+1. Collect all findings; compute `score`/`status` per [Engineering §6.2](./engineering.mdx).
+2. **Diff against the previous run** — new or worsened findings are flagged as new problems
+   ([scheduled_checks.mdx](./scheduled_checks.mdx)).
+3. **Persist through the serialized write lock** ([progress_ui.mdx §4.2](./progress_ui.mdx)) —
+   parallel domains never clobber each other's results in the shared store.
+4. Write the start/finish INFO lines to `log.log` ([errors.mdx](./errors.mdx)); any checker that
+   threw was already contained (§8) and logged to `error.err`.
+
+---
+
+## 3. Concurrency architecture — how parallel is implemented
+
+### 3.1 The decision: bounded async concurrency, nothing heavier
+
+Check work is **overwhelmingly I/O-bound** (DNS answers, SMTP handshakes, HTTPS responses). Node's
+event loop overlaps I/O waits natively; the engineering problem is not "get parallelism" but
+"**bound** parallelism" so we don't open hundreds of sockets or get rate-limited by DNSBL mirrors.
+
+| Layer | Mechanism | Bound |
+| --- | --- | --- |
+| Across **domains** | `mapLimit(domains, 4, runForDomain)` — the shared limiter from [progress_ui.mdx §4.3](./progress_ui.mdx) | 4 domains concurrently |
+| Across **checks** in one domain | A promise-graph: each check's `run()` is `Promise.all(itsDeps).then(run)` — the dependency table *is* the schedule | Implicit (≈14 first-round checks) |
+| Within a **check** | The check's own `mapLimit` over its items (selectors, IPs, zones, MX hosts) | Per check spec (6 / 8 / 8 / 4) |
+| Across **everything**, per external resource | **Process-global resource semaphores** (below) | Per resource class |
+
+**Resource semaphores** are the piece that makes 4-domains-parallel safe. A per-domain cap alone
+multiplies: 4 domains × 8 DNSBL queries = 32 concurrent hits on the same mirrors. So the
+rate-sensitive resources are guarded by semaphores **shared across all in-flight domains**:
+
+| Semaphore | Limit | Guards |
+| --- | --- | --- |
+| `dnsbl` | 8 | All DNSBL/RHSBL queries (blacklists + link_url_reputation), whoever's domain they belong to |
+| `smtp25` | 4 | All outbound SMTP connections (tls_transport, smtp_security, reachability, DANE cert-match) |
+| `http` | 4 | RDAP, MTA-STS/BIMI policy fetches, unsubscribe probes, integration APIs |
+| `cpu` | 2 | SpamAssassin child processes (the only CPU-bound work) |
+
+Plain DNS through the per-run memo is not semaphore-guarded — it is cheap, cached, and the
+recursive resolver is the local network's own.
+
+### 3.2 The library
+
+**In-repo, dependency-free primitives** — the same decision [progress_ui.mdx §4.3](./progress_ui.mdx)
+already made, extended one notch:
+
+* `mapLimit<T, R>(items, limit, fn)` — already specified; lives in
+  `backend/src/shared/concurrency.ts`.
+* `Semaphore` — `acquire(): Promise<Release>` over a FIFO wait queue; ~30 lines in the same file.
+  `mapLimit` is expressible on top of it.
+
+**Explicitly rejected**, with the reason on record:
+
+| Alternative | Why not |
+| --- | --- |
+| `worker_threads` / `piscina` | The work is I/O-bound; threads add serialization overhead and complexity for zero throughput gain. The one CPU-heavy step (SpamAssassin) is already a separate OS process. |
+| `BullMQ` / `bee-queue` | Require a Redis server — violates the no-database, runs-anywhere charter. |
+| `p-limit` / `p-queue` (npm) | Fine libraries, but ESM-only interop friction in the CommonJS NestJS build, and the needed code is ~30 lines. In-repo keeps it offline-safe. |
+| RxJS pipelines | Already excluded by house style; promise-graph reads plainly. |
+
+### 3.3 Why the UI never blocks
+
+The backend never does synchronous work on the request path: every check is `await`ed I/O or a
+spawned child process, so the NestJS event loop keeps serving `GET` requests (dashboard polls,
+navigation) while runs are in flight. On the frontend, **Run all** is a fan-out of independent
+`POST /api/audit/run/:id` calls ([progress_ui.mdx §4.1](./progress_ui.mdx)) — no single
+long-blocking request, and each dock card resolves independently. A run started by the scheduler
+touches the UI only through the store: the next dashboard query sees the new audit record.
+
+---
+
+## 4. Progress — what the user sees
+
+The user-facing progress surface is fully specified in
+[Toasts & scan progress](./progress_ui.mdx); this section only anchors the contract from the
+runner's side:
+
+* **Granularity is per domain, not per check.** One dock card = one in-flight
+  `POST /api/audit/run/:id`. The card appears when the request starts and disappears the moment
+  the domain's Stage 4 completes (success or failure) — cards drain unevenly because domains
+  finish unevenly.
+* The dock sits **bottom-left, offset `left: 272px`** — clear of the 256px left navigation bar,
+  never over it — with the enlarged toasts stacking below it.
+* The runner must therefore keep `runForDomain` **one request = one domain = one card**: it must
+  not batch domains inside a single response (that is exactly what the deprecated-for-UI
+  `POST /api/audit/run` does, and why the UI stopped using it).
+* Per-check progress within a domain is **not** streamed in the first round. The stage graph (§2)
+  finishes a typical pure-DNS domain in a few seconds; a spinner per domain is honest and
+  sufficient. *Future:* an SSE channel streaming `checkId` completion events per run, feeding a
+  per-card progress fraction — the graph runner already knows each check's completion moment, so
+  this is additive.
+
+---
+
+## 5. External tools — child processes with stdin/stdout
+
+Many checks eventually shell out to installed tools (the per-check specs name them: `dig`,
+`swaks`, `openssl s_client`, `spamassassin`/`spamc`, `whois`, and diagnostic extras like `doggo`,
+`kdig`, `drill`, `dnsx`, `checkdmarc`, `parsedmarc`). One shared contract governs every spawn:
+
+### 5.1 The `ToolRunner` contract
+
+* **`execFile`, never `exec`** — arguments as an array, **no shell interpolation, ever**. Domain
+  names and user config never touch a shell string (command-injection surface: zero).
+* **stdin/stdout as the data plane.** Input that is *content* (a raw `.eml` for SpamAssassin) is
+  written as **raw bytes to the child's stdin**; results are read from **stdout**, stderr is
+  captured for diagnostics. No temp files unless a tool cannot read stdin.
+* **Hard timeout per invocation** (default 30s; probe tools 10s) — on expiry the child is killed
+  (SIGKILL after a grace SIGTERM) and the check degrades (§5.3).
+* **`maxBuffer` cap** on stdout/stderr (default 10 MB) so a misbehaving tool cannot balloon the
+  Node heap.
+* **Structured result:** `{ code, stdout, stderr, timedOut }` — checkers parse stdout; a non-zero
+  exit is data (e.g. `dig` NXDOMAIN), not an exception.
+* Spawns of the same CPU-heavy tool go through the **`cpu` semaphore** (§3.1).
+
+### 5.2 The `ToolLocator` — discovery, once per run
+
+At Stage 0 the runner resolves each needed tool to an absolute path, in order:
+
+1. An explicit override in config (`tools.dig: /opt/homebrew/bin/dig` in `config.yaml` /
+   Settings → Tools & environment, per [settings.mdx](./settings.mdx)).
+2. A PATH search (`which` semantics implemented in-process — **never** the macOS `find`).
+3. The platform's conventional locations (§6–§8) as a fallback, because **launchd/cron/schtasks
+   environments carry a minimal PATH** that does not include Homebrew's directories.
+
+The resolved map is cached in the RunContext and reported by `GET /api/health` style diagnostics
+so Settings can show "dig ✓ /opt/homebrew/bin/dig · spamassassin ✗ not installed".
+
+### 5.3 Graceful degradation is mandatory
+
+A missing tool is a **capability downgrade, never a failure**:
+
+* If a pure-Node fallback exists (it does for all first-round checks — `node:dns/promises`
+  covers them), the checker silently uses it.
+* If the tool is the only method (SpamAssassin scoring), the check emits one `info` finding —
+  *"Content scoring skipped: spamassassin not installed — `brew install spamassassin`"* — with the
+  platform-correct install command as the remediation.
+* The audit's score is computed over the checks that ran; skipped-by-capability checks never
+  drag a domain to `warning`.
+
+---
+
+## 6. Running on macOS
+
+macOS is the primary development and daily-driver platform.
+
+* **Tools via Homebrew** (the project charter's standard): `brew install bind` (→ `dig`),
+  `swaks`, `spamassassin`, `whois`; `openssl` and `curl` ship with the OS. Conventional paths for
+  the ToolLocator fallback: **`/opt/homebrew/bin`** (Apple Silicon), **`/usr/local/bin`** (Intel),
+  then `/usr/bin`.
+* **The launchd PATH problem:** a LaunchAgent-triggered run executes with
+  `PATH=/usr/bin:/bin:/usr/sbin:/sbin` — Homebrew is invisible. The ToolLocator's conventional-path
+  fallback (above) exists precisely so a **scheduled** run finds the same tools a **manual** run
+  does. This is a hard acceptance criterion (§11.7).
+* **Scheduling:** the launchd LaunchAgent
+  (`~/Library/LaunchAgents/com.emaildeliveryhero.scheduler.plist`) from
+  [scheduled_checks.mdx](./scheduled_checks.mdx), triggering `POST /api/scheduler/run` via
+  `/usr/bin/curl`, or the CLI entrypoint (a Node script, per the charter — the launchd job runs
+  our TypeScript-on-Node code, not shell logic).
+* **Firewall/egress:** outbound port 25 is typically open on Mac desktops but often blocked on
+  hotel/ISP networks — the `smtp25` gate's "probe unavailable" `info` path (§2 Stage 3) is the
+  normal mobile-Mac experience, not an edge case.
+
+## 7. Running on Linux
+
+Servers and CI — the platform where the app is most likely to run unattended.
+
+* **Tools via the distro package manager** (`apt install dnsutils swaks spamassassin whois` /
+  `dnf install bind-utils …`) or Homebrew-on-Linux (`/home/linuxbrew/.linuxbrew/bin` joins the
+  ToolLocator fallback list, before `/usr/bin`, `/usr/local/bin`).
+* **Identical code.** `node:dns/promises`, `execFile`, `node:path`, and the store all behave the
+  same; there is no `process.platform === 'linux'` branch outside the ToolLocator's fallback list
+  and the scheduler-artifact generator.
+* **Scheduling:** cron entry or systemd user timer per
+  [scheduled_checks.mdx](./scheduled_checks.mdx) (`Persistent=true` recommended so a missed window
+  runs at boot). cron's PATH is as minimal as launchd's — same ToolLocator rule applies.
+* **Egress reality:** most cloud providers (AWS, GCP, Hetzner…) **block outbound port 25 by
+  default**. On Linux servers the SMTP-probe family should be assumed gated-off until the operator
+  confirms egress; everything DNS/HTTPS runs at full fidelity.
+* **spamd:** where SpamAssassin is used at volume, run the daemon (`spamd`) and let the checker
+  prefer `spamc` (cheap per-message client) over cold `spamassassin` starts — the ToolRunner
+  contract is unchanged, only the resolved binary differs.
+
+## 8. Running on Windows
+
+Windows support is functional-first: every first-round check must pass; probe/tool checks degrade
+transparently where a tool has no Windows build.
+
+* **What just works:** all pure-Node paths — `node:dns/promises`, `node:net`/`node:tls` (the
+  future in-process SMTP/STARTTLS probes deliberately prefer Node's own sockets over `openssl`
+  precisely so Windows needs no extra binary), the file store, the REST API.
+* **Tools:** `curl.exe` ships with Windows 10+; `dig` via the BIND tools zip or
+  `winget install ISC.BIND`; `openssl` via `winget install ShiningLight.OpenSSL.Light`.
+  ToolLocator fallback locations: `%ProgramFiles%\ISC BIND 9\bin`, `%ProgramFiles%\OpenSSL-Win64\bin`.
+  **SpamAssassin has no practical Windows install** — content scoring reports the §5.3 `info`
+  finding pointing at WSL as the remediation. `swaks` (Perl) is likewise degrade-to-Node.
+* **Process handling:** `execFile` with an args array needs no `shell: true` for `.exe` targets —
+  and `shell: true` remains forbidden. Paths are composed exclusively with `node:path`; nothing
+  assumes `/`.
+* **Scheduling:** Task Scheduler via `schtasks` per [scheduled_checks.mdx](./scheduled_checks.mdx)
+  — one task per configured time, each firing `curl.exe -X POST http://localhost:9312/api/scheduler/run`.
+* **WSL note:** running the whole app under WSL2 is the recommended path for a user who wants the
+  full probe/tool fidelity on a Windows machine — under WSL the app *is* the Linux app (§7).
+
+---
+
+## 9. One code path — manual, scheduled, headless
+
+The rule stated in §1, made testable:
+
+* `runForDomain(id, trigger)` takes the trigger tag as **data**; it contains **zero** conditional
+  logic on it. Same stages, same graph, same semaphores, same persistence.
+* The tag is recorded on the audit record (`trigger: 'manual' | 'scheduled-inprocess' |
+  'scheduled-os' | 'api'`) and in the [errors.mdx](./errors.mdx) INFO lines
+  (`Manual check started (all domains)` / `Scheduled check run started (3 domain(s))`), so the
+  history view and the logs can distinguish *who asked* even though *what ran* is identical.
+* The **CLI entrypoint** (`edh scheduler run`) boots the store + audit engine headlessly (no HTTP
+  server) and calls the same `runForAll`. It exists for OS schedulers on machines where the
+  backend isn't kept running; it is a thin `main()` around the same service.
+* **Overlap guard:** if a scheduled tick fires while the previous scheduled run is still in
+  flight, the new tick is **skipped with an INFO line** (never queued — audits are idempotent and
+  the next tick is hours away). A *manual* run during a scheduled run is allowed; the per-domain
+  serialized persist (§2 Stage 4) makes the interleaving safe, and a per-domain in-flight guard
+  collapses duplicate concurrent runs of the *same* domain into one.
+
+---
+
+## 10. Failure containment, timeouts, budgets
+
+Layered so that no single failure can grow past its layer
+(consistent with [errors.mdx](./errors.mdx)):
+
+| Layer | Budget / rule | On breach |
+| --- | --- | --- |
+| One DNS lookup | 5s, one retry on transient (`SERVFAIL`/timeout) | The sub-check reports `info` "inconclusive — retry", **never** a false critical |
+| One tool invocation | 10–30s hard kill + `maxBuffer` (§5.1) | Structured `timedOut` result → checker degrades |
+| One checker | try/catch around `run()` (errors.mdx rule) | Logged to `error.err` **and** converted to a `warning` finding; the domain's other checks are untouched |
+| One domain | Deadline ≈ 5 min wall clock | Unfinished checks are cancelled and reported `info` "did not complete"; Stage 4 still finalizes with what it has |
+| One run (all domains) | No global deadline — bounded by `mapLimit(4)` × the domain deadline | A failed domain fails alone; `runForAll` uses settled semantics, never rejects the batch |
+
+Cancellation is cooperative: the RunContext carries an `AbortSignal`; checkers pass it to DNS
+calls and child processes (`execFile` accepts it natively) so a deadline actually reclaims
+sockets and kills children instead of leaking them.
+
+---
+
+## 11. Acceptance criteria
+
+1. All five triggers (§1) reach the same `runForDomain`; the audit records they produce are
+   byte-identical in shape, differing only in the `trigger` tag.
+2. In one domain's run, all Stage-1 checks demonstrably start together, and each Stage-2/3 check
+   starts **as soon as its named prerequisites finish** — no barrier: `mta_sts` runs while `spf`
+   is still in flight; `dmarc` never starts before both `spf` and `dkim` finish; `bimi` never
+   before `dmarc`; `dane_tlsa` never before `mx_routing` **and** `dnssec`.
+3. The MX list is resolved **once** (by `mx_routing`) per run and consumed by every downstream
+   check; the per-run DNS memo dedupes repeated lookups across checkers.
+4. With 4+ domains running in parallel, total in-flight DNSBL queries never exceed 8 and total
+   outbound SMTP connections never exceed 4 — the semaphores are **process-global**, not
+   per-domain.
+5. Concurrency is implemented with the in-repo `mapLimit` + `Semaphore`
+   (`backend/src/shared/concurrency.ts`); no `worker_threads`, `piscina`, queue server, or npm
+   concurrency package is added.
+6. During a Run-all of many domains, the UI remains fully responsive and the scan-progress dock
+   behaves per [progress_ui.mdx](./progress_ui.mdx): one card per in-flight domain, draining
+   unevenly, bottom-left, clear of the 256px left bar.
+7. Every external tool is spawned via `execFile` with an args array (no shell), stdin for content
+   input, a hard timeout, and a `maxBuffer`; a run scheduled by **launchd/cron/schtasks** (minimal
+   PATH) locates the same tools as a manual run, via the ToolLocator fallback paths.
+8. On a machine missing a tool, the affected check degrades to its pure-Node method or a single
+   `info` finding with a platform-correct install remediation; the run never errors out and the
+   score is computed over the checks that ran.
+9. The same repository runs its full first-round check set on macOS, Linux, and Windows with no
+   platform branches outside the ToolLocator fallback list and the scheduler-artifact generator;
+   on Windows, SpamAssassin/swaks-dependent checks degrade per §8.
+10. A checker that throws becomes a `warning` finding + an `error.err` entry and never aborts its
+    domain; a domain that exceeds its deadline finalizes with partial results; a failed domain
+    never fails the batch.
+11. A scheduled tick that fires during a still-running scheduled run is skipped with an INFO line;
+    concurrent runs of the same domain collapse into one.
+12. Start/finish INFO lines for every run (manual and scheduled) appear in `log.log` with the
+    trigger and domain count, per [errors.mdx](./errors.mdx).
+
+<!--
+  run_checks.mdx maintenance: this file owns the ORCHESTRATION of a check run — the trigger→engine
+  funnel (§1), the stage/dependency graph (§2), the concurrency + semaphore model (§3), the
+  ToolRunner/ToolLocator child-process contract (§5), and the per-OS sections (§6–§8). Keep it in
+  lockstep with: engineering.mdx §6 (Checker contract — if the contract gains fields like
+  dependsOn/resource, define them there, use them here), progress_ui.mdx (dock + mapLimit(4) +
+  serialized persist), scheduled_checks.mdx (trigger artifacts), errors.mdx (log lines + per-checker
+  containment), and the per-check specs under checks/ (if a new check is added, place it in the §2
+  graph and, if it uses a new external resource, give it a semaphore row in §3.1). The dependency
+  edges (spf+dkim→dmarc→bimi/arc, mx→{mta_sts,dane,probes}, dnssec→dane) come from the per-check
+  specs — verify there before changing them here.
+-->

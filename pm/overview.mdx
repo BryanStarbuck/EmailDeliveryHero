@@ -58,6 +58,12 @@ All MDX specifications in this directory and its subdirectories:
   dock — stacked per-domain "Running <domain>" cards with a spinning icon that drain as each domain
   finishes. Also fixes the concurrency model: parallel per-domain scans (bounded limiter) with a
   concurrency-safe persist.
+* [Running the checks](./run_checks.mdx) — the orchestration spec for a check run: the five
+  triggers (Run all, single domain, in-process schedule, OS schedule, API) funneling into one
+  engine, the stage/dependency graph (which checks run in parallel, which serially), the
+  bounded-concurrency + resource-semaphore model (TypeScript-on-Node, no worker threads), the
+  child-process contract for Brew/OS tools (execFile, stdin/stdout, graceful degradation), and
+  how the same code runs on macOS, Linux, and Windows.
 * [Dashboard](./dashboard.mdx) — the main screen: the big "Email Delivery Hero" brand header, the
   TanStack table (one run per day × six color-coded category columns), the metric cell text, and
   the top-right **Run checks** button + scheduled-checks toggle/chevron.
@@ -71,7 +77,7 @@ All MDX specifications in this directory and its subdirectories:
   storage & data, tools & environment, and the `role:admin`-gated Admin sub-section.
 * [Storage](./storage.mdx) — how state is persisted on disk (no database): the state root
   `~/T/_emaildeliveryhero/`, the hierarchical app-level `config.yaml` (settings), the
-  per-logged-in-user `users/<email>/config.yaml`, the `domains.json` domain list + each domain's sync
+  per-logged-in-user `users/<email>/config.yaml`, the `domains.yaml` domain list + each domain's sync
   on/off flag, `audits.json`, the auth session store + signing secret, the two log files, the
   browser `localStorage` conventions (theme mirror, never secrets), and the store layer that fronts
   it all — identical in local and server mode.
@@ -240,8 +246,9 @@ EmailDeliveryHero/
 │   ├── dashboard.mdx        # the TanStack table dashboard (6 columns, status cells)
 │   ├── domains.mdx          # Monitored Domains CRUD + per-domain schedule toggle
 │   ├── scheduled_checks.mdx # recurring checks: config page + per-OS scheduling
+│   ├── run_checks.mdx       # run orchestration: triggers, stage graph, concurrency, per-OS tools
 │   ├── settings.mdx         # the Settings page
-│   ├── storage.mdx          # on-disk state: config.yaml, per-user config, domains.json, logs
+│   ├── storage.mdx          # on-disk state: config.yaml, per-user config, domains.yaml, logs
 │   ├── errors.mdx           # error handling & logging: log.log + error.err, rolling writer, filter
 │   ├── left_bar.yaml        # nav source of truth (written by a separate process)
 │   ├── checks/              # one deep engineering spec per check topic (21 files + index)

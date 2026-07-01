@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — DKIM check
-description: Engineering spec for the DKIM (DomainKeys Identified Mail) category — the per-selector sub-checks EmailDeliveryHero runs (presence, parse, key length, test flag, algorithm, flags, CNAME delegation, rotation, multi-selector, selector discovery, duplicate-key reuse), how each is measured over node:dns/promises, how findings surface in the app, the dkim_check_results schema, and which sub-checks are first-round pure DNS vs future probe-based.
+description: Engineering spec for the DKIM (DomainKeys Identified Mail) category — testing methodologies (DNS layer, selector discovery, message layer, rua observation), the per-selector sub-checks (presence, parse, key length, test flag, algorithm, flags, single-record, CNAME delegation, Ed25519-only, rotation, multi-selector, duplicate-key), the Brew/npm testing toolbox, the test-results YAML, the summary cell + full DKIM page UX, the fix-recommendation engine, and the DKIM problem-state catalog with per-state deep dives.
 ---
 
 # EmailDeliveryHero — DKIM check
@@ -12,25 +12,32 @@ the message was **not altered in transit** and genuinely originated from the sig
 the more durable half of DMARC alignment — a DKIM signature survives forwarding and mailing lists,
 whereas SPF breaks on the envelope rewrite — so a missing, unparseable, weak, or revoked key quietly
 collapses DMARC pass rates, strips the sender of a positive reputation signal, and pushes mail to the
-spam folder. Since the 2024 Gmail/Yahoo bulk-sender rules, valid DKIM plus DMARC alignment is
-effectively mandatory for any sender doing volume.
+spam folder. Since the **2024 Gmail/Yahoo bulk-sender rules** and **Microsoft's May 2025
+outlook.com enforcement** (senders of ≥5,000 msgs/day must pass SPF, DKIM, *and* aligned DMARC or be
+rejected/junked), valid DKIM plus DMARC alignment is effectively mandatory for any sender doing
+volume.
 
 This check belongs to the **DKIM** dashboard category; all of its sub-check ids use the **`dkim`**
 prefix. It audits the **DNS-published key side** of DKIM (what a receiver would fetch to verify a
-signature); it does not yet send or verify a real signed message — that is future (see §7).
+signature); message-layer verification (does a real signed message actually pass, is `l=` present,
+is the signature aligned) is future — the methodology map in §2 shows exactly which layer each
+question lives in.
 
 **Read alongside** (do not duplicate these):
 
 * [Overview](../overview.mdx) — product charter, personas, port list.
 * [Engineering](../engineering.mdx) — the `Checker`/`Finding` contract, registry + runner, file
-  store, and scheduler this check plugs into (`dkim.checker.ts`, `checkId` `dkim`).
+  store, and scheduler this check plugs into (`dkim.check.ts`, `checkId` `dkim`).
 * [Deliverability checks catalog](../spam_checks.mdx) — the master catalog; DKIM is §2 there and this
   file is its full expansion.
 * [Dashboard](../dashboard.mdx) — how the six category cells render, color, and sort.
-* [Scheduled checks](../scheduled_checks.mdx) — recurring-audit cadence and per-OS scheduling.
+* [UI](../ui.mdx) — the app-wide summary-cell + chevron + full-page pattern this check follows.
+* [Scheduled checks](../scheduled_checks.mdx) — recurring-audit cadence and regression diffing.
+* [Report-email ingestion](../emails.mdx) — the DMARC `rua` corpus that will power the
+  observational-layer sub-checks.
 * Peers: [SPF](./spf.mdx) (the other authentication input to DMARC alignment) and
-  [DMARC](./dmarc.mdx) (which consumes DKIM results); [BIMI](./bimi.mdx) depends on DMARC enforcement
-  that in turn leans on strong DKIM.
+  [DMARC](./dmarc.mdx) (which consumes DKIM results); [BIMI](./bimi.mdx) depends on DMARC
+  enforcement that in turn leans on strong DKIM.
 
 ---
 
@@ -39,30 +46,49 @@ signature); it does not yet send or verify a real signed message — that is fut
 **Background.** A signing MTA/ESP hashes selected headers plus the body of an outbound message and
 signs the hash with a **private key**. It stamps a `DKIM-Signature:` header carrying the domain
 (`d=`), the **selector** (`s=`), the algorithm (`a=`, e.g. `rsa-sha256`), the signed-header list
-(`h=`), and the signature (`b=`). The **public key** lives in DNS as a TXT record at
-`<selector>._domainkey.<d-domain>`. A verifier reads `d=` and `s=` off the message, fetches that TXT
-record, and checks the signature. The selector is just a label, so one domain can publish **many
-keys** (one per ESP, one per rotation generation) side by side.
+(`h=`), the body hash (`bh=`), and the signature (`b=`). The **public key** lives in DNS as a TXT
+record at `<selector>._domainkey.<d-domain>`. A verifier reads `d=` and `s=` off the message,
+fetches that TXT record, and checks the signature. The selector is just a label, so one domain can
+publish **many keys** (one per ESP, one per rotation generation) side by side — and selectors
+**cannot be enumerated from DNS** (no wildcard answers `*._domainkey`, no registry), which is why
+discovery (§2.2) matters.
 
 **The standards.** **RFC 6376** defines the signature and the key record format (the `v=`, `k=`,
-`p=`, `t=`, `s=`, `h=`, `g=`, `n=` tags). **RFC 8301** sets the security floor: RSA keys **must be at
-least 1024 bits and should be 2048 bits**, and **SHA-1 (`rsa-sha1`) is forbidden** — only
-`rsa-sha256` (and, per RFC 8463, **`ed25519-sha256`**) are acceptable. **RFC 8463** adds Ed25519 keys
-for smaller records and modern crypto (published alongside an RSA selector for compatibility).
-M3AAWG guidance recommends **rotating keys at least every six months**.
+`p=`, `t=`, `s=`, `h=`, `g=`, `n=` tags). **RFC 8301** sets the security floor: RSA keys **must be
+at least 1024 bits and should be 2048 bits**, and **SHA-1 (`rsa-sha1`) is forbidden** — signatures
+made with historic algorithms have *permanently failed* evaluation. **RFC 8463** adds
+`ed25519-sha256` keys — but real-world verifier support is roughly half the market (Gmail returns
+`dkim=neutral`, Microsoft 365 errors, Yahoo permfails on Ed25519), so Ed25519 is only safe
+**dual-signed alongside RSA**. **RFC 8601** defines the `Authentication-Results` result values
+(`pass`/`fail`/`policy`/`neutral`/`temperror`/`permerror`) our message-layer checks will parse.
+M3AAWG guidance recommends **rotating keys at least every six months** (publish the new key ≥48 h
+before signing with it; keep the old record 7–30 days after cutover, then revoke with an empty
+`p=`).
 
 **Why receivers care.** A verified DKIM signature is a stable, forward-surviving identity a receiver
 can attach reputation to. It is one of the two authentication results DMARC aligns against
 (`d=` domain vs the `From:` domain). Gmail, Yahoo, and Outlook all weight a valid DKIM signature
-positively and treat its absence — for a bulk sender — as a reason to filter.
+positively and treat its absence — for a bulk sender — as a reason to filter or reject.
 
-**Common real-world failure mode.** The single most common failure is not a syntactically broken
+**Common real-world failure modes.** The single most common failure is not a syntactically broken
 record but a **selector that was never published** (the ESP was set up to sign, but the operator
 never added the TXT/CNAME record at the registrar), so every message carries a `DKIM-Signature` that
-fails to verify (`permerror`/`temperror`) — worse than not signing at all. Close behind: **legacy
-1024-bit keys** never upgraded, a **`t=y` test flag left in production** (receivers are told to
-ignore the result), an **empty `p=`** left behind after a key was revoked, and **CNAME delegations to
-an ESP whose target has since been removed** (dangling delegation → NXDOMAIN → no key).
+fails to verify (`permerror "no key for signature"`) — worse than not signing at all. Close behind:
+**legacy 1024-bit keys** never upgraded (history says this matters: in 2012 mathematician Zachary
+Harris factored Google's then-512-bit DKIM key for ~$75 of cloud time and spoofed mail between the
+founders — US-CERT VU#268267; Google moved to 2048-bit within days), a **`t=y` test flag left in
+production** (receivers must treat mail as unsigned), an **empty `p=`** left behind after a key was
+revoked, **CNAME delegations to an ESP whose target has since been removed** (dangling delegation →
+NXDOMAIN → no key, and a subdomain-takeover risk), and **ESPs signing with their own default
+domain** (`d=sendgrid.net`-style) — `dkim=pass` that contributes nothing to DMARC alignment.
+
+**Newer attack surface this spec tracks.** The 2024 Zone.eu research showed the **`l=` body-length
+tag** lets attackers append rendered content to signed mail while DKIM, DMARC — and even the BIMI
+logo — keep passing; flag `l=` on sight (message layer, future). **DKIM replay** (re-broadcasting
+one legitimately signed message at scale; the April 2025 `d=google.com` phishing wave is the
+canonical case) is mitigated sender-side by short `x=` expirations and **oversigning** (listing
+`From`/`To`/`Subject`/`Date` twice in `h=` so they cannot be added post-signing) — both future
+message-layer sub-checks.
 
 **How a failure degrades inbox placement.** No/invalid DKIM removes the forward-surviving half of
 DMARC alignment; if SPF also fails to align (e.g. after a forward), the message fails DMARC entirely
@@ -72,136 +98,735 @@ weak (1024-bit) or SHA-1 key is a negative trust signal in its own right.
 
 ---
 
-## 2. Sub-checks
+## 2. Tests we perform
+
+### 2.1 The four testing layers (methodology map)
+
+Every way DKIM can be tested falls into one of four layers. This spec ships layer 1 + 2 now; layers
+3 + 4 are future rounds that reuse the same `Checker`/`Finding` contract:
+
+| Layer | What it answers | Instruments | Round |
+| --- | --- | --- | --- |
+| **1. DNS layer** | Is the published key correct — present, parseable, strong, sane flags, resolvable delegation? | `node:dns/promises`; `dig`/`doggo`/`kdig` as debug bench; `openssl` for key decode | **first round** |
+| **2. Discovery layer** | Which selectors exist for this domain at all? | Configured selectors + MX-guided common-selector wordlist probing (`dnsx` for bulk) | **first round** |
+| **3. Message layer** | Does a real signed message verify — `bh=`/`b=` pass, canonicalization sound, `h=` coverage/oversigning, no `l=`, sane `x=`, `d=` aligned with `From:`? | `swaks` probe send + **mailauth** (npm) verification; reflectors (`check-auth@verifier.port25.com`, dkimvalidator.com); Gmail "Show original" | future |
+| **4. Observational layer** | What do real receivers report — per-source/per-selector DKIM pass rates, unsigned streams, pass-but-unaligned ESPs, replay anomalies? | DMARC `rua` aggregate reports via **parsedmarc** ([../emails.mdx](../emails.mdx)); `Authentication-Results` (RFC 8601) parsing | future |
+
+### 2.2 Sub-checks
 
 Every sub-check runs **per selector** unless noted as domain-scoped. Selectors come from
-`CheckContext.selectors` (the `dkim_selectors` table); when that list is empty, `dkim.selector_discovery`
-probes a common-selector wordlist to find any that exist.
+`CheckContext.dkimSelectors` (the per-domain selector list); when that list is empty,
+`dkim.selector_discovery` probes the common-selector wordlist to find any that exist.
 
 | Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
 | --- | --- | --- | --- | --- |
-| `dkim.present` | For each configured selector, a TXT (or CNAME→TXT) record exists at `<selector>._domainkey.<domain>`. | `resolveTxt('<selector>._domainkey.<domain>')`; on NODATA try `resolveCname` then resolve the target. | **critical:** no record for a selector known to sign mail. | Publish the public key your ESP/MTA generated as a TXT record at `<selector>._domainkey.<domain>` (or the CNAME your ESP specifies). |
-| `dkim.parses` | The record is a valid key: optional `v=DKIM1`, a `k=` type, and a **non-empty `p=`** whose base64 decodes to a well-formed public key. | Parse tag=value pairs; base64-decode `p=`; DER-parse the SubjectPublicKeyInfo. | **critical:** `p=` empty (**key revoked**) or record does not parse / bad base64. | Republish the correct public key exported from the signing system; an empty `p=` means the selector is revoked — remove it or repopulate `p=`. |
-| `dkim.keylength` | RSA modulus is **≥ 1024 bits (required)** and **≥ 2048 bits (recommended)** per RFC 8301; Ed25519 is fixed-strength and passes. | Decode `p=`, read the RSA modulus bit length (or detect `k=ed25519`). | **critical:** < 1024-bit RSA; **warning:** exactly 1024-bit RSA (upgrade advised). | Generate a **2048-bit** RSA key (or add an `ed25519` key), publish it on a new selector, re-sign, then retire the old selector. |
-| `dkim.testflag` | The record is **not** in test mode. `t=y` tells verifiers to treat the domain as testing and **ignore** DKIM results. | Read the `t=` tag; look for the `y` flag. | **warning:** `t=y` present on a production selector. | Remove the `y` flag from the `t=` tag (or drop `t=` entirely) once testing is complete. |
-| `dkim.algorithm` | The key type / advertised hash is modern: `k=rsa` or `k=ed25519`; **no SHA-1**. The `h=` tag (acceptable hash algorithms), if present, must not restrict to `sha1`. | Read `k=` and the optional `h=` tag. | **critical:** `h=sha1` only (SHA-1 forbidden, RFC 8301); **warning:** unknown `k=` type. | Reissue signing with `rsa-sha256` (remove any `h=sha1`); optionally add an `ed25519-sha256` selector alongside RSA for compatibility. |
+| `dkim.present` | For each configured selector, a TXT (or CNAME→TXT) record exists at `<selector>._domainkey.<domain>`. | `resolveTxt('<selector>._domainkey.<domain>')`; on NODATA try `resolveCname` then resolve the target. | **critical:** no record for a selector known to sign mail (`permerror "no key for signature"` at every receiver). | Publish the public key your ESP/MTA generated as a TXT record at `<selector>._domainkey.<domain>` (or the CNAME your ESP specifies). |
+| `dkim.parses` | The record is a valid key: optional `v=DKIM1`, a `k=` type, and a **non-empty `p=`** whose base64 decodes to a well-formed public key (DER SPKI for RSA; raw 32 bytes for Ed25519). | Parse tag=value pairs; base64-decode `p=`; `crypto.createPublicKey` on the SPKI. | **critical:** record does not parse / bad base64 (pasted PEM armor, smart quotes, injected line breaks are the classic causes). | Republish the exact key exported from the signing system — single logical string, no `-----BEGIN…` armor, no quotes-in-quotes, no newlines. |
+| `dkim.revoked` | `p=` is not empty. An empty `p=` is a **valid revocation** (RFC 6376 §3.6.1) — fatal only if the selector still signs mail. | Detect empty `p=` during parse. | **critical:** empty `p=` on a configured (expected-to-sign) selector; **info:** empty `p=` on a discovered selector (proper decommissioning). | Point the signer at the new selector/key, or repopulate `p=` if the revocation was accidental. |
+| `dkim.keylength` | RSA modulus is **≥ 1024 bits (required)** and **≥ 2048 bits (recommended)** per RFC 8301; Ed25519 is fixed-strength and passes. | Decode `p=`, read the RSA modulus bit length (or detect `k=ed25519`). | **critical:** < 1024-bit RSA (factorable — the 2012 Google incident); **warning:** exactly 1024-bit RSA (upgrade advised). | Generate a **2048-bit** RSA key, publish it on a new selector, re-sign, then retire the old selector. (Avoid 4096 — it breaks the 255-byte TXT chunking at some DNS hosts.) |
+| `dkim.testflag` | The record is **not** in test mode. `t=y` tells verifiers to treat mail from the domain **as unsigned**. | Read the `t=` tag; look for the `y` flag. | **warning:** `t=y` present on a production selector. | Remove the `y` flag from the `t=` tag (or drop `t=` entirely) once testing is complete. `t=s` (strict subdomain flag) is separate — surface as `info` since it forbids subdomain `i=` identities. |
+| `dkim.algorithm` | The key type / advertised hash is modern: `k=rsa` or `k=ed25519`; **no SHA-1**. The `h=` tag (acceptable hash algorithms), if present, must not restrict to `sha1`. | Read `k=` and the optional `h=` tag. | **critical:** `h=sha1` only (SHA-1 forbidden, RFC 8301 — permanent failure at modern verifiers); **warning:** unknown `k=` type. | Reissue signing with `rsa-sha256` (remove any `h=sha1`); optionally add an `ed25519-sha256` selector alongside RSA. |
+| `dkim.ed25519_only` | The domain is not signing **only** with Ed25519. Gmail returns `neutral`, Microsoft 365 errors, and Yahoo permfails on Ed25519 — an Ed25519-only domain is effectively unsigned at the big three. | Domain-scoped: after all selectors resolve, check whether ≥1 healthy **RSA** key exists whenever any `k=ed25519` key exists. | **warning:** every working selector is `k=ed25519` (no RSA fallback). | **Dual-sign**: keep an RSA-2048 selector as primary and Ed25519 as secondary — verifiers accept a message if *any* signature validates. |
 | `dkim.flags` | Tag sanity for the remaining RFC 6376 tags: `s=` (service type: `*` or `email`), `t=` flags (`y` test, `s` no-subdomain), deprecated `g=` (granularity) not overly restrictive, `n=` notes ignored, `h=` a valid hash list. | Tokenize all tags; validate values against the RFC 6376 grammar. | **warning:** `s=` excludes `email`; `g=` set to a value that won't match the signing identity; unknown/malformed tag. | Set `s=email` (or `s=*`); remove a restrictive/deprecated `g=`; fix or drop any malformed tag so verifiers accept the key. |
-| `dkim.multi` | The domain has **≥ 1 working selector** and, ideally, a **second selector staged** so keys can rotate without an outage. | Count selectors that pass `present`+`parses`+`keylength`. | **warning:** exactly one working selector (no rotation headroom); **critical:** zero working selectors. | Publish a second selector now (even pre-activation) so the next rotation is a cutover, not an outage. |
-| `dkim.rotation` | Key age vs the **6-month M3AAWG cadence**, when the selector's first-seen/publish date is known. | Compare `first_seen_at` (tracked in the store) to `now`; config window default 180 days. | **warning:** key older than the rotation window; **info:** approaching it. | Rotate the DKIM key: publish a fresh selector, switch signing to it, then remove the old selector after a grace period. |
-| `dkim.selector_discovery` | When no selectors are configured, probe a **common-selector wordlist** to find published keys the operator forgot to register. | TXT/CNAME lookups over `google`, `default`, `selector1`, `selector2`, `k1`, `k2`, `s1`, `s2`, `dkim`, `mail`, `mandrill`, `mailjet`, `sig1`, `ctct1`, `pm`, `zoho`, `everlytickey1`. | **info:** discovered selector(s) not in config; **warning:** discovered a selector that is broken (weak/revoked). | Add discovered selectors to the domain's monitored selector list so they are audited every run; fix any that are broken. |
-| `dkim.cname_delegation` | Selectors published as **CNAME to an ESP** (e.g. `s1._domainkey.<domain>` → `s1.domainkey.uXXXX.wlYYY.sendgrid.net`) resolve through to a valid key at the target. | `resolveCname` the selector name; then `resolveTxt` the CNAME target and parse it. | **critical:** CNAME target NXDOMAIN / no key (dangling delegation — ESP removed); **warning:** CNAME chain > 1 hop or target key weak. | Re-point the CNAME to the exact target your ESP lists (copy it from the ESP dashboard); remove the CNAME if that ESP is decommissioned. |
-| `dkim.duplicate_key` | The **same public key (`p=`)** is not reused across multiple domains or multiple selectors within a domain (shared private key = shared blast radius). | Hash the decoded public key; compare across the audit corpus (per-domain and cross-domain within the app's monitored set). | **warning:** identical `p=` seen on another domain/selector (shared private key). | Generate a **unique key per domain** (and per rotation generation); never copy one private key across brands/domains. |
-| `dkim.record_size` | The TXT record stays within DNS limits: each character-string ≤ 255 bytes and the total answer avoids fragmentation (RSA-2048 must be split into multiple 255-byte strings). | Inspect the TXT chunk lengths returned by `resolveTxt` (array of strings, concatenated). | **warning:** a single string > 255 bytes (some providers reject), or an oversize record risking TCP-only/fragmented answers. | Split the `p=` value into correctly-quoted ≤255-byte strings (most DNS UIs do this automatically); consider an Ed25519 key for a far shorter record. |
-| `dkim.underscore_label` | The queried name is exactly `<selector>._domainkey.<domain>` (the fixed `_domainkey` label present, selector not accidentally doubled or misspelled). | String-validate the constructed query name before lookup; detect a wildcard TXT that answers everything. | **warning:** a wildcard `*.<domain>` TXT makes every selector "resolve" with non-DKIM data (false positive). | Ensure the key sits under the literal `_domainkey` label; remove/scoping any wildcard TXT that shadows `_domainkey`. |
-| `dkim.signature_verify` *(future)* | A **real sent message actually verifies** against the published key (`bh=` body hash and `b=` signature check out; canonicalization and `h=` coverage are sound). | Send a probe via `swaks` through the sender's MTA, capture the `DKIM-Signature`, and validate it. | **critical:** signed message fails verification despite a present key (canonicalization/body-hash mismatch). | Fix the signer: align the signing `d=`/`s=` with the published record, sign a stable header set, use relaxed/relaxed canonicalization if intermediaries modify whitespace. |
+| `dkim.single_record` | Exactly **one** TXT record answers at the selector name. RFC 6376 §3.6.2.2: multiple TXT RRs at one selector → "the results are undefined" (and CNAME+TXT coexisting is illegal). | Count the TXT answers (after filtering to DKIM-looking strings, count all). | **warning:** ≥2 TXT records at one selector name (verifier behavior undefined — some pick the wrong one). | Delete the extra TXT record(s) so exactly one remains at the selector name. |
+| `dkim.multi` | The domain has **≥ 1 working selector** and, ideally, a **second selector staged** so keys can rotate without an outage (the Microsoft 365 `selector1`/`selector2` pattern). | Count selectors that pass `present`+`parses`+`keylength`. | **warning:** exactly one working selector (no rotation headroom); **critical:** zero working selectors. | Publish a second selector now (even pre-activation) so the next rotation is a cutover, not an outage. |
+| `dkim.rotation` | Key age vs the **6-month M3AAWG cadence**, when the selector's first-seen date is known (tracked in the store per `(selector, key_sha256)`). | Compare `first_seen_at` to `now`; config window default 180 days. | **warning:** key older than the rotation window; **info:** approaching it. | Rotate: publish a fresh key on a new selector ≥48 h ahead, switch signing, keep the old record 7–30 days, then revoke (empty `p=`). |
+| `dkim.selector_discovery` | When no selectors are configured, probe the **common-selector wordlist** (§4, MX-guided) to find published keys the operator forgot to register. | Bounded-concurrency TXT/CNAME lookups over the wordlist. | **info:** discovered selector(s) not in config; **warning:** a discovered selector that is broken (weak/revoked). | Add discovered selectors to the domain's monitored selector list so they are audited every run; fix any that are broken. |
+| `dkim.cname_delegation` | Selectors published as **CNAME to an ESP** (e.g. `s1._domainkey.<domain>` → `s1.domainkey.uXXXX.wlYYY.sendgrid.net`) resolve through to a valid key at the target. | `resolveCname` the selector name; then `resolveTxt` the CNAME target and parse it. | **critical:** CNAME target NXDOMAIN / no key (dangling delegation — ESP removed; also a takeover risk); **warning:** CNAME chain > 1 hop or target key weak. | Re-point the CNAME to the exact target your ESP lists (copy it from the ESP dashboard); remove the CNAME if that ESP is decommissioned. |
+| `dkim.duplicate_key` | The **same public key (`p=`)** is not reused across multiple domains or multiple selectors within a domain (shared private key = shared blast radius + shared reputation). | Hash the decoded public key; compare across this run and the latest audit of every other monitored domain. | **warning:** identical `p=` seen on another domain/selector. | Generate a **unique key per domain** (and per rotation generation); never copy one private key across brands/domains. |
+| `dkim.record_size` | The TXT record stays within DNS limits: each character-string ≤ 255 bytes and the total answer avoids UDP truncation (RSA-2048 must be split into multiple 255-byte strings; 4096-bit keys frequently break resolvers without EDNS0/TCP fallback). | Inspect the TXT chunk lengths returned by `resolveTxt`. | **warning:** a single string > 255 bytes (some providers reject), or an oversize record risking truncation → intermittent `temperror`. | Split the `p=` value into correctly-quoted ≤255-byte strings (most DNS UIs do this automatically); prefer 2048-bit RSA or add Ed25519 for a far shorter record. |
+| `dkim.underscore_label` | The queried name is exactly `<selector>._domainkey.<domain>` (the fixed `_domainkey` label present, selector not doubled or misspelled), and a wildcard TXT is not shadowing every selector. | String-validate the constructed query name; probe a random nonexistent selector — if it "resolves", a wildcard is answering. | **warning:** a wildcard `*.<domain>` TXT makes every selector "resolve" with non-DKIM data (false positives for us *and* `permerror` junk for receivers). | Ensure the key sits under the literal `_domainkey` label; remove or scope any wildcard TXT that shadows `_domainkey`. |
+| `dkim.alignment` *(future — message/rua layer)* | The signing `d=` domain **aligns** with the visible `From:` domain for DMARC (relaxed = org-domain match). `dkim=pass header.d=sendgrid.net` contributes nothing to your DMARC. | Parse `d=` from probe-message signatures / `rua` `auth_results`. | **warning:** mail signs with an ESP default domain — pass-but-unaligned. | Complete the ESP's custom-domain authentication (SendGrid Domain Authentication, SES Easy DKIM, Mailgun sending domain) so `d=` becomes your domain. |
+| `dkim.signature_verify` *(future — message layer)* | A **real sent message actually verifies**: `bh=` and `b=` check out; canonicalization (`c=relaxed/relaxed` preferred) survives transit; `h=` covers `From`/`To`/`Subject`/`Date`. | `swaks` probe send through the sender's MTA → verify with mailauth. | **critical:** signed message fails verification despite a healthy key (body-hash mismatch from footers/gateways; header rewrite under `c=simple`). | Sign as the *last* content-changing step; use relaxed/relaxed; stop modifying signed headers post-signing. |
+| `dkim.length_tag` *(future — message layer)* | No **`l=` body-length tag** in observed signatures (2024 Zone.eu exploit: append rendered content while DKIM/DMARC/BIMI keep passing). | Parse `l=` from observed `DKIM-Signature` headers. | **critical:** any `l=` present. | Remove `l=` from the signer config — always sign the whole body. |
+| `dkim.replay_hardening` *(future — message layer)* | Replay-mitigation hygiene: `x=` expiration present with a sane window (x − t between ~3 h and ~30 d; x > t required), and `From`/`To`/`Subject`/`Date` **oversigned** (listed twice in `h=`). | Parse `t=`/`x=`/`h=` from observed signatures. | **info/warning:** no `x=`, or no oversigning; **warning:** `x= ≤ t=` (invalid) or `t=` in the future (clock skew — NTP-sync the signer). | Add a short `x=` (re-sign deferred queue retries) and oversign the display-critical headers. |
 
 ---
 
-## 3. How it is measured
+## 3. Testing toolbox — Brew / npm / pipx tools
+
+Verified against `formulae.brew.sh` (2026-07). First-round detection is pure `node:dns/promises`
+(no binaries required); these tools are the **debug bench** we shell out to for deeper diagnosis,
+cross-checking our own checker, and the future message layer. Install the bench with:
+
+```bash
+brew install bind doggo q dnsx ldns knot dnsviz checkdmarc parsedmarc swaks msmtp mailpit openssl@3
+npm install mailauth        # library + CLI, same TS/Node stack as the app
+pipx install dkimpy         # dkimverify/dkimsign/dknewkey — minimal scriptable verifier
+```
+
+> **Key gap to know:** homebrew-core has **no DKIM-specific formula** — `opendkim`
+> (`opendkim-testkey`), `rspamd` (`rspamadm dkim_keygen`), and `spamassassin` are all absent from
+> brew (stale web guides notwithstanding). The message-layer verifier of choice is **mailauth**
+> (npm) — it authenticates a raw `.eml` exactly like a receiving MTA (SPF, DKIM, DMARC, ARC, BIMI,
+> alignment) and doubles as a backend **library** on our own Node stack.
+
+### DKIM record fetch & DNS diagnosis
+
+| Tool | Install | What we use it for | Example DKIM command |
+| --- | --- | --- | --- |
+| **dig** (bind) | `brew install bind` | The baseline lookup + the `dig()` fallback in `dns-util.ts`. Add `+tcp` to rule out UDP truncation of big keys. | `dig +short TXT selector1._domainkey.example.com` |
+| **delv** (bind) | (same formula) | DNSSEC verdict on the key name — first line reads `; fully validated` / `; unsigned answer` / `; resolution failed`. | `delv @1.1.1.1 TXT s1._domainkey.example.com +rtrace` |
+| **doggo** | `brew install doggo` | Modern dig with native **JSON output**, DoH/DoT. (`dog` is gone from Homebrew; doggo is its successor.) | `doggo s1._domainkey.example.com TXT --json` |
+| **kdig** (knot) | `brew install knot` | dig-compatible, `+json` (RFC 8427) output; "does 8.8.8.8 see the same key?" cross-checks. | `kdig @8.8.8.8 +short TXT google._domainkey.example.com` |
+| **q** | `brew install q` | Tiny DNS client over UDP/TCP/DoT/DoH/DoQ — resolver-dependent-visibility testing. | `q s1._domainkey.example.com TXT --format=json` |
+| **drill** (ldns) | `brew install ldns` | DNSSEC-aware tracing when a record looks present-but-invisible. | `drill -D TXT s1._domainkey.example.com` |
+| **dnsx** | `brew install dnsx` | **Bulk selector probing** — pipe a wordlist of `sel._domainkey.domain` names, get NDJSON with status codes. | `echo google._domainkey.example.com \| dnsx -txt -resp -json` |
+| **massdns** | `brew install massdns` | Very large sweeps (many selectors × many domains) when dnsx isn't enough. | `massdns -r resolvers.txt -t TXT -o J selectors.txt` |
+| **dnsviz** | `brew install dnsviz` | DNSSEC chain assessment of the `_domainkey` name — JSON warnings/errors via `grok`. | `dnsviz probe -A -R TXT s1._domainkey.example.com \| dnsviz grok -l warning` |
+
+### Key parsing & crypto
+
+| Tool | Install | What we use it for | Example |
+| --- | --- | --- | --- |
+| **openssl@3** | `brew install openssl@3` | Decode `p=` and read the key size/type — the line `RSA Public-Key: (2048 bit)` or `ED25519 Public-Key` is the verdict. (DKIM Ed25519 `p=` is a **raw 32-byte key**, not DER — length-check before piping to openssl.) | `dig +short TXT s1._domainkey.ex.com \| tr -d '" ' \| grep -o 'p=[^;]*' \| cut -c3- \| base64 -d \| openssl pkey -pubin -inform DER -text -noout` |
+
+In-process we use Node's own `crypto.createPublicKey` for the same decode — openssl is the manual
+cross-check we print in the drill-down pages.
+
+### Message-layer verification & probes (future round)
+
+| Tool | Install | What we use it for | Example |
+| --- | --- | --- | --- |
+| **mailauth** (npm) | `npm i mailauth` | The end-to-end verifier: full JSON report per `.eml` — per-signature `signingDomain`, `selector`, `status.result`, key size, algorithm, canonicalization, plus SPF/DMARC/ARC/BIMI and alignment. Also signs (`mailauth sign`) for round-trip tests. | `npx mailauth report message.eml` |
+| **dkimpy** (pipx) | `pipx install dkimpy` | Minimal scriptable verify/sign/keygen (`dkimverify` exit code 0/1); `dknewkey` generates keys + ready-to-paste records. | `dkimverify < message.eml` |
+| **swaks** | `brew install swaks` | Sends the probe message through the user's MTA to a seed/reflector mailbox. No native DKIM signing — sign with mailauth/dkimsign first, inject with `--data`. | `swaks --to seed@gmail.com --from you@example.com --server smtp.example.com --data @signed.eml` |
+| **msmtp** | `brew install msmtp` | Lightweight capability probe of the sending MTA (STARTTLS, size limits) without sending. | `msmtp --serverinfo --host=smtp.example.com --tls=on --tls-starttls=on` |
+| **mailpit** | `brew install mailpit` | Local SMTP sink (`:1025`) + JSON API (`:8025`) — lets us verify our **own** probe-signing pipeline end-to-end before touching real mailboxes. (`mailhog` is gone from brew; mailpit is the successor.) | `curl localhost:8025/api/v1/messages` |
+| **checkdmarc** | `brew install checkdmarc` | The domain-wide conformance oracle (SPF/DMARC/MX/DNSSEC/BIMI). **Its CLI does not probe DKIM selectors** — pair it with the DNS tools above. | `checkdmarc example.com -f JSON` |
+| **parsedmarc** | `brew install parsedmarc` | Parses DMARC `rua`/`ruf` report files (zip/gz/xml/eml) → normalized JSON incl. `auth_results.dkim[]{domain, selector, result}` — the observational layer's engine ([../emails.mdx](../emails.mdx)). | `parsedmarc report.xml.gz` |
+
+### Reflectors & online testers (manual debugging aids, linked from the UI)
+
+**check-auth@verifier.port25.com** (email it from the audited domain; an automated reply reports
+DKIM/SPF/SpamAssassin results), **dkimvalidator.com** and **appmaildev.com/en/dkim** (one-time test
+address → web report), **mail-tester.com** (seed score /10), **learndmarc.com** (paste raw headers →
+step-by-step SPF/DKIM/DMARC alignment replay), **Gmail "Show original"** (free verdict from the
+largest verifier), **MXToolbox / dmarcian DKIM Inspector / EasyDMARC** (domain+selector record
+checkers), **dmarcdkim.com** and **CaptainDNS** (selector-discovery testers probing ~100–130 common
+selectors — the same technique as our `dkim.selector_discovery`).
+
+---
+
+## 4. How it is measured
 
 **Query construction.** For each selector `s` and domain `d`, the checker builds the FQDN
 `` `${s}._domainkey.${d}` `` and calls `resolveTxt(name)` from `node:dns/promises`. `resolveTxt`
-returns `string[][]` (an array of records, each an array of character-strings); the checker joins the
-inner array with `''` (no separator — DKIM splits `p=` across 255-byte strings) before parsing.
+returns `string[][]` (an array of records, each an array of character-strings); the checker joins
+the inner array with `''` (no separator — DKIM splits `p=` across 255-byte strings) before parsing.
 
 **CNAME resolution (`dkim.cname_delegation`).** If `resolveTxt` throws `ENODATA`/`ENOTFOUND`, the
 checker calls `resolveCname(name)`. If a CNAME target exists, it records `resolved_via = 'cname'`,
 then `resolveTxt` the target and parses the key found there. This is the normal shape for SendGrid,
-Mailchimp, Amazon SES, Postmark, etc. A CNAME with no resolvable target is a **dangling delegation**
-→ `critical`.
+Mailchimp, Amazon SES, Postmark, Microsoft 365, etc. A CNAME with no resolvable target is a
+**dangling delegation** → `critical`.
 
 **Parsing.** The record is split on `;` into `tag=value` pairs (whitespace-trimmed, case-insensitive
 tag names). Relevant tags: `v` (must be `DKIM1` if present), `k` (`rsa`|`ed25519`, default `rsa`),
 `p` (base64 public key; **empty = revoked**), `t` (flags: `y`,`s`), `s` (service type), `h`
 (acceptable hash algorithms), `g` (deprecated granularity), `n` (human note). The `p=` value is
 base64-decoded; for RSA it is DER-parsed as a SubjectPublicKeyInfo and the **modulus bit length** is
-read (Node `crypto.createPublicKey` on the reconstructed SPKI, or a minimal ASN.1 length read). For
-`k=ed25519` the key is a fixed 32-byte Ed25519 public key (always "strong").
+read (Node `crypto.createPublicKey` on the decoded DER); for `k=ed25519` the key is a fixed
+32-byte raw public key (always "strong" — but see `dkim.ed25519_only`).
 
-**Selector discovery (`dkim.selector_discovery`).** Runs **only** when `ctx.selectors` is empty. It
-fires the wordlist (see §2) as parallel TXT lookups with a bounded concurrency (e.g. 6) and short
-per-lookup timeout; hits are reported as `info` findings and recommended for adding to config. It is
-deliberately a small curated list (not a brute force) to stay polite to resolvers.
+**Selector discovery (`dkim.selector_discovery`).** Runs **only** when the domain has no configured
+selectors. Two passes:
+
+1. **MX-guided:** `resolveMx(domain)` first; the MX host names the provider, and the provider names
+   the likely selectors — probe those first:
+
+   | MX contains | Provider | Probe first |
+   | --- | --- | --- |
+   | `google.com` / `googlemail` | Google Workspace | `google` |
+   | `protection.outlook.com` | Microsoft 365 | `selector1`, `selector2` |
+   | `zoho` | Zoho Mail | `zoho`, `zmail` |
+   | `mimecast` / `pphosted` / `barracuda` | gateway in front | fall through to the wordlist |
+
+2. **Wordlist:** parallel TXT/CNAME lookups (bounded concurrency ~6, short timeout) over the curated
+   common-selector list — generic first, then ESP conventions:
+   `default`, `dkim`, `dkim1`, `dkim2`, `mail`, `email`, `smtp`, `selector`, `selector1`,
+   `selector2`, `key1`, `key2`, `k1`, `k2`, `k3` (Mailchimp), `s1`, `s2` (SendGrid; legacy
+   `smtpapi`), `s1024`, `mx`, `google` (Google Workspace), `mandrill`, `mte1`, `mte2` (Mailchimp
+   Transactional), `mailjet`, `pm` (Postmark — real selectors are date-based `YYYYMMDDpm`), `hs1`,
+   `hs2` (HubSpot), `km1`, `km2` (Klaviyo), `brevo1`, `brevo2` (Brevo/Sendinblue), `zendesk1`,
+   `zendesk2`, `ctct1`, `ctct2` (Constant Contact), `zoho`, `zmail`, `protonmail`, `protonmail2`,
+   `protonmail3`, `sig1` (Apple iCloud custom domains), `sfdc` (Salesforce convention),
+   `everlytickey1`, `everlytickey2`, `pdk1` (Mailgun), `mailo`.
+
+   Hits are `info` findings recommended for adding to config. It is deliberately a curated list (not
+   a brute force) to stay polite to resolvers — Amazon SES's three random-token CNAME selectors and
+   custom selectors escape any wordlist **by design**; the durable sources for those are pasted
+   message headers and `rua` reports (layers 3–4). A selector *name* proves nothing about the
+   provider — anyone can name a selector `google`.
 
 **Duplicate-key detection (`dkim.duplicate_key`).** The checker computes `sha256(decoded p=)` and
 compares it against the same hash from **other selectors in this run** and from the **most recent
-audit of every other monitored domain** (read from the store). A collision across domains is a shared
-private key → `warning`.
+audit of every other monitored domain** (read from the store). A collision across domains is a
+shared private key → `warning`.
 
 **Severity mapping.**
 
 | Condition | Severity |
 | --- | --- |
-| No record for a configured signing selector; unparseable record; empty `p=` (revoked); RSA < 1024-bit; SHA-1-only; dangling CNAME target | **critical** |
-| 1024-bit RSA; `t=y` in production; only one working selector; key past rotation window; duplicate key across domains; oversize/misspelled record; `s=` excludes email | **warning** |
-| Discovered-but-unconfigured selector; approaching rotation window; Ed25519 present as advisory note | **info** |
-| Selector present, parses, ≥2048-bit (or Ed25519), no test flag, sane tags | **ok** |
+| No record for a configured signing selector; unparseable record; empty `p=` (revoked) on a configured selector; RSA < 1024-bit; SHA-1-only; dangling CNAME target; zero working selectors | **critical** |
+| 1024-bit RSA; `t=y` in production; only one working selector; multiple TXT records at a selector; Ed25519-only; key past rotation window; duplicate key across domains; oversize record; wildcard shadowing; `s=` excludes email | **warning** |
+| Discovered-but-unconfigured selector; approaching rotation window; `t=s` strict flag; empty `p=` on a merely-discovered selector; `n=` notes | **info** |
+| Selector present, parses, ≥2048-bit RSA (or Ed25519 alongside RSA), no test flag, one TXT record, sane tags | **ok** |
 
-**Edge cases.** (a) A selector with `p=` empty is a **valid revocation**, not a parse error — report
-`critical` "revoked" only if the selector is expected to sign; otherwise `info`. (b) `resolveTxt`
-returning multiple TXT records at one selector name → report the **first valid DKIM key** and a
-`warning` for the ambiguity. (c) A **wildcard TXT** (`*.<domain>`) can make every probed selector
-"resolve" with junk — `dkim.underscore_label` guards against this false positive. (d) `TEMPORARY`
-DNS failures (`ESERVFAIL`/timeouts) must be surfaced as `info`/"could not determine", **never** as a
-`critical` "missing" — a resolver hiccup must not fabricate a problem (important for the scheduler's
-regression diff). (e) Trailing-dot and case normalization on the domain before building the name.
+**Edge cases.** (a) An empty `p=` is a **valid revocation**, not a parse error — `critical` only for
+a configured selector (see `dkim.revoked`). (b) `resolveTxt` returning multiple TXT records at one
+selector name → `dkim.single_record` warning; evaluate the first DKIM-parseable one. (c) A
+**wildcard TXT** (`*.<domain>`) can make every probed selector "resolve" with junk —
+`dkim.underscore_label` probes a random nonexistent selector to detect this and suppresses
+discovery false-positives. (d) **Transient DNS failures** (`ESERVFAIL`/timeouts) must be surfaced
+as `warning "could not determine"`, **never** as a `critical` "missing" — a resolver hiccup must not
+fabricate a problem (important for the scheduler's regression diff). (e) Trailing-dot and case
+normalization on the domain before building the name. (f) CNAME chains longer than one hop resolve
+fine but are noted (fragility).
 
-**Caching / rate limits.** Pure-DNS sub-checks are cheap; results honor the record TTL implicitly via
-the OS resolver. Selector discovery is the only fan-out — cap concurrency and cache negative results
-for the audit run so a re-probe within one audit does not repeat lookups. No third-party rate limits
-apply until the future `swaks` verify path.
-
----
-
-## 4. User interface
-
-DKIM is **column 2 of the six-column** [Dashboard](../dashboard.mdx). Per domain, the DKIM cell shows
-the **worst severity** across all DKIM sub-checks over all selectors and an **N-of-M** summary:
-
-* All selectors present, parse, ≥2048-bit, no test flag → **dark green**, "Healthy".
-* Worst finding is `warning` (e.g. a 1024-bit key or single selector) → **amber**, e.g. "1 of 2 selectors weak".
-* Any `critical` (missing/revoked/SHA-1/dangling CNAME) → **dark red**, e.g. "selector `s1` missing".
-* Never run → **light gray**, "—". (`info`-only, e.g. a discovered selector, does not turn the cell amber.)
-
-**Audit-detail view.** Findings render grouped under a **DKIM** section, one collapsible sub-group
-**per selector**, each row = one `Finding`: a severity badge (`ok`/`info`/`warning`/`critical` in
-green/blue/amber/red), the sub-check label, the **observed detail** (the raw record, key type, and
-bit length), the **remediation** string, and a **copy-to-clipboard** button that copies the exact TXT
-value to publish. Built with **React 19 + shadcn/ui** (`Card`, `Badge`, `Accordion`, `Button`,
-`Tooltip`) and **lucide-react** icons (`KeyRound`, `ShieldCheck`, `ShieldAlert`, `Copy`).
-
-```
-DKIM  ────────────────────────────────────  worst: ● critical
-  selector: s1  ▸ resolved via CNAME → s1.domainkey.u123.sendgrid.net
-    ● critical  dkim.present     No key found — CNAME target NXDOMAIN   [Fix ▾] [Copy]
-    ○ info      dkim.rotation    First seen 2025-11-02 (age 241d)       [Fix ▾]
-  selector: google
-    ● warning   dkim.keylength   RSA 1024-bit (upgrade to 2048)         [Fix ▾] [Copy]
-    ● ok        dkim.testflag    no t=y
-  domain-wide
-    ● warning   dkim.multi       only 1 working selector (stage a 2nd)  [Fix ▾]
-```
-
-**Per-domain config inputs.** The Domains detail page ([domains](../domains.mdx)) exposes a
-**Selectors** editor (add/remove selector strings → the shared `dkim_selectors` table). If empty, a
-banner: "No selectors configured — discovery will probe common selectors; add yours for precise
-auditing." A **"Run discovery now"** button triggers `dkim.selector_discovery` and offers to import
-hits. The future `dkim.signature_verify` path adds a **"Send test message"** admin action (SMTP host
-+ from address).
-
-**States.** *Empty/never-run:* gray "—" cell, detail reads "DKIM not yet audited." *Loading:*
-skeleton rows while the audit runs. *No selectors + discovery found nothing:* `info` "no DKIM
-selectors detected — mail from this domain is likely unsigned." **Admin-only settings** (gated by
-`role:admin` via `<Protect>`): the discovery wordlist, the rotation-window days, and the future SMTP
-probe credentials live under [Settings](../settings.mdx).
+**Caching / rate limits.** Pure-DNS sub-checks are cheap; results honor the record TTL implicitly
+via the OS resolver. Selector discovery is the only fan-out — cap concurrency (~6), short per-lookup
+timeout, cache negative results within the run. No third-party rate limits until the future message
+layer (reflectors and seed mailboxes have their own etiquette).
 
 ---
 
-## 5. Information schema (database schema)
+## 5. Test results (YAML)
+
+The information we extract from the tests, in one document per domain per run. The structured
+payload is produced by the checker as `results.dkim` (persisted inside the per-run audit record;
+see §10) and the per-test rows are the findings. Rendered as YAML — **`test_results.yaml`** — the
+canonical shape every DKIM UI surface and the regression differ consume:
+
+```yaml
+# test_results.yaml — DKIM category, one document per domain per audit run
+dkim:
+  domain: example.com
+  checked_at: 2026-07-01T09:30:00Z
+  status: critical             # worst severity across the tests below
+  # ---- the parsed observation (results.dkim) ----
+  selectors_configured: [s1, google]
+  discovery_ran: false         # true only when no selectors were configured
+  working_selectors: 1         # pass present+parses+keylength
+  selectors:                   # one entry per selector probed (configured or discovered)
+    - selector: s1
+      query_name: s1._domainkey.example.com
+      source: configured             # configured | discovered
+      resolved_via: cname            # txt | cname | none
+      cname_target: s1.domainkey.u123.wl001.sendgrid.net
+      present: false
+      parses: false
+      raw_record: null
+      dkim_version: null             # v= tag
+      key_type: null                 # rsa | ed25519 | null
+      key_bits: null                 # RSA modulus bits; null for ed25519/absent
+      key_sha256: null               # sha256 of decoded public key (duplicate detect)
+      has_test_flag: false           # t=y
+      has_strict_flag: false         # t=s
+      is_revoked: false              # p= empty
+      txt_record_count: 0
+      oversize_chunk: false          # any character-string > 255 bytes
+      flags: {}                      # long tail: {s: email, h: [sha256], g: "*", n: "..."}
+      first_seen_at: 2025-11-02T00:00:00Z   # earliest audit that saw this key (rotation age)
+    - selector: google
+      query_name: google._domainkey.example.com
+      source: configured
+      resolved_via: txt
+      cname_target: null
+      present: true
+      parses: true
+      raw_record: "v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQ…"
+      dkim_version: DKIM1
+      key_type: rsa
+      key_bits: 1024
+      key_sha256: "9f2c…a41b"
+      has_test_flag: false
+      has_strict_flag: false
+      is_revoked: false
+      txt_record_count: 1
+      oversize_chunk: false
+      flags: {}
+      first_seen_at: 2024-03-14T00:00:00Z
+  wildcard_shadow: false       # random-selector probe answered → wildcard TXT pollution
+  duplicate_keys: []           # [{key_sha256, seen_on: ["other.com/s1"]}]
+  # ---- the per-test rows (the findings, pass and fail alike) ----
+  tests:
+    - id: dkim.present.s1
+      selector: s1
+      title: DKIM selector "s1" not found
+      result: fail                   # pass | fail | warn | info
+      detail: CNAME target s1.domainkey.u123.wl001.sendgrid.net does not resolve (NXDOMAIN).
+      dns_value_observed: "s1._domainkey.example.com CNAME s1.domainkey.u123.wl001.sendgrid.net → NXDOMAIN"
+      fix: Re-point the CNAME to the target listed in your SendGrid dashboard, or remove it.
+    - id: dkim.keylength.google
+      selector: google
+      title: 1024-bit RSA key (upgrade to 2048)
+      result: warn
+      detail: RFC 8301 requires ≥1024 and recommends ≥2048 bits; 1024-bit keys are a negative trust signal.
+      dns_value_observed: "k=rsa; p=… (1024-bit modulus)"
+      fix: Generate a 2048-bit key in the Google Admin console, publish it, then re-enable signing.
+    - id: dkim.multi
+      title: Only 1 working selector (no rotation headroom)
+      result: warn
+      fix: Stage a second selector so the next rotation is a cutover, not an outage.
+    - id: dkim.testflag.google
+      selector: google
+      title: No test flag
+      result: pass
+  # ---- matched problem states (see §9) ----
+  problem_states: [PS-01, PS-04, PS-09]
+```
+
+Field-name mapping: `selectors[].*` keys are 1:1 with the `dkim_check_results` columns in §10
+(`selector`, `query_name`, `resolved_via`, `cname_target`, `raw_record`, `key_type`, `key_bits`,
+`key_sha256`, `has_test_flag`, `is_revoked`, `flags`, `first_seen_at`, `present`, `parses`);
+`tests[]` rows are the `findings` (`result: pass|fail|warn|info` ⇔ severity `ok|critical|warning|
+info`; per-selector finding ids are suffixed `.<selector>`); `problem_states` is derived (§9 mapping
+table) — never stored separately.
+
+---
+
+## 6. User interface — the summary surface and the full DKIM page
+
+Two surfaces, following the app-wide pattern in [../ui.mdx](../ui.mdx): a **summary cell** on the
+main view, and a **chevron** that opens a **full page dedicated to DKIM** for that domain.
+
+### 6.1 The summary surface (main view)
+
+DKIM is one of the six category columns on the Dashboard. The DKIM cell for a domain is the
+**worst severity** among all `dkim.*` findings in the latest run, and shows the single most
+decision-relevant metric for this technology: **working selectors and key strength**.
+
+- **Color** — dark green (all selectors healthy, ≥2048-bit), amber (worst = warning, e.g. a
+  1024-bit key or single selector), dark red (any critical — missing/revoked/SHA-1/dangling CNAME),
+  light gray (never run). `info`-only findings (e.g. a discovered selector) keep the cell green.
+- **Label** — the one-line summary: `2 selectors · 2048-bit` / `1 of 2 selectors failing` /
+  `selector "s1" missing` / `No selectors` / `—`.
+- **Hover** — tooltip with the top open problem's title.
+- **Chevron (›)** — on the right edge of the cell (visible on hover and on the domain run-detail
+  category chip). Clicking it navigates to the full DKIM page: **`/domains/:id/dkim`**. Clicking
+  anywhere else in the row still opens the domain run detail as today.
+
+### 6.2 The full DKIM page (`/domains/:id/dkim`)
+
+One page, purely about DKIM for one domain. It must answer, top to bottom: *Is my mail signed with
+healthy keys? What exactly did we observe (the DNS names, the raw records, the key sizes)? Which
+tests passed/failed per selector? How do I fix each failure?* Every failed test shows the relevant
+debugging values — the exact DNS name queried, the raw TXT/CNAME answer, the decoded key type and
+bit length, and the expected value.
+
+Contents, in order (exact layout in §7):
+
+1. **Header** — domain name, "DKIM" title, the category StatusCell, `ran <timestamp>`, a
+   **Re-run** button (runs just this domain's audit), and a back link.
+2. **Key health hero** — the domain-level verdict band: working-selector count, weakest key bits,
+   rotation headroom, and the primary recommendation from §8 as the single CTA.
+3. **Selector cards** — one card per probed selector: selector name, `source` (configured /
+   discovered), resolution chain (`TXT` or `CNAME → target`), key type + bit length badge
+   (`RSA 2048` green / `RSA 1024` amber / `revoked` red / `ed25519` slate), test/strict flags, key
+   age, and the raw record (copyable, monospace, truncated with expand).
+4. **Test results table** — one row per §2 test instance (per selector where applicable):
+   pass/fail/warn/info icon, finding id, plain-language title, and — expanded via row accordion —
+   the full detail, the observed evidence (exact DNS name + raw answer), and the **Fix** block with
+   a copy-to-clipboard button carrying the exact record/CNAME to publish.
+5. **Selectors editor** — the per-domain config input: add/remove selector strings (writes the
+   domain's `dkimSelectors`), plus a **"Run discovery now"** action that probes the §4 wordlist and
+   offers one-click import of hits. Empty state banner: "No selectors configured — discovery will
+   probe common selectors; add yours for precise auditing."
+6. **Problem states** — cards for each matched §9 problem state, each with a one-paragraph hook and
+   a **"Learn more ›"** chevron that opens the per-problem drill-down page
+   (`/domains/:id/dkim/:problemId`) — concept, your data, diagnose-it-yourself commands, and the
+   step-by-step path forward.
+7. **Message-layer panel (future)** — once the probe path lands: last probe verdict per receiver
+   (verified ✓/✗, canonicalization, alignment, `l=`/`x=`/oversigning audit), and per-selector pass
+   rates from `rua` ingestion.
+
+**Empty / never-run / loading states.** Never-run → gray header cell + "No audit yet — run one"
+CTA. Loading → skeleton rows. *No selectors + discovery found nothing* is **not** empty — it renders
+the `dkim.no_selectors` info plus the "likely unsigned" warning state (PS-12) with the selector
+editor front and center.
+
+---
+
+## 7. UX design — what goes where
+
+Written as the UX designer would hand it to engineering. Desktop-first (localhost tool), 1200 px
+content max-width, the app-wide left nav (256 px) stays. Vertical order = triage order: verdict
+first, evidence second, work items third, configuration fourth, education last.
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Back to example.com          DKIM                          [Re-run ⟳]   │  header row
+│ example.com  ·  [ red: selector "s1" missing ]  ·  ran 2026-07-01 09:30   │
+├────────────────────────────────────────────────────────────────────────────┤
+│  KEY HEALTH        1 of 2 selectors working · weakest key 1024-bit         │  hero band
+│  "Mail signed as s1 is failing at every receiver (no key in DNS)."         │
+│  Next step: re-point the s1 CNAME to your SendGrid target            [→]   │
+├──────────────────────────────────┬─────────────────────────────────────────┤
+│  SELECTOR  s1        ✗ missing   │  SELECTOR  google      ⚠ RSA 1024      │  selector cards
+│  configured · CNAME →            │  configured · TXT                      │
+│  s1.domainkey.u123….sendgrid.net │  v=DKIM1; k=rsa; p=MIGfMA0…   [copy]   │
+│  → NXDOMAIN (dangling)           │  key age 474d · no t=y · 1 TXT record  │
+├──────────────────────────────────┴─────────────────────────────────────────┤
+│  TEST RESULTS                                   6 passed · 1 failed · 3 ⚠  │  main table
+│  ✗ dkim.present.s1        no key at s1._domainkey.example.com       [v]    │
+│      observed: CNAME s1.domainkey.u123.wl001.sendgrid.net → NXDOMAIN       │
+│      expected: CNAME resolving to a v=DKIM1 TXT           [copy fix]       │
+│  ⚠ dkim.keylength.google  1024-bit RSA (upgrade to 2048)            [v]    │
+│  ⚠ dkim.multi             only 1 working selector                   [v]    │
+│  ✓ dkim.testflag.google   no t=y                                    [v]    │
+│  …                                                                          │
+├────────────────────────────────────────────────────────────────────────────┤
+│  SELECTORS                       [ s1 × ] [ google × ] [ + add ]           │  config band
+│  [ Run discovery now ]  — probes 40+ common selectors and offers imports   │
+├────────────────────────────────────────────────────────────────────────────┤
+│  PROBLEM STATES                                                             │  cards
+│  [PS-01 Selector not published ›]  [PS-04 Weak key ›]  [PS-09 No rotation ›]│
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+Placement rules and rationale:
+
+- **Highest: the verdict.** The header row carries identity + status; the **key-health hero**
+  directly under it is the one line a non-expert needs — how many selectors work, how strong the
+  weakest key is, and the single next move. One accent CTA maximum on the page (the hero's "next
+  step").
+- **Second band: selector cards, two-up.** DKIM is inherently **per selector**, so the evidence
+  surface is a card per selector, not one blob: name + verdict badge top-left, resolution chain and
+  raw record beneath (monospace, copy button), and the vitals line (key age, flags, record count)
+  at the card foot. Discovered-but-unconfigured selectors render with a dashed border and an
+  **"Add to monitored"** inline action. On narrow widths cards stack.
+- **Main table: test results.** A table, not cards — users scan many rows; sort order is fixed
+  fail → warn → info → pass (never alphabetical, never by selector). Each row: status icon (✗ red /
+  ⚠ amber / ✓ green / ⓘ slate), finding id in small caps (per-selector ids keep their `.selector`
+  suffix so the row is self-locating), plain-language title, right-aligned chevron `[v]` accordion.
+  Expanded row shows *observed* (exact DNS name + raw answer + decoded key facts, monospace),
+  *expected*, *why it matters* (one sentence), and the **Fix** strip: the exact TXT/CNAME to publish
+  with `[copy fix]`. Copy buttons always copy the publishable value, never prose.
+- **Config band: the selectors editor.** Below the work items because configuration is a
+  lower-frequency act than triage — but it must be on *this* page (DKIM is the only category with a
+  per-domain input). Chips with an × per selector, an add field, and the discovery action with its
+  import flow.
+- **Lowest: problem-state cards** — education and deep dives; up to three per row, title + one-line
+  hook + chevron to `/domains/:id/dkim/:problemId`. They repeat information the table already
+  flagged on purpose: the table is for operators, the cards for learners.
+- **Type & color:** shadcn/ui primitives (`Card`, `Table`, `Accordion`, `Badge`), lucide icons
+  (`KeyRound`, `ShieldCheck`, `ShieldAlert`, `Info`, `ChevronRight`, `Copy`, `Wrench`). Severity
+  colors identical to the Dashboard cells. Monospace (`font-mono text-xs`) for every DNS name, raw
+  record, CNAME target, and hash.
+- **Drill-down pages** (`/domains/:id/dkim/:problemId`) reuse the same header row (so the user never
+  loses context), then: **Concept** (what this state means, 2–3 paragraphs), **Your data** (the §9
+  data fields rendered live from the latest run), **Diagnose it yourself** (copyable terminal
+  commands from §3), **Path forward** (numbered steps with copyable records), and a further-reading
+  footer. Back chevron returns to the DKIM page anchor.
+
+---
+
+## 8. Recommendations — how we tell the user to fix DKIM
+
+Every failing test carries its concrete one-line remediation (§2). Above the per-test fixes, the
+page computes one **primary recommendation** — the hero CTA — from this precedence ladder (first
+match wins):
+
+| Current state | Primary recommendation |
+| --- | --- |
+| No selectors configured, discovery found nothing (PS-12) | Your mail is likely unsigned. Enable DKIM at your provider (Google Admin → Authenticate email; M365 Defender → DKIM; your ESP's Domain Authentication) and add the selector here. |
+| No selectors configured, discovery found some | Import the discovered selector(s) so every future run audits them. |
+| Any configured selector missing / dangling CNAME (PS-01) | Publish the exact record: for TXT, the key from your provider dashboard; for CNAME, the exact target the ESP lists. This selector is failing **every** message it signs. |
+| Record unparseable / revoked-but-signing (PS-02/PS-03) | Republish the key exactly as exported — no PEM armor, no line breaks; or point the signer at the live selector. |
+| SHA-1 restriction (PS-06) | Remove `h=sha1` / re-sign with `rsa-sha256` — SHA-1 signatures permanently fail at modern receivers. |
+| Weak key (PS-04) | Rotate to 2048-bit RSA on a **new** selector, switch signing, then retire the old one. |
+| `t=y` in production (PS-05) | Remove the test flag — until then receivers treat your mail as unsigned. |
+| Ed25519-only (PS-11) | Add an RSA-2048 selector and dual-sign — Gmail/Microsoft/Yahoo cannot verify Ed25519 alone. |
+| Multiple TXT / wildcard / oversize (PS-08) | Clean the DNS: one record per selector, no wildcard shadowing `_domainkey`, ≤255-byte strings. |
+| Only 1 working selector (PS-09) | Stage a second selector now so the next rotation is a cutover, not an outage. |
+| Key older than the rotation window (PS-09) | Rotate per M3AAWG: new key ≥48 h ahead → switch → keep old 7–30 days → revoke (empty `p=`). |
+| Duplicate key across domains (PS-10) | Generate a unique key pair per domain — one compromise (or one bad neighbor) must not spoof every brand. |
+| All healthy (PS-00) | Keep it healthy: rotation reminder on cadence, and (future) enable the message-layer probe to catch body-hash/alignment breakage DNS can't see. |
+
+Additional standing recommendations surfaced as `info` when applicable: prefer **CNAME delegation**
+to ESPs (they rotate keys for you); prefer aligned DKIM on **every** stream before DMARC `p=reject`
+(DKIM survives forwarding; SPF does not); never "fix" a body-hash problem with `l=`; put
+`*._domainkey` **revocation wildcards** (empty `p=`) on parked/non-sending domains alongside their
+`p=reject` DMARC.
+
+---
+
+## 9. Problem states
+
+The health situations a domain can be in for DKIM. Each maps from finding ids (detection is
+automatic — per-selector ids are matched on their `dkim.<subcheck>` prefix), and each has a
+deep-dive below and a drill-down UI page (§7). PS-00 is the healthy goal state; the rest are
+unhealthy in descending typical severity. PS-13…PS-16 are future (message/rua layers) and listed so
+the catalog is stable when those rounds land.
+
+| Id | Problem state | Detected by | Severity |
+| --- | --- | --- | --- |
+| PS-00 | Signed and healthy | all tests pass; ≥1 (ideally 2) working ≥2048-bit selectors | ok |
+| PS-01 | Selector not published (permerror "no key") | `dkim.present`, `dkim.cname_delegation` | critical |
+| PS-02 | Record unparseable / bad base64 | `dkim.parses` | critical |
+| PS-03 | Revoked key still configured (empty `p=`) | `dkim.revoked` | critical |
+| PS-04 | Weak RSA key (<2048-bit) | `dkim.keylength` | critical (<1024) / warning (1024) |
+| PS-05 | Test mode left on (`t=y`) | `dkim.testflag` | warning |
+| PS-06 | SHA-1 restriction (`h=sha1`) | `dkim.algorithm` | critical |
+| PS-07 | Dangling / fragile CNAME delegation | `dkim.cname_delegation` | critical |
+| PS-08 | DNS pathologies: multi-TXT, oversize, wildcard shadowing | `dkim.single_record`, `dkim.record_size`, `dkim.underscore_label` | warning |
+| PS-09 | No rotation headroom / stale key | `dkim.multi`, `dkim.rotation` | warning |
+| PS-10 | Shared key across domains | `dkim.duplicate_key` | warning |
+| PS-11 | Ed25519-only signing | `dkim.ed25519_only` | warning |
+| PS-12 | No selectors known — mail likely unsigned | `dkim.no_selectors` + empty discovery | warning |
+| PS-13 | Signs but doesn't align (`d=` is the ESP's domain) *(future)* | `dkim.alignment` | warning |
+| PS-14 | Verification failing in transit (body-hash / canonicalization) *(future)* | `dkim.signature_verify` | critical |
+| PS-15 | Replay exposure (no `x=`, no oversigning) *(future)* | `dkim.replay_hardening` | warning |
+| PS-16 | `l=` body-length tag present *(future)* | `dkim.length_tag` | critical |
+
+### PS-00 — Signed and healthy
+
+The goal state: every configured selector resolves to one parseable record with a ≥2048-bit RSA key
+(optionally an Ed25519 sibling), no test flag, a second selector staged, keys inside the rotation
+window, no key shared with another domain.
+- **Data fields:** `working_selectors ≥ 1`, every `selectors[]` row `present`+`parses`,
+  `key_bits ≥ 2048` (or `key_type: ed25519` alongside RSA), `has_test_flag=false`,
+  `txt_record_count=1`, `duplicate_keys=[]`.
+- **Diagnose/debug:** nothing to fix — `dig +short TXT <sel>._domainkey.<domain>` for a sanity
+  glance; pipe `p=` through openssl (§3) and confirm `RSA Public-Key: (2048 bit)`.
+- **Tools:** dig; the openssl decode one-liner.
+- **More health metrics:** the scheduled-run regression diff (a selector going missing, `key_bits`
+  dropping, `t=y` reappearing, a CNAME going dangling, a new cross-domain key collision); key age
+  vs the 180-day window; (future) per-selector pass rates from `rua`.
+- **UI:** all-green selector cards; the drill-down page explains *keeping* it healthy — rotation is
+  perpetual, and DNS health today says nothing about body-hash breakage (that's the message layer).
+
+### PS-01 — Selector not published (permerror "no key")
+
+- **Concept:** mail signed with this selector carries a `DKIM-Signature` every receiver fails —
+  `permerror "no key for signature"` — which is *worse* than not signing. Classic after ESP
+  onboarding where the DNS record was never added, a selector typo, or signing that was rotated to
+  a selector whose record was deleted.
+- **Data fields:** `selectors[].present=false`, `query_name`, `resolved_via`, `cname_target`
+  (when the failure is a dangling delegation), DNS rcode in the finding detail.
+- **Diagnose/debug:** `dig +short TXT <sel>._domainkey.<domain>` (empty) → cross-check a public
+  resolver `kdig @8.8.8.8 +short TXT <sel>._domainkey.<domain>` → `dig +short CNAME
+  <sel>._domainkey.<domain>` to see whether a delegation exists and where it dies.
+- **Tools:** dig/kdig/doggo; the ESP dashboard (it displays the exact record it expects).
+- **More health metrics:** regression diff — a selector that was `present` last run and is missing
+  now is a **new problem** toast; (future) `rua` rows showing `permerror` per selector.
+- **UI:** red selector card with the resolution chain and where it broke; fix strip carries the
+  exact TXT or CNAME to publish; drill-down explains selectors and why an unpublished one fails
+  everything.
+
+### PS-02 — Record unparseable / bad base64
+
+- **Concept:** a record exists but verifiers can't extract a key: PEM `-----BEGIN…` armor pasted
+  into DNS, smart quotes, injected line breaks/whitespace mid-key, truncated paste, malformed tags.
+  Receivers return `permerror` ("key syntax error" / "bad base64") — same net effect as no key.
+- **Data fields:** `selectors[].parses=false`, `raw_record` (read it character-by-character),
+  `txt_record_count`, `oversize_chunk`.
+- **Diagnose/debug:** fetch the raw record; `echo '<p-value>' | base64 -d | openssl pkey -pubin
+  -inform DER -text -noout` — openssl's error names the corruption.
+- **Tools:** dig + openssl@3; `dkimverify` (pipx dkimpy) against a saved message for a second
+  opinion.
+- **More health metrics:** regression diff on `raw_record` changes.
+- **UI:** the card shows the raw record with the unparseable span highlighted; fix strip = republish
+  instructions; drill-down walks the classic paste corruptions one by one.
+
+### PS-03 — Revoked key still configured (empty `p=`)
+
+- **Concept:** RFC 6376 §3.6.1 — an empty `p=` **means the key is revoked**. That's the correct
+  final step of a rotation; it's a critical problem only when the signer still uses the selector:
+  every message hard-fails. Detection severity therefore depends on `source`: configured selector →
+  critical; merely discovered → info (proper decommissioning).
+- **Data fields:** `selectors[].is_revoked=true`, `source`, `raw_record`.
+- **Diagnose/debug:** `dig +short TXT <sel>._domainkey.<domain>` → `v=DKIM1; p=` ; then confirm
+  whether live mail still signs with `s=<sel>` (message headers, ESP config).
+- **Tools:** dig; Gmail "Show original" on a fresh outbound message (read the `s=` actually used).
+- **More health metrics:** none — either re-key or retire.
+- **UI:** red "revoked" badge on the card; drill-down explains rotation end-state vs accidental
+  revocation and shows both paths.
+
+### PS-04 — Weak RSA key (512/768/1024-bit)
+
+- **Concept:** sub-1024-bit keys are practically factorable — in 2012 Zachary Harris factored
+  Google's 512-bit key for ~$75 and spoofed founder-to-founder mail (US-CERT VU#268267); several
+  receivers now refuse <1024 outright. 1024-bit meets the RFC floor but is below the 2048-bit
+  standard and a negative trust signal.
+- **Data fields:** `selectors[].key_bits`, `key_type`, `first_seen_at` (old + weak usually travel
+  together).
+- **Diagnose/debug:** the openssl decode one-liner (§3) — the first output line is the verdict.
+- **Tools:** dig + openssl@3; the provider's key-length setting (Google Admin lets you pick 2048).
+- **More health metrics:** fleet-wide: the duplicate-key table often shows one weak key cloned
+  across domains — fix both at once.
+- **UI:** amber (1024) or red (<1024) key badge on the card; fix strip = the §8 rotation recipe;
+  drill-down tells the 2012 story and the exact new-selector rotation steps.
+
+### PS-05 — Test mode left on (`t=y`)
+
+- **Concept:** `t=y` tells verifiers the domain is *testing* — RFC 6376 requires them to treat mail
+  as unsigned for policy purposes. The signature buys nothing: no DMARC credit, no reputation.
+  Don't confuse with `t=s` (strict — forbids subdomain `i=` identities; info only).
+- **Data fields:** `selectors[].has_test_flag`, `has_strict_flag`, `flags.t`.
+- **Diagnose/debug:** `dig +short TXT <sel>._domainkey.<domain> | grep -o 't=[^;]*'`.
+- **Tools:** dig; the DNS console (the flag is one tag edit).
+- **More health metrics:** regression diff — `has_test_flag` flipping back to true (a provider
+  "reset" is the usual culprit) is flagged as a new problem.
+- **UI:** amber flag chip on the card; fix strip carries the corrected record with `t=y` removed.
+
+### PS-06 — SHA-1 restriction (`h=sha1`)
+
+- **Concept:** RFC 8301 forbids SHA-1 in DKIM — signatures identified as rsa-sha1 have
+  *permanently failed* evaluation at modern verifiers. A key record with `h=sha1` restricts the key
+  to a dead algorithm.
+- **Data fields:** `selectors[].flags.h`, `key_type`.
+- **Diagnose/debug:** `dig +short TXT <sel>._domainkey.<domain> | grep -o 'h=[^;]*'`; message-side,
+  check `a=` in a real `DKIM-Signature` header (`a=rsa-sha1` = same problem at the signer).
+- **Tools:** dig; (future) mailauth reports the signature algorithm per message.
+- **More health metrics:** none — remove and re-sign.
+- **UI:** red badge; fix strip = record with `h=sha1` dropped and signer set to `rsa-sha256`.
+
+### PS-07 — Dangling / fragile CNAME delegation
+
+- **Concept:** delegated selectors (SendGrid/M365/Mailchimp/SES style) die when the ESP account is
+  closed or migrated: the CNAME stays, the target vanishes → NXDOMAIN → `permerror` — and a stale
+  vendor CNAME is a **subdomain-takeover** risk (someone re-registers the target and publishes
+  *their* key under your name).
+- **Data fields:** `selectors[].resolved_via=cname`, `cname_target`, `present=false`.
+- **Diagnose/debug:** `dig +short CNAME <sel>._domainkey.<domain>` → `dig +short TXT <target>` —
+  find the hop that dies; compare the target against the ESP dashboard's current value.
+- **Tools:** dig/doggo (follows chains); the ESP dashboard.
+- **More health metrics:** regression diff on `cname_target` changes (an ESP-side migration shows up
+  here before mail breaks).
+- **UI:** the card renders the chain hop-by-hop with the dead hop struck through; fix strip = the
+  exact current target to re-point at (or "remove — ESP decommissioned").
+
+### PS-08 — DNS pathologies: multi-TXT, oversize, wildcard shadowing
+
+- **Concept:** three record-shape faults that break verification sideways: (a) **multiple TXT
+  records** at one selector — RFC 6376 §3.6.2.2 says results are *undefined*; (b) **oversize
+  strings** (>255 bytes per character-string, or 4096-bit keys tripping UDP truncation) →
+  intermittent `temperror`; (c) a **wildcard TXT** answering every `_domainkey` query with junk —
+  receivers permerror, and naive discovery tools "find" selectors that don't exist.
+- **Data fields:** `selectors[].txt_record_count`, `oversize_chunk`, `wildcard_shadow` (domain
+  level).
+- **Diagnose/debug:** `dig TXT <sel>._domainkey.<domain> +multiline` (count answers, see string
+  splits); `dig +tcp` vs UDP to expose truncation; `dig +short TXT zz-random._domainkey.<domain>`
+  (an answer = wildcard pollution).
+- **Tools:** dig; dnsx for sweeping candidates.
+- **More health metrics:** `temperror` clusters at one receiver (often Microsoft) in future `rua`
+  data correlate with (b).
+- **UI:** each fault renders as its own test row with the exact observed answers; drill-down
+  explains all three shapes with their dig commands.
+
+### PS-09 — No rotation headroom / stale key
+
+- **Concept:** one selector and a years-old key means the next rotation is an outage and the
+  private key has accumulated exposure (backups, tickets, ex-employees, breached ESPs). M3AAWG:
+  rotate at least every 6 months; the dual-selector pattern (à la M365 `selector1`/`selector2`)
+  makes rotation a cutover.
+- **Data fields:** `working_selectors`, `selectors[].first_seen_at` (per `(selector, key_sha256)` —
+  age survives across runs), date-embedded selector names as a freebie signal.
+- **Diagnose/debug:** count working selectors on the page; check `first_seen_at` vs the 180-day
+  window; CNAME-delegated selectors rotate at the ESP — confirm in their dashboard.
+- **Tools:** the app's own run history is the age instrument; `dknewkey` (dkimpy) or the provider
+  console to mint the next key.
+- **More health metrics:** age trend per selector; the `info` "approaching window" finding fires
+  before the warning.
+- **UI:** the hero shows rotation headroom; the drill-down carries the M3AAWG rotation runbook
+  (publish ≥48 h ahead → switch → 7–30 days grace → revoke).
+
+### PS-10 — Shared key across domains
+
+- **Concept:** the same public key on several domains means one private key signs them all — one
+  compromise spoofs every brand, and reputation bleeds across tenants. Common when an operator
+  copies a working key pair to a new domain, or an ESP issues one key for many customers.
+- **Data fields:** `duplicate_keys[]` (`key_sha256` → list of `domain/selector` sightings),
+  `selectors[].key_sha256`.
+- **Diagnose/debug:** the app compares hashes across all monitored domains automatically; manually,
+  decode `p=` from both records and diff.
+- **Tools:** the duplicate-key table on the page; openssl for manual confirmation.
+- **More health metrics:** new collisions flagged by the regression diff.
+- **UI:** the card links the sibling domain(s); fix strip = mint a unique key per domain.
+
+### PS-11 — Ed25519-only signing
+
+- **Concept:** RFC 8463's Ed25519 is smaller and faster — but only about half of verifiers support
+  it. Gmail returns `dkim=neutral` (treats the key as nonexistent), Microsoft 365 errors as
+  malformed, Yahoo permfails. Ed25519-*only* signing is effectively unsigned at the big three.
+- **Data fields:** `selectors[].key_type` per selector; the domain-level check (any healthy RSA?).
+- **Diagnose/debug:** `dig +short TXT <sel>._domainkey.<domain> | grep -o 'k=[^;]*'` per selector;
+  message-side, look for a second `DKIM-Signature` with `a=rsa-sha256`.
+- **Tools:** dig; (future) mailauth shows both signatures' verdicts per message.
+- **More health metrics:** receiver-support tracking is external — revisit annually.
+- **UI:** slate `ed25519` badge, amber domain banner "no RSA fallback"; fix strip = add an RSA-2048
+  selector and dual-sign (verifiers accept if *any* signature validates).
+
+### PS-12 — No selectors known — mail likely unsigned
+
+- **Concept:** we can't audit what we can't name, and if discovery finds nothing either, the domain
+  is probably not signing at all — which since 2024 (Gmail/Yahoo) and May 2025 (Outlook) means
+  filtered or rejected bulk mail. Alternatively the domain signs with an uncataloguable selector
+  (SES random tokens, custom names) that headers or `rua` will reveal.
+- **Data fields:** `selectors_configured=[]`, `discovery_ran=true`, zero discovered selectors,
+  `wildcard_shadow=false` (a wildcard invalidates the "nothing found" conclusion).
+- **Diagnose/debug:** send yourself a message and read `DKIM-Signature:` `s=`/`d=` in Gmail "Show
+  original" — the definitive selector source; check the provider's admin console for DKIM status.
+- **Tools:** Gmail "Show original"; the ESP dashboard; `dnsx` if you want to sweep a larger private
+  wordlist.
+- **More health metrics:** none until a selector is known.
+- **UI:** the selectors editor is the hero on this page state; drill-down explains how to find the
+  selector from headers step-by-step (screenshots), then enable DKIM per major provider.
+
+### PS-13 — Signs but doesn't align *(future — message/rua layer)*
+
+- **Concept:** the ESP signs with its own domain (`d=sendgrid.net`, `d=amazonses.com`,
+  `d=mailchimpapp.net`) — `dkim=pass` at the receiver but **zero DMARC contribution**, because
+  DMARC needs `d=` to align with the `From:` org-domain. The most common "everything passes but
+  DMARC fails" confusion; invisible to pure-DNS auditing.
+- **Data fields (future):** per-message `d=` vs `From:` org-domain; `rua` rows where raw
+  `dkim=pass` but `policy_evaluated.dkim=fail`.
+- **Diagnose/debug:** `Authentication-Results: dkim=pass header.d=sendgrid.net` while `From:` is
+  your domain = this state; complete the ESP's custom-domain authentication.
+- **Tools:** mailauth (`.dkim.results[].signingDomain`); parsedmarc; learndmarc.com.
+- **UI:** message-layer panel row per stream: signer `d=`, aligned ✓/✗, and the ESP-specific fix
+  link.
+
+### PS-14 — Verification failing in transit *(future — message layer)*
+
+- **Concept:** key healthy, DNS healthy — but real messages fail: **body-hash mismatch** (`bh=`;
+  footers/disclaimers appended after signing, gateway URL-rewriting, MIME re-encoding, mailing
+  lists) or **signature failure** (`b=`; signed headers rewritten — "[EXTERNAL]" subject taggers —
+  or brittle `c=simple` canonicalization).
+- **Diagnose/debug:** probe send → mailauth verdict; differential test direct vs through the
+  suspect gateway; check `c=` (want `relaxed/relaxed`) and the `h=` list vs headers the path
+  modifies.
+- **Tools:** swaks + mailauth; reflectors; Gmail "Show original".
+- **Fix:** sign as the last content-changing step; `relaxed/relaxed`; tag `[EXTERNAL]` on inbound
+  only; never `l=`.
+
+### PS-15 — Replay exposure *(future — message layer)*
+
+- **Concept:** one legitimately signed message re-broadcast at scale keeps passing DKIM+DMARC (no
+  envelope binding) and burns the signing domain's reputation — the April 2025 `d=google.com`
+  OAuth-phishing wave is the canonical case. Sender-side hygiene: short `x=` (re-sign deferred
+  retries) and oversigning `From`/`To`/`Subject`/`Date`.
+- **Diagnose/debug:** parse `t=`/`x=`/`h=` from observed signatures; watch `rua` for
+  volume spikes of passing mail from foreign sources.
+- **Tools:** mailauth; parsedmarc.
+
+### PS-16 — `l=` body-length tag present *(future — message layer)*
+
+- **Concept:** `l=N` signs only the first N body bytes; the 2024 Zone.eu research showed attackers
+  can append rendered content (even whole MIME parts) while DKIM, DMARC, and the BIMI logo keep
+  passing. Never use it; several providers now treat `l=`-signed mail as unsigned.
+- **Diagnose/debug:** grep observed `DKIM-Signature` headers for `l=`.
+- **Fix:** remove `l=` from the signer; fix footer ordering properly (PS-14), never with `l=`.
+
+---
+
+## 10. Information schema (database schema)
 
 DKIM reuses the **shared core tables** owned by engineering — do not redefine them. It **reads**
-`dkim_selectors` (the per-domain selector list that drives `CheckContext.selectors`) and writes
-`findings` like every check. It adds **one structured result table**.
+the per-domain selector list (which drives `CheckContext.dkimSelectors`) and writes `findings` like
+every check. It adds **one structured result table**.
 
 Shared core (reference only — defined in [Engineering](../engineering.mdx)):
 
@@ -217,26 +842,31 @@ Check-specific result table — **one row per selector per audit run**:
 
 ```sql
 CREATE TABLE dkim_check_results (
-    id            BIGSERIAL PRIMARY KEY,
-    audit_run_id  BIGINT NOT NULL REFERENCES audit_runs(id)   ON DELETE CASCADE,
-    domain_id     BIGINT NOT NULL REFERENCES domains(id)      ON DELETE CASCADE,
-    selector      TEXT   NOT NULL,                 -- e.g. 's1', 'google' (may be discovered)
-    query_name    TEXT   NOT NULL,                 -- '<selector>._domainkey.<domain>'
-    resolved_via  TEXT   NOT NULL DEFAULT 'txt',   -- 'txt' | 'cname'  (CHECK below)
-    cname_target  TEXT,                            -- populated when resolved_via = 'cname'
-    raw_record    TEXT,                            -- full TXT string as fetched (NULL if absent)
-    dkim_version  TEXT,                            -- v= tag ('DKIM1' or NULL/default)
-    key_type      TEXT,                            -- k= tag: 'rsa' | 'ed25519'
-    key_bits      INT,                             -- RSA modulus bits; NULL for ed25519/unparseable
-    key_sha256    CHAR(64),                        -- sha256 of decoded public key (duplicate detect)
-    has_test_flag BOOLEAN NOT NULL DEFAULT FALSE,  -- t=y present
-    is_revoked    BOOLEAN NOT NULL DEFAULT FALSE,  -- p= empty
-    flags         JSONB  NOT NULL DEFAULT '{}',    -- {t:['y'], s:'email', h:['sha256'], g:'*', ...}
-    first_seen_at TIMESTAMPTZ,                      -- earliest audit that saw this key (rotation age)
-    present       BOOLEAN NOT NULL DEFAULT FALSE,
-    parses        BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT dkim_results_resolved_via_ck CHECK (resolved_via IN ('txt','cname')),
+    id              BIGSERIAL PRIMARY KEY,
+    audit_run_id    BIGINT NOT NULL REFERENCES audit_runs(id)   ON DELETE CASCADE,
+    domain_id       BIGINT NOT NULL REFERENCES domains(id)      ON DELETE CASCADE,
+    selector        TEXT   NOT NULL,                 -- e.g. 's1', 'google' (may be discovered)
+    source          TEXT   NOT NULL DEFAULT 'configured', -- 'configured' | 'discovered'
+    query_name      TEXT   NOT NULL,                 -- '<selector>._domainkey.<domain>'
+    resolved_via    TEXT   NOT NULL DEFAULT 'txt',   -- 'txt' | 'cname' | 'none'
+    cname_target    TEXT,                            -- populated when resolved_via = 'cname'
+    raw_record      TEXT,                            -- full TXT string as fetched (NULL if absent)
+    dkim_version    TEXT,                            -- v= tag ('DKIM1' or NULL/default)
+    key_type        TEXT,                            -- k= tag: 'rsa' | 'ed25519'
+    key_bits        INT,                             -- RSA modulus bits; NULL for ed25519/unparseable
+    key_sha256      CHAR(64),                        -- sha256 of decoded public key (duplicate detect)
+    has_test_flag   BOOLEAN NOT NULL DEFAULT FALSE,  -- t=y present
+    has_strict_flag BOOLEAN NOT NULL DEFAULT FALSE,  -- t=s present
+    is_revoked      BOOLEAN NOT NULL DEFAULT FALSE,  -- p= empty
+    txt_record_count INT   NOT NULL DEFAULT 0,       -- answers at the selector name (want exactly 1)
+    oversize_chunk  BOOLEAN NOT NULL DEFAULT FALSE,  -- any character-string > 255 bytes
+    flags           JSONB  NOT NULL DEFAULT '{}',    -- {t:['y'], s:'email', h:['sha256'], g:'*', ...}
+    first_seen_at   TIMESTAMPTZ,                     -- earliest audit that saw this key (rotation age)
+    present         BOOLEAN NOT NULL DEFAULT FALSE,
+    parses          BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT dkim_results_resolved_via_ck CHECK (resolved_via IN ('txt','cname','none')),
+    CONSTRAINT dkim_results_source_ck       CHECK (source IN ('configured','discovered')),
     CONSTRAINT dkim_results_unique_sel UNIQUE (audit_run_id, selector)
 );
 
@@ -250,130 +880,141 @@ join key for `dkim.duplicate_key` (indexed for the cross-domain compare); `first
 forward from the previous run's row for the same `(domain_id, selector, key_sha256)` so
 `dkim.rotation` can compute age even though each run inserts a fresh row.
 
-**Mapping onto today's JSON file store.** There is **no database in the first round** (see
-[Engineering §7](../engineering.mdx)). Today this data lives inside the per-run audit file
-`~/.email_delivery_hero/audits/<domainId>/<auditId>.json`. That file already holds `findings[]`; the
-DKIM checker adds a `dkim.results[]` array on the run object, one object per selector with exactly the
-columns above (minus the surrogate ids, which map to the file path + array index):
-
-```jsonc
-// audits/<domainId>/<auditId>.json  (excerpt)
-{
-  "id": "<auditId>", "domain": "example.com",
-  "dkim": {
-    "results": [
-      { "selector": "s1", "queryName": "s1._domainkey.example.com", "resolvedVia": "cname",
-        "cnameTarget": "s1.domainkey.u123.sendgrid.net", "rawRecord": null,
-        "keyType": null, "keyBits": null, "keySha256": null, "hasTestFlag": false,
-        "isRevoked": false, "flags": {}, "firstSeenAt": "2025-11-02T00:00:00Z",
-        "present": false, "parses": false }
-    ]
-  },
-  "findings": [ /* Finding[] incl. dkim.* rows */ ]
-}
-```
-
-The configured selectors (the `dkim_selectors` table) live today in `domains.json` as a
-`selectors: string[]` field on each domain object. `key_sha256` values for the duplicate-key compare
-are read across the latest audit file of each domain. Because everything is isolated behind the
-`store` module, the file→Postgres move is a single-module change: `dkim_check_results` ← the
-`dkim.results[]` arrays, `dkim_selectors` ← `domains.json[].selectors`.
+**Mapping onto today's file store.** There is **no database in the first round** (see
+[Engineering §7](../engineering.mdx)). Today the structured observation is the checker's
+`results.dkim` payload inside the per-run audit record, exactly the `selectors[]` +
+`wildcard_shadow` + `duplicate_keys` shape shown in §5's YAML (same snake_case keys in code, like
+`results.dmarc`). The configured
+selectors live on each domain record (`dkimSelectors: string[]` — the future `dkim_selectors`
+table); `key_sha256` values for the duplicate-key compare are read across the latest stored audit of
+each domain. Because everything is isolated behind the `store` module, the file→Postgres move is a
+single-module change: `dkim_check_results` ← the `results.dkim.selectors[]` arrays,
+`dkim_selectors` ← the domains' `dkimSelectors`.
 
 ---
 
-## 6. When we run the check
+## 11. When we run the check
 
-**On-demand.** Runs as part of a full audit via `POST /api/domains/:id/audit` (per domain) or
-`POST /api/scheduler/run` (all domains). The DKIM checker executes in parallel with the other
-first-round checkers in the runner; it is pure DNS so it adds only a few lookups per selector.
+**On-demand.** Runs as part of a full audit via `POST /api/domains/:id/audit` (per domain) or the
+scan-all action. The DKIM checker executes in parallel with the other first-round checkers in the
+runner; it is pure DNS so it adds only a few lookups per selector.
 
-**Periodic.** The in-process scheduler re-runs the full engine per domain on the `config.yaml` cadence
+**Periodic.** The in-process scheduler re-runs the full engine per domain on the configured cadence
 (default every 6h; see [Scheduled checks](../scheduled_checks.mdx)). DKIM state changes slowly, so a
 6–24h cadence is ample; the value of frequent runs is catching an **operator error** (a selector
-deleted, a key swapped to a weak one, a `t=y` reintroduced) quickly.
+deleted, a key swapped to a weak one, a `t=y` reintroduced, an ESP silently rotating a CNAME
+target) quickly.
 
-**First-round vs future dependency.** Every sub-check in §2 **except `dkim.signature_verify`** is
-first-round pure `node:dns/promises` and ships now. `dkim.signature_verify` is gated behind the
-`swaks` probe + a validating verifier and is future (§7).
+**First-round vs future dependency.** Every §2 sub-check in layers 1–2 is first-round pure
+`node:dns/promises` and ships now. Layer-3 (`dkim.signature_verify`, `dkim.length_tag`,
+`dkim.replay_hardening`, `dkim.alignment` via probe) is gated behind the `swaks` + mailauth path;
+layer-4 needs `rua` ingestion ([../emails.mdx](../emails.mdx)).
 
 **Cost / rate-limit / back-off.** No third-party quotas for the DNS path. The only fan-out is
-`dkim.selector_discovery`: bound concurrency (~6), short timeout, curated wordlist (not brute force),
-and cache negative results within the run. Treat `ESERVFAIL`/timeout as retry-once-then-`info`, never
-as a fabricated "missing" `critical`.
+`dkim.selector_discovery`: bounded concurrency (~6), short timeout, curated wordlist (not brute
+force), negative results cached within the run. Treat `ESERVFAIL`/timeout as
+retry-once-then-`warning "could not determine"`, never as a fabricated "missing" `critical`.
 
 **Regression detection.** The scheduler diffs each run against the previous (Engineering §8). DKIM
 regressions to surface as **new problems**: a selector that was `present`+`ok` last run now
 missing/revoked (green→red); `key_bits` dropping (2048→1024); `has_test_flag` flipping true; a CNAME
-target going dangling; a `key_sha256` newly colliding with another domain. Each becomes a "new
-problem" toast/badge on the Dashboard.
+target changing or going dangling; `txt_record_count` rising above 1; a `key_sha256` newly colliding
+with another domain.
 
 ---
 
-## 7. First round vs future
+## 12. First round vs future
 
 | Sub-check | First round (pure `node:dns/promises`, deterministic) | Future (probe / external tool / feed / API) |
 | --- | --- | --- |
 | `dkim.present` | ✓ TXT (and CNAME→TXT) lookup per selector | |
-| `dkim.parses` | ✓ tag parse + base64 decode | |
-| `dkim.keylength` | ✓ decode SPKI / read RSA modulus bits | |
+| `dkim.parses` / `dkim.revoked` | ✓ tag parse + base64 decode + SPKI parse | |
+| `dkim.keylength` | ✓ RSA modulus bits via `crypto.createPublicKey` | |
 | `dkim.testflag` | ✓ read `t=` | |
 | `dkim.algorithm` | ✓ read `k=`/`h=` | |
+| `dkim.ed25519_only` | ✓ domain-level key-type census | receiver-support matrix refresh |
 | `dkim.flags` | ✓ tag-grammar validation | |
-| `dkim.record_size` | ✓ TXT chunk-length inspection | |
-| `dkim.underscore_label` | ✓ name construction + wildcard-TXT guard | |
+| `dkim.single_record` | ✓ TXT answer count | |
+| `dkim.record_size` | ✓ TXT chunk-length inspection | `dig +tcp` truncation differential |
+| `dkim.underscore_label` | ✓ name construction + wildcard probe | |
 | `dkim.cname_delegation` | ✓ `resolveCname` + resolve target | |
-| `dkim.selector_discovery` | ✓ bounded wordlist TXT/CNAME probes | (optional: larger crowd-sourced selector corpus) |
+| `dkim.selector_discovery` | ✓ MX-guided + bounded wordlist probes | selector harvesting from pasted headers + `rua` |
 | `dkim.multi` | ✓ count of working selectors | |
 | `dkim.duplicate_key` | ✓ `sha256(p=)` compare across store | |
 | `dkim.rotation` | ✓ age from `first_seen_at` (store-tracked) | richer age via ESP/provider API metadata |
-| `dkim.signature_verify` | | **future** — `swaks` sends a probe message; a validating verifier confirms `b=`/`bh=` actually pass (canonicalization + `h=` coverage) |
+| `dkim.alignment` | | **future** — probe-message `d=` vs `From:`; `rua` pass-but-unaligned rows |
+| `dkim.signature_verify` | | **future** — `swaks` probe + mailauth verification (`bh=`/`b=`, canonicalization, `h=` coverage) |
+| `dkim.length_tag` | | **future** — `l=` scan of observed signatures |
+| `dkim.replay_hardening` | | **future** — `x=`/`t=`/oversigning audit of observed signatures |
 
 Rule of thumb (matches [spam_checks](../spam_checks.mdx)): **anything answerable from DNS ships
-first**; verifying that a **real signed message** passes needs to send/inspect a message and is a
-later round. The `Checker`/`Finding` contract is unchanged across rounds — only the checker internals
-differ — so the Dashboard, store, and scheduler never change as `dkim.signature_verify` is added.
+first**; anything requiring a real message (send, headers, or receiver reports) is a later round.
+The `Checker`/`Finding` contract is unchanged across rounds — only the checker internals differ —
+so the Dashboard, store, and scheduler never change as the message and observational layers land.
 
 ---
 
-## 8. Acceptance criteria
+## 13. Acceptance criteria
 
-1. For each selector in `CheckContext.selectors`, the checker queries `<selector>._domainkey.<domain>`
-   and emits `dkim.present` (`critical` when absent for a configured signing selector).
-2. A record whose `p=` is empty yields `dkim.parses` = `critical` with title "revoked"; a record whose
-   `p=` does not base64-decode yields `critical` "unparseable".
+1. For each selector in `CheckContext.dkimSelectors`, the checker queries
+   `<selector>._domainkey.<domain>` and emits `dkim.present.<selector>` (`critical` when absent for
+   a configured signing selector).
+2. A record whose `p=` is empty yields `dkim.revoked.<selector>` — `critical` for a configured
+   selector, `info` for a merely-discovered one; a record whose `p=` does not base64-decode/DER-parse
+   yields `dkim.parses.<selector>` `critical`.
 3. RSA modulus is decoded and `dkim.keylength` is `critical` for < 1024-bit, `warning` for exactly
    1024-bit, `ok` for ≥ 2048-bit; `k=ed25519` passes `keylength` as `ok`.
-4. `t=y` produces `dkim.testflag` = `warning` with remediation to remove the `y` flag.
-5. `h=sha1`-only produces `dkim.algorithm` = `critical` (SHA-1 forbidden per RFC 8301).
-6. A selector published as a CNAME resolves through to the target key; a dangling CNAME target yields
-   `dkim.cname_delegation` = `critical`; `resolved_via` is recorded as `cname` with `cname_target` set.
-7. When `CheckContext.selectors` is empty, `dkim.selector_discovery` probes the curated wordlist with
-   bounded concurrency and reports any hits as `info`, offering to add them to config.
-8. `dkim.duplicate_key` flags identical `sha256(p=)` across two monitored domains as `warning`.
-9. A domain with exactly one working selector yields `dkim.multi` = `warning`; zero working selectors =
-   `critical`.
-10. `dkim.rotation` computes key age from `first_seen_at` and warns past the configured window
-    (default 180 days).
-11. Every non-`ok` DKIM finding carries a **concrete** remediation string (an exact TXT value to
-    publish, an exact `t=`/`k=` edit, or the exact CNAME target to set) — never a generic message.
-12. Each selector writes one `dkim_check_results` row per audit run (today: one entry in the run
-    file's `dkim.results[]`) with `selector`, `raw_record`, `key_type`, `key_bits`, `has_test_flag`,
-    `flags`, `is_revoked`, `resolved_via` populated.
-13. Transient DNS failures (`ESERVFAIL`/timeout) never produce a `critical` "missing" finding; they
-    surface as `info`/"undetermined" so the scheduler's regression diff is not poisoned.
-14. The DKIM Dashboard cell color equals the worst DKIM severity across all selectors; an `info`-only
-    result (e.g. a discovered selector) does not turn the cell amber.
-15. The audit-detail view groups DKIM findings per selector with severity badge, observed record
-    detail, remediation, and a copy-to-clipboard of the fix (React 19 + shadcn/ui).
+4. A domain whose only working key(s) are Ed25519 yields `dkim.ed25519_only` `warning` with the
+   dual-signing remediation.
+5. `t=y` produces `dkim.testflag` `warning`; `t=s` produces an `info` note (not a warning).
+6. `h=sha1`-only produces `dkim.algorithm` `critical` (SHA-1 forbidden per RFC 8301).
+7. Two or more TXT records at one selector name produce `dkim.single_record` `warning` (RFC 6376
+   §3.6.2.2 undefined behavior), and evaluation proceeds on the first parseable DKIM record.
+8. A selector published as a CNAME resolves through to the target key; a dangling CNAME target
+   yields `dkim.cname_delegation` `critical`; `resolved_via` is recorded as `cname` with
+   `cname_target` set.
+9. When `CheckContext.dkimSelectors` is empty, `dkim.selector_discovery` probes MX-guided +
+   wordlist selectors with bounded concurrency and reports hits as `info`, offering to add them to
+   config; a wildcard-TXT domain (random-selector probe answers) suppresses discovery results and
+   yields `dkim.underscore_label` `warning`.
+10. `dkim.duplicate_key` flags identical `sha256(p=)` across two monitored domains (or two selectors
+    of one domain) as `warning`, naming the sibling.
+11. A domain with exactly one working selector yields `dkim.multi` `warning`; zero working selectors
+    = `critical`.
+12. `dkim.rotation` computes key age from `first_seen_at` (carried across runs per
+    `(selector, key_sha256)`) and warns past the configured window (default 180 days).
+13. Every non-`ok` DKIM finding carries a **concrete** remediation string (an exact TXT value to
+    publish, an exact `t=`/`k=`/`h=` edit, or the exact CNAME target to set) — never generic.
+14. The checker returns a `CheckOutcome` whose `results` payload matches §5's `selectors[]` +
+    `wildcard_shadow` + `duplicate_keys` shape, one entry per probed selector, and it is persisted
+    as `results.dkim` on the audit run.
+15. Transient DNS failures (`ESERVFAIL`/timeout) never produce a `critical` "missing" finding; they
+    surface as a `warning "could not determine"` so the scheduler's regression diff is not poisoned.
+16. The DKIM Dashboard cell shows the worst DKIM severity and a working-selectors/key-strength
+    label, and exposes a **chevron** that navigates to `/domains/:id/dkim`; an `info`-only result
+    does not turn the cell amber.
+17. The full DKIM page renders (top to bottom) the key-health hero, per-selector cards with the raw
+    record/resolution chain/key badges, the fail-first test-results table with observed evidence and
+    copyable fixes, the selectors editor with discovery import, and matched problem-state cards
+    linking to `/domains/:id/dkim/:problemId` drill-downs per §7.
+18. Each §9 problem state PS-01…PS-12 is matched from finding-id prefixes and its drill-down page
+    renders concept, live data fields, diagnose-it-yourself commands (§3 tools), and the numbered
+    path forward.
 
 <!--
   Maintenance notes:
-  - Keep RFC refs current: DKIM signing/key format RFC 6376; key-strength floor (RSA >=1024/2048, no
-    SHA-1) RFC 8301; Ed25519 selectors RFC 8463. M3AAWG ~6-month rotation cadence.
+  - Keep RFC refs current: DKIM signing/key format RFC 6376 (§3.6.1 empty p= revocation; §3.6.2.2
+    multi-TXT undefined); key-strength floor (RSA >=1024/2048, no SHA-1) RFC 8301; Ed25519 selectors
+    RFC 8463 (verifier support still ~half the market — Gmail neutral / MS error / Yahoo permfail;
+    revisit annually); Authentication-Results RFC 8601. M3AAWG ~6-month rotation cadence.
+  - Keep the selector wordlist (§4) in sync with dkim.check.ts; it is curated, not exhaustive —
+    SES random tokens and custom selectors are unreachable by design (headers/rua are the source).
   - Keep this file in sync with ../spam_checks.mdx §2 (DKIM row set) and ../engineering.mdx §6.3
-    (dkim.checker.ts row). If a sub-check is added/renamed here, mirror it in both.
-  - dkim.signature_verify stays FUTURE until the swaks probe + validator path lands; do not promote it
-    to first-round in the §7 table without moving it in ../spam_checks.mdx too.
+    (dkim.check.ts row). If a sub-check is added/renamed here, mirror it in both.
+  - Layer-3/4 sub-checks (signature_verify, length_tag, replay_hardening, alignment) stay FUTURE
+    until the swaks+mailauth probe path / rua ingestion lands; do not promote them in §12 without
+    moving them in ../spam_checks.mdx too.
   - dkim_check_results extends the shared core tables (audit_runs, domains, findings) and READS the
-    shared dkim_selectors table — do not redefine core tables here.
+    shared dkim_selectors list — do not redefine core tables here.
+  - Problem-state ids PS-00…PS-16 are stable API for the frontend drill-down routes — never renumber.
 -->

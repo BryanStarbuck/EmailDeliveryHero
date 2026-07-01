@@ -22,6 +22,13 @@ export interface Finding {
   evidence?: string
 }
 
+/** A DKIM public-key hash observed on another monitored domain (latest audit). */
+export interface PeerDkimKey {
+  domain: string
+  selector: string
+  keySha256: string
+}
+
 /** Everything a checker needs to inspect one domain. */
 export interface CheckContext {
   domain: string
@@ -29,12 +36,26 @@ export interface CheckContext {
   dkimSelectors: string[]
   /** Sending IPs to test against DNS blacklists (optional; MX IPs are used when empty). */
   sendingIps: string[]
+  /** sha256(decoded p=) per selector across the OTHER monitored domains — powers dkim.duplicate_key. */
+  peerDkimKeys?: PeerDkimKey[]
+  /** The previous audit's structured results for this domain — powers dkim.rotation first-seen carry-forward. */
+  previousResults?: Record<string, unknown>
+}
+
+/**
+ * A checker may return a bare finding list, or findings plus a structured machine-readable payload
+ * (pm/checks/*.mdx §5 "Information schema" — e.g. the parsed DMARC tag map). The payload lands in
+ * `AuditResult.results[checker.id]` and powers the per-technology detail pages.
+ */
+export interface CheckOutcome {
+  findings: Finding[]
+  results?: unknown
 }
 
 export interface Checker {
   id: string
   label: string
-  run(ctx: CheckContext): Promise<Finding[]>
+  run(ctx: CheckContext): Promise<Finding[] | CheckOutcome>
 }
 
 /** The result of auditing one domain — the full finding list plus a rolled-up score/status. */
@@ -47,6 +68,8 @@ export interface AuditResult {
   status: Severity
   findings: Finding[]
   counts: Record<Severity, number>
+  /** Structured per-check payloads keyed by checker id (e.g. results.dmarc — the parsed record). */
+  results?: Record<string, unknown>
 }
 
 /** Roll a flat finding list into a 0–100 score, an overall status, and per-severity counts. */

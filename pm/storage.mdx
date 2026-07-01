@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — Local Storage, Config & Settings
-description: How EmailDeliveryHero persists state on disk — the no-database state root at ~/T/_emaildeliveryhero/, the hierarchical app-level config.yaml (settings), the per-logged-in-user config under users/<email>/config.yaml, the machine-written collection stores (domains.json, audits.json) that hold the domain list and each domain's sync on/off flag, the OpenAuthFederated session store + signing secret, the two log files (log.log + error.err), the browser localStorage conventions (theme mirror + oaf_edh session, never secrets), and the store module that fronts all of it. Works identically on a developer laptop and on a server; the only thing that changes is where the state root resolves and who is logged in.
+description: How EmailDeliveryHero persists state on disk — the no-database state root at ~/T/_emaildeliveryhero/, the hierarchical app-level config.yaml (settings), the per-logged-in-user config under users/<email>/config.yaml, the domain list in human-editable YAML (domains.yaml) plus the machine-written audit collection (audits.json), holding the domain list and each domain's sync on/off flag, the OpenAuthFederated session store + signing secret, the two log files (log.log + error.err), the browser localStorage conventions (theme mirror + oaf_edh session, never secrets), and the store module that fronts all of it. Works identically on a developer laptop and on a server; the only thing that changes is where the state root resolves and who is logged in.
 ---
 
 # EmailDeliveryHero — Local Storage, Config & Settings
@@ -33,7 +33,7 @@ Related specs:
 * [Settings](./settings.mdx) — the Settings **page**: every field, which are admin-only, and the
   REST contract. This document is the **storage** side of that page — where each field lands on disk.
 * [Domains](./domains.mdx) — the Monitored Domains CRUD and each domain's per-domain
-  `scheduleEnabled` ("on/off on sync") flag, persisted here in `domains.json`.
+  `scheduleEnabled` ("on/off on sync") flag, persisted here in `domains.yaml`.
 * [Scheduled checks](./scheduled_checks.mdx) — the `schedule:` block of `config.yaml`.
 * [Authentication](./authentication.mdx) — the `oaf_edh` cookie, the out-of-repo credentials file,
   and why secrets never live in the config store or in browser `localStorage`.
@@ -76,7 +76,7 @@ runtime data (`~/BGit/Bryan_git/EmailDeliveryHero/CLAUDE.md`).
 ```
 ~/T/_emaildeliveryhero/
 ├── config.yaml              # APP-LEVEL settings — install-wide, hierarchical YAML (§3)
-├── domains.json             # the monitored-domains list + each domain's sync on/off flag (§5)
+├── domains.yaml             # the monitored-domains list + each domain's sync on/off flag (§5)
 ├── audits.json              # latest audit result keyed by domain id (§6)
 ├── .auth_session_secret     # stable HS256 signing secret (auto-created; never in .env) (§7)
 ├── users/                   # PER-LOGGED-IN-USER settings, keyed by verified email (§4)
@@ -94,17 +94,19 @@ Three tiers:
   machine"; in server mode "this server".
 * **User-level** (`users/<email>/config.yaml`) — one folder per person who has ever logged in,
   created lazily on first write. Personal, cosmetic, per-user preferences.
-* **Machine-written collections & runtime** (`domains.json`, `audits.json`, `sessions/`,
-  `.auth_session_secret`, `log.log`, `error.err`) — not hand-edited; the app owns them.
+* **Machine-written collections & runtime** (`audits.json`, `sessions/`, `.auth_session_secret`,
+  `log.log`, `error.err`) — not hand-edited; the app owns them. The **domains list** (`domains.yaml`)
+  is app-owned too but deliberately kept in **YAML** so an operator can read and hand-edit it (§5).
 
-### Why YAML for config and JSON for collections
+### Why YAML for config + the domain list, JSON for the audit collection
 
-The product rule is **"keep everything in `config.yaml` unless the data type makes that a bad fit."**
+The product rule is **"keep human-facing data in YAML unless the data type makes that a bad fit."**
 
 | Need | Goes in | Why |
 | --- | --- | --- |
 | Settings, preferences, toggles, small key/values | `config.yaml` (app) / `users/<email>/config.yaml` | Human-readable, hot-editable, **hierarchical**. |
-| A keyed/collection record set (domains, latest audits) | `domains.json` / `audits.json` | Machine-written maps/arrays the store rewrites atomically; JSON matches the current code. |
+| The **monitored-domains list** — small, operator-facing, hand-editable on localhost | `domains.yaml` | A short sequence a person actually reads and edits; the store rewrites it atomically. |
+| The **latest-audit collection** — machine-written, high-churn, never hand-edited | `audits.json` | A keyed map the app owns and rewrites atomically; JSON matches the current code. |
 | Secrets (Google client id/secret) | `~/.credentials/email_delivery_hero.json` **or** env | Never in the state store, never in the repo (§7, [Authentication](./authentication.mdx)). |
 | Append-only logs | `log.log` / `error.err` | Flat append streams; appending to YAML/JSON is wrong. |
 
@@ -274,43 +276,50 @@ tables:
 
 ---
 
-## 5. `domains.json` — the domain list + each domain's sync on/off flag
+## 5. `domains.yaml` — the domain list + each domain's sync on/off flag
 
 The monitored-domains list is the source of truth for the [Domains](./domains.mdx) CRUD and persists
-to **`~/T/_emaildeliveryhero/domains.json`** (already implemented in
-`code/packages/backend/src/modules/domains/domains.service.ts`). It is an array of domain records;
-**each record carries its own `scheduleEnabled` flag — this is "what was turned on or off on sync"**
-(whether the domain rides the recurring scheduled checks). The latest per-category status shown in
-the UI is not duplicated here; it is derived at read time from `audits.json` (§6).
+to **`~/T/_emaildeliveryhero/domains.yaml`** (implemented in
+`code/packages/backend/src/modules/domains/domains.service.ts` via the `yaml-store` helper). It is a
+**YAML sequence** — deliberately YAML, not JSON, so an operator can read and hand-edit the domain list
+on localhost. **Each record carries its own `scheduleEnabled` flag — this is "what was turned on or
+off on sync"** (whether the domain rides the recurring scheduled checks). The latest per-category
+status shown in the UI is not duplicated here; it is derived at read time from `audits.json` (§6).
+A legacy `domains.json` from an earlier install is migrated to `domains.yaml` on first read.
 
-```json
-[
-  {
-    "id": "whitehatengineering-com",
-    "domain": "whitehatengineering.com",
-    "label": "Primary marketing domain",
-    "sendingIps": ["203.0.113.10", "203.0.113.11"],
-    "selectors": ["google", "selector1"],
-    "scheduleEnabled": true,
-    "lastAuditId": "2026-07-01T14-03-11-a1b2",
-    "lastAuditedAt": "2026-07-01T14:03:11.204Z"
-  },
-  {
-    "id": "act3ai-com",
-    "domain": "act3ai.com",
-    "label": "Product / transactional",
-    "sendingIps": ["198.51.100.20"],
-    "selectors": ["google"],
-    "scheduleEnabled": false
-  }
-]
+```yaml
+- id: 3f1c… (uuid)
+  name: whitehatengineering.com
+  label: Primary marketing domain
+  dkimSelectors:
+    - google
+    - selector1
+  sendingIps:
+    - 203.0.113.10
+    - 203.0.113.11
+  scheduleEnabled: true
+  addedBy: bryan@whitehatengineering.com
+  createdAt: 2026-07-01T14:03:11.204Z
+  updatedAt: 2026-07-01T14:03:11.204Z
+- id: 7a20… (uuid)
+  name: act3ai.com
+  label: Product / transactional
+  dkimSelectors:
+    - google
+  sendingIps:
+    - 198.51.100.20
+  scheduleEnabled: false
+  addedBy: bryan@whitehatengineering.com
+  createdAt: 2026-07-01T14:04:00.000Z
+  updatedAt: 2026-07-01T14:04:00.000Z
 ```
 
 * `scheduleEnabled` is toggled per domain in the Domains table/form ([Domains §6](./domains.mdx)); a
   domain is on the recurring schedule only when the **global** `schedule.enabled` (§3) **and** its own
   `scheduleEnabled` are both true.
 * Adding/removing a domain, editing its IPs/selectors/label, and flipping its sync toggle all rewrite
-  this file through the store (§8).
+  this file through the `yaml-store` helper (§8). Records written by an older version that lack
+  `label` / `scheduleEnabled` are backfilled with defaults (empty label, schedule **on**) on read.
 
 ---
 
@@ -370,15 +379,16 @@ provider secrets.
 All filesystem access for state goes through a thin **`store` module** so callers never deal with
 paths, parsing, atomic writes, or the local-vs-server difference ([Engineering §7](./engineering.mdx)).
 
-* **Atomic writes.** Serialize → write to `*.tmp` → `fsync` → `rename` over the real file, so a crash
-  mid-write never leaves a half-written `config.yaml`/`domains.json`.
+* **Atomic writes.** Serialize → write to a **unique** `*.tmp` (per-write, so concurrent writers never
+  share a temp path) → `rename` over the real file, so a crash mid-write never leaves a half-written
+  `config.yaml`/`domains.yaml`; a failed write cleans up the temp file, logs, and rethrows.
 * **Per-file mutex.** Read-modify-write is serialized per file to avoid concurrent-write corruption
   (matters in server mode); every write stamps `updated_at`.
 * **Defaults on absence.** Reading a missing file returns the typed defaults and logs nothing —
   expected first-run absence is **not** an error and must not spam `error.log`.
 * **Schema validation on read.** Files are validated against the record/config schema on load;
   malformed data is rejected loudly rather than silently trusted.
-* **Two scopes.** App-scoped (`config.yaml`, `domains.json`, `audits.json`) and user-scoped
+* **Two scopes.** App-scoped (`config.yaml`, `domains.yaml`, `audits.json`) and user-scoped
   (`users/<email>/config.yaml`, created lazily) — the user-scoped opener is what makes storage
   per-logged-in-user (§4).
 
@@ -454,8 +464,8 @@ Everything EmailDeliveryHero persists, and where:
 | **Theme / density** | `users/<email>/config.yaml → ui` (mirror: `localStorage edh.theme`) | **per-user** |
 | **My notification preferences** (desktop/email/minSeverity/mode) | `users/<email>/config.yaml → notifications` | **per-user** |
 | **Last route + remembered table sort/filter** | `users/<email>/config.yaml → ui.last_route`, `tables.views` | **per-user** |
-| **The monitored-domains list** (domain, IPs, selectors, label) | `domains.json` | collection |
-| **Each domain's sync on/off** (`scheduleEnabled`) | `domains.json[].scheduleEnabled` | collection |
+| **The monitored-domains list** (domain, IPs, selectors, label) | `domains.yaml` | collection |
+| **Each domain's sync on/off** (`scheduleEnabled`) | `domains.yaml[].scheduleEnabled` | collection |
 | Latest audit result per domain (findings, score, status, timestamps) | `audits.json` | collection |
 | Auth session records | `sessions/` | runtime |
 | Auth signing secret | `.auth_session_secret` | runtime |
@@ -479,9 +489,10 @@ Storage is correct when **all** of the following hold:
 4. `GET /api/settings` merges `defaults` with the caller's own `users/<email>/config.yaml`;
    per-user/all-users writes go only to that user's file; admin-only writes go to the app `config.yaml`
    (`PUT /api/settings/admin`, `403` without `role:admin`).
-5. The **domain list** and **each domain's `scheduleEnabled` (sync on/off)** persist in `domains.json`;
-   a domain is on the recurring schedule only when global `schedule.enabled` **and** the domain's
-   `scheduleEnabled` are both true.
+5. The **domain list** and **each domain's `scheduleEnabled` (sync on/off)** persist in `domains.yaml`
+   (human-readable YAML; a legacy `domains.json` is migrated on first read); a domain is on the
+   recurring schedule only when global `schedule.enabled` **and** the domain's `scheduleEnabled` are
+   both true.
 6. Audit history persists in `audits.json` and is pruned per `storage.retentionDays`.
 7. Auth session records (`sessions/`) and the signing secret (`.auth_session_secret`) live under the
    state root, separate from settings; **no** provider secret is stored there or in `config.yaml`.
@@ -496,11 +507,11 @@ Storage is correct when **all** of the following hold:
 
 <!--
   storage.mdx maintenance: keep consistent with engineering.mdx §7/§8 (file store, scheduler),
-  settings.mdx (every setting → a config.yaml/users key), domains.mdx (domains.json + scheduleEnabled),
+  settings.mdx (every setting → a config.yaml/users key), domains.mdx (domains.yaml + scheduleEnabled),
   scheduled_checks.mdx (the schedule: block), and authentication.mdx (oaf_edh cookie, out-of-repo
   credentials, no secrets in localStorage). When a new setting is added, add its key to §3 (app) or §4
   (per-user), add a row to the §11 inventory, and mark admin-only ones. Reflect the real code paths:
-  resolveStateDir() in shared/state-dir.ts, domains.json in domains.service.ts, audits.json in
+  resolveStateDir() in shared/state-dir.ts, domains.yaml in domains.service.ts, audits.json in
   audit.service.ts, the session store + .auth_session_secret in auth-frontend.ts, log.log/error.err in
   logging.ts + rolling-file-writer.ts. The error-handling behavior lives in errors.mdx — keep the two in sync.
   Remember to keep the TOC bullet in overview.mdx.

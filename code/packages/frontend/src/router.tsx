@@ -5,9 +5,15 @@ import { ScanProgressDock } from "@/components/ScanProgressDock"
 import { AppShell } from "@/pages/app/AppShell"
 import { DashboardPage } from "@/pages/app/DashboardPage"
 import { AuditsPage } from "@/pages/audits/AuditsPage"
+import { BlacklistDomainPage } from "@/pages/blacklists/BlacklistDomainPage"
+import { BlacklistStatePage } from "@/pages/blacklists/BlacklistStatePage"
 import { BlacklistsPage } from "@/pages/blacklists/BlacklistsPage"
+import { DmarcPage } from "@/pages/domains/DmarcPage"
+import { DmarcProblemPage } from "@/pages/domains/DmarcProblemPage"
 import { DomainsPage } from "@/pages/domains/DomainsPage"
 import { RunDetailPage } from "@/pages/domains/RunDetailPage"
+import { SpfPage } from "@/pages/domains/SpfPage"
+import { SpfProblemPage } from "@/pages/domains/SpfProblemPage"
 import { SettingsPage } from "@/pages/settings/SettingsPage"
 import { SignInPage } from "@/pages/sign-in/SignInPage"
 import { SsoCallbackPage } from "@/pages/sso-callback/SsoCallbackPage"
@@ -73,6 +79,27 @@ const runDetailRoute = createRoute({
   path: "/domains/$id",
   component: RunDetailPage,
 })
+// The per-technology full pages (pm/checks/*.mdx §6.2) and their problem-state drill-downs.
+const dmarcRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/dmarc",
+  component: DmarcPage,
+})
+const dmarcProblemRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/dmarc/$problemId",
+  component: DmarcProblemPage,
+})
+const spfRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/spf",
+  component: SpfPage,
+})
+const spfProblemRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/spf/$problemId",
+  component: SpfProblemPage,
+})
 const auditsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/audits",
@@ -82,6 +109,17 @@ const blacklistsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/blacklists",
   component: BlacklistsPage,
+})
+// The Blacklists technology full page and its problem-state deep dives (pm/checks/blacklists.mdx §13/§16).
+const blacklistDomainRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/blacklists/$domain",
+  component: BlacklistDomainPage,
+})
+const blacklistStateRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/blacklists/$domain/state/$psId",
+  component: BlacklistStatePage,
 })
 const settingsIndexRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
@@ -101,8 +139,14 @@ const routeTree = rootRoute.addChildren([
     dashboardRoute,
     domainsRoute,
     runDetailRoute,
+    dmarcRoute,
+    dmarcProblemRoute,
+    spfRoute,
+    spfProblemRoute,
     auditsRoute,
     blacklistsRoute,
+    blacklistDomainRoute,
+    blacklistStateRoute,
     settingsIndexRoute,
     settingsSectionRoute,
   ]),

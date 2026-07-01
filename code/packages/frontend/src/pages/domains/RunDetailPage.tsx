@@ -1,12 +1,18 @@
-import { useNavigate, useParams } from "@tanstack/react-router"
-import { ArrowLeft, RefreshCw, Wrench } from "lucide-react"
+import { Link, useNavigate, useParams } from "@tanstack/react-router"
+import { ArrowLeft, ChevronRight, RefreshCw, Wrench } from "lucide-react"
 import { useAuditResults } from "@/api/audit"
 import { useDomains } from "@/api/domains"
 import type { Finding } from "@/api/types"
 import { ScoreBadge, SeverityBadge } from "@/components/Badges"
 import { CopyFixButton } from "@/components/CopyFixButton"
 import { StatusCell } from "@/components/StatusCell"
-import { CATEGORIES, categoryOf, NEVER_CELL, rollupCategories } from "@/lib/categories"
+import {
+  CATEGORIES,
+  categoryOf,
+  NEVER_CELL,
+  rollupCategories,
+  techPageRoute,
+} from "@/lib/categories"
 import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext"
 
 const ORDER = { critical: 0, warning: 1, info: 2, ok: 3 } as const
@@ -81,14 +87,28 @@ export function RunDetailPage() {
 
           {/* Six category chips, colored to match the Dashboard cells. */}
           <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-            {CATEGORIES.map((c) => (
-              <a key={c.key} href={`#cat-${c.key}`} className="block">
-                <div className="mb-1 text-center text-[11px] font-medium text-[var(--edh-muted)]">
-                  {c.header}
-                </div>
-                <StatusCell status={cells[c.key] ?? NEVER_CELL} />
-              </a>
-            ))}
+            {CATEGORIES.map((c) => {
+              // Chevron to the category's full-page technology view (pm/checks/*.mdx §6.1).
+              const techRoute = techPageRoute(c.key)
+              return (
+                <a key={c.key} href={`#cat-${c.key}`} className="block">
+                  <div className="mb-1 flex items-center justify-center gap-1 text-center text-[11px] font-medium text-[var(--edh-muted)]">
+                    {c.header}
+                    {techRoute && (
+                      <Link
+                        to={techRoute}
+                        params={{ id }}
+                        aria-label={`Open the ${c.header} page`}
+                        className="hover:text-slate-700"
+                      >
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      </Link>
+                    )}
+                  </div>
+                  <StatusCell status={cells[c.key] ?? NEVER_CELL} />
+                </a>
+              )
+            })}
           </div>
 
           {/* Findings grouped by the six categories. */}

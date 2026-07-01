@@ -4,13 +4,17 @@ import type { MonitoredDomain } from "./types"
 
 export interface CreateDomainInput {
   name: string
+  label?: string
   dkimSelectors?: string[]
   sendingIps?: string[]
+  scheduleEnabled?: boolean
 }
 
 export interface UpdateDomainInput {
+  label?: string
   dkimSelectors?: string[]
   sendingIps?: string[]
+  scheduleEnabled?: boolean
 }
 
 const KEY = ["domains"] as const

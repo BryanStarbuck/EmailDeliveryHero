@@ -89,15 +89,42 @@ export class AuditService {
   }
 
   private async auditDomain(domain: MonitoredDomain): Promise<AuditResult> {
+    // Cross-run context: the other domains' latest DKIM key hashes (dkim.duplicate_key) and this
+    // domain's previous structured results (dkim.rotation first-seen carry-forward). Both are
+    // best-effort reads of the same store the results land in.
+    const all = this.loadAll()
+    const peerDkimKeys = Object.values(all)
+      .filter((r) => r.domainId !== domain.id)
+      .flatMap((r) => {
+        const dkim = r.results?.dkim as
+          | { selectors?: { selector: string; key_sha256: string | null }[] }
+          | undefined
+        return (dkim?.selectors ?? [])
+          .filter((s) => s.key_sha256)
+          .map((s) => ({
+            domain: r.domain,
+            selector: s.selector,
+            keySha256: s.key_sha256 as string,
+          }))
+      })
     const ctx = {
       domain: domain.name,
       dkimSelectors: domain.dkimSelectors,
       sendingIps: domain.sendingIps,
+      peerDkimKeys,
+      previousResults: all[domain.id]?.results,
     }
     const findings: Finding[] = []
+    const results: Record<string, unknown> = {}
     for (const checker of CHECKERS) {
       try {
-        findings.push(...(await checker.run(ctx)))
+        const outcome = await checker.run(ctx)
+        if (Array.isArray(outcome)) {
+          findings.push(...outcome)
+        } else {
+          findings.push(...outcome.findings)
+          if (outcome.results !== undefined) results[checker.id] = outcome.results
+        }
       } catch (err) {
         logError(`Checker ${checker.id} failed for ${domain.name}`, err, "AuditService")
         findings.push({
@@ -119,6 +146,7 @@ export class AuditService {
       status,
       findings,
       counts,
+      results,
     }
   }
 }

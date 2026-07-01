@@ -274,7 +274,7 @@ managed. See [Domains](./domains.mdx).
 * **Add domain** (top-right) opens a form: **Domain name** (required, validated to real DNS syntax,
   duplicates rejected on client and server), **DKIM selectors** and **Sending IPs** (comma-separated;
   used by the DKIM, PTR, and DNSBL checkers). Submitting `POST /api/domains` appends to
-  `domains.json`; the new row shows six **Never** cells until first audit.
+  `domains.yaml`; the new row shows six **Never** cells until first audit.
 * **Row** — Domain (name + optional label), the **six category cells** (same colors/labels as the
   Dashboard, from the domain's latest audit), then **Actions**:
   * **⟳ Run audit now** — `POST /api/audit/run/:id`, this domain only; cells refresh on completion.
@@ -285,7 +285,7 @@ managed. See [Domains](./domains.mdx).
 
 > **Per-domain schedule toggle.** [Domains §6](./domains.mdx) specifies an inline per-domain
 > "Scheduled" switch ANDed with the global switch. That requires a `scheduleEnabled` field the
-> first-round `domains.json` record does not yet carry, so the toggle is a **planned** column; the
+> first-round `domains.yaml` record does not yet carry, so the toggle is a **planned** column; the
 > current schedule is the single global preference surfaced on the Dashboard.
 
 ---

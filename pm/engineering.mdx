@@ -233,7 +233,7 @@ First round persists to **JSON/YAML files** under a **state dir**, default
 ```
 ~/.email_delivery_hero/
 ├── config.yaml              # app-level config (state dir, DNSBL zones, schedule cadence)
-├── domains.json             # the Monitored Domains list (the source of truth for CRUD)
+├── domains.yaml             # the Monitored Domains list (the source of truth for CRUD)
 └── audits/
     └── <domainId>/
         └── <auditId>.json   # one file per audit run (findings + score/status + timestamps)
