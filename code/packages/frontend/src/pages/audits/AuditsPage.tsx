@@ -23,7 +23,9 @@ export function AuditsPage() {
     <div className="mx-auto max-w-4xl">
       <h1 className="mb-1 text-2xl font-bold">Audits</h1>
       <p className="mb-6 text-sm text-[var(--edh-muted)]">
-        SPF, DKIM, DMARC, MX, and blacklist findings — with the exact fix for each problem.
+        21 deliverability checks across six categories — SPF, DKIM, DMARC, blacklists, DNS &amp;
+        infrastructure (MX, PTR, DNSSEC, DANE, MTA-STS, and more), and spam &amp; content — each with
+        the exact fix for every problem found.
       </p>
 
       {list.length === 0 && (
