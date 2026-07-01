@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { dig, resolveSoa } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import type { Checker, CheckOutcome, Finding } from "./types"
 
 /**
  * DNSSEC (DNS Security Extensions, RFC 4033/4034/4035). Verifies that a mail domain's zone is signed
@@ -16,6 +16,19 @@ import type { Checker, Finding } from "./types"
  */
 
 const CHECK_ID = "infra.dnssec"
+
+/**
+ * The structured DNSSEC state persisted at results["infra.dnssec"] (pm/checks/dns.mdx §5) —
+ * the DNS page's Zone panel one-liner. Nullable fields mean "could not be determined this run".
+ */
+export interface DnssecResults {
+  signed: boolean
+  ds_present: boolean | null
+  ds_digest_types: number[]
+  algorithms: number[]
+  ds_matches_dnskey: boolean | null
+  dane_ready: boolean
+}
 
 // RRSIG near-expiry lead time (spec default 72h) — used only by the future rrsig_expiry advisory.
 const RRSIG_LEAD_HOURS = 72
@@ -161,24 +174,27 @@ function computeDsDigest(domain: string, rdata: Buffer, hash: string): string {
 export const dnssecCheck: Checker = {
   id: CHECK_ID,
   label: "DNSSEC",
-  async run(ctx): Promise<Finding[]> {
+  async run(ctx): Promise<CheckOutcome> {
     const domain = ctx.domain
     const findings: Finding[] = []
 
     // ---- infra.dnssec_signed (first round: DNSKEY presence) ----
     const dnskeyRes = await dig(domain, "DNSKEY")
     if (dnskeyRes.error) {
-      return [
-        {
-          id: "infra.dnssec_signed.unavailable",
-          checkId: "infra.dnssec_signed",
-          title: "DNSSEC status unavailable",
-          severity: "info",
-          detail: `Could not query DNSKEY for ${domain} (${dnskeyRes.error}). DNSSEC presence could not be determined this run.`,
-          remediation:
-            "Retry the audit later. If it persists, confirm the Brew `dig` binary is installed and the domain's authoritative nameservers are reachable.",
-        },
-      ]
+      // Transient: no snapshot — the UI must not render a false "unsigned".
+      return {
+        findings: [
+          {
+            id: "infra.dnssec_signed.unavailable",
+            checkId: "infra.dnssec_signed",
+            title: "DNSSEC status unavailable",
+            severity: "info",
+            detail: `Could not query DNSKEY for ${domain} (${dnskeyRes.error}). DNSSEC presence could not be determined this run.`,
+            remediation:
+              "Retry the audit later. If it persists, confirm the Brew `dig` binary is installed and the domain's authoritative nameservers are reachable.",
+          },
+        ],
+      }
     }
 
     const keys = dnskeyRes.records.map(parseDnskey).filter((k): k is DnskeyRecord => k !== null)
@@ -205,7 +221,17 @@ export const dnssecCheck: Checker = {
         remediation:
           "Complete DNSSEC first (enable signing + publish the DS), then publish TLSA records per the DANE/TLSA check.",
       })
-      return findings
+      return {
+        findings,
+        results: {
+          signed: false,
+          ds_present: null,
+          ds_digest_types: [],
+          algorithms: [],
+          ds_matches_dnskey: null,
+          dane_ready: false,
+        } satisfies DnssecResults,
+      }
     }
 
     // Zone is signed.
@@ -282,6 +308,9 @@ export const dnssecCheck: Checker = {
     }
 
     // ---- infra.dnssec_ds_present + infra.dnssec_ds_algo_match (first round) ----
+    let dsPresent: boolean | null = null
+    let dsDigestTypes: number[] = []
+    let dsMatches: boolean | null = null
     const dsRes = await dig(domain, "DS")
     if (dsRes.error) {
       findings.push({
@@ -294,6 +323,7 @@ export const dnssecCheck: Checker = {
           "Retry the audit later. If it persists, confirm the parent/registrar nameservers are reachable and the Brew `dig` binary is installed.",
       })
     } else if (dsRes.empty) {
+      dsPresent = false
       // Signed but no DS at parent — "island of security": validation impossible.
       findings.push({
         id: "infra.dnssec_ds_present.missing",
@@ -306,6 +336,8 @@ export const dnssecCheck: Checker = {
       })
     } else {
       const dsRecords = dsRes.records.map(parseDs).filter((d): d is DsRecord => d !== null)
+      dsPresent = true
+      dsDigestTypes = [...new Set(dsRecords.map((d) => d.digestType))]
       findings.push({
         id: "infra.dnssec_ds_present.ok",
         checkId: "infra.dnssec_ds_present",
@@ -332,6 +364,7 @@ export const dnssecCheck: Checker = {
         }
       }
 
+      dsMatches = matched !== null
       if (!matched) {
         findings.push({
           id: "infra.dnssec_ds_algo_match.mismatch",
@@ -436,6 +469,16 @@ export const dnssecCheck: Checker = {
         "Ensure the parent DS key tag exists in the apex DNSKEY RRset. The future chain-walk deep check will verify every delegation hop links.",
     })
 
-    return findings
+    return {
+      findings,
+      results: {
+        signed: true,
+        ds_present: dsPresent,
+        ds_digest_types: dsDigestTypes,
+        algorithms: uniqueAlgos,
+        ds_matches_dnskey: dsMatches,
+        dane_ready: dsPresent === true,
+      } satisfies DnssecResults,
+    }
   },
 }

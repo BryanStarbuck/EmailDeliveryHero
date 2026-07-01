@@ -102,6 +102,100 @@ export interface SpfResults {
   ip_coverage: SpfIpCoverage[]
 }
 
+/** One probed DKIM selector (`results.dkim.selectors[]`, pm/checks/dkim.mdx §5). */
+export interface DkimSelectorResult {
+  selector: string
+  query_name: string
+  source: "configured" | "discovered"
+  resolved_via: "txt" | "cname" | "none"
+  cname_target: string | null
+  present: boolean
+  parses: boolean
+  raw_record: string | null
+  dkim_version: string | null
+  key_type: string | null
+  key_bits: number | null
+  key_sha256: string | null
+  has_test_flag: boolean
+  has_strict_flag: boolean
+  is_revoked: boolean
+  txt_record_count: number
+  oversize_chunk: boolean
+  flags: Record<string, string>
+  first_seen_at: string | null
+}
+
+/** The parsed DKIM observation (`results.dkim`, pm/checks/dkim.mdx §5). */
+export interface DkimResults {
+  selectors_configured: string[]
+  discovery_ran: boolean
+  working_selectors: number
+  wildcard_shadow: boolean
+  duplicate_keys: { key_sha256: string; seen_on: string[] }[]
+  selectors: DkimSelectorResult[]
+}
+
+// ---- DNS & Infrastructure snapshots (pm/checks/dns.mdx §5 — snake_case mirrors the YAML) -------
+
+/** The MX topology snapshot (`results["infra.mx_routing"]`). */
+export interface MxRoutingResults {
+  mx_found: boolean
+  null_mx: boolean
+  implicit_a_fallback: boolean
+  hosts: {
+    host: string
+    priority: number
+    is_cname: boolean
+    cname_target: string | null
+    ips: string[]
+    non_public: { ip: string; cls: string }[]
+  }[]
+  redundancy: { host_count: number; network_count: number }
+}
+
+/** One PTR/FCrDNS row of the reverse-DNS map (`results["infra.reverse_dns"]`). */
+export interface ReverseDnsIpResult {
+  ip: string
+  source: "mx" | "sending_ip"
+  ptr: string | null
+  forward_confirmed: boolean
+  generic: boolean
+}
+
+export interface ReverseDnsResults {
+  ips: ReverseDnsIpResult[]
+}
+
+/** The zone snapshot (`results["infra.dns_health"]`); null fields = probe not run yet. */
+export interface DnsHealthResults {
+  ns: { host: string; ips: string[] }[]
+  ns_count: number
+  network_count: number
+  parent_child_match: boolean | null
+  soa: {
+    mname: string
+    rname: string
+    serial: number
+    refresh: number
+    retry: number
+    expire: number
+    min_ttl: number
+  } | null
+  ttls: Record<string, number> | null
+  wildcard: { detected: boolean; probe: string; types: string[] }
+  cname_at_apex: boolean
+}
+
+/** The DNSSEC state (`results["infra.dnssec"]`); null = could not be determined this run. */
+export interface DnssecResults {
+  signed: boolean
+  ds_present: boolean | null
+  ds_digest_types: number[]
+  algorithms: number[]
+  ds_matches_dnskey: boolean | null
+  dane_ready: boolean
+}
+
 export interface AuditResult {
   domainId: string
   domain: string
@@ -111,7 +205,16 @@ export interface AuditResult {
   findings: Finding[]
   counts: Record<Severity, number>
   /** Structured per-check payloads keyed by checker id (e.g. results.dmarc, results.spf). */
-  results?: { dmarc?: DmarcResults; spf?: SpfResults; blacklist?: BlacklistRunResults } & Record<string, unknown>
+  results?: {
+    dmarc?: DmarcResults
+    spf?: SpfResults
+    dkim?: DkimResults
+    blacklist?: BlacklistRunResults
+    "infra.mx_routing"?: MxRoutingResults
+    "infra.reverse_dns"?: ReverseDnsResults
+    "infra.dns_health"?: DnsHealthResults
+    "infra.dnssec"?: DnssecResults
+  } & Record<string, unknown>
 }
 
 // ---- Blacklists (pm/checks/blacklists.mdx §12 — snake_case mirrors the persisted YAML) ---------

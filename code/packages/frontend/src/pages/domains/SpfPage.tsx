@@ -225,6 +225,9 @@ function BudgetHero({
   )
 }
 
+/** The 10 gauge segments, keyed by their budget slot (1–10). */
+const GAUGE_SEGMENTS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const
+
 /** The n/10 lookup-budget segments: green under 8, amber 8–10, red past 10. */
 function LookupGauge({ lookups }: { lookups: number }) {
   const color =
@@ -233,10 +236,10 @@ function LookupGauge({ lookups }: { lookups: number }) {
     <span className="flex items-center gap-2">
       <span className="text-sm text-slate-700">lookups</span>
       <span className="flex gap-0.5">
-        {Array.from({ length: 10 }, (_, i) => (
+        {GAUGE_SEGMENTS.map((slot) => (
           <span
-            key={`seg-${i + 1}`}
-            className={cn("h-3 w-2 rounded-sm", i < lookups ? color : "bg-slate-200")}
+            key={slot}
+            className={cn("h-3 w-2 rounded-sm", slot <= lookups ? color : "bg-slate-200")}
           />
         ))}
       </span>
@@ -257,6 +260,8 @@ function RecordPanel({ spf }: { spf?: SpfResults }) {
   const mechs = spf?.mechanisms ?? []
   // Terms after `all` never evaluate (redirect/exp modifiers excluded from position math).
   const allIdx = mechs.findIndex((m) => m.type === "all")
+  // Duplicate terms are legal in SPF, so key rows by raw + occurrence number, not array index.
+  const rows = withOccurrenceKeys(mechs, (m) => m.raw)
   return (
     <section className="rounded-lg border border-[var(--edh-border)] bg-white p-4">
       <div className="mb-2 flex items-center justify-between">
@@ -281,12 +286,12 @@ function RecordPanel({ spf }: { spf?: SpfResults }) {
               </tr>
             </thead>
             <tbody>
-              {mechs.map((m, i) => {
+              {rows.map(({ item: m, key }, i) => {
                 const dead =
                   allIdx !== -1 && i > allIdx && m.type !== "redirect" && m.type !== "exp"
                 const flagged = m.type === "ptr" || m.type === "unknown"
                 return (
-                  <tr key={`${m.raw}-${i}`} className="border-t border-[var(--edh-border)]">
+                  <tr key={key} className="border-t border-[var(--edh-border)]">
                     <td className="py-1.5 pr-3 align-top font-mono text-xs font-semibold">
                       <span className={cn(dead && "line-through opacity-60")}>{m.raw}</span>
                       {dead && (
@@ -367,13 +372,24 @@ function TreeNode({ node }: { node: SpfTreeNode }) {
       )}
       {node.children.length > 0 && (
         <ul className="space-y-1">
-          {node.children.map((c, i) => (
-            <TreeNode key={`${c.term}-${i}`} node={c} />
+          {withOccurrenceKeys(node.children, (c) => c.term).map(({ item, key }) => (
+            <TreeNode key={key} node={item} />
           ))}
         </ul>
       )}
     </li>
   )
+}
+
+/** Stable keys for lists that may repeat the same term: "<term>#<nth occurrence>". */
+function withOccurrenceKeys<T>(items: T[], keyOf: (item: T) => string): { item: T; key: string }[] {
+  const seen = new Map<string, number>()
+  return items.map((item) => {
+    const base = keyOf(item)
+    const n = (seen.get(base) ?? 0) + 1
+    seen.set(base, n)
+    return { item, key: `${base}#${n}` }
+  })
 }
 
 /** One row per configured sending IP: covered ✓/✗ and the matching pass-set entry (§6.2 #6). */

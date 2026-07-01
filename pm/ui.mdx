@@ -145,7 +145,8 @@ signed-in user is never bounced (see [Security §3.4](./security.mdx)).
 
 There are **two** left bars. Both are **data-driven** from `pm/left_bar.yaml`, imported raw and
 parsed by `src/config/left_bar.ts` — there is no second copy. Icons are lucide-react names resolved
-in `NavIcon.tsx`.
+in `NavIcon.tsx`. Styling and behavior are specified in [Left bar](./leftbar.mdx) — notably the
+LOCKED color rule: **all left-bar text is black; green stays green; medium grey becomes black.**
 
 ### 3.1 The app bar (main navigation)
 
@@ -160,7 +161,8 @@ A flat, ordered list; the account slot pinned to the bottom.
 | 5 | **Reports** | `Mailbox` | `/reports` | Ingested DMARC (`rua`) + TLS-RPT report emails: who sent as your domain, alignment, TLS health, with fixes. |
 | 6 | **Settings** | `Settings` | `/settings` | Account, scheduling, app config. |
 
-Header: the **"EmailDeliveryHero"** wordmark linking to `/`. Footer: the **account slot** (§1.5),
+Header: the **"Email Delivery Hero"** wordmark (spaces between the three words, green, normal
+tracking — [Left bar §1](./leftbar.mdx)) linking to `/`. Footer: the **account slot** (§1.5),
 whose menu is `Settings`, `Admin` (gated `role:admin`), `Log out`.
 
 ### 3.2 The settings bar
@@ -180,8 +182,8 @@ Route `/`. The landing screen and the one users live in. See [Dashboard](./dashb
 
 ```
 ┌────────────┬──────────────────────────────────────────────────────────────┐
-│            │      E M A I L   D E L I V E R Y   H E R O      ┌────────────┐ │
-│  LEFT BAR  │        (big, extra-bold, tracked-out wordmark)  │ ⟳ Run checks│ │
+│            │      Email Delivery Hero                        ┌────────────┐ │
+│  LEFT BAR  │      (big, extra-bold, NORMAL letter spacing)   │ ⟳ Run checks│ │
 │            │                                                 └────────────┘ │
 │            │                                                 Scheduled ◉  › │
 │            ├──────────────────────────────────────────────────────────────┤
@@ -195,8 +197,8 @@ Route `/`. The landing screen and the one users live in. See [Dashboard](./dashb
 ```
 
 * **Brand header** — the wordmark **"Email Delivery Hero"** rendered large (`text-4xl md:text-5xl`),
-  `font-extrabold`, `tracking-[0.25em]`, with visible spacing between the three words. The brand is a
-  feature, not a label.
+  `font-extrabold`, **`tracking-normal`** — plain text with regular single spaces between the three
+  words (no letter tracking, no extra word gaps).
 * **Run checks** (top-right) — `POST /api/audit/run`; idle → running (spinner, disabled) → done, then
   the grid refetches (TanStack Query invalidation) and a success toast fires.
 * **Scheduled toggle + chevron** (directly below Run checks) — an on/off switch for recurring checks
@@ -211,10 +213,11 @@ Route `/`. The landing screen and the one users live in. See [Dashboard](./dashb
   (domains exist, no audit): all-gray cells and a nudge to press Run checks. **Loading**: skeleton
   rows sized to Domain + six cells so there is no layout shift.
 
-> **Row model.** The backend keeps the **latest** audit per domain (`audits.json`, keyed by domain),
-> so the Dashboard grid is **one row per domain**. A per-day time-series grid (one row per day) is a
-> planned enhancement that arrives when the store keeps run history; the design language (six columns,
-> four colors) is already the one it will use.
+> **Row model.** The backend keeps the **latest** audit per domain (`audits.json`) **and** a run
+> history (`runs.json`), so the Dashboard is **two tables**: the domain-health grid above (one row
+> per domain, with a per-row ▶ play button and ⋮ menu) and the **Runs** table below (one row per
+> run — Date, Domain, six test cells, › chevron and ⋮ menu). Vocabulary is **Run → Test →
+> Sub-test**; full spec in [Dashboard](./dashboard.mdx) §1/§4.
 
 ---
 

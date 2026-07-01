@@ -8,6 +8,8 @@ import { AuditsPage } from "@/pages/audits/AuditsPage"
 import { BlacklistDomainPage } from "@/pages/blacklists/BlacklistDomainPage"
 import { BlacklistStatePage } from "@/pages/blacklists/BlacklistStatePage"
 import { BlacklistsPage } from "@/pages/blacklists/BlacklistsPage"
+import { DkimPage } from "@/pages/domains/DkimPage"
+import { DkimProblemPage } from "@/pages/domains/DkimProblemPage"
 import { DmarcPage } from "@/pages/domains/DmarcPage"
 import { DmarcProblemPage } from "@/pages/domains/DmarcProblemPage"
 import { DomainsPage } from "@/pages/domains/DomainsPage"
@@ -79,6 +81,12 @@ const runDetailRoute = createRoute({
   path: "/domains/$id",
   component: RunDetailPage,
 })
+// A specific historical run's report (pm/dashboard.mdx §4.2 — the Runs table's row click).
+const runReportRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/runs/$runId",
+  component: RunDetailPage,
+})
 // The per-technology full pages (pm/checks/*.mdx §6.2) and their problem-state drill-downs.
 const dmarcRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
@@ -89,6 +97,16 @@ const dmarcProblemRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/domains/$id/dmarc/$problemId",
   component: DmarcProblemPage,
+})
+const dkimRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/dkim",
+  component: DkimPage,
+})
+const dkimProblemRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/dkim/$problemId",
+  component: DkimProblemPage,
 })
 const spfRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
@@ -139,8 +157,11 @@ const routeTree = rootRoute.addChildren([
     dashboardRoute,
     domainsRoute,
     runDetailRoute,
+    runReportRoute,
     dmarcRoute,
     dmarcProblemRoute,
+    dkimRoute,
+    dkimProblemRoute,
     spfRoute,
     spfProblemRoute,
     auditsRoute,

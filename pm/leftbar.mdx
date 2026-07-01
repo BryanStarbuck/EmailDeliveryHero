@@ -1,0 +1,155 @@
+---
+title: EmailDeliveryHero — Left Bar
+description: The left navigation bar specification — the human companion to pm/left_bar.yaml (the machine source of truth the frontend imports). Defines the "Email Delivery Hero" wordmark (spaces between the three words), the LOCKED color rules (all left-bar text black; anything green stays green; medium grey becomes black), the two bar variants (app + settings), every nav item, the bottom account slot, active/hover states, and permission gates.
+---
+
+# EmailDeliveryHero — Left Bar
+
+The **left bar** is the fixed 256px navigation column on every screen. There are **two** left bars —
+the **app bar** (main navigation) and the **settings bar** (under `/settings/*`) — both data-driven
+from **`pm/left_bar.yaml`**, which the frontend imports raw (`src/config/left_bar.ts`, via Vite
+`?raw`). There is no second code copy of the nav content.
+
+Division of labor:
+
+* **`pm/left_bar.yaml`** — the **machine source of truth** for the *content*: items, labels, icons,
+  routes, order, gates, the header label, the account-menu items.
+* **This file** — the **human spec** for everything around that content: the wordmark treatment,
+  the color rules, states, layout, and acceptance criteria. Where prose here and the yaml disagree
+  on content, the yaml wins; on styling, this file wins.
+
+Siblings: [Overview](./overview.mdx) (product charter), [UI](./ui.mdx) (app frame),
+[Dashboard](./dashboard.mdx) (the screen to the right of this bar),
+[Security](./security.mdx) (optional login / the `default` user).
+
+---
+
+## 1. The wordmark (top of the bar)
+
+The header of the app bar shows the product name as **text only** — no icon mark:
+
+* The label is **"Email Delivery Hero"** — with a **space between "Email" and "Delivery"** and a
+  **space between "Delivery" and "Hero"**. Never `EmailDeliveryHero` run together.
+* Normal letter tracking (`tracking-normal`) — plain readable text, not a tracked-out logotype.
+* It keeps its **green** brand color (`--edh-primary`, `#0f766e`) — green stays green (§2).
+* `text-lg font-semibold`, vertically centered in the 56px header band, left-padded to align with
+  the nav items, bottom border `--edh-border`.
+* Clicking it routes to `/` (the Dashboard).
+
+The label string itself lives in `pm/left_bar.yaml` (`header.label`) so the frontend renders it
+verbatim — the yaml carries the spaced form.
+
+---
+
+## 2. Color rules (LOCKED)
+
+The left bar's text is **black**. The complete rule set:
+
+| What | Was | Now |
+| --- | --- | --- |
+| Nav item labels + icons | medium grey (`text-slate-700`) | **black** (`text-black`) |
+| Settings group headers (e.g. "GENERAL") | medium grey (`--edh-muted`) | **black** (`text-black`) |
+| Account slot name / email lines | name dark, email medium grey (`--edh-muted`) | **both black** (`text-black`) |
+| Back-to-app link (settings bar) | medium grey | **black** |
+| Wordmark "Email Delivery Hero" | green (`--edh-primary`) | **stays green** |
+| Active nav item | green text on green-tint background | **stays green** |
+| "Sign in" accent in the account slot | green | **stays green** |
+| Hover background (`hover:bg-slate-100`) | light grey fill | unchanged (it is a fill, not text) |
+
+The principle, verbatim: **everything green stays green; everything that was medium grey becomes
+black.** Icons inherit their item's text color, so they follow the same rule automatically. Black
+on white passes WCAG AAA; the green active state keeps its tint background for shape.
+
+---
+
+## 3. The app bar (main navigation)
+
+A flat, ordered list under the wordmark; the account slot pinned to the bottom. Content from
+`pm/left_bar.yaml` (`Location: app`):
+
+| Order | Item | Icon (lucide) | Route | Purpose |
+| --- | --- | --- | --- | --- |
+| 1 | **Dashboard** | `LayoutDashboard` | `/` | The two-table health view — domain health grid + run history ([Dashboard](./dashboard.mdx)). |
+| 2 | **Domains** | `Globe` | `/domains` | Add and manage the email-sending domains you monitor. |
+| 3 | **Audits** | `ShieldCheck` | `/audits` | Deliverability audit results — SPF, DKIM, DMARC, MX, and blacklist findings. |
+| 4 | **Blacklists** | `Ban` | `/blacklists` | DNSBL status for your sending IPs, with delisting steps. |
+| 5 | **Reports** | `Mailbox` | `/reports` | Ingested DMARC (`rua`) + TLS-RPT report emails — who sent as your domain, alignment, TLS health, with fixes ([emails.mdx](./emails.mdx)). |
+| 6 | **Settings** | `Settings` | `/settings` | Account, scheduling, and app configuration. |
+
+States:
+
+* **Active** — the item whose route matches the current path (`/` exact; others by prefix):
+  green text + `--edh-primary`/10 tint background, `font-medium`.
+* **Inactive** — black text (§2), transparent background.
+* **Hover** — `bg-slate-100` fill; text color unchanged.
+* Each item shows its yaml `description` as the hover `title` tooltip.
+
+---
+
+## 4. The settings bar
+
+Rendered instead of the app bar under `/settings/*`. Content from `pm/left_bar.yaml`
+(`Location: settings`):
+
+* **Header** — a back affordance: `ArrowLeft` icon + **"Settings"**, routing back to `/`. Black
+  text (§2).
+* **Groups** (group headers uppercase, black):
+  * **General** → **Account** (`/settings`, the default section) · **Scheduling**
+    (`/settings/scheduling` — how often periodic re-audits run).
+  * **Administration** → **Admin** (`/settings/admin`, gated `role:admin`).
+* A group whose items are all gated out does not render its header.
+
+---
+
+## 5. The account slot (bottom of the bar)
+
+Pinned to the bottom of both bars, always visible ([UI §1.5](./ui.mdx),
+[Security §3.2](./security.mdx)):
+
+* **Logged out** → a **"Sign in"** button (green accent — stays green) with the subtitle
+  "Using default settings" in **black**. No screen ever forces sign-in.
+* **Signed in** → avatar + **name** + **email**, both text lines **black** (§2). Clicking opens an
+  **upward-expanding** popup menu (items from the yaml `footer`): **Settings**, **Admin** (only
+  with `role:admin`), **Log out**. Log out returns to the `default` user — it never ejects the
+  person from the app.
+
+---
+
+## 6. Layout & behavior
+
+* Fixed width **256px** (`w-64`), full height, white background, right border `--edh-border`;
+  the nav list scrolls independently if it overflows.
+* The bar **variant is chosen by route**: settings bar under `/settings/*`, app bar everywhere
+  else.
+* Permission gates come from OpenAuthFederated claims (e.g. `role:admin`); a gated item is
+  **hidden**, not disabled, when the claim is absent. The bar renders for everyone — signed in or
+  the `default` user.
+* Icons resolve by lucide name in `NavIcon.tsx`; an unknown icon name renders no icon rather than
+  crashing.
+
+---
+
+## 7. Acceptance criteria
+
+1. The app-bar header reads **"Email Delivery Hero"** — spaces between *Email*/*Delivery* and
+   *Delivery*/*Hero*, normal tracking, green (`--edh-primary`), and routes to `/`.
+2. All left-bar text is **black**: nav labels, icons, settings group headers, the back link, and
+   both account-slot text lines. Nothing in the bar renders in medium grey.
+3. Green elements keep their green: the wordmark, the active nav item (text + tint background),
+   and the Sign-in accent.
+4. Both bars render their content **from `pm/left_bar.yaml`** — items, order, icons, routes,
+   labels, and gates; no hard-coded copies in components.
+5. The app bar lists exactly: Dashboard, Domains, Audits, Blacklists, Reports, Settings — in that
+   order; the settings bar shows the back header and the General/Administration groups.
+6. Active state matches by route (exact `/`, prefix otherwise); gated items are hidden without the
+   claim; hover shows the light-grey fill without changing text color.
+7. The account slot sits at the bottom, behaves per §5, and its popup expands upward.
+
+<!--
+  This file is the styling/behavior spec; pm/left_bar.yaml is the content source of truth the
+  frontend imports raw. LOCKED here: the spaced wordmark "Email Delivery Hero", and the color rule
+  "green stays green, medium grey becomes black" — every text element in the bar is black except the
+  green wordmark / active item / sign-in accent. When adding a nav item, edit the yaml (content) and,
+  if it needs special treatment, add a row to §3 here. Keep ui.mdx §2–§3 pointing at this file
+  instead of restating it.
+-->

@@ -1,87 +1,125 @@
 ---
 title: EmailDeliveryHero — Dashboard
-description: The main screen of EmailDeliveryHero — a big-brand header over a TanStack Table where each row is one daily health-check run and six locked category columns (SPF, DKIM, DMARC, Blacklists, DNS & Infrastructure, Spam & Content) render color-coded, metric-based status cells. Includes the top-right Run checks button and scheduled-checks toggle, row-click navigation to a single run, and empty/loading states.
+description: The main screen of EmailDeliveryHero — a plain-text brand header over TWO TanStack Tables. Table 1 (Domain health) is one row per monitored domain with six locked test columns (SPF, DKIM, DMARC, Blacklists, DNS & Infrastructure, Spam & Content), a per-row play button that runs checks for just that domain, and a triple-dot menu. Table 2 (Runs) is one row per run — Date, Domain, then the same six test columns — with a right chevron and a triple-dot menu on every row. Defines the Run → Test → Sub-test hierarchy, whole-row click navigation to a run report (top table opens the newest report), the top-right Run checks button and scheduled-checks toggle, and empty/loading states.
 ---
 
 # EmailDeliveryHero — Dashboard
 
 The **Dashboard** is the landing view of EmailDeliveryHero and the screen users live in. It is a
-proud, branded header over a single **TanStack Table**: one row per day, one column per
-deliverability category, every cell a short color-coded status. From here a user runs a manual
-health check, toggles the recurring scheduler, and clicks into any day's full findings.
+brand header over **two TanStack Tables**:
+
+1. **Domain health** (top) — one row per monitored domain; each row summarizes the domain's
+   **newest run** across the six test columns.
+2. **Runs** (below) — one row per **run** (a dated, per-domain execution of all checks); the
+   history that lets a user open any past report.
+
+From here a user runs a manual health check for everything or for one domain, toggles the recurring
+scheduler, and clicks into any run's full findings.
 
 This spec builds on the siblings and does not repeat them:
 
-* [Overview](./overview.mdx) — the product charter, the left navigation, and the list of checks.
-* [Engineering](./engineering.mdx) — the audit engine (findings severity `ok`/`info`/`warning`/`critical`), one audit run producing findings, the scheduler endpoints, and the React 19 + Vite + Tailwind + shadcn/ui + lucide-react + TanStack Table/Router/Query frontend on port **4444**.
-* [Scheduled checks](./scheduled_checks.mdx) — the recurring-checks configuration page the chevron opens.
-* [Settings](./settings.mdx) — app and per-user settings.
-* [Spam checks](./spam_checks.mdx) — the full catalog of sub-checks that each of the six columns groups.
-* [View one health check run](./use_cases/view_health_check_run.mdx) — the page a row click opens.
-
-The left bar is already specified in the [Overview](./overview.mdx) (source of truth
-`pm/left_bar.yaml`); this document does not redefine it and only shows where it sits.
-
----
-
-## 1. Layout
-
-The screen has four regions: the **left bar** (see Overview), the **big brand header** across the
-top of the content area, the **top-right controls** (Run checks button, and directly below it the
-scheduled-checks toggle with a chevron), and the **table** filling the rest.
-
-```
-┌────────────┬──────────────────────────────────────────────────────────────────────────┐
-│            │                                                          ┌───────────────┐ │
-│  LEFT BAR  │        E M A I L   D E L I V E R Y   H E R O             │ ▶ Run checks  │ │
-│            │            (big brand header, tracked-out)               └───────────────┘ │
-│ Dashboard  │                                                          ┌───────────────┐ │
-│ Domains    │                                                          │ Scheduled ◉  ⌄│ │
-│ Audits     │                                                          └───────────────┘ │
-│ Blacklists │                                                                (toggle+chevron)│
-│ Settings   ├──────────────────────────────────────────────────────────────────────────┤
-│            │ Date        SPF     DKIM    DMARC   Blacklists  DNS & Infra   Spam & Content│
-│            ├──────────────────────────────────────────────────────────────────────────┤
-│            │ 2026-07-01 │Healthy│2 of 7 │Healthy│ Healthy   │ 3 problems │  92%          │  ← newest, top
-│            │ 2026-06-30 │Healthy│Healthy│ 1 fail│ Healthy   │ Healthy    │  94%          │
-│            │ 2026-06-29 │ Never │ Never │ Never │  Never    │  Never     │  Never        │
-│  [avatar]  │    …        …       …       …        …            …            …            │
-│  name      │                                                                            │
-│  email     │                                                                            │
-└────────────┴──────────────────────────────────────────────────────────────────────────┘
-```
-
-* The **Run checks** button is the topmost top-right control.
-* The **scheduled-checks toggle** sits **directly below** the Run checks button, right-aligned, with
-  its **chevron on the right edge**.
-* The **table** starts below the header/controls band and scrolls independently; the header row is
-  sticky.
-* Each row is clickable (whole-row hit target) and navigates to that day's run.
+* [Overview](./overview.mdx) — the product charter and the list of checks.
+* [Left bar](./leftbar.mdx) — the left navigation (data source of truth `pm/left_bar.yaml`); this
+  document does not redefine it and only shows where it sits.
+* [Engineering](./engineering.mdx) — the audit engine (findings severity `ok`/`info`/`warning`/`critical`),
+  the scheduler endpoints, and the React 19 + Vite + Tailwind + lucide-react + TanStack
+  Table/Router/Query frontend on port **4444**.
+* [Scheduled checks](./scheduled_checks.mdx) — the recurring-checks configuration page the toggle's chevron opens.
+* [Spam checks](./spam_checks.mdx) — the full catalog of sub-tests each of the six test columns groups.
+* [View one health check run](./use_cases/view_health_check_run.mdx) — the run report a row click opens.
 
 ---
 
-## 2. The top header / brand
+## 1. Vocabulary — Run → Test → Sub-test (LOCKED)
 
-The header renders the wordmark **"Email Delivery Hero"** large and proud, with generous spacing
-**between the three words** and comfortable letter tracking — the brand is a feature, not a label.
+Three levels, used consistently across every spec and every screen:
+
+| Level | Term | Definition |
+| --- | --- | --- |
+| 1 | **Run** | One execution of all checks for **one domain**. A run has a `runId`, the **domain** it ran against, a **`startedAt`** date-time (when it started) and a **`finishedAt`** date-time (when it stopped). Pressing "Run checks" over N domains creates **N runs** (one per domain). |
+| 2 | **Test** | A **test area** inside a run — exactly the six locked categories: **SPF, DKIM, DMARC, Blacklists, DNS & Infrastructure, Spam & Content**. Every run contains these six tests. |
+| 3 | **Sub-test** | An individual check inside a test (e.g. "SPF ≤10 DNS lookups", "selector `s1._domainkey` key present"). Each finding the engine emits belongs to one sub-test; a test's cell color rolls up its sub-tests' worst severity. |
+
+```ts
+// The run record the backend persists and the Runs table renders.
+export interface AuditRun {
+  runId: string;      // unique id for this run
+  domainId: string;
+  domain: string;     // domain name at run time
+  startedAt: string;  // ISO date-time — when the run started
+  finishedAt: string; // ISO date-time — when the run stopped
+  score: number;
+  status: "healthy" | "warning" | "critical";
+  findings: Finding[];   // every sub-test outcome (see engineering.mdx)
+  counts: SeverityCounts;
+}
+```
+
+**Backend requirement.** The engine keeps the latest result per domain (`audits.json`) **and** a
+run history (`runs.json`): every run is appended with its `runId`, `startedAt`, `finishedAt`,
+capped at the newest **50 runs per domain**. Endpoints:
+
+* `GET /api/audit/runs` — all kept runs, newest `startedAt` first (optional `?domainId=` filter).
+* `GET /api/audit/runs/:runId` — one run in full (the run report's data).
+
+---
+
+## 2. Layout
+
+The screen has five regions: the **left bar** (see [Left bar](./leftbar.mdx)), the **brand header**,
+the **top-right controls** (Run checks button, scheduled-checks toggle with chevron), **Table 1 —
+Domain health**, and **Table 2 — Runs**.
+
+```
+┌────────────┬───────────────────────────────────────────────────────────────────────────┐
+│            │  Email Delivery Hero                                     ┌───────────────┐ │
+│  LEFT BAR  │  (large + bold, NORMAL letter spacing)                   │ ⟳ Run checks  │ │
+│            │                                                          └───────────────┘ │
+│ Dashboard  │                                                            Scheduled ◉  ›  │
+│ Domains    ├───────────────────────────────────────────────────────────────────────────┤
+│ Audits     │ DOMAIN HEALTH                                                              │
+│ Blacklists │ Domain          SPF    DKIM   DMARC  Blkl   DNS&Inf  Spam&Cont             │
+│ Reports    │ whitehat….com  Hlthy  2of7   Hlthy  Hlthy  1of10    92%       ▶  ⋮        │ ← click row → newest report
+│ Settings   │ act3ai.com     Hlthy  Hlthy  1fail  Hlthy  Hlthy    88%       ▶  ⋮        │
+│            ├───────────────────────────────────────────────────────────────────────────┤
+│            │ RUNS                                                                       │
+│            │ Date              Domain         SPF    DKIM   DMARC  Blkl  DNS&I  Spam    │
+│            │ 2026-07-01 09:14  whitehat….com  Hlthy  2of7   Hlthy  Hlthy 1of10  92%  › ⋮│ ← click row → this run's report
+│            │ 2026-07-01 09:14  act3ai.com     Hlthy  Hlthy  1fail  Hlthy Hlthy  88%  › ⋮│
+│  [account] │ 2026-06-30 03:00  whitehat….com  Hlthy  Hlthy  Hlthy  Hlthy Hlthy  94%  › ⋮│
+└────────────┴───────────────────────────────────────────────────────────────────────────┘
+```
+
+* Both tables share the same six **test** columns, the same status-cell design (§5), and sticky
+  header rows; each scrolls with the page.
+* Every row in **both** tables is a whole-row click target that opens a run report (§6).
+* Every row in both tables carries trailing row controls (§4.3 / §4.4): Table 1 rows end with a
+  **play button** and a **triple-dot menu**; Table 2 rows end with a **right chevron** and a
+  **triple-dot menu**.
+
+---
+
+## 3. The top header / brand
+
+The header renders the wordmark **"Email Delivery Hero"** as **normal text** — large and bold, but
+with **normal letter spacing and normal word spacing**. No tracked-out letters, no extra gaps
+between the words: it reads exactly like the three words typed with single spaces.
 
 | Aspect | Tailwind treatment | Intent |
 | --- | --- | --- |
-| Font size | `text-4xl md:text-5xl` | Large, dominates the top of the content area. |
+| Font size | `text-4xl md:text-5xl` | Large; still dominates the top of the content area. |
 | Weight | `font-extrabold` | Confident, heavy wordmark. |
-| Letter tracking | `tracking-[0.25em]` | Generous letter spacing so it reads as a designed mark. |
-| Word spacing | rendered as three `<span>`s separated by `mx-3` (or a `[word-spacing:0.5em]` on the container) | Visible gaps **between the three words**. |
-| Casing / color | title-case, `text-foreground`; optional subtle gradient via `bg-clip-text` | High contrast on the page background (WCAG AA). |
+| Letter tracking | `tracking-normal` | **Normal text** — no extra spacing between letters. |
+| Word spacing | plain string `Email Delivery Hero` | Regular single spaces between the three words; no `mx-*` spans, no `word-spacing`. |
+| Casing / color | title-case, `text-slate-900` | High contrast on the page background (WCAG AA). |
 | Layout | header row is `flex items-start justify-between`; wordmark left, controls right | Brand left, actions right. |
 
 ```tsx
-// pages/dashboard/BrandHeader.tsx
+// components/BrandHeader.tsx
 export function BrandHeader() {
   return (
-    <h1 className="text-4xl md:text-5xl font-extrabold tracking-[0.25em] text-foreground">
-      <span>Email</span>
-      <span className="mx-3">Delivery</span>
-      <span>Hero</span>
+    <h1 className="text-4xl font-extrabold tracking-normal text-slate-900 md:text-5xl">
+      Email Delivery Hero
     </h1>
   );
 }
@@ -89,45 +127,68 @@ export function BrandHeader() {
 
 ---
 
-## 3. The table
+## 4. The two tables
 
-The core of the Dashboard is a **TanStack Table** ([Engineering §5](./engineering.mdx)).
+Both are **TanStack Tables** ([Engineering §5](./engineering.mdx)) sharing one column vocabulary:
+the six **LOCKED test columns**, in this order everywhere — **SPF, DKIM, DMARC, Blacklists,
+DNS & Infrastructure, Spam & Content**.
 
-### 3.1 Row model — one health-check run per day
+### 4.1 Table 1 — Domain health (one row per domain)
 
-* **One row = one day's health-check run** (the daily audit across all monitored domains, or the
-  selected domain). A row is the day-level roll-up of that day's audit run(s).
-* Rows are sorted **newest day at the top** (descending `date`).
-* The **first column is Date** — the calendar day of the run, formatted `YYYY-MM-DD`.
-* Each of the six category columns renders that day's status for that category as a single
-  color-coded cell (§4).
+* **One row = one monitored domain.** Each test cell rolls up the sub-tests of that test from the
+  domain's **newest run** (the latest result per domain).
+* Column order: **Domain** first, then the six test columns, then the trailing **row-controls**
+  cell (play button + triple-dot menu).
+* A domain never audited shows six gray never-run cells.
+* **Row click** → the domain's **newest run report** (`/domains/$id`).
 
-Data comes from the audit history ([Engineering §6–§8](./engineering.mdx)): each day's audit run(s)
-are summarized into one `DashboardRow`, with each category cell derived by rolling up the findings of
-the sub-checks that belong to that category (catalog in [Spam checks](./spam_checks.mdx)).
+### 4.2 Table 2 — Runs (one row per run)
 
-### 3.2 Column definitions
+* **One row = one run** (§1): per domain, with its start date-time.
+* Column order: **Date** first (the run's `startedAt`, formatted `YYYY-MM-DD HH:mm`, newest first),
+  **Domain** second, then the **six test columns** showing **that run's** results, then the trailing
+  **row-controls** cell (right chevron + triple-dot menu).
+* Sorted by `startedAt` descending — the newest run is the top row.
+* Fed by `GET /api/audit/runs` (§1). Shows the newest **100** runs across all domains.
+* A section heading **"Runs"** separates it from Table 1.
+* **Row click** → **that run's** report (`/domains/$domainId/runs/$runId`).
 
-Seven columns total: **Date** plus the **six LOCKED category columns** (same order across all specs).
+### 4.3 Row controls — Table 1 (Domain health)
 
-| Column | Key | What it summarizes |
-| --- | --- | --- |
-| **Date** | `date` | The day of the health-check run (`YYYY-MM-DD`), newest first. Row click target. |
-| **SPF** | `spf` | Roll-up of SPF sub-checks (single valid `v=spf1`, ≤10 lookups, one `all`). |
-| **DKIM** | `dkim` | Roll-up of DKIM sub-checks (each selector's `_domainkey` key present/valid). |
-| **DMARC** | `dmarc` | Roll-up of DMARC sub-checks (`_dmarc` present, policy strength). |
-| **Blacklists** | `blacklists` | Roll-up of DNSBL sub-checks across sending IPs (Spamhaus ZEN, Barracuda, SpamCop, …). |
-| **DNS & Infrastructure** | `dnsInfra` | Roll-up of MX, PTR/FCrDNS, and related DNS/infra sub-checks. |
-| **Spam & Content** | `spamContent` | Roll-up of content/reputation sub-checks; naturally a percentage (inbox-placement %). |
+Trailing cell on every row, right-aligned, two controls:
 
-### 3.3 Types and `ColumnDef[]`
+* **▶ Play button** (lucide `Play`) — kicks off a health-check run for **just that domain**
+  (`POST /api/audit/run/:domainId`, through the scan runner so the per-domain progress card shows,
+  per [Progress UI](./progress_ui.mdx)). While that domain is scanning the play button shows a
+  spinner and is disabled. It does **not** navigate.
+* **⋮ Triple-dot menu** (lucide `MoreVertical`) — a pull-down menu of actions for that domain:
+  * **Run checks now** — same as the play button.
+  * **Open newest report** — same as the row click.
+  * **Edit domain** — navigates to the Domains page (`/domains`) with this domain's editor open.
+  * **Scheduled checks on/off** — toggles the domain record's `scheduleEnabled`.
+  * **Delete domain** — destructive, confirm dialog first (same behavior as the Domains page delete).
+
+### 4.4 Row controls — Table 2 (Runs)
+
+Trailing cell on every row, right-aligned, two controls:
+
+* **› Right chevron** (lucide `ChevronRight`) — opens the row up: navigates to that run's report
+  (the same place the row click goes). Every Runs row has it.
+* **⋮ Triple-dot menu** (lucide `MoreVertical`) — actions for that run:
+  * **Open report** — same as the row click / chevron.
+  * **Run checks again** — a fresh run for the same domain (`POST /api/audit/run/:domainId`).
+  * **Delete run** — removes this run from the history (confirm first).
+
+Clicks on any row control **stop propagation** — they never trigger the whole-row navigation.
+
+### 4.5 Types and `ColumnDef[]`
 
 ```ts
 // pages/dashboard/columns.ts
 import type { ColumnDef } from "@tanstack/react-table";
 
-// The six locked category keys, in display order.
-export type CategoryKey =
+// The six locked TEST keys, in display order (identical in both tables).
+export type TestKey =
   | "spf"
   | "dkim"
   | "dmarc"
@@ -135,246 +196,154 @@ export type CategoryKey =
   | "dnsInfra"
   | "spamContent";
 
-// Cell color drives the Tailwind background (see §4). Derived from the
-// worst finding severity among the category's sub-checks for that day.
 export type CellColor = "green" | "red" | "amber" | "gray";
 
 export interface CellStatus {
   color: CellColor; // healthy | critical | warning | never-run
-  label: string;    // short metric string, <=10 chars ideal (see §4.2)
+  label: string;    // short metric string, <=10 chars ideal (see §5.2)
 }
 
-export interface DashboardRow {
-  date: string;         // "YYYY-MM-DD", the day of the run
-  runId: string;        // the audit run this day rolls up to (row click → this run)
-  spf: CellStatus;
-  dkim: CellStatus;
-  dmarc: CellStatus;
-  blacklists: CellStatus;
-  dnsInfra: CellStatus;
-  spamContent: CellStatus;
+// Table 1 row — one monitored domain, cells from its newest run.
+export interface DomainHealthRow {
+  domainId: string;
+  domain: string;
+  cells: Record<TestKey, CellStatus>;
 }
 
-const CATEGORY_COLUMNS: { key: CategoryKey; header: string }[] = [
-  { key: "spf", header: "SPF" },
-  { key: "dkim", header: "DKIM" },
-  { key: "dmarc", header: "DMARC" },
-  { key: "blacklists", header: "Blacklists" },
-  { key: "dnsInfra", header: "DNS & Infrastructure" },
-  { key: "spamContent", header: "Spam & Content" },
-];
-
-export const columns: ColumnDef<DashboardRow>[] = [
-  {
-    accessorKey: "date",
-    header: "Date",
-    cell: ({ getValue }) => <span className="font-medium tabular-nums">{getValue<string>()}</span>,
-  },
-  ...CATEGORY_COLUMNS.map<ColumnDef<DashboardRow>>(({ key, header }) => ({
-    accessorKey: key,
-    header,
-    cell: ({ getValue }) => <StatusCell status={getValue<CellStatus>()} />,
-  })),
-];
+// Table 2 row — one run.
+export interface RunRow {
+  runId: string;
+  domainId: string;
+  domain: string;
+  startedAt: string;  // ISO — rendered YYYY-MM-DD HH:mm, newest first
+  finishedAt: string;
+  cells: Record<TestKey, CellStatus>;
+}
 ```
 
 ---
 
-## 4. Status cell
+## 5. Status cell
 
-Every category cell is a solid color block with short text — a glanceable grid where color signals
-health and the label gives the metric.
+Every test cell is a solid color block with short text — a glanceable grid where color signals
+health and the label gives the metric. Shared by both tables (and the run report's test chips).
 
-### 4.1 Colors → meaning (LOCKED)
+### 5.1 Colors → meaning (LOCKED)
 
-| Meaning | When | Tailwind classes | Contrast intent |
-| --- | --- | --- | --- |
-| **Healthy** | Every sub-check in the category passed (all `ok`). | `bg-green-800 text-white` | Dark green + white text → WCAG AA on the darkest healthy state. |
-| **Critical / very bad** | One or more sub-checks are `critical`. | `bg-red-800 text-white` | Dark red + white text → high-contrast alarm. |
-| **Some problems** | Warnings present, but nothing critical (worst is `warning`/`info`). | `bg-amber-500 text-black` | Medium-dark amber; black text keeps AA contrast on amber. |
-| **Never run** | No data for that cell/day (category never ran that day). | `bg-gray-100 text-gray-500` | Very light gray, muted text → clearly "no data," recedes visually. |
+| Meaning | When | Tailwind classes |
+| --- | --- | --- |
+| **Healthy** | Every sub-test in the test passed (all `ok`). | `bg-green-800 text-white` |
+| **Critical / very bad** | One or more sub-tests are `critical`. | `bg-red-800 text-white` |
+| **Some problems** | Warnings present, nothing critical (worst is `warning`/`info`). | `bg-amber-500 text-black` |
+| **Never run** | No data for that cell (test never ran). | `bg-gray-100 text-gray-500` |
 
-The `CellColor` maps 1:1: `green → healthy`, `red → critical`, `amber → some problems`,
-`gray → never run`. Color is derived from the **worst finding severity** among that category's
-sub-checks for the day (`critical → red`, `warning`/`info → amber`, all `ok → green`, no data →
-`gray`).
+Color is derived from the **worst finding severity** among that test's sub-tests
+(`critical → red`, `warning`/`info → amber`, all `ok → green`, no data → `gray`). All four meet
+WCAG AA.
 
-```tsx
-// pages/dashboard/StatusCell.tsx
-import type { CellStatus } from "./columns";
+### 5.2 Metric text format rules
 
-const CELL_CLASSES: Record<CellStatus["color"], string> = {
-  green: "bg-green-800 text-white",
-  red: "bg-red-800 text-white",
-  amber: "bg-amber-500 text-black",
-  gray: "bg-gray-100 text-gray-500",
-};
+Cell text is **metric-based and short (≤10 chars ideal)**:
 
-export function StatusCell({ status }: { status: CellStatus }) {
-  return (
-    <span
-      className={`inline-flex w-full items-center justify-center rounded px-2 py-1 text-sm font-medium ${CELL_CLASSES[status.color]}`}
-      title={status.label}
-    >
-      {status.label}
-    </span>
-  );
-}
-```
+* **Healthy (green):** the literal `Healthy`.
+* **Never run (gray):** `Never run` (or `—` in the ultra-compact empty state, §7).
+* **K of M sub-tests fail:** `K of M fail` (e.g. `2 of 7 fail`).
+* **Naturally a percentage:** show the percent (e.g. `92%`).
+* **Just a count of problems:** `N problems` / `1 problem`.
 
-### 4.2 Metric text format rules
-
-Cell text is **metric-based and short (≤10 chars ideal)**. General rules:
-
-* **Healthy (green):** always the literal `Healthy`.
-* **Never run (gray):** `Never run` (or `—` in the ultra-compact empty state, see §6).
-* **N of M sub-checks fail:** `K of M fail` (e.g. `2 of 7 fail`), where `M` is the number of
-  sub-checks in that category and `K` is how many are failing (`critical` + `warning`).
-* **Naturally a percentage:** show the percent (e.g. `92%`) — used where a category is inherently a
-  rate rather than a pass/fail count.
-* **Just a count of problems:** `N problems` (e.g. `3 problems`), or `1 problem` (singular) when
-  `N === 1`.
-
-Per-category choice of metric string (color still comes from worst severity):
-
-| Category | Metric string it shows |
-| --- | --- |
-| **SPF** | Small fixed sub-check set → `Healthy`, else `K of M fail` (e.g. `1 of 4 fail`). |
-| **DKIM** | Per-selector checks → `Healthy`, else `K of M fail` across selectors (e.g. `2 of 7 fail`). |
-| **DMARC** | Small fixed set → `Healthy`, else `K of M fail`; a `p=none` warning counts as a fail. |
-| **Blacklists** | Count-oriented → `Healthy` when listed on none, else `N problems` (= number of DNSBL listings, e.g. `3 problems`). |
-| **DNS & Infrastructure** | `Healthy`, else `K of M fail` (MX + PTR/FCrDNS + related, e.g. `1 of 5 fail`). |
-| **Spam & Content** | Naturally a percentage → show inbox-placement `NN%` (e.g. `92%`); green when at/above threshold, amber below, red on a critical content failure. |
-
-Any category with no run that day shows the gray **never-run** state regardless of the rules above.
+Per-test choice: **SPF / DKIM / DMARC / DNS & Infrastructure** → `K of M fail`; **Blacklists** →
+`N problems` (number of DNSBL listings); **Spam & Content** → inbox-placement `NN%`.
 
 ---
 
-## 5. Top-right controls
+## 6. Row click → the run report (and the one exception)
+
+**Clicking anywhere in a row navigates to a run report** — the
+[view one health check run](./use_cases/view_health_check_run.mdx) page showing every test, every
+sub-test, its severity, and its remediation.
+
+* **Table 1 (Domain health):** row click opens the domain's **newest** run report (`/domains/$id`).
+* **Table 2 (Runs):** row click opens **that specific run's** report
+  (`/domains/$domainId/runs/$runId`).
+* The whole row is the hit target (`cursor-pointer`, hover highlight), routed via TanStack Router.
+
+**The one exception — going inside a test.** Tests that have a full page
+([checks/*.mdx §6.1](./checks/overview.mdx)) show a small chevron next to their status cell; pressing
+that button goes **inside that test** (e.g. `/domains/$id/spf`) instead of opening the whole run
+report. Row controls (§4.3/§4.4) likewise capture their own clicks. Everything else in the row —
+including the other cells — falls through to the whole-row navigation.
+
+---
+
+## 7. Top-right controls
 
 Two controls, stacked top-right: the **Run checks** button on top, the **scheduled-checks toggle**
 directly below it.
 
-### 5.1 Run checks button (top)
+### 7.1 Run checks button (top)
 
-Kicks off a **manual health-check run** — a new audit run across all monitored domains (or the
-selected domain).
+Kicks off a manual run for **every** monitored domain — one **run per domain**, fanned out in
+parallel through the scan runner ([Progress UI §4](./progress_ui.mdx)).
 
-* **API:** `POST /api/scheduler/run` (all monitored domains) — the same manual "run now" path in
-  [Engineering §8](./engineering.mdx). For a single selected domain it is
-  `POST /api/domains/:id/audit`.
-* **States:**
-  * **Idle** — label `Run checks` with a play/`RefreshCw` lucide icon; enabled.
-  * **Running** — label `Running…`, a spinner (`Loader2` spinning), button disabled to prevent
-    double-submit.
-  * **Done** — reverts to idle; the query invalidates and the table refetches. If the run produced a
-    new day's run (or updated today's), a **new/updated row appears at the top**. A brief success
-    toast confirms completion.
-* Implemented as a TanStack Query mutation; on success it calls `queryClient.invalidateQueries` for
-  the dashboard rows so the table refreshes without a full reload.
+* **API:** `POST /api/audit/run` (all domains); a single domain is `POST /api/audit/run/:domainId`.
+* **States:** idle (`Run checks`, `RefreshCw` icon) → running (`Running…`, spinner, disabled) →
+  done (queries invalidate; Table 1 refreshes, new rows appear at the **top of the Runs table**).
 
-### 5.2 Scheduled-checks toggle + chevron (below)
+### 7.2 Scheduled-checks toggle + chevron (below)
 
-An **on/off switch** for recurring (scheduled) checks, with a **chevron on its right**.
+An on/off switch for recurring checks, with a **chevron on its right**:
 
-* **Toggle (shadcn `Switch`):** reflects and sets whether recurring checks are enabled. Reads current
-  state from `GET /api/scheduler`; flipping it enables/disables the scheduler
-  (`PATCH /api/scheduler`, per [Engineering §8](./engineering.mdx) / [Scheduled checks](./scheduled_checks.mdx)).
-  On means periodic re-audits run on the configured cadence; off pauses them.
-* **Chevron (lucide `ChevronRight`), on the toggle's right:** clicking it **navigates to the
-  scheduled-checks configuration page** ([Scheduled checks](./scheduled_checks.mdx)) via TanStack
-  Router — where cadence, scope, and notification settings live. The chevron is navigation only; it
-  does not change the toggle state.
-
-```tsx
-// pages/dashboard/TopRightControls.tsx
-import { Loader2, RefreshCw, ChevronRight } from "lucide-react";
-
-export function TopRightControls(/* props: mutation + scheduler state + nav */) {
-  return (
-    <div className="flex flex-col items-end gap-2">
-      <button
-        className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-primary-foreground disabled:opacity-60"
-        onClick={onRunChecks}
-        disabled={isRunning}
-      >
-        {isRunning ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
-        {isRunning ? "Running…" : "Run checks"}
-      </button>
-
-      <div className="inline-flex items-center gap-2 rounded-md border px-3 py-2">
-        <span className="text-sm">Scheduled</span>
-        <Switch checked={scheduledOn} onCheckedChange={onToggleScheduled} />
-        <button aria-label="Configure scheduled checks" onClick={goToScheduledChecks}>
-          <ChevronRight size={16} />
-        </button>
-      </div>
-    </div>
-  );
-}
-```
+* **Toggle** reflects/sets whether recurring checks are enabled ([Scheduled checks](./scheduled_checks.mdx)).
+* **Chevron** (`ChevronRight`) navigates to the scheduled-checks configuration page
+  (`/settings/scheduling`). Navigation only; it never flips the toggle.
 
 ---
 
-## 6. Row click → view a run
+## 8. Empty & loading states
 
-Clicking anywhere on a **row** navigates to the **[view one health check run](./use_cases/view_health_check_run.mdx)**
-page for that day, showing the full findings behind the six category cells (every sub-check, its
-severity, and its remediation).
-
-* The whole row is the hit target (`cursor-pointer`, hover highlight); it routes via TanStack Router
-  using the row's `runId` (e.g. `/runs/$runId`).
-* The category cells are read-only summaries on the Dashboard; the drill-down page is where the
-  detail lives. This keeps the grid glanceable and pushes depth one click away.
+* **No domains:** Table 1 is replaced by a dashed card — "No domains yet. Add your first domain →"
+  (links to `/domains`). The Runs table is hidden.
+* **Never run:** domains exist but no run yet — Table 1 shows all-gray never-run cells and a helper
+  line inviting **Run checks**; the Runs table shows "No runs yet."
+* **Loading:** skeleton rows sized to each table's columns, so there is no layout shift.
+* **Refetch after a run:** existing rows stay visible until new data replaces them.
 
 ---
 
-## 7. Empty & loading states
+## 9. Acceptance criteria
 
-* **Never run (no data at all):** before any audit has run, the table shows the most recent day(s)
-  with every category cell in the gray **never-run** state — `bg-gray-100 text-gray-500` with `—` (or
-  `Never run`). A short helper line invites the user to press **Run checks** to create the first row.
-* **A single never-run cell:** when a category simply didn't run on a given day (but others did),
-  only that cell is gray never-run; the rest of the row renders normally.
-* **Loading:** while the dashboard query is in flight, render **skeleton rows** — shadcn `Skeleton`
-  blocks sized to the Date + six cells — so the grid shape is stable and there is no layout shift when
-  data lands.
-* **Refetch after Run checks:** the table shows a subtle top progress/refetch indicator while
-  invalidated queries refetch; existing rows stay visible until the new data replaces them.
-
----
-
-## 8. Acceptance criteria
-
-1. The Dashboard renders the **left bar** (per Overview) and a **big brand header** showing
-   "Email Delivery Hero" large, extra-bold, with visible tracking and word spacing between the three
-   words.
-2. The core is a **TanStack Table** with **one row per day** (a daily health-check run), **newest day
-   at the top**, and the **first column is Date** (`YYYY-MM-DD`).
-3. There are exactly **six category columns** in the locked order: **SPF, DKIM, DMARC, Blacklists,
-   DNS & Infrastructure, Spam & Content**, each rendering a color-coded status cell.
-4. Cell colors follow the locked mapping: dark green (`bg-green-800 text-white`) healthy, dark red
-   (`bg-red-800 text-white`) critical, amber (`bg-amber-500`) some problems, very light gray
-   (`bg-gray-100 text-gray-500`) never run — all meeting WCAG AA contrast.
-5. Cell text is short and metric-based (`Healthy`, `K of M fail`, `N problems`, `NN%`) following the
-   per-category rules in §4.2.
-6. A **Run checks** button, top-right, POSTs a manual run to the audit/scheduler endpoint and moves
-   idle → running (spinner, disabled) → done, after which the table refreshes and a new/updated top
-   row appears.
-7. A **scheduled-checks toggle** sits directly below the Run checks button, reflects/sets whether
-   recurring checks are enabled, and has a **chevron on its right** that navigates to the
-   [Scheduled checks](./scheduled_checks.mdx) page.
-8. **Clicking a row** navigates to the [view one health check run](./use_cases/view_health_check_run.mdx)
-   page for that day.
-9. **Empty** (never-run) shows all-gray cells with `—`/`Never run` and a prompt to run checks;
-   **loading** shows skeleton rows with no layout shift.
+1. The brand header shows **"Email Delivery Hero"** as **normal text** — large and extra-bold, but
+   `tracking-normal` with regular single spaces between the words (no letter tracking, no extra
+   word gaps).
+2. The vocabulary is **Run → Test → Sub-test**: a run is per-domain with `startedAt` and
+   `finishedAt` date-times; the six locked tests are SPF, DKIM, DMARC, Blacklists,
+   DNS & Infrastructure, Spam & Content; sub-tests are the individual checks inside a test.
+3. **Table 1 (Domain health):** one row per monitored domain — Domain column, six test columns
+   (newest run's roll-ups), and trailing row controls: a **▶ play button** that runs checks for
+   **just that domain** (spinner while running, no navigation) and a **⋮ triple-dot menu** (Run
+   checks now / Open newest report / Edit domain / Scheduled on-off / Delete domain).
+4. **Table 2 (Runs):** one row per run, newest `startedAt` first — **Date** column
+   (`YYYY-MM-DD HH:mm`), **Domain** column, the six test columns for that run, and trailing row
+   controls: a **› right chevron** that opens the run and a **⋮ triple-dot menu** (Open report /
+   Run checks again / Delete run).
+5. **Every row in both tables is clickable**: Table 1 rows open the domain's **newest** run report;
+   Runs rows open **that run's** report. Row controls and per-test chevrons capture their own
+   clicks and never trigger row navigation.
+6. Pressing a test cell's chevron goes **inside that test** (its full page) — the one exception to
+   whole-row navigation.
+7. The backend keeps a **run history** (`runId`, `startedAt`, `finishedAt`, findings; 50 newest per
+   domain) and serves `GET /api/audit/runs` (+ `/:runId`); the Runs table renders from it.
+8. Status cells follow the locked four-color mapping and short metric text rules (§5).
+9. The **Run checks** button and **scheduled toggle + chevron** behave per §7.
+10. Empty/never-run/loading states render per §8 with no layout shift.
 
 <!--
-  Keep this dashboard aligned with the audit engine in ./engineering.mdx (findings severity
-  ok/info/warning/critical, one audit run producing findings, scheduler run/toggle endpoints) and the
-  sub-check catalog in ./spam_checks.mdx. The SIX category columns (SPF, DKIM, DMARC, Blacklists,
-  DNS & Infrastructure, Spam & Content) and the FOUR status colors (dark green / dark red / amber /
-  light gray) are LOCKED across all specs — do not add, rename, or recolor them. Row = one run per
-  day, newest first, Date is the first column. When a category's metric string rule changes, update
-  §4.2. When a new sibling page is added, add a cross-link in the intro and to overview.mdx's TOC.
+  Keep this dashboard aligned with the audit engine in ./engineering.mdx and the sub-test catalog in
+  ./spam_checks.mdx. LOCKED across all specs: the SIX tests (SPF, DKIM, DMARC, Blacklists,
+  DNS & Infrastructure, Spam & Content), the FOUR status colors (dark green / dark red / amber /
+  light gray), and the Run → Test → Sub-test vocabulary (run = per-domain with startedAt/finishedAt).
+  Table 1 = one row per domain (play + kebab), Table 2 = one row per run (chevron + kebab), whole-row
+  click opens a run report, test-cell chevrons open the test's page. The brand header is NORMAL text
+  (tracking-normal, plain spaces). When a metric string rule changes, update §5.2. Left bar lives in
+  ./leftbar.mdx + pm/left_bar.yaml — never redefine it here.
 -->

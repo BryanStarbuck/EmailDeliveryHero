@@ -73,12 +73,15 @@ function DebugDrawer({ run, row }: { run: BlacklistRunResults; row: BlacklistZon
           .map(([k, v]) => (
             <div key={k} className="contents">
               <dt className="text-slate-500">{k}</dt>
-              <dd
-                className="break-all font-mono text-slate-800"
-                onClick={() => navigator.clipboard?.writeText(String(v))}
-                title="Click to copy"
-              >
-                {v}
+              <dd className="break-all font-mono text-slate-800">
+                <button
+                  type="button"
+                  className="text-left"
+                  onClick={() => navigator.clipboard?.writeText(String(v))}
+                  title="Click to copy"
+                >
+                  {v}
+                </button>
               </dd>
             </div>
           ))}

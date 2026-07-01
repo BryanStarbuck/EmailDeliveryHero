@@ -3,7 +3,9 @@
 # ============================================================================
 # Single source of truth for every left-side navigation bar in the app.
 # The frontend imports THIS file directly (code/packages/frontend/src/config/left_bar.ts,
-# via Vite `?raw`) — there is no separate code copy. Human companion spec: pm/overview.mdx.
+# via Vite `?raw`) — there is no separate code copy. Human companion spec: pm/leftbar.mdx
+# (styling + behavior: the spaced wordmark, and the LOCKED color rule "all text black;
+# green stays green; medium grey becomes black").
 #
 # There are two left bars:
 #   1. app       — the main app: a flat list of the primary sections.
@@ -32,9 +34,19 @@ Left_Nav:
 
       header:
         kind: logo
-        label: "EmailDeliveryHero"
-        alt_text: "EmailDeliveryHero — email deliverability auditing"
+        # Spaces between the three words are REQUIRED (pm/leftbar.mdx §1) —
+        # never "EmailDeliveryHero" run together. Rendered verbatim, normal tracking.
+        label: "Email Delivery Hero"
+        alt_text: "Email Delivery Hero — email deliverability auditing"
         click_route: "/"
+
+      # Color rules (pm/leftbar.mdx §2, LOCKED): all left-bar text is black;
+      # anything green stays green (wordmark, active item, sign-in accent);
+      # anything that was medium grey becomes black.
+      styling:
+        text_color: "black"
+        keep_green: ["wordmark", "active_item", "sign_in_accent"]
+        replace_medium_grey_with: "black"
 
       nav_items:
         - id: dashboard

@@ -82,8 +82,15 @@ describe("buildQueryName", () => {
   })
 })
 
+/** Look up a default-catalog zone; throws in-test when the catalog loses it. */
+function catalogZone(host: string): BlocklistZone {
+  const found = DEFAULT_ZONES.find((z) => z.zone === host)
+  if (!found) throw new Error(`zone ${host} missing from DEFAULT_ZONES`)
+  return found
+}
+
 describe("classifyAnswer", () => {
-  const zen = DEFAULT_ZONES.find((z) => z.zone === "zen.spamhaus.org")!
+  const zen = catalogZone("zen.spamhaus.org")
 
   it("decodes a ZEN XBL listing to its sub-list and severity", () => {
     const c = classifyAnswer(zen, ["127.0.0.4"])
@@ -106,14 +113,14 @@ describe("classifyAnswer", () => {
   })
 
   it("treats URIBL 127.0.0.1 (URIBL_BLOCKED) as a refusal", () => {
-    const uribl = DEFAULT_ZONES.find((z) => z.zone === "multi.uribl.com")!
+    const uribl = catalogZone("multi.uribl.com")
     const c = classifyAnswer(uribl, ["127.0.0.1"])
     expect(c.listed).toBe(false)
     expect(c.refusal_code).toBe("127.0.0.1")
   })
 
   it("decodes SURBL bitmask answers, combining bits", () => {
-    const surbl = DEFAULT_ZONES.find((z) => z.zone === "multi.surbl.org")!
+    const surbl = catalogZone("multi.surbl.org")
     const c = classifyAnswer(surbl, ["127.0.0.24"]) // 8 (PH) + 16 (MW)
     expect(c.listed).toBe(true)
     expect(c.sub_list).toContain("PH")

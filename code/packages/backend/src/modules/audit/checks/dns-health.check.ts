@@ -7,7 +7,7 @@ import {
   resolveSoa,
   resolveTxt,
 } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import type { Checker, CheckOutcome, Finding } from "./types"
 
 /**
  * DNS Zone & Nameserver Health (infra.dns_health). Audits the delegation plumbing every other
@@ -21,6 +21,43 @@ import type { Checker, Finding } from "./types"
  */
 
 const CHECK_ID = "infra.dns_health"
+
+/**
+ * The structured zone snapshot persisted at results["infra.dns_health"] (pm/checks/dns.mdx §5) —
+ * what the DNS page's Zone panel renders. `parent_child_match` and `ttls` stay null until their
+ * probes (authoritative parent query / dig TTL parsing) land; snake_case mirrors the spec YAML.
+ */
+export interface DnsHealthResults {
+  ns: { host: string; ips: string[] }[]
+  ns_count: number
+  network_count: number
+  parent_child_match: boolean | null
+  soa: {
+    mname: string
+    rname: string
+    serial: number
+    refresh: number
+    retry: number
+    expire: number
+    min_ttl: number
+  } | null
+  ttls: Record<string, number> | null
+  wildcard: { detected: boolean; probe: string; types: string[] }
+  cname_at_apex: boolean
+}
+
+function emptySnapshot(): DnsHealthResults {
+  return {
+    ns: [],
+    ns_count: 0,
+    network_count: 0,
+    parent_child_match: null,
+    soa: null,
+    ttls: null,
+    wildcard: { detected: false, probe: "", types: [] },
+    cname_at_apex: false,
+  }
+}
 
 interface Fingerprint {
   provider: string
@@ -150,7 +187,7 @@ async function classifyTarget(name: string): Promise<"live" | "dead" | "transien
 }
 
 /** infra.ns_sanity (+ infra.ns_no_cname). Count, resolve, network-diversity, NS-as-CNAME. */
-async function checkNs(domain: string, findings: Finding[]): Promise<void> {
+async function checkNs(domain: string, findings: Finding[], snap: DnsHealthResults): Promise<void> {
   const ns = await resolveNs(domain)
   if (ns.error) {
     findings.push(
@@ -193,6 +230,10 @@ async function checkNs(domain: string, findings: Finding[]): Promise<void> {
     const ips = [...a.records, ...aaaa.records]
     nsInfos.push({ host, ips, groups: unique(ips.map(netGroup)) })
   }
+
+  snap.ns = nsInfos.map((n) => ({ host: n.host, ips: n.ips }))
+  snap.ns_count = hosts.length
+  snap.network_count = new Set(nsInfos.flatMap((n) => n.groups)).size
 
   const resolvedCount = nsInfos.filter((n) => n.ips.length > 0).length
   const evidence = nsInfos.map((n) => `${n.host}=${n.ips.join("/") || "?"}`).join(", ")
@@ -237,7 +278,11 @@ async function checkNs(domain: string, findings: Finding[]): Promise<void> {
 }
 
 /** infra.soa_sanity / soa_serial / soa_mname_ns / soa_rname. */
-async function checkSoa(domain: string, findings: Finding[]): Promise<void> {
+async function checkSoa(
+  domain: string,
+  findings: Finding[],
+  snap: DnsHealthResults,
+): Promise<void> {
   const soa = await resolveSoa(domain)
   if (soa.error) {
     findings.push(
@@ -251,6 +296,16 @@ async function checkSoa(domain: string, findings: Finding[]): Promise<void> {
   }
   const r = soa.record
   if (!r) return // no SOA (bare subdomain) — already surfaced by the NS no-delegation info.
+
+  snap.soa = {
+    mname: r.nsname,
+    rname: r.hostmaster,
+    serial: r.serial,
+    refresh: r.refresh,
+    retry: r.retry,
+    expire: r.expire,
+    min_ttl: r.minttl,
+  }
 
   const soaEvidence = `mname=${r.nsname} rname=${r.hostmaster} serial=${r.serial} refresh=${r.refresh} retry=${r.retry} expire=${r.expire} minimum=${r.minttl}`
 
@@ -375,7 +430,11 @@ async function checkSoa(domain: string, findings: Finding[]): Promise<void> {
 }
 
 /** infra.cname_at_apex. Any CNAME at the zone apex masks SOA/NS/MX/TXT. */
-async function checkApexCname(domain: string, findings: Finding[]): Promise<void> {
+async function checkApexCname(
+  domain: string,
+  findings: Finding[],
+  snap: DnsHealthResults,
+): Promise<void> {
   const c = await resolveCname(domain)
   if (c.error) {
     findings.push(
@@ -388,6 +447,7 @@ async function checkApexCname(domain: string, findings: Finding[]): Promise<void
     return
   }
   if (c.records.length > 0) {
+    snap.cname_at_apex = true
     findings.push({
       id: "infra.cname_at_apex",
       checkId: CHECK_ID,
@@ -611,7 +671,11 @@ async function checkTxt(domain: string, findings: Finding[]): Promise<void> {
 }
 
 /** infra.wildcard. A random nonce label that resolves implies a wildcard/catch-all. */
-async function checkWildcard(domain: string, findings: Finding[]): Promise<void> {
+async function checkWildcard(
+  domain: string,
+  findings: Finding[],
+  snap: DnsHealthResults,
+): Promise<void> {
   const nonce = `nonce-${Math.random().toString(36).slice(2, 12)}${Date.now().toString(36)}`
   const label = `${nonce}.${domain}`
   const [a, aaaa, mx, txt] = await Promise.all([
@@ -625,6 +689,7 @@ async function checkWildcard(domain: string, findings: Finding[]): Promise<void>
   if (aaaa.records.length > 0) types.push("AAAA")
   if (mx.records.length > 0) types.push("MX")
   if (txt.records.length > 0) types.push("TXT")
+  snap.wildcard = { detected: types.length > 0, probe: label, types }
   if (types.length > 0) {
     findings.push({
       id: "infra.wildcard",
@@ -662,23 +727,24 @@ function emitFutureInfos(findings: Finding[]): void {
 export const dnsHealthCheck: Checker = {
   id: "infra.dns_health",
   label: "DNS Zone & NS Health",
-  async run(ctx): Promise<Finding[]> {
+  async run(ctx): Promise<CheckOutcome> {
     const findings: Finding[] = []
+    const snap = emptySnapshot()
     const domain = fqdnLower(ctx.domain)
-    if (!domain) return findings
+    if (!domain) return { findings }
 
     const selectors = ctx.dkimSelectors ?? []
 
     // Ordered, but independent — run each sub-check with its own graceful degradation.
-    await checkNs(domain, findings)
-    await checkSoa(domain, findings)
-    await checkApexCname(domain, findings)
+    await checkNs(domain, findings, snap)
+    await checkSoa(domain, findings, snap)
+    await checkApexCname(domain, findings, snap)
     await checkDanglingCname(domain, selectors, findings)
     await checkDanglingInclude(domain, findings)
     await checkTxt(domain, findings)
-    await checkWildcard(domain, findings)
+    await checkWildcard(domain, findings, snap)
     emitFutureInfos(findings)
 
-    return findings
+    return { findings, results: snap }
   },
 }

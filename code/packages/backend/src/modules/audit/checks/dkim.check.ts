@@ -412,7 +412,12 @@ export function analyzeSelectorRecord(
       record,
     )
   } else {
-    push("testflag", "ok", `No test flag on selector "${selector}"`, "The record is not in t=y test mode.")
+    push(
+      "testflag",
+      "ok",
+      `No test flag on selector "${selector}"`,
+      "The record is not in t=y test mode.",
+    )
   }
   if (result.has_strict_flag) {
     push(
@@ -635,7 +640,8 @@ export const dkimCheck: Checker = {
           severity: "critical",
           detail:
             "Every probed selector is missing, revoked, unparseable, or too weak — mail from this domain cannot pass DKIM.",
-          remediation: "Fix the failing selector(s) above; at least one healthy ≥2048-bit key must be published.",
+          remediation:
+            "Fix the failing selector(s) above; at least one healthy ≥2048-bit key must be published.",
         })
       } else if (working.length === 1) {
         findings.push({
@@ -645,7 +651,8 @@ export const dkimCheck: Checker = {
           severity: "warning",
           detail:
             "With a single selector, the next key rotation is an outage instead of a cutover (compare Microsoft 365's selector1/selector2 pattern).",
-          remediation: "Publish a second selector now (even before activating it) so rotation is a switch, not a gap.",
+          remediation:
+            "Publish a second selector now (even before activating it) so rotation is a switch, not a gap.",
         })
       } else {
         findings.push({
@@ -699,7 +706,8 @@ export const dkimCheck: Checker = {
         title: "The same DKIM key is published in more than one place",
         severity: "warning",
         detail: `The identical public key appears at: ${sightings.join(", ")}. One private key signs them all — one compromise (or one bad neighbor) spoofs every one of them.`,
-        remediation: "Generate a unique key pair per domain (and per rotation generation); never copy a private key across brands or domains.",
+        remediation:
+          "Generate a unique key pair per domain (and per rotation generation); never copy a private key across brands or domains.",
         evidence: `sha256(p=) ${hash.slice(0, 16)}…`,
       })
     }
@@ -760,7 +768,8 @@ async function probeSelector(
           title: `Could not look up DKIM selector "${selector}"`,
           severity: "warning",
           detail: `DNS lookup for TXT ${name} failed (${lookup.error}) — could not determine whether the key is published.`,
-          remediation: "Retry the audit; if it persists, verify the domain's nameservers respond for _domainkey names.",
+          remediation:
+            "Retry the audit; if it persists, verify the domain's nameservers respond for _domainkey names.",
         },
       ],
       result: emptyResult("none", null),
@@ -768,11 +777,25 @@ async function probeSelector(
   }
 
   if (lookup.records.length > 0) {
-    return analyzeSelectorRecord(domain, selector, source, lookup.records, {
-      resolvedVia: "txt",
-      cnameTarget: null,
+    // node:dns follows CNAME chains transparently, so a healthy delegation still answers the TXT
+    // query — probe the CNAME separately so the delegation is recorded (and rotated-by-ESP noted).
+    const viaCname = await resolveCname(name)
+    const delegatedTo = viaCname.records[0] ?? null
+    const analysis = analyzeSelectorRecord(domain, selector, source, lookup.records, {
+      resolvedVia: delegatedTo ? "cname" : "txt",
+      cnameTarget: delegatedTo,
       chunkLengths: lookup.chunkLengths,
     })
+    if (delegatedTo) {
+      analysis.findings.push({
+        id: `dkim.cname_delegation.${selector}`,
+        checkId: "dkim",
+        title: `Selector "${selector}" is delegated via CNAME`,
+        severity: "ok",
+        detail: `${name} → ${delegatedTo}, which resolves to a key. The ESP rotates this key for you.`,
+      })
+    }
+    return analysis
   }
 
   // No TXT — check for a CNAME delegation (the SendGrid / M365 / Mailchimp / SES shape).

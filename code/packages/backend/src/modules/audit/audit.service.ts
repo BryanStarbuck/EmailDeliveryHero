@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import { join } from "node:path"
 import type { MonitoredDomain } from "@module/domains/domain.types"
 import { DomainsService } from "@module/domains/domains.service"
@@ -12,6 +13,9 @@ import { type AuditResult, type Finding, summarize } from "./checks/types"
 /** How many domains to audit concurrently (pm/progress_ui.mdx §4.2). I/O-bound, so this is plenty. */
 const AUDIT_CONCURRENCY = 4
 
+/** Run-history cap: the newest N runs kept per domain (pm/dashboard.mdx §1). */
+const RUNS_KEPT_PER_DOMAIN = 50
+
 /**
  * The audit engine. Runs every registered checker against a domain, rolls the findings into a
  * score/status, and persists the latest result per domain as JSON under the state dir. The runner
@@ -20,6 +24,7 @@ const AUDIT_CONCURRENCY = 4
 @Injectable()
 export class AuditService {
   private readonly file = join(resolveStateDir(), "audits.json")
+  private readonly runsFile = join(resolveStateDir(), "runs.json")
 
   /**
    * Serializes every persist so parallel per-domain scans (pm/progress_ui.mdx §4.2) can't clobber
@@ -40,12 +45,34 @@ export class AuditService {
     writeJson(this.file, map)
   }
 
-  /** Merge one result into the store under the write-lock (see writeChain). */
+  /** Run history, newest startedAt first, capped per domain (pm/dashboard.mdx §1). */
+  private loadRuns(): AuditResult[] {
+    return readJson<AuditResult[]>(this.runsFile, [])
+  }
+
+  private saveRuns(runs: AuditResult[]): void {
+    writeJson(this.runsFile, runs)
+  }
+
+  /**
+   * Merge one result into the latest-per-domain store AND prepend it to the run history, both
+   * under the write-lock (see writeChain).
+   */
   private persistResult(result: AuditResult): Promise<void> {
     const run = this.writeChain.then(() => {
       const map = this.loadAll()
       map[result.domainId] = result
       this.saveAll(map)
+
+      const runs = [result, ...this.loadRuns()]
+      // Cap the history at the newest RUNS_KEPT_PER_DOMAIN runs per domain.
+      const perDomain: Record<string, number> = {}
+      this.saveRuns(
+        runs.filter((r) => {
+          perDomain[r.domainId] = (perDomain[r.domainId] ?? 0) + 1
+          return perDomain[r.domainId] <= RUNS_KEPT_PER_DOMAIN
+        }),
+      )
     })
     // Keep the chain alive even if a write throws (it's logged + rethrown to the caller below).
     this.writeChain = run.catch(() => {})
@@ -59,6 +86,26 @@ export class AuditService {
   /** Latest results for every domain (used by the dashboard). */
   latestAll(): AuditResult[] {
     return Object.values(this.loadAll())
+  }
+
+  /** All kept runs, newest startedAt first (the dashboard's Runs table). */
+  listRuns(domainId?: string): AuditResult[] {
+    const runs = this.loadRuns()
+    const filtered = domainId ? runs.filter((r) => r.domainId === domainId) : runs
+    return filtered.sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""))
+  }
+
+  getRun(runId: string): AuditResult | null {
+    return this.loadRuns().find((r) => r.runId === runId) ?? null
+  }
+
+  /** Remove one run from the history (dashboard Runs-row ⋮ menu → Delete run). */
+  deleteRun(runId: string): Promise<void> {
+    const run = this.writeChain.then(() => {
+      this.saveRuns(this.loadRuns().filter((r) => r.runId !== runId))
+    })
+    this.writeChain = run.catch(() => {})
+    return run
   }
 
   /** Run all checkers for one domain, persist and return the result. */
@@ -89,6 +136,8 @@ export class AuditService {
   }
 
   private async auditDomain(domain: MonitoredDomain): Promise<AuditResult> {
+    // One RUN (pm/dashboard.mdx §1): per domain, stamped with when it started and stopped.
+    const startedAt = new Date().toISOString()
     // Cross-run context: the other domains' latest DKIM key hashes (dkim.duplicate_key) and this
     // domain's previous structured results (dkim.rotation first-seen carry-forward). Both are
     // best-effort reads of the same store the results land in.
@@ -138,10 +187,14 @@ export class AuditService {
       }
     }
     const { score, status, counts } = summarize(findings)
+    const finishedAt = new Date().toISOString()
     return {
+      runId: randomUUID(),
       domainId: domain.id,
       domain: domain.name,
-      ranAt: new Date().toISOString(),
+      startedAt,
+      finishedAt,
+      ranAt: finishedAt,
       score,
       status,
       findings,

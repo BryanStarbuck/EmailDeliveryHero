@@ -94,12 +94,8 @@ describe("analyzeSelectorRecord", () => {
   })
 
   it("warns on a 1024-bit key and rejects a sub-1024 key", () => {
-    expect(byId(analyze(`v=DKIM1; p=${rsaP(1024)}`), "dkim.keylength.s1")?.severity).toBe(
-      "warning",
-    )
-    expect(byId(analyze(`v=DKIM1; p=${rsaP(512)}`), "dkim.keylength.s1")?.severity).toBe(
-      "critical",
-    )
+    expect(byId(analyze(`v=DKIM1; p=${rsaP(1024)}`), "dkim.keylength.s1")?.severity).toBe("warning")
+    expect(byId(analyze(`v=DKIM1; p=${rsaP(512)}`), "dkim.keylength.s1")?.severity).toBe("critical")
   })
 
   it("warns on t=y and records the flag; t=s is info only", () => {

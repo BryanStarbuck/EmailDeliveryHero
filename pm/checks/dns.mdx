@@ -1,0 +1,958 @@
+---
+title: EmailDeliveryHero — DNS & Infrastructure Check
+description: Engineering spec for the DNS & Infrastructure category — the ten test families we run against a domain's DNS and mail infrastructure (MX routing, reverse DNS/FCrDNS, STARTTLS, MTA-STS, TLS-RPT, DANE, DNSSEC, zone & nameserver health, domain registration, SMTP hardening), the Brew testing toolbox, the test-results YAML, the dashboard summary surface and the full-page DNS view (UX layout), the fix recommendations and fix-order ladder, and the catalog of infrastructure problem states with a deep-dive (data fields, diagnosis, tools, drill-down UI) for each.
+---
+
+# EmailDeliveryHero — DNS & Infrastructure Check
+
+**DNS & Infrastructure** is the plumbing layer under every other deliverability check. Before a
+receiver ever evaluates SPF, DKIM, or DMARC, it resolves the sender's MX and A records, reverses
+the connecting IP, walks the nameserver delegation, and (increasingly) validates DNSSEC and
+transport security. A domain with perfect authentication records but a generic PTR, a lame
+nameserver, or an expired RRSIG still lands in spam — or is rejected outright: since the
+**2024 Gmail/Yahoo bulk-sender rules** (and Microsoft's May 2025 follow-on), **forward-confirmed
+reverse DNS (FCrDNS)** and **TLS in transit** are hard requirements, and Gmail's late-2025
+enforcement ramp turned FCrDNS failures into permanent `550-5.7.25` rejections.
+
+This check is the **DNS & Infrastructure** dashboard category; all sub-check ids use the
+**`infra.`** checkId prefix. It is the **category-level spec**: it defines the roll-up, the
+test-results document, the full-page DNS UI, and the problem-state catalog. The ten per-topic
+specs below own the per-sub-check detail; this file never contradicts them.
+
+**Read alongside**
+- [../overview.mdx](../overview.mdx) — product charter, personas, port list.
+- [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
+- [../spam_checks.mdx](../spam_checks.mdx) — master catalog; DNS & Infrastructure is category 5 of 6.
+- [../run_checks.mdx](../run_checks.mdx) — run pipeline, concurrency semaphores, external-tool runner.
+- [../dashboard.mdx](../dashboard.mdx) / [../ui.mdx](../ui.mdx) — the 6-column dashboard and cell roll-up.
+- [../scheduled_checks.mdx](../scheduled_checks.mdx) — recurring-check cadence and regression diffing.
+
+**The ten topic specs this category rolls up** (one `Checker` each, in run order):
+
+| # | Family | Spec | Checker id (`results` key) |
+| --- | --- | --- | --- |
+| 1 | MX records & mail routing | [./mx_routing.mdx](./mx_routing.mdx) | `infra.mx_routing` |
+| 2 | Reverse DNS / PTR / FCrDNS | [./reverse_dns.mdx](./reverse_dns.mdx) | `infra.reverse_dns` |
+| 3 | STARTTLS & MX certificate health | [./tls_transport.mdx](./tls_transport.mdx) | `infra.tls_transport` |
+| 4 | MTA-STS | [./mta_sts.mdx](./mta_sts.mdx) | `infra.mta_sts` |
+| 5 | TLS-RPT | [./tls_rpt.mdx](./tls_rpt.mdx) | `infra.tls_rpt` |
+| 6 | DANE / TLSA | [./dane_tlsa.mdx](./dane_tlsa.mdx) | `infra.dane_tlsa` |
+| 7 | DNSSEC | [./dnssec.mdx](./dnssec.mdx) | `infra.dnssec` |
+| 8 | DNS zone & nameserver health | [./dns_health.mdx](./dns_health.mdx) | `infra.dns_health` |
+| 9 | Domain registration reputation | [./domain_reputation.mdx](./domain_reputation.mdx) | `infra.domain_reputation` |
+| 10 | SMTP server security | [./smtp_security.mdx](./smtp_security.mdx) | `infra.smtp_security` |
+
+---
+
+## 1. What it checks
+
+**The standards.** MX semantics: RFC 5321 §5.1 (implicit-MX fallback, no address literals) and
+RFC 2181 §10.3 (an MX target must not be a CNAME); RFC 7505 (null MX). Reverse DNS: RFC 1912 §2.1
+(every internet host should have matching forward and reverse DNS) as operationalized by the
+receiver rules below. Delegation: RFC 1034 (≥2 NS) and RFC 2182/BCP 16 (topological diversity);
+RIPE-203 + RFC 1912 for SOA value ranges. DNSSEC: RFC 4033-4035, algorithm guidance RFC 8624 as
+updated by RFC 9904 (Nov 2025 — guidance now lives in the IANA registries; algorithm 13
+ECDSAP256SHA256 is the recommended default, SHA-1-based 5/7 are deprecated). Transport: RFC 8461
+(MTA-STS), RFC 8460 (TLS-RPT), RFC 6698 + 7672 (DANE for SMTP). Registration data: RDAP (WHOIS's
+successor — the ICANN gTLD WHOIS obligation ended January 2025).
+
+**Why receivers care.** Infrastructure signals are *pre-content* signals: they are evaluated on
+every connection before a single header is read, they are cheap to check, and they are hard for a
+spammer to fake at scale. Snowshoe and fast-flux operations betray themselves with generic PTRs,
+brand-new domains, rock-bottom TTLs, and churning A records — so every major filter scores
+exactly the things this category tests.
+
+**What the 2024-2026 receiver rules require (the enforcement floor):**
+- **Gmail** (all senders, enforced with permanent failures since the Nov 2025 ramp-up): the
+  sending IP **must** have a PTR and FCrDNS must close (the PTR hostname's A/AAAA equals the
+  sending IP) — failure is a `550-5.7.25` reject; TLS required in transit; the `From:` domain must
+  resolve (MX or A). IPv6 is stricter: a missing IPv6 PTR rejects mail even when IPv4 is perfect.
+- **Yahoo** (Feb 2024): valid, meaningful, **non-generic** rDNS reflecting the sending domain on
+  every sending IP.
+- **Microsoft / Outlook.com** (enforced from May 5, 2025 for 5,000+/day): valid PTR/FCrDNS for
+  self-hosted MTAs and dedicated IPs; non-compliant mail goes to Junk, then `550 5.7.15`.
+
+**Common real-world failure modes.** (1) FCrDNS broken or the PTR is the provider's generic
+`ec2-…compute.amazonaws.com` — hard rejects at Gmail, PBL-class treatment everywhere. (2) The MTA
+has an AAAA record but no IPv6 PTR — Gmail prefers the IPv6 path and rejects mail the IPv4 path
+would have delivered. (3) An MX target is a CNAME, resolves to RFC 1918 space, or no longer
+resolves at all — bounces and DMARC reports silently vanish. (4) A lame or single-homed
+nameserver makes SPF/DKIM lookups time out at some receivers — authentication intermittently
+returns `temperror` and mail spam-folders in a pattern that correlates with the receiver, not the
+content. (5) DNSSEC signed once, RRSIGs expired later — validating resolvers (Google, Cloudflare,
+Quad9) SERVFAIL the whole zone and mail fails outright. (6) A dangling CNAME or expired SPF
+`include:` domain gets re-registered by an attacker (the 2024 "SubdoMailing" campaign, ~8,800
+domains) and the whole org domain's reputation burns.
+
+**How failures degrade inbox placement.** Hard gates first (FCrDNS, resolvable From: domain, TLS)
+— fail those and mail is rejected, not just filtered. Above the gates, infrastructure feeds the
+reputation model: domain age under ~30 days, steady-state TTLs under ~300 s, generic PTRs, and
+missing DNSSEC/MTA-STS each nudge the spam probability up; several together mark the classic
+throwaway-spam-domain fingerprint even when the mail is legitimate.
+
+---
+
+## 2. Tests we perform (sub-checks)
+
+The category runs **ten test families** — one checker per family, every sub-check id prefixed
+`infra.`. Each family's full sub-check table (what it verifies, how measured, remediation per
+finding) lives in its own spec; this table is the category-level contract: the finding ids each
+family may emit, the ideal state, and the worst severity it can raise. Every test emits a finding
+— **pass (`ok`) findings included** — so the DNS page renders an explicit passed/failed row per
+test.
+
+| # | Family | Finding ids (`infra.` prefix elided) | Ideal state (the "totally registered correctly" bar) | Worst |
+| --- | --- | --- | --- | --- |
+| 1 | **MX routing** | `mx_present` (+`.lookup_failed`), `mx_matches_a`, `mx_null`, `mx_not_cname[.<host>]`, `mx_resolve[.<host>]`, `mx_public_ip[.<host>]`, `mx_localhost.<host>`, `mx_priority`, `mx_dup_targets`, `mx_target_count`, `mx_trailing_dot.<host>`, `mx_redundancy`, `mx_a_consistency.<host>`; future-probe infos: `mx_reachable`, `mx_banner`, `mx_greylash`, `backup_mx_hygiene`, `mx_ttl` | 1-3 MX records, distinct priorities (10/20/30), every target an FQDN (never a CNAME, never an IP literal) resolving to public A (+AAAA), ≥2 hosts on ≥2 networks; null MX (`0 .`) only alone and only on no-mail domains. | critical |
+| 2 | **Reverse DNS** | per-IP (suffix `.<ip>`): `ptr_present`, `ptr_ipv6`, `fcrdns`, `ptr_single`, `ptr_generic`, `ptr_no_ip_literal`, `ptr_tld_valid`, `ptr_matches_sender_domain`, `ptr_cname`, `ptr_ok`, `ptr_transient`, `fcrdns_transient`; plus `ptr_no_ips`, `helo_match.pending` | Every sending/MX IP (v4 **and** v6) has exactly one PTR; FCrDNS closes both ways; hostname is non-generic and contains the org domain; matches HELO. | critical |
+| 3 | **STARTTLS / MX certs** | `tls_transport`, `tls_transport.pending` | Every MX advertises STARTTLS, TLS ≥ 1.2, valid publicly-trusted cert whose SAN covers the MX hostname, ≥30 days from expiry. | critical |
+| 4 | **MTA-STS** | `mta_sts_txt`, `mta_sts_txt_single`, `mta_sts_version`, `mta_sts_id_format`, `mta_sts_policy`, `mta_sts_vs_tlsrpt` | One `_mta-sts` TXT (`v=STSv1; id=…`), policy served at `https://mta-sts.<domain>/.well-known/mta-sts.txt`, `mode: enforce`, `max_age ≥ 86400` (604800 typical), `mx:` patterns matching the real MX set, id rotated when the policy file changes. | warning |
+| 5 | **TLS-RPT** | `tls_rpt_present`, `tls_rpt_single`, `tls_rpt_syntax`, `tls_rpt_version`, `tls_rpt_rua`, `tls_rpt_rua_present`, `tls_rpt_ttl_sane`, `tls_rpt_unknown_tags`, `tls_rpt_no_extra_txt`, `tls_rpt_reports_ingested` | One `_smtp._tls` TXT `v=TLSRPTv1; rua=mailto:…` with a deliverable mailbox, present whenever MTA-STS or DANE is deployed. | warning |
+| 6 | **DANE / TLSA** | per-MX (suffix `.<mx-host>`): `dane_tlsa_present`, `dane_tlsa_params`, `dane_digest_length`, `dane_rollover`, `dane_name_alignment`, `dane_dnssec_prereq`, `dane_without_dnssec`; plus `dane_tlsa`, `dane_tlsa_cert_match`, `dane_all_mx`, `dane_mx_lookup`, `dane_no_mx`, `dane_ttl_sane` | TLSA at `_25._tcp.<mx-host>` for **every** MX, "3 1 1" profile (+ a second current-plus-next record during rollover), matching the live cert, DNSSEC-signed zone (hard prerequisite). | warning |
+| 7 | **DNSSEC** | `dnssec_signed.{ok,unsigned,unavailable}`, `dnssec_ds_present.{ok,missing,unavailable}`, `dnssec_ds_algo_match.{ok,mismatch}`, `dnssec_algorithm.{ok,deprecated}`, `dnssec_key_rollover.{ok,weak}`, `dnssec_dane_ready.{signed,unsigned}`, `dnssec_soa_signed.present`, `dnssec_chain_complete.pending`, `dnssec_rrsig_expiry.pending`, `dnssec_validates.pending` | Zone signed with algorithm 13 (or 15; RSA ≥2048 acceptable), DS at the parent with SHA-256 digest, DNSKEY↔DS match, RRSIGs current. Unsigned = advisory; **signed-but-broken = critical** (validating resolvers SERVFAIL everything). | critical |
+| 8 | **Zone & NS health** | `ns_sanity`, `ns_lame`, `ns_parent_child`, `ns_all_answer`, `ns_response_time`, `ns_no_cname.<ns>`, `glue_records`, `recursion_open`, `zone_transfer`, `soa_sanity`, `soa_serial`, `soa_mname_ns`, `soa_rname`, `ttl_sanity`, `wildcard`, `cname_at_apex`, `multi_txt_spf`, `txt_bloat`, `dangling_cname.<name>`, `dangling_include[.mx].<domain>` | 2-4 NS on ≥2 networks/ASNs, all authoritative, parent set == child set, correct glue, recursion & AXFR closed; SOA in RIPE-203/RFC 1912 ranges (refresh 3600-86400, retry < refresh, expire 604800-2419200, negative TTL 300-86400); mail-record TTLs 300-86400 steady-state; no wildcard interfering with mail lookups; no CNAME at apex. | warning |
+| 9 | **Registration** | `domain_age`, `domain_expiry`, `registrar_lock`, `update_lock`, `delete_lock`, `auto_renew`, `hold_status`, `pending_delete`, `recent_transfer`, `record_available`, `registrant_privacy`, `registrar_abuse_contact`, `registrar_reputation`, `parked`, `parking_nameservers`, `tld_risk`, `name_similarity`, `idn_homograph`, `dnssec_ds_at_registrar` | Domain > 90 days old before volume, > 90 days to expiry with auto-renew, `clientTransferProhibited` set, no hold/pendingDelete status, not parked, low-abuse TLD. | critical (hold/expiry) |
+| 10 | **SMTP hardening** | `smtp_security`, `smtp_security.pending` | No open relay, VRFY/EXPN disabled, AUTH only after TLS, submission on 587/465 (not 25), no backscatter. | critical |
+
+**Severity mapping (category-wide).** Rejection-now conditions → **critical**: FCrDNS
+missing/failed, MX absent/unresolvable/private-IP for a mail domain, signed-but-bogus DNSSEC,
+`clientHold`/expired registration, open relay, no STARTTLS on any MX. Reputation-eroding
+conditions → **warning**: generic PTR, MX→CNAME, single/lame NS, wildcard bleed, SOA/TTL out of
+range, NRD < 90 days, MTA-STS in `testing`, missing TLS-RPT where MTA-STS/DANE exist. Hardening
+and adoption gaps → **info**: unsigned DNSSEC, no DANE, no MTA-STS, WHOIS privacy, `.pending`
+(future-probe) findings. `info` alone never turns the category cell amber.
+
+---
+
+## 3. Testing toolbox — Brew / npm tools
+
+Verified against `formulae.brew.sh` 2026-07. First-round detection is pure `node:dns/promises`
+plus bounded sockets/HTTPS (per family spec); these tools are the **debug bench** we shell out to
+(via the [../run_checks.mdx](../run_checks.mdx) ToolRunner) for deeper diagnosis and for the
+copyable "diagnose it yourself" commands on the drill-down pages. Install the bench with:
+
+```bash
+brew install bind knot ldns doggo q dnsx dnstracer dnsviz whois rdap asn \
+             swaks testssl sslscan gnutls certigo nmap dnstwist checkdmarc
+npm install mailauth        # library + CLI, same TS/Node stack as the app
+```
+
+### DNS query & delegation
+
+| Tool | Install | What we use it for | Example |
+| --- | --- | --- | --- |
+| **dig / host / delv** (bind) | `brew install bind` | The baseline for every record type; `delv` adds validated (DNSSEC-aware) resolution; `dig -x` for PTR. | `dig MX example.com +short` · `dig -x 203.0.113.25 +short` |
+| **kdig / kzonecheck** (knot) | `brew install knot` | dig-compatible with native DoH/DoT and the cleanest `+dnssec` output; TLSA/DS queries; "does 8.8.8.8 see the same answer?" | `kdig @8.8.8.8 +dnssec MX example.com` |
+| **drill** (ldns) | `brew install ldns` | DNSSEC chain tracing from the root (`-TD`). | `drill -TD -S MX example.com` |
+| **doggo** | `brew install doggo` | Modern dig with native **JSON output** (successor to the removed `dog`). | `doggo MX example.com --json` |
+| **q** | `brew install q` | Tiny client, UDP/TCP/DoT/DoH/DoQ — resolver-consistency cross-checks. | `q example.com MX @https://dns.google/dns-query` |
+| **dnsx** | `brew install dnsx` | Bulk resolution across many domains/names — sweeps, wildcard probes. | `echo example.com \| dnsx -mx -a -cname -resp` |
+| **dnstracer** | `brew install dnstracer` | Traces the delegation chain to the authoritative servers — lame-delegation hunting. | `dnstracer -s . -o example.com` |
+
+### DNSSEC
+
+| Tool | Install | What we use it for | Example |
+| --- | --- | --- | --- |
+| **dnsviz** | `brew install dnsviz` | The chain-of-trust oracle: probes root→zone and grades every DS/DNSKEY/RRSIG. | `dnsviz probe example.com \| dnsviz grok` |
+| **delv** (bind) | `brew install bind` | Validated lookups with `; fully validated` / SERVFAIL diagnosis. | `delv +vtrace MX example.com` |
+| **drill -TD** (ldns) | `brew install ldns` | Second opinion on the trust chain. | `drill -TD -S DNSKEY example.com` |
+
+### Reverse DNS, WHOIS/RDAP, IP intelligence
+
+| Tool | Install | What we use it for | Example |
+| --- | --- | --- | --- |
+| **whois** | `brew install whois` | Registrar, expiry, EPP status codes, IP netblock ownership. | `whois example.com` |
+| **rdap** | `brew install rdap` | Structured JSON registration data (WHOIS's successor) — what the checker parses. | `rdap example.com` |
+| **asn** | `brew install asn` | ASN/prefix lookup for MX and sending IPs — network-diversity and neighborhood checks. | `asn 203.0.113.25` |
+| **dnstwist** | `brew install dnstwist` | Lookalike/typosquat generation + resolution — feeds `infra.name_similarity`. | `dnstwist --registered example.com` |
+
+### SMTP / TLS probing (MX infrastructure)
+
+| Tool | Install | What we use it for | Example |
+| --- | --- | --- | --- |
+| **swaks** | `brew install swaks` | Full SMTP transaction test: banner, STARTTLS, AUTH, live delivery probe. | `swaks --server mx.example.com --to test@example.com --tls --quit-after RCPT` |
+| **openssl s_client** | `brew install openssl@3` | MX cert chain, TLS version, SNI behavior on 25/465/587. | `openssl s_client -starttls smtp -connect mx.example.com:25 -servername mx.example.com` |
+| **testssl** | `brew install testssl` | Full cipher/protocol/vulnerability audit of an MX endpoint. | `testssl --starttls smtp mx.example.com:25` |
+| **sslscan** | `brew install sslscan` | Fast cipher enumeration when testssl is overkill. | `sslscan --starttls-smtp mx.example.com:25` |
+| **gnutls-cli** (gnutls) | `brew install gnutls` | **DANE-aware** TLS client — validates TLSA against the live cert. | `gnutls-cli --dane --starttls-proto=smtp mx.example.com -p 25` |
+| **certigo** | `brew install certigo` | Cert-chain parsing: expiry, SAN coverage of the MX name. | `certigo connect mx.example.com:25 --start-tls smtp` |
+| **nmap** | `brew install nmap` | NSE `smtp-commands`, `smtp-open-relay`, `ssl-enum-ciphers` for the SMTP-security family. | `nmap -p25 --script smtp-commands,smtp-open-relay mx.example.com` |
+
+### Multi-check auditors & our own stack
+
+| Tool | Install | What we use it for | Example |
+| --- | --- | --- | --- |
+| **checkdmarc** | `brew install checkdmarc` | Cross-validation oracle: SPF/DMARC/MTA-STS/TLS-RPT/BIMI plus MX and DNSSEC presence in one JSON pass. | `checkdmarc example.com -f json` |
+| **mailauth** (npm) | `npm i mailauth` | In-process (Node) SPF/DKIM/DMARC/ARC/MTA-STS verification — usable as a library in the backend. | `npx mailauth report message.eml` |
+
+**Not on Brew** (documented for completeness, not installed by default): `zonemaster-cli` (the
+gold-standard delegation auditor — Perl/Docker; we mirror its test ideas natively),
+`posttls-finger` (ships with Postfix; `gnutls-cli --dane` covers us), `sslyze` (pipx), `zdns` (go).
+**Gone from Homebrew:** `dog` (use doggo). **Deprecated upstream:** `fpdns` (installs but archived
+— do not depend on it).
+
+### Online / API checkers (reference only, linked from drill-downs)
+
+**Zonemaster** (zonemaster.net — delegation/consistency/DNSSEC, self-hostable), **DNSViz**
+(dnsviz.net — DNSSEC chain visualizer), **intoDNS** (parent/child NS, glue, SOA sanity),
+**Google Admin Toolbox CheckMX** (Google-flavored MX + cross-NS record consistency),
+**internet.nl** (standards scorecard: IPv6, DNSSEC, STARTTLS, DANE), **MXToolbox** (paid API:
+SMTP diagnostics + blacklists), **Hardenize/Red Sift** (continuous monitoring),
+**dane.sys4.de** (DANE validator + common-mistakes list).
+
+---
+
+## 4. How it is measured
+
+The ten checkers run inside the normal audit pipeline ([../run_checks.mdx](../run_checks.mdx))
+under the per-run semaphores (`dnsbl`/`smtp25`/`http`); each family spec owns its exact queries.
+Category-level rules that bind all ten:
+
+1. **Pure-DNS first round.** Families 1, 2, 7, 8, 9 measure with `node:dns/promises`
+   (`resolveMx/resolve4/resolve6/resolveCname/resolveNs/resolveSoa/resolveTxt/reverse`) plus the
+   `dig()` fallback in `dns-util.ts` for exotic types (DS, DNSKEY, TLSA). Families 4 and 5 add one
+   bounded HTTPS fetch (the MTA-STS policy file). Families 3, 6 (cert match), and 10 need sockets
+   to port 25 — they emit `.pending` info findings wherever the probe hasn't run (never a
+   fabricated warning).
+2. **Resolver discipline.** Lookups go through the system resolver; `SERVFAIL`/timeout is recorded
+   as `lookup_failed`/`unavailable` (**warning**, "re-run to confirm"), never conflated with
+   NXDOMAIN/NODATA ("record absent").
+3. **IP classification.** Every resolved MX/sending IP is classed (public / RFC 1918 / loopback /
+   link-local / CGNAT / ULA); non-public anywhere in the mail path is a critical.
+4. **Both address families.** Wherever an AAAA exists the same tests run on IPv6 — a v6 host
+   missing its PTR is a critical even when v4 is perfect (the Gmail dual-stack trap).
+5. **Structured payloads.** Four checkers persist machine-readable snapshots (§5) at
+   `results[<checker id>]`: MX topology (`infra.mx_routing`), PTR/FCrDNS map
+   (`infra.reverse_dns`), zone snapshot (`infra.dns_health`), DNSSEC state (`infra.dnssec`).
+   The other six are findings-only in the first round (payloads listed as future in §12).
+6. **Cost.** All first-round work is DNS + one HTTPS fetch + optional short SMTP probes; no paid
+   feeds. RDAP queries are rate-limited per registry — cache per domain per day.
+
+---
+
+## 5. Test results (YAML)
+
+The information we extract, one document per domain per run. Structured payloads are produced by
+the checkers as `results[<checker id>]`; per-test rows are the findings. Rendered as YAML —
+**`test_results.yaml`** — the canonical shape the DNS page and the regression differ consume:
+
+```yaml
+# test_results.yaml — DNS & Infrastructure category, one document per domain per audit run
+infra:
+  domain: example.com
+  checked_at: 2026-07-01T09:30:00Z
+  status: warning                     # worst severity across all ten families
+  families:                           # roll-up per family (drives the family status strip)
+    mx_routing:        { status: ok,       tests: 8 }
+    reverse_dns:       { status: critical, tests: 3 }
+    tls_transport:     { status: info,     tests: 1 }   # .pending — probe not yet run
+    mta_sts:           { status: warning,  tests: 6 }
+    tls_rpt:           { status: ok,       tests: 9 }
+    dane_tlsa:         { status: info,     tests: 4 }
+    dnssec:            { status: ok,       tests: 9 }
+    dns_health:        { status: warning,  tests: 15 }
+    domain_reputation: { status: ok,       tests: 17 }
+    smtp_security:     { status: info,     tests: 1 }
+  # ---- structured snapshots (results[<checker id>]) ----
+  mx_routing:                         # results["infra.mx_routing"]
+    mx_found: true
+    null_mx: false
+    implicit_a_fallback: false        # true when no MX and the apex A is the mail host
+    hosts:
+      - host: mx1.example.com
+        priority: 10
+        is_cname: false
+        ips: ["203.0.113.25", "2001:db8::25"]
+        non_public: []                # [{ip, cls}] — any entry here is a critical
+      - host: mx2.example.com
+        priority: 20
+        is_cname: false
+        ips: ["198.51.100.25"]
+        non_public: []
+    redundancy:
+      host_count: 2
+      network_count: 2                # distinct /24 (v4) + /48 (v6) prefixes
+  reverse_dns:                        # results["infra.reverse_dns"]
+    ips:
+      - ip: 203.0.113.25
+        source: mx                    # mx | sending_ip
+        ptr: mail.example.com
+        forward_confirmed: true       # PTR hostname's A/AAAA includes this IP
+        generic: false                # dyn/pool/dhcp/ec2-style pattern match
+      - ip: 2001:db8::25
+        source: mx
+        ptr: null                     # ← the Gmail dual-stack trap (critical)
+        forward_confirmed: false
+        generic: false
+  dns_health:                         # results["infra.dns_health"]
+    ns:
+      - { host: ns1.example.net, ips: ["192.0.2.53"] }
+      - { host: ns2.example.org, ips: ["198.51.100.53"] }
+    ns_count: 2
+    network_count: 2
+    parent_child_match: true
+    soa:
+      mname: ns1.example.net
+      rname: hostmaster.example.com
+      serial: 2026070101
+      refresh: 14400
+      retry: 3600
+      expire: 1209600
+      min_ttl: 3600
+    ttls: { mx: 3600, apex_txt: 3600 }
+    wildcard: { detected: false, probe: _edh-probe-x7f3q.example.com, types: [] }
+    cname_at_apex: false
+  dnssec:                             # results["infra.dnssec"]
+    signed: true
+    ds_present: true
+    ds_digest_types: [2]              # SHA-256; flag type 1 (SHA-1)
+    algorithms: [13]                  # RFC 8624/9904: 13/15 good, 8 ok (≥2048), 5/7 deprecated
+    ds_matches_dnskey: true
+    dane_ready: true                  # signed + DS — the DANE prerequisite
+  # ---- the per-test rows (the findings, pass and fail alike) ----
+  tests:
+    - id: infra.reverse_dns
+      family: reverse_dns
+      title: IPv6 MX 2001:db8::25 has no PTR record
+      result: fail                    # pass | fail | warn | info
+      detail: Gmail prefers the IPv6 path and rejects mail from IPv6 addresses without FCrDNS (550-5.7.25).
+      evidence: "dig -x 2001:db8::25 → NXDOMAIN"
+      fix: Ask the IP owner to delegate a PTR (2001:db8::25 → mail.example.com) and publish the matching AAAA, or disable outbound IPv6 on the MTA.
+    - id: infra.ns_parent_child
+      family: dns_health
+      title: Parent and child NS sets differ
+      result: warn
+      evidence: "parent: ns1.example.net, ns2.example.org · child: ns1.example.net"
+      fix: Update the registrar's NS list to exactly match the zone's NS RRset.
+    - id: infra.mx_present
+      family: mx_routing
+      title: MX records found (2)
+      result: pass
+      evidence: "10 mx1.example.com, 20 mx2.example.com"
+  # ---- matched problem states (see §9; derived, never stored) ----
+  problem_states: [PS-02, PS-03]
+```
+
+Field-name mapping: snapshot keys are 1:1 with the §10 tables (`infra_mx_hosts`,
+`infra_ptr_records`, `infra_zone_snapshot`, `infra_dnssec_state`); `tests[]` rows are the
+`findings` (`result: pass|fail|warn|info` ⇔ severity `ok|critical|warning|info`; `family` is
+derived from the finding id per the §2 table); `families` and `problem_states` are derived at
+render time — never stored separately.
+
+---
+
+## 6. User interface — the summary surface and the full DNS page
+
+Two surfaces, following the app-wide pattern in [../ui.mdx](../ui.mdx): a **summary cell** on the
+main view, and a **chevron** that opens a **full page dedicated to DNS & Infrastructure** for that
+domain.
+
+### 6.1 The summary surface (main view)
+
+DNS & Infrastructure is one of the six category columns on the Dashboard (key `dnsInfra`, prefix
+`infra`). The cell for a domain is the **worst severity** among all `infra.*` findings in the
+latest run and shows the single most decision-relevant fact:
+
+- **Color** — dark green (all families healthy), amber (worst = warning, e.g. parent/child NS
+  mismatch), dark red (any critical, e.g. FCrDNS failure), light gray (never run). `info`-only
+  findings (unsigned DNSSEC, no DANE, `.pending` probes) keep the cell green.
+- **Label** — `Healthy` or `K of M fail` (K = warning+critical findings, M = total tests run).
+- **Hover** — tooltip with the top open problem's title (worst severity first).
+- **Chevron (›)** — on the right edge of the cell (visible on hover) and on the domain run-detail
+  category chip. Clicking it navigates to the full DNS page: **`/domains/:id/dns`**. Clicking
+  anywhere else in the row still opens the domain run detail.
+
+### 6.2 The full DNS page (`/domains/:id/dns`)
+
+One page, purely about DNS & Infrastructure for one domain. Top to bottom it must answer: *Is my
+plumbing blocking delivery right now? What did we observe (the actual DNS values, IPs, hostnames)?
+Which of the ten families pass/fail, test by test? How do I fix each failure, in what order?*
+Every failed test shows the debugging values — the DNS name queried, the raw answer, the IP
+address, the expected value.
+
+Contents, in order (exact layout in §7):
+
+1. **Header** — domain name, "DNS & Infrastructure" title, the category StatusCell,
+   `ran <timestamp>`, a **Re-run** button, and a back link — identical chrome to the DMARC page.
+2. **Family status strip** — the hero: ten compact chips (MX · rDNS · TLS · MTA-STS · TLS-RPT ·
+   DANE · DNSSEC · Zone · Domain · SMTP), each colored by that family's worst severity with a
+   ✓/✗/⚠/ⓘ glyph. Clicking a chip scrolls to that family's section in the test table. Beneath the
+   strip: one plain-language verdict line and the **primary next step** from the §8 fix-order
+   ladder (one accent CTA maximum).
+3. **Mail path panel** (two-up left) — the observed MX topology from `results["infra.mx_routing"]`:
+   one row per MX host (priority, hostname, IPs) with inline badges — CNAME ✗, private-IP ✗, and
+   the PTR per IP from `results["infra.reverse_dns"]` (green when FCrDNS closes, red `no PTR` /
+   `generic` when not). This panel is where the Gmail dual-stack trap becomes visible at a glance.
+4. **Zone panel** (two-up right) — from `results["infra.dns_health"]` + `results["infra.dnssec"]`:
+   the NS list (count + network diversity), parent/child match ✓/✗, the SOA values with their sane
+   ranges grayed alongside, TTLs, wildcard probe result, and a one-line DNSSEC state
+   (`signed, algorithm 13, DS ✓` / `unsigned` / `BROKEN — resolvers SERVFAIL`).
+5. **Test results table** — one row per finding, **grouped by family** in the §2 order, fail-first
+   within each family group; each family group header repeats the family chip and its pass/fail
+   count. Rows expand (accordion) to full detail, evidence (exact DNS name + raw answer,
+   monospace), and the **Fix** block with a copy button carrying the exact record/step.
+6. **Problem states** — cards for each matched §9 problem state with a one-paragraph hook and a
+   **"Learn more ›"** chevron opening the drill-down page (`/domains/:id/dns/:problemId`).
+
+**Empty / never-run / loading states.** Never-run → gray header cell + "No audit yet — run one"
+CTA. Loading → skeleton rows. A domain with no MX is **not** empty — it renders the
+`infra.mx_present` critical (or the null-MX explanation for a declared no-mail domain).
+
+**Per-domain config inputs.** None required in the first round (sending IPs already come from
+domain settings and default to the MX IPs). Future: a "receives mail?" toggle that flips the
+null-MX expectation (see [./mx_routing.mdx](./mx_routing.mdx)).
+
+---
+
+## 7. UX design — what goes where
+
+Written as the UX designer would hand it to engineering. Desktop-first (localhost tool), 1200 px
+content max-width, the app-wide left nav (256 px) stays. Vertical order = triage order: verdict
+first, evidence second, work items third, education last. Same shadcn/ui + lucide vocabulary as
+the DMARC page — the two pages must feel like siblings.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Back to example.com     DNS & Infrastructure               [Re-run ⟳]     │  header row
+│ example.com  ·  [ red: 4 of 63 fail ]  ·  ran 2026-07-01 09:30              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  [✓ MX] [✗ rDNS] [ⓘ TLS] [⚠ MTA-STS] [✓ TLS-RPT] [ⓘ DANE] [✓ DNSSEC]        │  family strip
+│  [⚠ Zone] [✓ Domain] [ⓘ SMTP]                                               │  (hero band)
+│  "Mail is being REJECTED: an MX IP has no reverse DNS (Gmail 550-5.7.25)."  │
+│  Next step: get a PTR for 2001:db8::25, or disable IPv6 on the MTA  [→]     │
+├────────────────────────────────────┬────────────────────────────────────────┤
+│  MAIL PATH                         │  ZONE                                  │  two-up band
+│  10  mx1.example.com               │  NS  ns1.example.net · ns2.example.org │
+│      203.0.113.25 → mail.example…✓ │      2 servers · 2 networks  ✓         │
+│      2001:db8::25 → no PTR ✗       │  parent/child match ✗  [details]       │
+│  20  mx2.example.com               │  SOA refresh 14400 ✓ · expire 1209600 ✓│
+│      198.51.100.25 → mx2.example…✓ │  TTL  MX 3600 ✓ · wildcard none ✓      │
+│                                    │  DNSSEC signed · alg 13 · DS ✓         │
+├────────────────────────────────────┴────────────────────────────────────────┤
+│  TEST RESULTS                                   55 passed · 2 failed · 6 ⚠  │  main table,
+│  ── Reverse DNS ──────────────────────────────────────────── 1 of 3 fail ── │  grouped by
+│  ✗ infra.reverse_dns   IPv6 MX has no PTR record                    [v]     │  family
+│      observed: dig -x 2001:db8::25 → NXDOMAIN                               │
+│      expected: PTR → mail.example.com → AAAA → 2001:db8::25   [copy fix]    │
+│  ✓ infra.ptr_no_ips    every mail IP was PTR-checked                [v]     │
+│  ── Zone & NS health ─────────────────────────────────────── 2 of 15 warn ──│
+│  ⚠ infra.ns_parent_child  parent and child NS sets differ           [v]     │
+│  …                                                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  PROBLEM STATES                                                             │  cards
+│  [PS-02 Reverse-DNS failure ›]        [PS-03 Fragile delegation ›]          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Placement rules and rationale:
+
+- **Highest: the verdict.** The family strip is the one visual a non-expert needs — ten chips, ten
+  colors, instant "where does it hurt". The verdict line under it must distinguish the three tiers
+  in plain language: *rejected now* (critical in a gate family: rDNS, MX, TLS, registration hold),
+  *reputation eroding* (warnings), *hardening available* (info). One accent CTA maximum — the
+  §8 ladder's next step.
+- **Second band, two-up:** left = **Mail path** (the topology users actually debug: MX → IP → PTR
+  with per-hop ✓/✗ — the FCrDNS story told visually); right = **Zone** (NS/SOA/TTL/wildcard/DNSSEC
+  digest). On narrow widths the right panel stacks below the left.
+- **Main table grouped by family, not one flat list.** ~60+ findings would drown a flat table;
+  family groups with their own fail counts keep it scannable. Within a group: fail → warn → info →
+  pass (never alphabetical). Row anatomy identical to the DMARC page: status icon (✗ red / ⚠ amber
+  / ✓ green / ⓘ slate), finding id in small caps mono, plain-language title, chevron accordion;
+  expanded = *observed* (exact name + raw answer, monospace) / *expected* / *why it matters* (one
+  sentence) / **Fix** strip with `[copy fix]`. Copy buttons always copy the publishable value or
+  command, never prose. Family chips in the strip anchor-link to these group headers.
+- **Lowest: problem-state cards** — education and deep dives, two per row, title + one-line hook +
+  chevron to `/domains/:id/dns/:problemId`. They deliberately repeat what the table flagged: the
+  table is for operators, the cards for learners.
+- **Type & color:** severity colors identical to the Dashboard cells; monospace
+  (`font-mono text-xs`) for every DNS name, record value, and IP; lucide icons
+  (`ShieldCheck`/`ShieldAlert`/`Info`/`ChevronRight`/`Copy`/`Wrench`/`Network`).
+- **Drill-down pages** (`/domains/:id/dns/:problemId`) reuse the same header chrome, then:
+  **Concept** (2-3 paragraphs), **Your data** (the §9 data fields rendered live from the latest
+  run), **Diagnose it yourself** (copyable §3 terminal commands with the domain substituted in),
+  **Tools**, **More health metrics**, **Path forward** (numbered steps). Back chevron returns to
+  the DNS page.
+
+---
+
+## 8. Recommendations — how we tell the user to fix DNS & Infrastructure
+
+Every failing test carries its concrete one-line remediation (family specs own the exact text).
+Above the per-test fixes, the page computes one **primary recommendation** from the **fix-order
+ladder** — infrastructure fixes have a natural dependency order, and telling the user to do DANE
+before fixing their PTR is malpractice:
+
+| Rung | Condition (first match wins) | Primary recommendation |
+| --- | --- | --- |
+| 0 | Registration critical (`hold_status`, expired, `pending_delete`) | Fix the registration first — a domain on hold resolves for no one; nothing else matters until it's back. |
+| 1 | MX critical (`mx_present`, `mx_resolve`, `mx_public_ip`, misused `mx_null`) | Restore inbound routing: publish 2 MX FQDNs with public A/AAAA. Bounces, FBL mail, and DMARC reports all depend on it. |
+| 2 | Reverse-DNS critical (`reverse_dns`, missing/failed FCrDNS, v6 gap) | Close FCrDNS on every sending/MX IP — this is a hard Gmail/Microsoft gate, not a score. PTR is set by the **IP owner**, so open the hosting-provider ticket today; or disable outbound IPv6 until its PTR exists. |
+| 3 | STARTTLS critical (an MX without TLS, expired cert) | Get every MX offering STARTTLS with a valid cert matching the MX hostname — TLS in transit is required by all three major receivers. |
+| 4 | Zone warnings (`ns_*`, `glue_records`, `soa_*`, `ttl_sanity`, `wildcard`) | Stabilize the zone: second NS provider, sync parent↔child NS, close recursion/AXFR, bring SOA/TTLs into range. Flaky DNS = intermittent auth failures everywhere else. |
+| 5 | DNSSEC signed-but-broken | Fix or (temporarily) remove the DS — a bogus chain SERVFAILs your whole zone at Google/Cloudflare/Quad9 resolvers. Broken beats unsigned only in damage. |
+| 6 | MTA-STS absent or `mode: testing` matured | Publish MTA-STS (`testing` + TLS-RPT for 14-30 days, then `enforce`, `max_age 604800`). |
+| 7 | TLS-RPT absent while MTA-STS/DANE exist | Add `_smtp._tls` TXT `v=TLSRPTv1; rua=mailto:tls-reports@<domain>` — you can't run enforce-mode blind. |
+| 8 | DNSSEC unsigned (info) | Sign the zone (algorithm 13, automated re-signing, CDS/CDNSKEY for the DS) — the prerequisite for DANE. |
+| 9 | DANE absent, zone signed | Publish `3 1 1` TLSA for every MX, current+next during rollover; verify with `gnutls-cli --dane`. |
+| 10 | All healthy | Keep it: registrar auto-renew + transfer lock, RRSIG-expiry watch, re-run on schedule — regressions are the real enemy now. |
+
+Standing advisories surfaced as `info` when applicable: age new domains ≥90 days and warm volume
+gradually (there is no configuration fix for NRD reputation — only time); keep steady-state TTLs
+≥ 3600 s and lower them only around planned migrations; on parked/no-mail domains publish the
+full deny set (`MX 0 .`, `v=spf1 -all`, DMARC `p=reject`); prefer two DNS providers fed from one
+zone source (never independently edited copies).
+
+---
+
+## 9. Problem states
+
+The health situations a domain can be in for DNS & Infrastructure. Each maps from finding ids
+(detection is automatic — matched by **id prefix**, because many ids carry a `.<host>` / `.<ip>` /
+`.<mx-host>` suffix), each has a deep-dive below and a drill-down page (§7). PS-00 is the healthy
+goal state; PS-01…PS-11 are first-round detectable (PS-11 partially); PS-12 is future. A state
+matches when any of its listed prefixes matches a finding at warning/critical severity.
+
+| Id | Problem state | Detected by (`infra.` elided) | Severity |
+| --- | --- | --- | --- |
+| PS-00 | Plumbing healthy end to end | all families pass | ok |
+| PS-01 | Broken inbound mail routing | prefixes `mx_present`, `mx_resolve`, `mx_not_cname`, `mx_public_ip`, `mx_localhost`, `mx_null`, `mx_matches_a`, `mx_trailing_dot`, `mx_a_consistency`, `mx_priority`, `mx_redundancy`, `mx_dup_targets`, `mx_target_count` | critical |
+| PS-02 | Reverse-DNS failure (no/generic/unconfirmed PTR) | prefixes `ptr_present`, `ptr_ipv6`, `fcrdns`, `ptr_single`, `ptr_generic`, `ptr_no_ip_literal`, `ptr_tld_valid` | critical |
+| PS-03 | Fragile delegation (few/lame/mismatched NS) | `ns_sanity`, `ns_lame`, `ns_parent_child`, `ns_all_answer`, `ns_response_time`, `glue_records`, `recursion_open`, `zone_transfer` | warning |
+| PS-04 | SOA & TTL out of range | `soa_sanity`, `soa_serial`, `soa_mname_ns`, `soa_rname`, `ttl_sanity` | warning |
+| PS-05 | Wildcard & zone bleed | `wildcard`, `cname_at_apex`, `multi_txt_spf`, `txt_bloat` | warning |
+| PS-06 | DNSSEC broken — or missing where it should be | `dnssec_signed.unsigned`, `dnssec_ds_present.missing`, `dnssec_ds_algo_match.mismatch`, `dnssec_algorithm.deprecated`, `dnssec_key_rollover.weak` | critical (broken) / info (unsigned) |
+| PS-07 | DANE gap (no/partial/stale TLSA) | prefixes `dane_tlsa`, `dane_all_mx`, `dane_ttl_sane`, `dane_mx_lookup`, `dane_rollover`, `dane_digest_length`, `dane_name_alignment`, `dane_dnssec_prereq`, `dane_without_dnssec` | warning |
+| PS-08 | Encryption-in-transit gaps (STARTTLS/MTA-STS/TLS-RPT) | `tls_transport`, `mta_sts_txt`, `mta_sts_version`, `mta_sts_id_format`, `mta_sts_policy`, `mta_sts_txt_single`, `mta_sts_vs_tlsrpt`, `tls_rpt_present`, `tls_rpt_syntax`, `tls_rpt_rua`, `tls_rpt_single`, `tls_rpt_version` | warning |
+| PS-09 | Registration risk (new/expiring/unlocked/parked) | `domain_age`, `domain_expiry`, `registrar_lock`, `auto_renew`, `hold_status`, `pending_delete`, `recent_transfer`, `record_available`, `parked`, `parking_nameservers`, `tld_risk`, `name_similarity`, `idn_homograph` | critical (hold/expired) / warning |
+| PS-10 | SMTP exposure (open relay / weak hardening) | `smtp_security` | critical |
+| PS-11 | Dangling records / takeover exposure | prefixes `dangling_cname`, `dangling_include` (first round: apex CNAME + SPF-include liveness); full subdomain sweep is future | critical |
+| PS-12 | Split answers / resolver divergence *(future)* | cross-resolver + cross-NS comparison, serial drift | warning |
+
+### PS-00 — Plumbing healthy end to end
+
+The goal state: routable redundant MX, FCrDNS closed on every IP both address families, TLS on
+every MX, diverse honest nameservers, sane SOA/TTLs, signed zone, locked mature registration.
+- **Data fields:** `families.*.status = ok`, all four snapshots clean.
+- **Diagnose/debug:** nothing to fix — `checkdmarc <domain> -f json` and Zonemaster should agree.
+- **Tools:** `dig MX <domain> +short` for a sanity glance; internet.nl for the public scorecard.
+- **More health metrics:** the scheduled-run regression diff (a lost PTR, an expired cert, NS
+  drift, RRSIG expiry are all silent regressions); registrar expiry countdown.
+- **UI:** all-green strip; drill-down explains *keeping* it healthy — infra rots quietly
+  (certs expire, providers change PTRs, secondaries fall out of sync).
+
+### PS-01 — Broken inbound mail routing
+
+- **Concept:** the MX set is how the world reaches you — and how bounces, FBL complaints, and
+  DMARC reports reach you. An absent/dangling/CNAME'd/private-IP MX doesn't just break inbound:
+  receivers check that the `From:` domain has a valid MX or A (Gmail requirement), and a domain
+  that can't take bounces accumulates reputation damage invisibly. RFC 5321 §5.1, RFC 2181 §10.3,
+  RFC 7505.
+- **Data fields:** `mx_routing.mx_found`, `null_mx`, `hosts[]` (`host`, `priority`, `is_cname`,
+  `ips`, `non_public[]`), `redundancy.{host_count,network_count}`.
+- **Diagnose/debug:** `dig MX <domain> +short` → for each target `dig A <target> +short` and
+  `dig AAAA <target> +short` → `dig CNAME <target> +short` (must be empty) → eyeball for
+  10/172/192.168/127 addresses. Cross-check `kdig @8.8.8.8 MX <domain>`.
+- **Tools:** dig/kdig/doggo; `dnsx -mx -resp` for bulk; intoDNS for the classic report.
+- **More health metrics:** future probe adds port-25 reachability and banner per MX.
+- **UI:** the Mail path panel paints the broken hop red; fix = publish `10 mx1.<domain>` /
+  `20 mx2.<domain>` with public A records (copy button per record). For declared no-mail domains
+  the drill-down explains the null-MX + `v=spf1 -all` + `p=reject` deny set instead.
+
+### PS-02 — Reverse-DNS failure
+
+- **Concept:** FCrDNS is the oldest infrastructure trust test: the connecting IP must have a PTR,
+  and that PTR hostname must resolve back to the same IP. Gmail rejects failures outright
+  (`550-5.7.25`, permanent since the Nov 2025 ramp); Yahoo requires the hostname to be
+  *non-generic* and reflect your domain; Microsoft enforces it for dedicated IPs. The killer
+  variant: the MTA has an AAAA record, Gmail prefers IPv6, and only the IPv4 PTR exists.
+- **Data fields:** `reverse_dns.ips[]` — `ip`, `source` (mx | sending_ip), `ptr`,
+  `forward_confirmed`, `generic`.
+- **Diagnose/debug:** `dig -x <ip> +short` (expect exactly one hostname) → `dig A/AAAA <that
+  hostname> +short` (must include the IP) → does the hostname contain your domain, or is it
+  `pool-`/`dyn`/`ec2-` pattern? Repeat for **every** IPv6 address.
+- **Tools:** dig; `asn <ip>` (who owns the block = who you file the PTR ticket with); swaks to
+  observe the live rejection text.
+- **More health metrics:** future SMTP probe compares HELO to the PTR hostname
+  (`helo_match.pending` today).
+- **UI:** the Mail path panel shows PTR per IP inline; fix strip carries the provider-ticket
+  wording ("delegate PTR <ip> → mail.<domain>") and the Postfix `inet_protocols = ipv4` escape
+  hatch for the v6 gap. Drill-down explains FCrDNS with the three-step loop diagram.
+
+### PS-03 — Fragile delegation
+
+- **Concept:** every SPF/DKIM/DMARC verification a receiver performs is a live query against your
+  nameservers. One NS, a lame NS, parent↔child disagreement, or missing glue turns authentication
+  into a coin flip — `temperror` results that spam-folder mail in a pattern that matches the
+  receiver's resolver, not your content. RFC 1034 requires ≥2 NS; BCP 16 wants topological
+  diversity; the post-Dyn-2016 practice is two providers.
+- **Data fields:** `dns_health.ns[]`, `ns_count`, `network_count`, `parent_child_match`; findings
+  for lame/recursion/AXFR carry the per-server evidence.
+- **Diagnose/debug:** `dig NS <domain> +short` vs the parent's view
+  (`dig NS <domain> @<tld-server>`); per server `dig SOA <domain> @<ns> +norec` (AA bit present?
+  same serial everywhere?); `dnstracer -s . -o <domain>`; recursion probe
+  `dig google.com @<ns> +norec` (should refuse).
+- **Tools:** dig, dnstracer, Zonemaster (the reference auditor), intoDNS.
+- **More health metrics:** per-NS response time trend; serial-drift watch across secondaries.
+- **UI:** Zone panel shows NS count/diversity and parent/child ✓/✗; fix = registrar NS list
+  edited to equal the zone RRset, plus "add a secondary provider" with the two-provider pattern
+  explained in the drill-down.
+
+### PS-04 — SOA & TTL out of range
+
+- **Concept:** SOA timers govern how secondaries refresh and how long negative answers are
+  cached. A huge negative TTL delays every new record you publish (a just-added DKIM selector
+  stays "NXDOMAIN" for days); a tiny expire makes the zone vanish during a primary outage.
+  Steady-state record TTLs under ~300 s pattern-match fast-flux infrastructure (CISA AA25-093A)
+  — not a hard reject, but a reputation-model feature; over 86400 s slows incident recovery.
+- **Data fields:** `dns_health.soa` (all seven values), `dns_health.ttls`. Sane ranges: refresh
+  3600-86400, retry < refresh, expire 604800-2419200 and > refresh+retry, negative TTL 300-86400.
+- **Diagnose/debug:** `dig SOA <domain> +multiline` (values annotated); `dig MX <domain>` and
+  read the TTL column at steady state (query twice — the second answer shows cache decay).
+- **Tools:** dig; intoDNS flags out-of-range SOA with RFC citations.
+- **More health metrics:** TTL history across scheduled runs — a TTL that *drops* without a
+  migration is a flag.
+- **UI:** Zone panel prints each SOA value with its sane range grayed alongside; fix = the
+  modern default set `refresh 14400 / retry 3600 / expire 1209600 / minimum 3600` as one
+  copyable line.
+
+### PS-05 — Wildcard & zone bleed
+
+- **Concept:** a wildcard (`*.<domain>`) answers every name that has no explicit record
+  (RFC 4592). Wildcard MX accepts mail for every nonexistent subdomain (backscatter, spamtrap
+  hits); wildcard TXT can answer `_dmarc.<sub>` or DKIM-selector queries with junk, corrupting
+  authentication discovery on any name you didn't pin explicitly. Apex CNAMEs and multiple SPF
+  TXT strings are the same class of bug: zone content that silently changes how mail lookups
+  resolve.
+- **Data fields:** `dns_health.wildcard` (`detected`, `probe`, `types[]`), `cname_at_apex`;
+  `multi_txt_spf`/`txt_bloat` findings carry the observed strings.
+- **Diagnose/debug:** `dig A _edh-probe-<random>.<domain> +short` and
+  `dig TXT _edh-probe-<random>.<domain> +short` (any answer = wildcard); `dig MX
+  <random>.<domain>`; `dig CNAME <domain> +short` (apex must be empty).
+- **Tools:** dig; dnsx for probing many candidate names.
+- **More health metrics:** once fixed, re-probe every run — wildcards reappear with provider
+  template resets.
+- **UI:** warning rows list which record types the wildcard answers; fix = remove wildcard MX,
+  and pin explicit `_dmarc`, `_mta-sts`, `_smtp._tls`, and selector records above any wildcard
+  that must stay.
+
+### PS-06 — DNSSEC broken — or missing where it should be
+
+- **Concept:** two very different states share the family. **Unsigned** is an adoption gap: no
+  DANE possible, lookups spoofable — advisory. **Signed-but-broken** (expired RRSIG, DS↔DNSKEY
+  mismatch, deprecated algorithm 5/7) is an outage: validating resolvers — Google, Cloudflare,
+  Quad9, Comcast — SERVFAIL the entire zone, so mail to *and* from the domain fails. Broken
+  DNSSEC is strictly worse than none.
+- **Data fields:** `dnssec.signed`, `ds_present`, `ds_matches_dnskey`, `algorithms[]` (13/15
+  good, 8 acceptable ≥2048-bit, 5/7 deprecated per RFC 8624/9904), `ds_digest_types[]` (2 good,
+  1 deprecated), `dane_ready`.
+- **Diagnose/debug:** `delv +vtrace MX <domain>` (look for `; fully validated` vs `SERVFAIL`);
+  `drill -TD -S DNSKEY <domain>`; `dig DS <domain> +short` at the parent; DNSViz for the visual
+  chain.
+- **Tools:** dnsviz, delv (bind), drill (ldns), kdig +dnssec.
+- **More health metrics:** future probe reads RRSIG inception/expiration and warns < 7 days from
+  expiry (`dnssec_rrsig_expiry.pending` today).
+- **UI:** Zone panel's DNSSEC line goes red on broken with "resolvers are SERVFAILing this zone";
+  fix for broken = re-sign or pull the DS at the registrar *today*; fix for unsigned = enable
+  automated signing (algorithm 13, CDS/CDNSKEY) — positioned as the DANE prerequisite, rung 8 of
+  the §8 ladder.
+
+### PS-07 — DANE gap
+
+- **Concept:** DANE pins the MX certificate in DNS (TLSA `_25._tcp.<mx-host>`), closing the
+  STARTTLS-stripping hole for senders that validate it (Postfix `dane`, Exchange Online since
+  2022/2024-25). The "3 1 1" profile (DANE-EE, SPKI, SHA-256) survives cert renewals that keep
+  the key; rollover demands publishing current+next before swapping. A TLSA that stops matching
+  the live cert makes DANE-validating senders **bounce** your inbound mail — worse than no TLSA.
+- **Data fields:** per-MX TLSA presence (`dane_all_mx`), record profile, cert match
+  (`dane_tlsa_cert_match`), TTL sanity, plus `dnssec.dane_ready` (the prerequisite).
+- **Diagnose/debug:** `dig TLSA _25._tcp.<mx-host> +short`; live validation
+  `gnutls-cli --dane --starttls-proto=smtp <mx-host> -p 25`; posture check at dane.sys4.de.
+- **Tools:** kdig/dig, gnutls-cli, testssl (`--starttls smtp`), openssl s_client.
+- **More health metrics:** cert-rotation watch — alert when the live SPKI hash diverges from
+  every published TLSA.
+- **UI:** advisory cards when absent (gated on `dane_ready`); critical row when a published TLSA
+  mismatches; fix = the exact `3 1 1 <sha256>` record computed from the observed cert (copy
+  button), plus the current+next rollover recipe in the drill-down.
+
+### PS-08 — Encryption-in-transit gaps
+
+- **Concept:** all three major receivers require TLS for transmission. STARTTLS is the
+  capability; MTA-STS (RFC 8461) is the downgrade-resistant policy (`_mta-sts` TXT + HTTPS policy
+  file, `mode: enforce`); TLS-RPT (RFC 8460) is the feedback channel that tells you when senders
+  couldn't negotiate TLS with you. Classic failures: policy file changed but `id=` not rotated
+  (senders cache the old policy for `max_age`), `mode: testing` forever, MX list in the policy
+  drifting from the real MX set, enforce-mode with an expired MX cert (mail refused).
+- **Data fields:** `tls_transport` findings (per-MX STARTTLS/cert once probed; `.pending` first
+  round), MTA-STS record/policy findings (`mta_sts_txt`, `mta_sts_policy`, `mta_sts_id_format`,
+  `mta_sts_vs_tlsrpt`), TLS-RPT record findings (`tls_rpt_*`).
+- **Diagnose/debug:** `dig TXT _mta-sts.<domain> +short`;
+  `curl -s https://mta-sts.<domain>/.well-known/mta-sts.txt`; `dig TXT _smtp._tls.<domain>
+  +short`; `openssl s_client -starttls smtp -connect <mx>:25 -servername <mx>`;
+  `testssl --starttls smtp <mx>:25`.
+- **Tools:** curl, dig, openssl/testssl/sslscan/certigo, swaks `--tls`.
+- **More health metrics:** TLS-RPT report ingestion ([../emails.mdx](../emails.mdx)) turns this
+  from configuration-audit into observed-failure data (`tls_rpt_reports_ingested`).
+- **UI:** the ladder walks testing→enforce with the 14-30-day gate; fix strips carry the exact
+  TXT records and a ready-to-serve `mta-sts.txt` policy body matching the observed MX set.
+
+### PS-09 — Registration risk
+
+- **Concept:** filters treat the domain's registration lifecycle as reputation bedrock. Newly
+  registered domains (< 30 days) are throttled or junked wholesale (Spamhaus/Proofpoint/Microsoft
+  NRD feeds) — no DNS record fixes that, only age and warm-up. At the other end: expiry within
+  30 days, `clientHold`/`pendingDelete` (domain literally not resolving), missing transfer lock,
+  parked nameservers, and high-abuse TLDs all mark the domain as ephemeral or hijackable.
+- **Data fields:** RDAP-derived: creation/expiry dates, EPP status array, registrar, lock flags,
+  privacy/proxy, NS-parking match, TLD; `name_similarity`/`idn_homograph` evidence lists the
+  colliding names.
+- **Diagnose/debug:** `rdap <domain>` (structured truth; WHOIS is sunset for gTLDs since Jan
+  2025); `whois <domain>` where RDAP is thin; `dnstwist --registered <domain>` for the lookalike
+  sweep.
+- **Tools:** rdap, whois, dnstwist.
+- **More health metrics:** expiry countdown surfaced as a standing dashboard nudge; scheduled
+  runs catch status-code changes (a sudden `clientHold` is an emergency).
+- **UI:** critical rows for hold/expiry-imminent with the registrar named in the fix; NRD renders
+  as a warning with the warm-up schedule (start 5-10/day, full volume by week 4-8) in the
+  drill-down — explicitly framed as "time, not configuration".
+
+### PS-10 — SMTP exposure
+
+- **Concept:** an open relay burns every other investment within hours — blacklists list first
+  and ask questions never. VRFY/EXPN enumeration, AUTH before TLS, and submission on port 25 are
+  the smaller cousins. First round emits `.pending` (the probe is off by default; see
+  [./smtp_security.mdx](./smtp_security.mdx) and the `smtp25` semaphore in
+  [../run_checks.mdx](../run_checks.mdx)).
+- **Data fields:** per-MX probe verdicts once enabled: relay accepted?, VRFY/EXPN responses,
+  AUTH-over-plaintext offered?, banner.
+- **Diagnose/debug:** `nmap -p25 --script smtp-commands,smtp-open-relay <mx>`;
+  `swaks --server <mx> --from test@external.example --to victim@external.example --quit-after
+  RCPT` (a 250 to both = relay).
+- **Tools:** nmap, swaks, telnet/socat for banner reads.
+- **More health metrics:** blacklist category cross-check — open relays surface there first.
+- **UI:** critical row with the offending SMTP transcript as evidence; fix = the MTA-specific
+  relay-restriction config (Postfix `smtpd_relay_restrictions`) in the drill-down.
+
+### PS-11 — Dangling records / takeover exposure
+
+- **Concept:** CNAMEs to unclaimed SaaS endpoints, MX targets on expired domains, SPF `include:`
+  chains through re-registerable domains, NS delegations to dead servers. The 2024 SubdoMailing
+  campaign rode exactly this: attacker registers the dangling target, inherits the org's SPF
+  authorization and reputation, spams, and the org domain lands on the DBL.
+- **Data fields (first round):** `dangling_cname.<name>` / `dangling_include[.mx].<domain>`
+  finding evidence — the dead target and which record references it (apex/www CNAME liveness and
+  SPF-include liveness are checked by the zone-health family today).
+- **Diagnose/debug:** `dig CNAME <name> +short` then resolve the target; `dig TXT <domain>
+  +short | grep spf1` and resolve every `include:` domain; `rdap <target-domain>` — is it even
+  registered?
+- **Tools:** dig, dnsx, rdap; future sweep: subfinder, amass, massdns.
+- **More health metrics (future):** full subdomain enumeration + SaaS-fingerprint liveness on
+  every CNAME/MX/NS/include target; registration-availability probe per referenced domain.
+- **UI:** critical rows name the dead reference; fix = delete the stale record or re-claim the
+  target; the drill-down explains the SubdoMailing attack chain and the decommission checklist.
+
+### PS-12 — Split answers / resolver divergence *(future)*
+
+- **Concept:** if one authoritative NS serves stale data — or two providers hold independently
+  edited zone copies — some receivers verify against old SPF/DKIM records: intermittent
+  `dkim=fail` that correlates with the receiver's resolver, the hardest deliverability bug to
+  see from any single vantage point. Google's CheckMX tests exactly this ("every name server
+  replies with exactly the same TXT records").
+- **Detection (future):** query MX/SPF/`_dmarc`/selectors against every authoritative NS plus
+  8.8.8.8 / 1.1.1.1 / 9.9.9.9; compare value sets and SOA serials; distinguish *converging*
+  (recent change inside TTL window) from *permanently inconsistent*.
+- **Tools:** kdig/q against explicit servers; Zonemaster consistency tests.
+- **UI (future):** an answers matrix (record × resolver) with diffs highlighted; fix = repair
+  zone transfer (NOTIFY/IXFR/TSIG) or consolidate to one zone source feeding both providers.
+
+---
+
+## 10. Information schema (database schema)
+
+Reference the shared core tables (owned by engineering, **not** redefined here): `domains`,
+`sending_ips`, `audit_runs`, `findings`. Human-readable findings land in the shared `findings`
+table with `check_id` prefixed `infra.` (category roll-up key = the prefix). The structured,
+machine-parsed observations for each run live in the tables below — one per first-round snapshot.
+
+```sql
+-- One row per MX host observed per run (results["infra.mx_routing"].hosts[]).
+CREATE TABLE infra_mx_hosts (
+    id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    audit_run_id   BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id      BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    host           TEXT   NOT NULL,        -- mx1.example.com (normalized, no trailing dot)
+    priority       INT    NOT NULL,
+    is_cname       BOOLEAN NOT NULL DEFAULT FALSE,
+    cname_target   TEXT,
+    ips            JSONB,                  -- ["203.0.113.25", "2001:db8::25"]
+    non_public     JSONB,                  -- [{ip, cls}] cls: private|loopback|linklocal|cgnat|unspecified
+    checked_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_infra_mx_hosts_run ON infra_mx_hosts(audit_run_id, domain_id);
+
+-- One row per IP whose PTR/FCrDNS was evaluated (results["infra.reverse_dns"].ips[]).
+CREATE TABLE infra_ptr_records (
+    id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    audit_run_id      BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id         BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    ip                INET   NOT NULL,
+    source            TEXT   NOT NULL,     -- 'mx' | 'sending_ip'
+    ptr               TEXT,                -- null = no PTR (critical)
+    forward_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+    generic           BOOLEAN NOT NULL DEFAULT FALSE,  -- dyn/pool/dhcp/cloud-template pattern
+    checked_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_infra_ptr_run ON infra_ptr_records(audit_run_id, domain_id);
+
+-- One row per run: the zone snapshot (results["infra.dns_health"]).
+CREATE TABLE infra_zone_snapshot (
+    id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    audit_run_id       BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id          BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    ns                 JSONB,              -- [{host, ips}]
+    ns_count           INT,
+    network_count      INT,                -- distinct /24 + /48 prefixes across NS IPs
+    parent_child_match BOOLEAN,
+    soa                JSONB,              -- {mname,rname,serial,refresh,retry,expire,min_ttl}
+    ttls               JSONB,              -- {mx, apex_txt, ...} observed steady-state TTLs
+    wildcard           JSONB,              -- {detected, probe, types[]}
+    cname_at_apex      BOOLEAN,
+    checked_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_infra_zone_run ON infra_zone_snapshot(audit_run_id, domain_id);
+
+-- One row per run: DNSSEC state (results["infra.dnssec"]).
+CREATE TABLE infra_dnssec_state (
+    id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    audit_run_id      BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id         BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    signed            BOOLEAN,
+    ds_present        BOOLEAN,
+    ds_digest_types   JSONB,              -- [2] good; [1] deprecated SHA-1
+    algorithms        JSONB,              -- [13] etc.; 5/7 deprecated (RFC 8624/9904)
+    ds_matches_dnskey BOOLEAN,
+    dane_ready        BOOLEAN,            -- signed + DS present
+    checked_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_infra_dnssec_run ON infra_dnssec_state(audit_run_id, domain_id);
+```
+
+**Mapping onto today's JSON file store.** There is **no database in the first round**. The audit
+runner persists each run under the state dir (`audits.json`, keyed by domain id); the
+human-readable findings live in `findings[]` (checkId prefix `infra`), and the four structured
+snapshots live at `results["infra.mx_routing"]`, `results["infra.reverse_dns"]`,
+`results["infra.dns_health"]`, and `results["infra.dnssec"]` on the same run object — mapping 1:1
+to the tables above. Future family payloads (MTA-STS policy body, TLSA records, RDAP snapshot,
+SMTP probe transcripts) get their own `results[<checker id>]` keys and tables when their probes
+land. Because the store module fronts all of this, the file→DB move is a single-module change.
+
+---
+
+## 11. When we run the check
+
+- **On-demand.** All ten family checkers run on every manual audit (`POST /api/audit/run/:domainId`
+  and run-all) inside the normal pipeline with its per-run semaphores
+  ([../run_checks.mdx](../run_checks.mdx) §3): DNS-only families are cheap and always inline;
+  socket-touching families (`tls_transport`, `smtp_security`, DANE cert-match) run under the
+  `smtp25` semaphore when their probes are enabled and emit `.pending` info findings when not.
+- **Periodic.** The scheduler re-audits each monitored domain on the configured cadence; each
+  run's `infra.*` findings diff against the previous run. High-value regressions this category
+  exists to catch: a PTR disappearing (provider migration), parent/child NS drift after a
+  registrar change, an RRSIG sliding toward expiry, a TLSA no longer matching a renewed cert, a
+  registrar status flipping to `clientHold`, MX targets changing, TTLs dropping.
+- **Cost / rate limits / back-off.** DNS + one HTTPS fetch per run; RDAP responses cached per
+  domain per day (registry rate limits); resolver failures get one bounded retry then record a
+  **warning** "could not resolve — re-run", never a false critical.
+- **Regression detection** applies exactly as in
+  [../scheduled_checks.mdx](../scheduled_checks.mdx): compare latest findings + the four
+  snapshots to the prior run by finding id + severity; snapshot diffs (an IP's PTR changing,
+  `network_count` dropping to 1) surface even when severity is unchanged.
+
+---
+
+## 12. First round vs future
+
+| Capability | First round (pure `node:dns/promises` + bounded HTTPS, deterministic) | Future (probe / feed / API) |
+| --- | --- | --- |
+| MX topology + IP classing + redundancy | ✅ full | port-25 reachability, banner, real-ASN diversity |
+| PTR / FCrDNS / generic-pattern (v4 + v6) | ✅ full | HELO↔PTR match (`helo_match.pending`), sending-IP discovery from message samples |
+| STARTTLS / MX cert health | `.pending` only | ⛔ SMTP probe: STARTTLS, TLS version, cert chain/SAN/expiry per MX |
+| MTA-STS record + policy fetch + MX consistency | ✅ full | sender-side policy-application simulation |
+| TLS-RPT record | ✅ full | report ingestion ([../emails.mdx](../emails.mdx)) → `tls_rpt_reports_ingested` |
+| DANE TLSA presence/profile per MX | ✅ (DNS side) | ⛔ live cert↔TLSA match via STARTTLS probe |
+| DNSSEC signed/DS/algorithms | ✅ via dig fallback (DS/DNSKEY) | RRSIG validity-window reads, full chain validation (dnsviz-grade) |
+| NS sanity/diversity/parent-child/glue | ✅ full | per-NS latency trending, TCP/EDNS conformance |
+| SOA + TTL ranges + wildcard + apex hygiene | ✅ full | TTL-history trending across runs |
+| Registration (RDAP age/expiry/locks/status) | ✅ full (cached daily) | NRD-feed cross-check, registrar-reputation feed |
+| SMTP hardening (relay/VRFY/AUTH) | `.pending` only | ⛔ opt-in SMTP probe under the `smtp25` semaphore |
+| Structured snapshots | ✅ mx_routing, reverse_dns, dns_health, dnssec | mta_sts, tls_rpt, dane_tlsa, domain_reputation, tls_transport, smtp_security payloads |
+| PS-11 dangling/takeover · PS-12 split answers | — | ⛔ subdomain sweep + cross-resolver matrix |
+
+---
+
+## 13. Acceptance criteria
+
+1. All ten family checkers run in every audit and emit pass **and** fail findings with the
+   `infra.` prefix; socket-gated sub-checks emit `.pending` **info** findings (never fabricated
+   warnings) until their probes exist.
+2. The four structured snapshots persist at `results["infra.mx_routing"]`,
+   `results["infra.reverse_dns"]`, `results["infra.dns_health"]`, `results["infra.dnssec"]` with
+   the §5 field names (snake_case, matching §10 columns).
+3. An MX target that is a CNAME, resolves to non-public space, or fails to resolve yields a
+   **critical** with the offending host and IP in the evidence; a healthy set yields explicit
+   `ok` findings including redundancy (`host_count`, `network_count` ≥ 2 → ok; 1 → warning).
+4. A mail IP (v4 **or** v6) with no PTR, or whose PTR fails forward confirmation, yields a
+   **critical**; a generic-pattern PTR yields a **warning**; the IPv6-only gap is detected even
+   when IPv4 FCrDNS is perfect.
+5. Signed-but-broken DNSSEC (DS present, DNSKEY mismatch/deprecated algorithm) yields
+   **critical**; an unsigned zone yields **info** only; `dane_ready` is true exactly when signed
+   with DS present.
+6. Parent/child NS mismatch, single-network NS set, lame delegation, open recursion, and
+   SOA/TTL values outside the §2 ranges each yield **warnings** with observed vs expected values
+   in the evidence.
+7. A wildcard answering the random-label probe yields a **warning** naming the record types it
+   answers; explicit mail-path records (`_dmarc`, `_mta-sts`, `_smtp._tls`, selectors) are noted
+   as masking or exposed.
+8. Registration: `clientHold`/`pendingDelete`/expired → **critical**; expiry < 90 days, missing
+   transfer lock, age < 90 days, parked nameservers → **warning**; privacy/proxy → **info** only.
+9. The Dashboard `dnsInfra` cell reflects worst severity with the `K of M fail` label;
+   `info`-only never turns it amber; cell and run-detail category chip expose a chevron routing
+   to `/domains/:id/dns`.
+10. The full DNS page renders: the ten-chip family strip with anchor links, the verdict line +
+    single §8-ladder CTA, the Mail path panel (MX → IP → PTR with per-hop status), the Zone panel
+    (NS/parent-child/SOA-with-ranges/TTL/wildcard/DNSSEC line), the family-grouped fail-first
+    test table with observed/expected evidence and copyable fixes, and the matched problem-state
+    cards.
+11. Problem-state drill-down pages (`/domains/:id/dns/:problemId`) render concept, live data
+    fields, copyable diagnose-commands (domain substituted), tools, metrics, and the numbered
+    path forward for PS-01…PS-11; PS-12 is absent in the first round.
+12. The primary recommendation is computed by the §8 fix-order ladder (first matching rung), so
+    a registration hold outranks an MX problem, which outranks rDNS, and DANE advice never
+    appears while FCrDNS is failing.
+13. A second scheduled run that sees a lost PTR, NS drift, a dropped MX, a registrar status
+    change, or `network_count` falling flags each as a **new problem** via the regression diff.
+
+<!--
+  Maintenance notes:
+  * This is the CATEGORY-level spec for the six-category dashboard's "DNS & Infrastructure"
+    column. The ten family specs (mx_routing, reverse_dns, tls_transport, mta_sts, tls_rpt,
+    dane_tlsa, dnssec, dns_health, domain_reputation, smtp_security) own per-sub-check detail;
+    keep §2's finding-id lists in sync with those specs AND with the checkers under
+    code/packages/backend/src/modules/audit/checks/ (the ids in §2 were inventoried from code
+    2026-07).
+  * Receiver-rule baseline: Gmail sender guidelines (FCrDNS mandatory, 550-5.7.25 permanent
+    since the Nov 2025 ramp; IPv6 PTR per connection family), Yahoo Feb 2024 (non-generic rDNS),
+    Microsoft May 2025 (550 5.7.15 for 5k+/day). Revisit yearly.
+  * Standards refs: RFC 5321/2181/7505 (MX), RFC 1912 + RIPE-203 (SOA ranges), RFC 1034/2182
+    (NS), RFC 8624 as updated by RFC 9904 (DNSSEC algorithms — Nov 2025), RFC 8461/8460 (MTA-STS/
+    TLS-RPT), RFC 6698/7672 (DANE), RFC 4592 (wildcards), RDAP (gTLD WHOIS sunset Jan 2025).
+  * Toolbox verified against formulae.brew.sh 2026-07: bind, knot, ldns, doggo, q, dnsx,
+    dnstracer, dnsviz, whois, rdap, asn, swaks, testssl, sslscan, gnutls, certigo, nmap,
+    dnstwist, checkdmarc all present. `dog` is GONE (use doggo); `fpdns` is archived upstream;
+    zonemaster-cli is NOT on brew. Do not re-add dead formulas.
+  * Routes /domains/:id/dns and /domains/:id/dns/:problemId mirror the DMARC pattern
+    (DnsPage.tsx, DnsProblemPage.tsx, lib/dns-problems.ts). The four snapshot payload shapes in
+    §5 are the frontend's contract — change them in lockstep with api/types.ts.
+  * PS-11 (dangling/takeover) is first-round PARTIAL (apex-CNAME + SPF-include liveness via the
+    dns_health checker's dangling_* findings); the full subdomain sweep and PS-12 (split answers)
+    stay FUTURE until those probes land; the §8 ladder gains rungs for them then.
+-->

@@ -445,10 +445,11 @@ match wins):
 
 Additional standing recommendations surfaced as `info` when applicable: keep the record under ~450
 bytes; subdomains that send mail need their own records (no inheritance); recognized ESP includes
-(Google `_spf.google.com` ≈3 lookups, Microsoft `spf.protection.outlook.com` ≈2–3, SendGrid
-`sendgrid.net`, Mailchimp `servers.mcsv.net`, Amazon SES `amazonses.com`) each have a known lookup
-cost — shown next to the include in the tree; prefer aligned **DKIM** on every stream (it survives
-forwarding; SPF does not).
+(Google `_spf.google.com` — flattened by Google to direct `ip4`/`ip6` blocks, 1 lookup as verified
+2026-07, Microsoft `spf.protection.outlook.com` ≈2–3, SendGrid `sendgrid.net`, Mailchimp
+`servers.mcsv.net`, Amazon SES `amazonses.com`) each have a live lookup cost — shown next to the
+include in the tree, never assumed from stale docs; prefer aligned **DKIM** on every stream (it
+survives forwarding; SPF does not).
 
 ---
 

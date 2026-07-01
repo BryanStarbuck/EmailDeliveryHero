@@ -1,6 +1,6 @@
 import { isIPv6 } from "node:net"
-import { resolve4, resolve6, resolveCname, reverse, reverseIpv4 } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import { resolve4, resolve6, resolveCname, resolveMx, reverse, reverseIpv4 } from "./dns-util"
+import type { Checker, CheckOutcome, Finding } from "./types"
 
 /**
  * Reverse DNS / PTR / FCrDNS. For every sending IP the domain claims, audits the reverse-lookup
@@ -149,9 +149,37 @@ function sharesOrgDomain(host: string, domain: string): boolean {
   return reg(h) !== "" && reg(h) === reg(d)
 }
 
+/**
+ * One row of the structured snapshot persisted at results["infra.reverse_dns"]
+ * (pm/checks/dns.mdx §5) — the PTR/FCrDNS map the DNS page's Mail path panel joins by IP.
+ */
+export interface ReverseDnsIpResult {
+  ip: string
+  source: "mx" | "sending_ip"
+  ptr: string | null
+  forward_confirmed: boolean
+  generic: boolean
+}
+
+export interface ReverseDnsResults {
+  ips: ReverseDnsIpResult[]
+}
+
+interface IpAudit {
+  findings: Finding[]
+  snap: ReverseDnsIpResult
+}
+
 /** Audit one IP; returns its per-IP findings (ids suffixed with the IP so they stay unique). */
-async function auditIp(ip: string, domain: string): Promise<Finding[]> {
+async function auditIp(ip: string, domain: string, source: "mx" | "sending_ip"): Promise<IpAudit> {
   const findings: Finding[] = []
+  const snap: ReverseDnsIpResult = {
+    ip,
+    source,
+    ptr: null,
+    forward_confirmed: false,
+    generic: false,
+  }
   const v6 = isIPv6(ip)
   const family = v6 ? "IPv6" : "IPv4"
   const mailHost = `mail1.${domain}`
@@ -168,7 +196,7 @@ async function auditIp(ip: string, domain: string): Promise<Finding[]> {
         "Re-run the audit later. If it persists, verify the reverse zone's nameservers with your host/ISP.",
       evidence: rev.error,
     })
-    return findings
+    return { findings, snap }
   }
 
   if (rev.empty || rev.records.length === 0) {
@@ -193,10 +221,11 @@ async function auditIp(ip: string, domain: string): Promise<Finding[]> {
             evidence: `${family} ${ip}`,
           },
     )
-    return findings
+    return { findings, snap }
   }
 
   const hosts = rev.records
+  snap.ptr = hosts[0] ?? null
   let problem = false
 
   if (hosts.length > 1) {
@@ -232,6 +261,7 @@ async function auditIp(ip: string, domain: string): Promise<Finding[]> {
       break
     }
   }
+  snap.forward_confirmed = fcrdnsOk
 
   if (!fcrdnsOk && fcrdnsTransient && observed.length === 0) {
     findings.push({
@@ -264,6 +294,7 @@ async function auditIp(ip: string, domain: string): Promise<Finding[]> {
   const generic = genericMatch(host, ip)
   if (generic) {
     problem = true
+    snap.generic = true
     findings.push({
       id: `infra.ptr_generic.${ip}`,
       checkId: "infra",
@@ -278,6 +309,7 @@ async function auditIp(ip: string, domain: string): Promise<Finding[]> {
   const literal = ipLiteralMatch(host, ip)
   if (literal) {
     problem = true
+    snap.generic = true
     findings.push({
       id: `infra.ptr_no_ip_literal.${ip}`,
       checkId: "infra",
@@ -347,7 +379,7 @@ async function auditIp(ip: string, domain: string): Promise<Finding[]> {
     })
   }
 
-  return findings
+  return { findings, snap }
 }
 
 /** Bounded-concurrency map (no p-limit dependency) preserving input order. */
@@ -366,25 +398,57 @@ async function mapPool<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>
   return out
 }
 
+/** Resolve the domain's MX targets to their A/AAAA addresses (the spec's MX-IP fallback). */
+async function mxIps(domain: string): Promise<string[]> {
+  const mx = await resolveMx(domain)
+  if (mx.error || mx.records.length === 0) return []
+  const hosts = [
+    ...new Set(
+      mx.records
+        .map((r) => r.exchange.trim().toLowerCase().replace(/\.$/, ""))
+        .filter((h) => h !== "" && h !== "."),
+    ),
+  ]
+  const out = new Set<string>()
+  for (const host of hosts) {
+    const [v4, v6] = await Promise.all([resolve4(host), resolve6(host)])
+    for (const ip of [...v4.records, ...v6.records]) out.add(ip)
+  }
+  return [...out]
+}
+
 export const reverseDnsCheck: Checker = {
   id: "infra.reverse_dns",
   label: "Reverse DNS / PTR",
-  async run(ctx): Promise<Finding[]> {
+  async run(ctx): Promise<CheckOutcome> {
     const findings: Finding[] = []
+    const snaps: ReverseDnsIpResult[] = []
 
-    const ips = [...new Set(ctx.sendingIps.map((ip) => ip.trim()).filter(Boolean))]
+    // Configured sending IPs first; fall back to the MX hosts' addresses so the audit still
+    // covers the inbound path (and the Gmail dual-stack trap) when none are configured
+    // (pm/checks/dns.mdx §5 — snapshot rows carry source: mx | sending_ip).
+    let ips = [...new Set(ctx.sendingIps.map((ip) => ip.trim()).filter(Boolean))]
+    let source: "mx" | "sending_ip" = "sending_ip"
+    if (ips.length === 0) {
+      ips = await mxIps(ctx.domain)
+      source = "mx"
+    }
+
     if (ips.length === 0) {
       findings.push({
         id: "infra.ptr_no_ips",
         checkId: "infra",
         title: "No sending IPs to audit",
         severity: "info",
-        detail: `No sending IPs recorded for ${ctx.domain}, so reverse DNS (PTR/FCrDNS) could not be audited.`,
+        detail: `No sending IPs are recorded for ${ctx.domain} and its MX hosts resolve to no addresses, so reverse DNS (PTR/FCrDNS) could not be audited.`,
         remediation: `Add the IPs your mail actually sends from to ${ctx.domain} (or import from SPF ip4:/ip6: mechanisms or MX A/AAAA records) so reverse DNS can be verified.`,
       })
     } else {
-      const perIp = await mapPool(ips, 8, (ip) => auditIp(ip, ctx.domain))
-      for (const list of perIp) findings.push(...list)
+      const perIp = await mapPool(ips, 8, (ip) => auditIp(ip, ctx.domain, source))
+      for (const audit of perIp) {
+        findings.push(...audit.findings)
+        snaps.push(audit.snap)
+      }
     }
 
     // infra.helo_match is FUTURE: it needs an outbound SMTP probe to read the HELO/EHLO string.
@@ -400,6 +464,6 @@ export const reverseDnsCheck: Checker = {
         "When the SMTP probe ships, configure the MTA HELO/EHLO to the FCrDNS-valid hostname (Postfix myhostname, exim primary_hostname). See ./smtp_security.mdx.",
     })
 
-    return findings
+    return { findings, results: { ips: snaps } satisfies ReverseDnsResults }
   },
 }

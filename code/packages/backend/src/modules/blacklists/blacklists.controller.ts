@@ -12,7 +12,6 @@ import {
   listBlacklistDomainIds,
   readBlacklistHistory,
   readLatestBlacklistRun,
-  readPortalStates,
   writePortalState,
 } from "../audit/checks/blacklist/store"
 import { PROVIDER_PORTALS } from "../audit/checks/blacklist/zones"

@@ -52,10 +52,13 @@ export function categoryOf(checkId: string): CategoryKey | null {
  */
 export const TECH_PAGE_ROUTES = {
   spf: "/domains/$id/spf",
+  dkim: "/domains/$id/dkim",
   dmarc: "/domains/$id/dmarc",
 } as const
 
-export function techPageRoute(key: CategoryKey): "/domains/$id/spf" | "/domains/$id/dmarc" | null {
+export function techPageRoute(
+  key: CategoryKey,
+): (typeof TECH_PAGE_ROUTES)[keyof typeof TECH_PAGE_ROUTES] | null {
   return key in TECH_PAGE_ROUTES ? TECH_PAGE_ROUTES[key as keyof typeof TECH_PAGE_ROUTES] : null
 }
 

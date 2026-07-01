@@ -1,5 +1,5 @@
 import { resolve4, resolve6, resolveCname, resolveMx } from "./dns-util"
-import type { Checker, Finding } from "./types"
+import type { Checker, CheckOutcome, Finding } from "./types"
 
 /**
  * MX & Mail Routing (RFC 5321 §5.1, RFC 7505 null MX, RFC 2181 §10.3). Resolves the domain's MX
@@ -90,6 +90,44 @@ interface HostInfo {
   transient?: string
 }
 
+/**
+ * The structured snapshot persisted at results["infra.mx_routing"] (pm/checks/dns.mdx §5) —
+ * the MX topology the DNS page's Mail path panel renders. snake_case mirrors the spec YAML.
+ */
+export interface MxRoutingResults {
+  mx_found: boolean
+  null_mx: boolean
+  implicit_a_fallback: boolean
+  hosts: {
+    host: string
+    priority: number
+    is_cname: boolean
+    cname_target: string | null
+    ips: string[]
+    non_public: { ip: string; cls: IpClass }[]
+  }[]
+  redundancy: { host_count: number; network_count: number }
+}
+
+function snapshot(
+  hosts: HostInfo[],
+  flags: { mx_found: boolean; null_mx: boolean; implicit_a_fallback: boolean },
+  redundancy: { host_count: number; network_count: number },
+): MxRoutingResults {
+  return {
+    ...flags,
+    hosts: hosts.map((h) => ({
+      host: h.host,
+      priority: h.priority,
+      is_cname: h.isCname,
+      cname_target: h.cnameTarget ?? null,
+      ips: h.ips,
+      non_public: h.nonPublic,
+    })),
+    redundancy,
+  }
+}
+
 /** One info finding for a FUTURE, probe/feed-gated sub-check. Never warning/critical. */
 function future(id: string, title: string, detail: string): Finding {
   return {
@@ -104,23 +142,26 @@ function future(id: string, title: string, detail: string): Finding {
 export const mxRoutingCheck: Checker = {
   id: "infra.mx_routing",
   label: "MX & Mail Routing",
-  async run(ctx): Promise<Finding[]> {
+  async run(ctx): Promise<CheckOutcome> {
     const domain = normHost(ctx.domain)
     const findings: Finding[] = []
 
     const mx = await resolveMx(ctx.domain)
     if (mx.error) {
-      return [
-        {
-          id: "infra.mx_present.lookup_failed",
-          checkId: CHECK_ID,
-          title: "Could not look up MX",
-          severity: "info",
-          detail: `DNS lookup for MX ${domain} failed transiently (${mx.error}). MX topology was not evaluated.`,
-          remediation:
-            "Retry the audit later. If it persists, check the domain's authoritative nameservers.",
-        },
-      ]
+      // Transient resolver failure: no snapshot — the UI must not render false topology.
+      return {
+        findings: [
+          {
+            id: "infra.mx_present.lookup_failed",
+            checkId: CHECK_ID,
+            title: "Could not look up MX",
+            severity: "info",
+            detail: `DNS lookup for MX ${domain} failed transiently (${mx.error}). MX topology was not evaluated.`,
+            remediation:
+              "Retry the audit later. If it persists, check the domain's authoritative nameservers.",
+          },
+        ],
+      }
     }
 
     // --- infra.mx_present: no MX at all --------------------------------------------------------
@@ -146,7 +187,14 @@ export const mxRoutingCheck: Checker = {
           evidence: a.records.join(", "),
         })
       }
-      return findings
+      return {
+        findings,
+        results: snapshot(
+          [],
+          { mx_found: false, null_mx: false, implicit_a_fallback: a.records.length > 0 },
+          { host_count: 0, network_count: 0 },
+        ),
+      }
     }
 
     // --- infra.mx_null: RFC 7505 detection -----------------------------------------------------
@@ -175,7 +223,14 @@ export const mxRoutingCheck: Checker = {
       })
       // Null MX short-circuits target resolution/reachability (no target to probe).
       pushFutureFindings(findings, domain)
-      return findings
+      return {
+        findings,
+        results: snapshot(
+          [],
+          { mx_found: true, null_mx: true, implicit_a_fallback: false },
+          { host_count: 0, network_count: 0 },
+        ),
+      }
     }
 
     if (nullRecords.length > 0 && realRecords.length > 0) {
@@ -470,7 +525,14 @@ export const mxRoutingCheck: Checker = {
     // --- FUTURE (probe / external feed) sub-checks: info only -----------------------------------
     pushFutureFindings(findings, domain)
 
-    return findings
+    return {
+      findings,
+      results: snapshot(
+        hosts,
+        { mx_found: true, null_mx: nullRecords.length > 0, implicit_a_fallback: false },
+        { host_count: distinctHosts.size, network_count: publicPrefixes.size },
+      ),
+    }
   },
 }
 

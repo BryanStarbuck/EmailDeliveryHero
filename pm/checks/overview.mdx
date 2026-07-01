@@ -60,6 +60,11 @@ parentheses). The specs are grouped that way below.
 
 ## 5. DNS & Infrastructure (`infra`)
 
+* [DNS & Infrastructure — category spec](./dns.mdx) — the category-level roll-up over the ten
+  topic specs below: the ten test families and their finding ids, the Brew testing toolbox, the
+  test-results YAML (structured snapshots at `results["infra.*"]`), the dashboard summary cell +
+  the full-page DNS view (`/domains/:id/dns`), the fix-order ladder, and the problem-state
+  catalog with drill-down pages.
 * [MX Records & Mail Routing](./mx_routing.mdx) — MX presence, resolution, priorities, redundancy,
   null-MX, public-IP and not-a-CNAME rules, reachability.
 * [Reverse DNS / PTR / FCrDNS](./reverse_dns.mdx) — per-IP PTR presence, forward-confirmed reverse

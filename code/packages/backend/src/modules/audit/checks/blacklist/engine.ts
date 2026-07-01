@@ -327,7 +327,7 @@ export function diffRuns(prev: BlacklistRunResults | null, curr: ZoneResult[]): 
     if (r.inconclusive) continue
     const before = prevByKey.get(key(r))
     if (before?.inconclusive) continue
-    if (r.listed && (!before || !before.listed)) {
+    if (r.listed && !before?.listed) {
       diff.new_listings.push({ zone: r.zone, target: r.target, sub_list: r.sub_list })
     } else if (r.listed && before?.listed && before.severity && r.severity) {
       if (SEVERITY_RANK[r.severity] > SEVERITY_RANK[before.severity]) {

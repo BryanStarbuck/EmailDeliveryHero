@@ -58,10 +58,21 @@ export interface Checker {
   run(ctx: CheckContext): Promise<Finding[] | CheckOutcome>
 }
 
-/** The result of auditing one domain — the full finding list plus a rolled-up score/status. */
+/**
+ * The result of auditing one domain — the full finding list plus a rolled-up score/status.
+ * Vocabulary (pm/dashboard.mdx §1): this is one RUN — per domain, with start/stop date-times.
+ * Inside it, the six categories are TESTS and each finding belongs to a SUB-TEST.
+ */
 export interface AuditResult {
+  /** Unique id for this run (pm/dashboard.mdx §1). Absent only on pre-history persisted data. */
+  runId: string
   domainId: string
   domain: string
+  /** ISO date-time the run started. */
+  startedAt: string
+  /** ISO date-time the run stopped. */
+  finishedAt: string
+  /** Kept for older readers; always equals finishedAt. */
   ranAt: string
   /** 0–100, derived from finding severities. */
   score: number
