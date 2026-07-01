@@ -1,0 +1,374 @@
+---
+title: EmailDeliveryHero — MTA-STS Check
+description: The MTA-STS (SMTP MTA Strict Transport Security, RFC 8461) deliverability check — verifying the _mta-sts TXT record (first-round pure DNS), the HTTPS-served policy file, the enforce/testing mode, the mx: host set, max_age sanity, TXT id freshness, and TXT/policy consistency; splits the pure-DNS TXT sub-checks from the future HTTPS-fetch sub-checks and defines the mta_sts_check_results schema.
+---
+
+# EmailDeliveryHero — MTA-STS Check
+
+**MTA-STS** (SMTP MTA Strict Transport Security, **RFC 8461**) lets a domain tell sending mail
+servers "always use TLS to my MX hosts, and here is exactly which MX hosts are legitimate." Without
+it, STARTTLS is opportunistic: a network attacker can strip the `STARTTLS` advertisement (a downgrade
+attack) or spoof an MX and the sender will silently fall back to cleartext or trust the wrong host.
+MTA-STS closes that gap by publishing a **policy** that senders cache and enforce.
+
+MTA-STS has **two moving parts**, and EmailDeliveryHero treats them separately because they use
+different transports:
+
+1. **A DNS TXT record** at `_mta-sts.<domain>` — value `v=STSv1; id=<policy-version>`. This is a
+   pure DNS lookup and is **first-round** in this app.
+2. **An HTTPS policy file** fetched from `https://mta-sts.<domain>/.well-known/mta-sts.txt` — a small
+   key/value document listing `version`, `mode`, one or more `mx` patterns, and `max_age`. Fetching
+   and parsing this requires an **HTTPS client**, so every sub-check that depends on the served
+   policy body is **FUTURE-round** (gated on the HTTPS probe).
+
+This check belongs to the **DNS & Infrastructure** dashboard category; its sub-check ids use the
+**`infra`** prefix, MTA-STS sub-family (`infra.mta_sts_*`).
+
+**Read alongside:**
+* [Overview](../overview.mdx) — product charter, personas, port list.
+* [Engineering](../engineering.mdx) — the `Checker`/`Finding` contract, the file store, the scheduler.
+* [Spam checks catalog](../spam_checks.mdx) — the master `infra` row (`infra.mta_sts`) this spec expands.
+* [Dashboard](../dashboard.mdx) — how the DNS & Infrastructure cell rolls up per domain.
+* [Scheduled checks](../scheduled_checks.mdx) — recurring cadence + regression detection.
+* [TLS transport](./tls_transport.mdx) — STARTTLS/cert probing that MTA-STS enforcement rides on.
+* [TLS-RPT](./tls_rpt.mdx) — reporting endpoint that receives MTA-STS/TLS **failure** reports.
+* [MX routing](./mx_routing.mdx) — the actual MX host set the policy `mx:` lines must match.
+* [DANE/TLSA](./dane_tlsa.mdx) — the DNSSEC-based alternative to MTA-STS for TLS binding.
+
+---
+
+## 1. What it checks
+
+MTA-STS is defined by **RFC 8461** (September 2018) and pairs with **TLS-RPT (RFC 8460)** for
+failure reporting. A sending MTA that supports MTA-STS, before delivering to `<domain>`:
+
+1. Looks up the `_mta-sts.<domain>` TXT record. If absent, no policy applies (opportunistic TLS).
+2. If the TXT `id` differs from the cached `id` (or nothing is cached), fetches the policy over HTTPS
+   from `https://mta-sts.<domain>/.well-known/mta-sts.txt` with a valid, name-matching certificate.
+3. Caches the policy for `max_age` seconds and enforces it: mail is only delivered to an MX whose
+   name matches an `mx:` pattern **and** that negotiates TLS with a valid certificate. On failure in
+   `mode: enforce`, delivery is **deferred/bounced** rather than downgraded.
+
+The policy file body looks like:
+
+```
+version: STSv1
+mode: enforce
+mx: mail.example.com
+mx: *.example.net
+max_age: 604800
+```
+
+**Why receivers care:** the sending side is the enforcer, so publishing MTA-STS protects *your*
+inbound mail from downgrade/interception; it also signals a well-run domain. Major providers
+(Google, Microsoft, Yahoo) both publish and honor MTA-STS.
+
+**Common real-world failure modes** this check catches:
+* TXT present but the HTTPS policy file 404s or is served with an invalid/expired certificate (the
+  policy is unusable — senders ignore it, so the domain gets *zero* protection while appearing
+  configured).
+* Policy stuck in `mode: testing` (or `mode: none`) for months — senders report but never enforce.
+* `mx:` patterns in the policy that no longer match the domain's real MX hosts (after a mail-host
+  migration), which in `enforce` mode **blocks legitimate mail**.
+* `id` never changes after the policy body is edited, so senders keep serving the stale cached copy.
+* `max_age` too short (thrashing, no real caching) or absurdly long (a bad policy is pinned for
+  weeks).
+
+**How a failure degrades inbox placement:** a broken policy in `enforce` mode causes hard delivery
+failures to your domain; a missing/`testing` policy leaves mail downgradeable and forgoes the
+security signal receivers increasingly weight. Either way, deliverability and sender reputation
+suffer quietly.
+
+---
+
+## 2. Sub-checks
+
+`infra` prefix, MTA-STS sub-family. **Pure-DNS** rows are first-round; rows marked **(HTTPS)** need
+the future policy-fetch probe.
+
+| Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `infra.mta_sts_txt` | The `_mta-sts.<domain>` TXT record exists and parses as `v=STSv1; id=...`. | `resolveTxt('_mta-sts.<domain>')`; parse `v=` and `id=`. | **info:** no MTA-STS TXT (feature not deployed). **warning:** TXT present but malformed / missing `id`. | Publish TXT at `_mta-sts.<domain>`: `"v=STSv1; id=20260701T000000"`. |
+| `infra.mta_sts_version` | The TXT tag set starts with exactly `v=STSv1` (correct version token, first tag). | String assert on parsed record. | **warning:** wrong/misspelled version (e.g. `v=STS1`, `STSv1` not first). | Correct the record to begin with `v=STSv1;`. |
+| `infra.mta_sts_txt_single` | Exactly one `_mta-sts` TXT STSv1 record exists (no duplicates). | Count STSv1 records from `resolveTxt`. | **warning:** two or more STSv1 TXT records (undefined which wins). | Remove the extra `_mta-sts` TXT so exactly one remains. |
+| `infra.mta_sts_id_format` | `id` is a valid token: 1–32 printable ASCII, alphanumeric, and monotonic-friendly (e.g. a timestamp). | Regex `^[A-Za-z0-9]{1,32}$` on `id`. | **warning:** `id` empty, too long, or contains illegal chars. | Set `id` to a short alphanumeric version stamp, e.g. `20260701120000`. |
+| `infra.mta_sts_policy` **(HTTPS)** | The policy file at `https://mta-sts.<domain>/.well-known/mta-sts.txt` is fetchable (HTTP 200) and parses. | HTTPS GET; parse key/value lines. | **critical:** TXT present but policy 404s / times out (protection is null). | Serve the policy file at that exact HTTPS path with `Content-Type: text/plain`. |
+| `infra.mta_sts_https_cert` **(HTTPS)** | The `mta-sts.<domain>` host presents a valid, non-expired CA cert whose name matches `mta-sts.<domain>`. | TLS handshake + cert chain/name/expiry check during the fetch. | **critical:** self-signed / expired / name-mismatch cert (senders reject the policy). | Install a valid CA cert for `mta-sts.<domain>` (e.g. Let's Encrypt); no wildcard-mismatch. |
+| `infra.mta_sts_policy_version` **(HTTPS)** | Policy body first line is `version: STSv1`. | Parse `version` key. | **warning:** missing/incorrect `version` line. | Add `version: STSv1` as the first policy line. |
+| `infra.mta_sts_mode` **(HTTPS)** | `mode:` is one of `enforce` / `testing` / `none`; flags `testing`/`none` left in place. | Parse `mode`; compare against desired-enforce config. | **warning:** `mode: testing` or `mode: none` (no enforcement). | After validating in `testing`, change the policy to `mode: enforce`. |
+| `infra.mta_sts_mx_present` **(HTTPS)** | At least one `mx:` line exists in the policy. | Count `mx` keys. | **critical:** zero `mx` lines (in `enforce` this blocks all mail). | Add an `mx:` line per MX host, e.g. `mx: mail.<domain>`. |
+| `infra.mta_sts_mx_match` **(HTTPS)** | Every real MX host (from `resolveMx`) matches some `mx:` pattern, and no `mx:` pattern is dead. | `resolveMx(domain)` ∩ policy `mx` patterns (RFC 8461 wildcard rules: leading `*.` matches one label). | **critical:** a live MX host matches no `mx:` pattern (mail deferred/bounced in enforce). **warning:** an `mx:` pattern matches no live MX (stale entry). | Update `mx:` lines to cover every current MX host; remove obsolete patterns. |
+| `infra.mta_sts_max_age` **(HTTPS)** | `max_age` is present, numeric, and sane (recommended `>= 604800`, `<= 31557600`). | Parse `max_age` int; bounds check. | **warning:** `max_age` missing, `< 86400`, or `> 31557600`. | Set `max_age: 604800` (one week) or higher, up to ~one year. |
+| `infra.mta_sts_id_freshness` **(HTTPS)** | The TXT `id` changed relative to the last audit whenever the served policy body changed. | Diff current `(id, policyHash)` vs previous audit's stored pair. | **warning:** policy body changed but `id` unchanged (senders keep stale cache). | Bump the `_mta-sts` TXT `id` every time you edit the policy file. |
+| `infra.mta_sts_txt_policy_consistency` **(HTTPS)** | The TXT `id` and the served policy are internally consistent (both present, both STSv1, fetch succeeds when TXT advertises a policy). | Cross-check TXT parse vs policy fetch/parse. | **critical:** TXT advertises a policy but none is served (or vice-versa). | Publish both parts together; never leave a TXT `id` pointing at a missing/mismatched policy. |
+| `infra.mta_sts_https_redirect` **(HTTPS)** | The policy fetch is not an HTTP→HTTPS or cross-host redirect (RFC 8461 forbids following redirects for the policy). | Inspect response status; reject 3xx. | **warning:** policy path returns a redirect (senders will not follow it). | Serve the policy directly at the `.well-known` path with a 200, no redirect. |
+| `infra.mta_sts_content_type` **(HTTPS)** | The policy is served as `text/plain` (RFC 8461 recommends it). | Inspect `Content-Type` header. | **info:** wrong/missing content type. | Serve the policy file with `Content-Type: text/plain; charset=utf-8`. |
+| `infra.mta_sts_vs_tlsrpt` | If MTA-STS is deployed, a TLS-RPT record also exists so enforcement failures are reported. | `resolveTxt('_smtp._tls.<domain>')` (cross-check). | **info:** MTA-STS present but no TLS-RPT (blind to failures). | Publish `_smtp._tls.<domain>` TXT `v=TLSRPTv1; rua=mailto:tlsrpt@<domain>` (see [TLS-RPT](./tls_rpt.mdx)). |
+
+---
+
+## 3. How it is measured
+
+**First-round (pure DNS) path — `infra.mta_sts_txt*`, `infra.mta_sts_version`, `_single`,
+`_id_format`, `infra.mta_sts_vs_tlsrpt`:**
+
+1. `resolveTxt('_mta-sts.' + ctx.domain)` via `node:dns/promises`. `resolveTxt` returns
+   `string[][]`; each record is an array of character-strings that must be **concatenated** (a long
+   record may be split into 255-byte chunks) before parsing.
+2. Filter to records whose joined value contains `v=STSv1`. Parse the `;`-separated tag list into a
+   map; require `v` (must equal `STSv1`, must be first tag) and `id`.
+3. Validate `id` against `^[A-Za-z0-9]{1,32}$`. Emit `info` (not `warning`) when the record is simply
+   absent — MTA-STS is an enhancement, not a baseline requirement — but `warning` when it is present
+   yet malformed. For `infra.mta_sts_vs_tlsrpt`, additionally `resolveTxt('_smtp._tls.<domain>')`.
+4. Edge cases: `ENODATA`/`ENOTFOUND` ⇒ treated as "no record" (`info`), not an error; multiple STSv1
+   records ⇒ `infra.mta_sts_txt_single` warning; a CNAME at `_mta-sts` that resolves to a TXT is
+   fine (resolver follows it).
+
+**Future (HTTPS) path — every `**(HTTPS)**` sub-check:**
+
+1. Only attempted when the TXT record is present (no point fetching a policy the sender would never
+   look up). HTTPS `GET https://mta-sts.<domain>/.well-known/mta-sts.txt` with: SNI = `mta-sts.<domain>`,
+   **no redirect following**, a short total timeout (e.g. 10 s), and a small max body size (e.g. 64 KB).
+2. During the TLS handshake, capture the peer certificate and validate chain, expiry, and that a
+   SAN/CN matches `mta-sts.<domain>` (`infra.mta_sts_https_cert`).
+3. Parse the body line-by-line: `key: value`, ignore blank lines, collect repeated `mx` keys into a
+   list. Require `version: STSv1`; read `mode`, `mx[]`, `max_age`.
+4. `infra.mta_sts_mx_match`: run `resolveMx(ctx.domain)`, lowercase/normalize hostnames, and test
+   each against the policy patterns using RFC 8461 matching — a pattern `*.example.com` matches
+   exactly one label to the left (`a.example.com` yes, `a.b.example.com` no); an exact pattern must
+   equal the MX host. Any live MX with no match ⇒ `critical` (enforce would break mail); any policy
+   pattern matching no live MX ⇒ `warning`.
+5. `infra.mta_sts_id_freshness` and `_txt_policy_consistency` need **memory of the last run**: the
+   checker stores `id` + a SHA-256 hash of the normalized policy body each audit and diffs against
+   the previous audit's stored values (read from the store, see §5). A body change with an unchanged
+   `id` ⇒ warning.
+
+**Caching / rate-limit concerns:** TXT lookups honor DNS TTL; the HTTPS fetch must be conservative
+(one request per domain per audit, respect the timeout, never follow redirects, cap body size).
+Because we deliberately fetch every audit (to detect drift), we do **not** trust `max_age` as a
+skip-fetch signal for auditing purposes — but we do surface it as a finding.
+
+**Severity mapping:** absent feature ⇒ `info`; malformed TXT / mode-testing / stale entries /
+short-or-long `max_age` / non-`text/plain` ⇒ `warning`; a TXT that advertises a policy the receiver
+can't actually use (missing policy, bad cert, no `mx`, a live MX that matches nothing, TXT/policy
+inconsistency) ⇒ `critical`, since it either yields zero protection or actively blocks mail.
+
+---
+
+## 4. User interface
+
+**Dashboard contribution.** MTA-STS findings roll into the **DNS & Infrastructure** category cell
+(alongside MX, PTR, STARTTLS, TLS-RPT, DANE, DNSSEC). The cell shows the **worst** severity across
+all `infra.*` findings: a `critical` MTA-STS finding turns the cell **dark red**; a `warning` (e.g.
+`mode: testing`) makes it **amber** only if nothing worse is present; an MTA-STS-absent `info` alone
+does **not** turn the cell amber (per the roll-up rule). Never-run ⇒ light gray.
+
+**Audit-detail view.** In the per-domain audit run, MTA-STS findings render as a grouped block under
+the DNS & Infrastructure section — a card titled "MTA-STS (RFC 8461)" with one row per finding:
+
+```
+DNS & Infrastructure ▸ MTA-STS (RFC 8461)
+┌────────────────────────────────────────────────────────────────────────────┐
+│ [CRITICAL] Policy file not served                                           │
+│  Observed: _mta-sts TXT = "v=STSv1; id=20260701" but                        │
+│            https://mta-sts.example.com/.well-known/mta-sts.txt → 404        │
+│  Fix: Serve the policy file at that HTTPS path.            [ Copy fix ]      │
+├────────────────────────────────────────────────────────────────────────────┤
+│ [WARNING]  Mode is "testing"                                                │
+│  Observed: mode: testing (max_age: 604800; mx: mail.example.com)            │
+│  Fix: Change the policy to mode: enforce.                  [ Copy fix ]      │
+├────────────────────────────────────────────────────────────────────────────┤
+│ [INFO]     No TLS-RPT to receive MTA-STS failure reports                    │
+│  Fix: Publish _smtp._tls.example.com TXT v=TLSRPTv1; ...   [ Copy fix ]      │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+Each row is a shadcn/ui component set: a severity **`Badge`** (`critical`=destructive,
+`warning`=amber, `info`=secondary, `ok`=green), the observed `detail` in a monospace block, the
+`remediation` string, and a **`Copy fix`** button (lucide `Copy` icon) that copies the exact record
+or policy line to the clipboard. Built with React 19 + Tailwind + shadcn/ui.
+
+**Per-domain config inputs.** MTA-STS needs no per-domain secrets, but the domain detail page
+exposes (admin-only) a **"Desired MTA-STS mode"** select (`enforce` | `testing` | `off`) so the
+`infra.mta_sts_mode` check can flag a domain that is stuck below its target. The `mx:` expected set
+is derived automatically from live MX (no input needed).
+
+**Empty / never-run / loading states.** Never-run ⇒ the MTA-STS card shows "Not yet audited — run an
+audit to check MTA-STS." Loading ⇒ shadcn `Skeleton` rows. Feature-absent ⇒ a single `info` row:
+"No MTA-STS policy published (optional but recommended)."
+
+**Admin-only settings.** The HTTPS-fetch sub-checks are behind a global feature flag
+(`mtaSts.httpsProbe.enabled`, default off until the HTTPS client ships) plus the fetch timeout and
+max-body-size, all under Settings ▸ Admin.
+
+---
+
+## 5. Information schema (database schema)
+
+The shared core tables are **owned by engineering** — this check references, and does not redefine,
+`domains`, `audit_runs`, and `findings` (see [Engineering](../engineering.mdx) and
+[Spam checks](../spam_checks.mdx)). Every MTA-STS `Finding` is persisted to the shared `findings`
+table with `category = 'infra'` and `check_id = 'infra.mta_sts_*'`. This check adds one structured
+result table.
+
+```sql
+-- Structured, parsed MTA-STS observation for one domain in one audit run.
+CREATE TABLE mta_sts_check_results (
+  id             BIGSERIAL   PRIMARY KEY,
+  audit_run_id   BIGINT      NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+  domain_id      BIGINT      NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+
+  -- TXT part (first-round, pure DNS)
+  txt_present    BOOLEAN     NOT NULL DEFAULT FALSE,
+  txt_raw        TEXT,                      -- concatenated _mta-sts TXT value as observed
+  txt_id         TEXT,                      -- parsed id= token
+  txt_version    TEXT,                      -- parsed v= token (expect 'STSv1')
+  txt_count      SMALLINT    NOT NULL DEFAULT 0,  -- number of STSv1 TXT records found (dup detection)
+
+  -- HTTPS policy part (future round)
+  policy_fetched BOOLEAN     NOT NULL DEFAULT FALSE,
+  policy_status  SMALLINT,                  -- HTTP status of the policy fetch (200, 404, ...)
+  policy_raw     TEXT,                      -- raw policy body (capped)
+  policy_hash    TEXT,                      -- sha256 of normalized policy body (for id_freshness diff)
+  mode           TEXT,                      -- 'enforce' | 'testing' | 'none'
+  max_age        INTEGER,                   -- parsed max_age seconds
+  policy_mx      JSONB       NOT NULL DEFAULT '[]',  -- array of mx: patterns from the policy
+  live_mx        JSONB       NOT NULL DEFAULT '[]',  -- array of resolved MX hosts at audit time
+  mx_match       BOOLEAN,                   -- every live MX matched a policy pattern
+  https_cert_ok  BOOLEAN,                   -- policy host presented a valid, name-matching cert
+  redirected     BOOLEAN,                   -- policy fetch hit a (forbidden) redirect
+
+  checked_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  CONSTRAINT mta_sts_mode_chk CHECK (mode IS NULL OR mode IN ('enforce','testing','none'))
+);
+
+CREATE UNIQUE INDEX ux_mta_sts_run_domain ON mta_sts_check_results (audit_run_id, domain_id);
+CREATE INDEX ix_mta_sts_domain_time       ON mta_sts_check_results (domain_id, checked_at DESC);
+CREATE INDEX ix_mta_sts_txt_id            ON mta_sts_check_results (domain_id, txt_id);
+```
+
+Notes:
+* `policy_hash` + `txt_id` are the pair that powers `infra.mta_sts_id_freshness` and
+  `_txt_policy_consistency`: on each audit the checker reads the domain's **previous**
+  `mta_sts_check_results` row (via `ix_mta_sts_domain_time`) and compares.
+* `policy_mx` / `live_mx` are JSONB arrays so the `mx_match` computation is auditable after the fact.
+* An optional reference table `mta_sts_desired_mode(domain_id PK/FK, desired_mode text)` stores the
+  admin-set target from §4; if omitted, the default target is `enforce`.
+
+**Mapping to today's JSON file store.** There is no database yet (see
+[Engineering §7](../engineering.mdx)). Today, each audit run is one file
+`~/.email_delivery_hero/audits/<domainId>/<auditId>.json`. The MTA-STS findings live in that file's
+top-level `findings[]` array (the same shape as the future `findings` table). The structured
+`mta_sts_check_results` row maps to a **`checkResults.mta_sts` object embedded in the same audit
+JSON**, e.g.:
+
+```json
+"checkResults": {
+  "mta_sts": {
+    "txtPresent": true, "txtId": "20260701", "txtVersion": "STSv1", "txtCount": 1,
+    "policyFetched": false, "mode": null, "maxAge": null,
+    "policyMx": [], "liveMx": ["mail.example.com"], "mxMatch": null,
+    "httpsCertOk": null, "policyHash": null, "checkedAt": "2026-07-01T12:00:00Z"
+  }
+}
+```
+
+The `id_freshness` diff reads the previous audit file for the domain (the store already keeps audits
+per `<domainId>`). When storage graduates to Postgres, this embedded object becomes one
+`mta_sts_check_results` row keyed by `(audit_run_id, domain_id)` — a single-module change behind the
+store interface, no checker changes.
+
+---
+
+## 6. When we run the check
+
+* **On-demand:** runs as part of a full audit via `POST /api/domains/:id/audit` and the "Run audit
+  now" button. The pure-DNS TXT sub-checks always run; the HTTPS sub-checks run only when
+  `mtaSts.httpsProbe.enabled` is on (future round).
+* **Periodic:** the in-process scheduler re-runs the whole engine per domain on the configured
+  cadence (e.g. every 6 h from `config.yaml`). MTA-STS is cheap on the DNS side; the HTTPS fetch,
+  when enabled, is **one request per domain per tick** with a hard timeout.
+* **First-round vs future:** the `_mta-sts` **TXT** sub-checks are **first-round** (pure
+  `node:dns/promises`, deterministic). Everything that reads the served **policy body** is **future**
+  and gated on the HTTPS client landing.
+* **Cost / rate-limit / back-off:** the policy host is *your* domain, so there is no third-party rate
+  limit, but the fetch must be defensive — 10 s timeout, no redirects, 64 KB body cap, and skip the
+  fetch entirely when no TXT is present. A fetch error is reported as a finding, not a crash; the
+  next scheduled run retries.
+* **Regression detection:** the scheduler diffs each run against the previous. A domain that moves
+  from `mode: enforce` back to `testing`, drops its policy file (`policy_fetched` true → false), or
+  whose `mx_match` flips to false after an MX migration surfaces as a **new problem** on the
+  Dashboard. `id_freshness` is itself a cross-run regression check.
+
+---
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises`) | Future (needs HTTPS client / probe) |
+| --- | --- | --- |
+| `infra.mta_sts_txt` | ✅ `resolveTxt('_mta-sts.<domain>')` | |
+| `infra.mta_sts_version` | ✅ parse `v=STSv1` | |
+| `infra.mta_sts_txt_single` | ✅ count STSv1 records | |
+| `infra.mta_sts_id_format` | ✅ regex on `id` | |
+| `infra.mta_sts_vs_tlsrpt` | ✅ `resolveTxt('_smtp._tls.<domain>')` | |
+| `infra.mta_sts_policy` | | 🔒 HTTPS GET of `.well-known/mta-sts.txt` |
+| `infra.mta_sts_https_cert` | | 🔒 TLS handshake + cert validation |
+| `infra.mta_sts_policy_version` | | 🔒 parse policy body |
+| `infra.mta_sts_mode` | | 🔒 parse `mode:` |
+| `infra.mta_sts_mx_present` | | 🔒 parse `mx:` lines |
+| `infra.mta_sts_mx_match` | partial: `resolveMx` is DNS, but matching needs the fetched `mx:` set | 🔒 needs the policy body |
+| `infra.mta_sts_max_age` | | 🔒 parse `max_age:` |
+| `infra.mta_sts_id_freshness` | | 🔒 needs `policy_hash` from the fetched body |
+| `infra.mta_sts_txt_policy_consistency` | | 🔒 needs both TXT + fetched policy |
+| `infra.mta_sts_https_redirect` | | 🔒 inspect fetch response |
+| `infra.mta_sts_content_type` | | 🔒 inspect fetch headers |
+
+---
+
+## 8. Acceptance criteria
+
+1. Given a domain with a valid `_mta-sts.<domain>` TXT (`v=STSv1; id=<token>`), `infra.mta_sts_txt`
+   returns `ok`, and `txt_present`/`txt_id`/`txt_version` are persisted.
+2. Given no `_mta-sts` TXT, the checker returns a single `info` finding (not `warning`/`critical`),
+   and the DNS & Infrastructure cell is **not** turned amber by it alone.
+3. Given a malformed TXT (missing `id`, wrong version token, or an illegal `id`),
+   `infra.mta_sts_version` / `infra.mta_sts_id_format` return `warning` with a concrete corrected
+   record in the remediation string.
+4. Given two STSv1 `_mta-sts` TXT records, `infra.mta_sts_txt_single` returns `warning`.
+5. TXT values split into multiple 255-byte character-strings are concatenated before parsing.
+6. Every non-`ok` MTA-STS finding carries a concrete `remediation` (exact record/policy line/step),
+   never a generic message, and the UI `Copy fix` button copies exactly that string.
+7. `resolveTxt` errors `ENODATA`/`ENOTFOUND` are treated as "no record" (an `info`), not a thrown
+   error, and the audit still completes.
+8. When the HTTPS probe is **disabled**, no `**(HTTPS)**` sub-check runs and none is reported as
+   failing (they are simply absent), while all pure-DNS sub-checks still run.
+9. When the HTTPS probe is **enabled**: a 404/timeout on the policy path yields
+   `infra.mta_sts_policy` = `critical`; an invalid/expired/name-mismatch cert yields
+   `infra.mta_sts_https_cert` = `critical`; a redirect yields `infra.mta_sts_https_redirect` =
+   `warning`.
+10. `infra.mta_sts_mx_match` returns `critical` when any live MX (from `resolveMx`) matches no `mx:`
+    pattern, and `warning` when an `mx:` pattern matches no live MX; RFC 8461 wildcard rules
+    (`*.` = exactly one label) are honored.
+11. `infra.mta_sts_mode` returns `warning` when `mode` is `testing`/`none` while the domain's desired
+    mode is `enforce`.
+12. `infra.mta_sts_max_age` returns `warning` for `max_age` missing, `< 86400`, or `> 31557600`.
+13. `infra.mta_sts_id_freshness` returns `warning` when `policy_hash` changed but `txt_id` did not,
+    computed by diffing against the domain's previous audit record.
+14. Each audit persists one `mta_sts_check_results` row per `(audit_run_id, domain_id)` (unique
+    index enforced); today this is the embedded `checkResults.mta_sts` object in the audit JSON file.
+15. The scheduler flags a domain as a **new problem** when MTA-STS regresses (enforce→testing, policy
+    dropped, or `mx_match` flips false) versus the prior run.
+
+<!--
+  MAINTENANCE NOTES
+  - Standard: MTA-STS = RFC 8461; failure reporting = TLS-RPT RFC 8460. Keep RFC refs current.
+  - The TXT sub-checks (infra.mta_sts_txt*) are first-round pure DNS; every policy-body sub-check is
+    FUTURE, gated on the HTTPS client (mtaSts.httpsProbe.enabled). Keep that split honest here and in
+    ../spam_checks.mdx (the infra.mta_sts row + the first-vs-future table).
+  - Keep the Checker/Finding contract in sync with ../engineering.mdx; category = 'infra'.
+  - Cross-links: ./tls_transport.mdx (STARTTLS/cert), ./tls_rpt.mdx (failure reports),
+    ./mx_routing.mdx (MX set the mx: patterns must match), ./dane_tlsa.mdx (DNSSEC alternative).
+  - When storage graduates to Postgres, the embedded checkResults.mta_sts object becomes one
+    mta_sts_check_results row; no checker changes.
+-->

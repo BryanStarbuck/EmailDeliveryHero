@@ -1,7 +1,9 @@
 import { credentialsFileExists, googleCredentialsFromFile } from "@config/credentials-file"
 import { Public } from "@module/auth/public.decorator"
-import { Controller, Get } from "@nestjs/common"
+import { Body, Controller, Get, HttpCode, Post } from "@nestjs/common"
 import { ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger"
+import { logError, logWarn } from "@shared/logging"
+import { ClientErrorDto } from "./dto/client-error.dto"
 
 /**
  * Unauthenticated health + auth-config probes. These are the only routes reachable before sign-in
@@ -29,5 +31,21 @@ export class HealthController {
       googleConfigured: fromEnv || Boolean(clientId && clientSecret),
       credentialsFilePresent: credentialsFileExists(),
     }
+  }
+
+  @Public()
+  @Post("client-error")
+  @HttpCode(204)
+  @ApiOperation({
+    summary: "Ingest a browser-side error into the backend fault trail (error.err)",
+  })
+  clientError(@Body() body: ClientErrorDto): void {
+    // The browser has no filesystem, so front-end faults are forwarded here to land in the ONE
+    // error file tagged [Frontend] (pm/errors.mdx §3). Public so an error on the sign-in page
+    // (pre-auth) is still captured.
+    const context = body.context ? `Frontend:${body.context}` : "Frontend"
+    const detail = [body.url ? `url=${body.url}` : "", body.stack ?? ""].filter(Boolean).join(" ")
+    if (body.level === "warn") logWarn(`${body.message} ${detail}`.trim(), context)
+    else logError(body.message, detail || undefined, context)
   }
 }

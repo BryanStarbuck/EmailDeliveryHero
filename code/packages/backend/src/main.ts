@@ -3,6 +3,7 @@ import { Logger, ValidationPipe } from "@nestjs/common"
 import { ConfigService } from "@nestjs/config"
 import { NestFactory } from "@nestjs/core"
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger"
+import { AllExceptionsFilter } from "@shared/all-exceptions.filter"
 import { appLogger, LOG_DIR } from "@shared/logging"
 import helmet from "helmet"
 import { AppModule } from "./app.module"
@@ -11,6 +12,8 @@ import { buildAuthFrontend } from "./modules/auth/auth-frontend"
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bufferLogs: true })
   app.useLogger(appLogger)
+  // Catch every exception thrown from any route and log it to error.err (pm/errors.mdx §3).
+  app.useGlobalFilters(new AllExceptionsFilter())
   const config = app.get(ConfigService)
   const logger = new Logger("Bootstrap")
 
@@ -41,14 +44,14 @@ async function bootstrap() {
 
   // CORS for the Vite front-end. NEVER reflect an arbitrary Origin with credentials — require an
   // explicit allowlist and fail closed at boot if it is empty.
-  const origins = (config.get<string>("CORS_ORIGINS") ?? "http://localhost:9311")
+  const origins = (config.get<string>("CORS_ORIGINS") ?? "http://localhost:4444")
     .split(",")
     .map((o) => o.trim())
     .filter(Boolean)
   if (origins.length === 0) {
     throw new Error(
       "CORS_ORIGINS is empty. Refusing to start: CORS with credentials requires an explicit " +
-        "origin allowlist (e.g. CORS_ORIGINS=http://localhost:9311).",
+        "origin allowlist (e.g. CORS_ORIGINS=http://localhost:4444).",
     )
   }
   app.enableCors({ origin: origins, credentials: true })
@@ -75,12 +78,11 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, swaggerConfig)
   SwaggerModule.setup("api-docs", app, document, { jsonDocumentUrl: "api-json" })
 
+  // Process-level nets so anything thrown outside a request still lands in error.err (errors.mdx §3).
   process.on("unhandledRejection", (reason) =>
-    appLogger.error?.("Unhandled promise rejection", String(reason), "Process"),
+    appLogger.logError("Unhandled promise rejection", reason, "Process"),
   )
-  process.on("uncaughtException", (err) =>
-    appLogger.error?.("Uncaught exception", String(err), "Process"),
-  )
+  process.on("uncaughtException", (err) => appLogger.logFatal("Uncaught exception", err, "Process"))
 
   const raw = config.get<string>("PORT") ?? "9312"
   const port = Number(raw)
@@ -91,10 +93,10 @@ async function bootstrap() {
   logger.log(
     `EmailDeliveryHero backend on http://localhost:${port} (docs: /api-docs, spec: /api-json)`,
   )
-  logger.log(`Logs: ${LOG_DIR} (info.log, error.log)`)
+  logger.log(`Logs: ${LOG_DIR} (log.log, error.err)`)
 }
 
 bootstrap().catch((err) => {
-  appLogger.error?.("Fatal: backend failed to bootstrap", String(err), "Bootstrap")
+  appLogger.logFatal("Fatal: backend failed to bootstrap", err, "Bootstrap")
   process.exit(1)
 })

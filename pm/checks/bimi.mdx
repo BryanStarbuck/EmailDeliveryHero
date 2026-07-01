@@ -1,0 +1,318 @@
+---
+title: BIMI — Brand Indicators for Message Identification
+description: Engineering spec for EmailDeliveryHero's BIMI check — verifying the default._bimi TXT record, its v=BIMI1 syntax, the DMARC-at-enforcement prerequisite, the l= SVG logo URL, the a= VMC/CMC certificate, and BIMI-Selector handling, splitting first-round DNS checks from future HTTPS/SVG/certificate validation.
+---
+
+# BIMI — Brand Indicators for Message Identification
+
+**BIMI** (Brand Indicators for Message Identification, currently an IETF Internet-Draft) lets a
+domain publish a **brand logo** that supporting receivers (Gmail, Apple Mail, Yahoo, Fastmail)
+display next to authenticated mail from that domain. The logo is published as a DNS TXT record at
+`default._bimi.<domain>` (or `<selector>._bimi.<domain>`) whose value points at an SVG logo (`l=`)
+and, for the providers that require it, a **Verified Mark Certificate (VMC)** or **Common Mark
+Certificate (CMC)** (`a=`) issued by a Mark Verifying Authority (MVA, e.g. DigiCert or Entrust).
+BIMI is not an anti-spam control in itself — its deliverability value is indirect but real: it is
+the visible reward for getting authentication right, it raises brand trust and open rates, and its
+**hard prerequisite is DMARC at enforcement** (`p=quarantine` or `p=reject`), so a BIMI check
+doubles as a nudge toward strong DMARC. The classic real-world failure is a domain that publishes a
+BIMI record but never reaches DMARC enforcement, or publishes only an SVG with no VMC — in both
+cases the logo silently never renders.
+
+This check belongs to the **Spam & Content** dashboard category, `checkId` prefix **`content`**
+(BIMI sub-family). Read it alongside the sibling specs and do not duplicate them:
+
+* [Deliverability checks catalog](../spam_checks.mdx) — where `content.bimi` sits in the master
+  catalog (this file is the deep-dive for that one catalog row).
+* [Engineering](../engineering.mdx) — the `Checker`/`Finding` contract, registry + runner, file
+  store, and scheduler this check plugs into.
+* [Dashboard](../dashboard.mdx) — how the Spam & Content cell is colored and rolled up.
+* [Scheduled checks](../scheduled_checks.mdx) — recurring-run cadence and regression detection.
+* [DMARC](./dmarc.mdx) — **hard prerequisite**: BIMI is ignored unless DMARC is at `p=quarantine`
+  or `p=reject`. Every BIMI finding cross-references the domain's DMARC state.
+* [Content & spam scoring](./content_scoring.mdx) — the peer Spam & Content checks BIMI rolls up
+  beside.
+
+## 1. What it checks
+
+**The standard.** BIMI is defined by an active IETF draft (`draft-brand-indicators-for-message-identification`)
+plus the companion **AVP (Assertion Record)** and **VMC** drafts. A BIMI record is a DNS TXT record
+at `<selector>._bimi.<domain>` (default selector name is `default`) carrying a semicolon-delimited
+tag list, minimally `v=BIMI1;` and an `l=` (logo URL) tag, optionally an `a=` (authority/VMC URL)
+tag. When a receiver processes an inbound message, it: (1) confirms the message passed **DMARC at an
+enforcing policy**, (2) selects the BIMI record using the `BIMI-Selector:` message header if present
+(else `default`), (3) fetches the `l=` SVG, and — for providers that require it — (4) fetches and
+validates the `a=` VMC/CMC, checking the embedded logo hash matches the SVG.
+
+**Why receivers care.** BIMI is layered strictly on top of authentication: the logo is a UI reward
+that only appears once SPF/DKIM/DMARC are correct and the policy is enforcing, which is exactly why
+Gmail/Yahoo made it attractive alongside their 2024 bulk-sender rules. It gives no delivery boost by
+itself, but a rendered brand logo materially lifts recognition, open rates, and phishing
+resistance.
+
+**Common failure mode.** The dominant failure is **publishing BIMI before DMARC is enforcing** — the
+record parses fine but every receiver ignores it because DMARC is still `p=none`. The second most
+common is **SVG-only (no `a=` VMC)**: Gmail and Apple Mail will not show a logo without a valid VMC,
+so the brand sees nothing despite a valid record. Others: an `l=` URL that is not HTTPS or 404s; an
+SVG that is not the **SVG Tiny Portable/Secure (SVG Tiny-PS)** profile (has scripts, external refs,
+animation, or is non-square); a VMC that is expired or from an unrecognized authority.
+
+**How a failure degrades placement.** BIMI failure does not push mail to spam — it removes the
+visible trust signal, so recipients see a generic monogram/avatar instead of the brand mark, which
+weakens recognition and engagement. Because BIMI presence is a signal some filters weakly reward,
+its absence is a soft negative for well-known brands.
+
+## 2. Sub-checks
+
+`content.bimi.*` — comprehensive. Each remediation hands the user the exact record or step. The
+`present`/`syntax`/`dmarc_prereq`/`selector` rows are **first-round pure DNS**; SVG- and VMC-body
+rows are **future** (need an HTTPS fetch plus SVG/certificate validation) and are marked (future).
+
+| Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `content.bimi_present` | A TXT record exists at `default._bimi.<domain>` (or the configured selector) and starts with `v=BIMI1`. | `resolveTxt('default._bimi.<domain>')`. | **warning:** no BIMI record for a brand that should have one (`info` for domains not opting into BIMI). | Publish a TXT record at `default._bimi.<domain>`: `v=BIMI1; l=https://<domain>/bimi/logo.svg; a=https://<domain>/bimi/vmc.pem`. |
+| `content.bimi_syntax` | The record parses: `v=BIMI1` first, known tags (`v`, `l`, `a`), valid `;`-separated `tag=value` pairs, no stray tokens. | Tokenize and validate the tag list against the BIMI draft grammar. | **critical:** malformed record → receivers ignore BIMI. | Fix the offending tag; `v=BIMI1` must be first and `l=` must be a valid URL. |
+| `content.bimi_dmarc_prereq` | DMARC is published **and enforcing** (`p=quarantine` or `p=reject`); some receivers also require `sp` enforcing and `pct=100`. | Read the domain's DMARC finding (`dmarc.policy`) from the same audit run. | **critical:** BIMI record present but DMARC is `p=none`/absent → BIMI ignored everywhere. | Move DMARC to `p=quarantine` then `p=reject` (see [DMARC](./dmarc.mdx)); until then BIMI will never render. |
+| `content.bimi_selector` | If a selector other than `default` is used, the `<selector>._bimi.<domain>` record exists and matches the value that would appear in the message `BIMI-Selector:` header. | TXT lookup at the configured selector; compare against the sample message's `BIMI-Selector` header if provided. | **warning:** message uses a `BIMI-Selector` with no matching `_bimi` record → no logo. | Publish a `_bimi` record for every selector your mail streams reference in `BIMI-Selector:`, or drop the header and use `default`. |
+| `content.bimi_l_present` | The `l=` tag is present and non-empty (an empty `l=` is a valid "declined" record but yields no logo). | Parse the `l=` tag. | **warning:** `l=` empty or missing → no logo will show. | Set `l=` to the HTTPS URL of your SVG Tiny-PS logo. |
+| `content.bimi_svg_url` | The `l=` value is a syntactically valid **HTTPS** URL that resolves (DNS + reachable host); plain HTTP is rejected by receivers. | Parse URL scheme/host; first round resolves the host via `node:dns/promises`; a full HTTPS `GET` + `200` is (future). | **critical:** `l=` is `http://` or an unresolvable host; **warning (future):** HTTPS `GET` is not `200`. | Host the SVG at an `https://` URL that returns `200`; use a stable, cache-friendly path. |
+| `content.bimi_svg_profile` *(future)* | The fetched SVG is **SVG Tiny-PS**: `baseProfile="tiny-ps"`, square viewBox, no `<script>`, no `<a>`, no external references, no animation, ≤ ~32 KB. | HTTPS fetch of `l=`, then parse/validate the SVG against the Tiny-PS profile. | **critical:** SVG has scripts/external refs (receivers reject); **warning:** non-square or oversized. | Re-export as SVG Tiny-PS (square `viewBox`, `baseProfile="tiny-ps"`), strip scripts/links/external refs; validate with the BIMI Group SVG conformance checker. |
+| `content.bimi_svg_square` *(future)* | The SVG `viewBox` is square (1:1); non-square logos are rejected/cropped. | Parse `viewBox` width vs height from the fetched SVG. | **warning:** aspect ratio ≠ 1:1. | Re-crop the artwork to a square canvas and re-export. |
+| `content.bimi_vmc` | The `a=` tag (VMC/CMC URL) is present — Gmail and Apple Mail will **not** display a logo without a verified mark certificate. | Parse the `a=` tag. | **warning:** BIMI record has `l=` but no `a=` → logo won't render in Gmail/Apple. | Obtain a **VMC** (registered trademark) or **CMC** (non-trademark mark) from a Mark Verifying Authority and publish its PEM URL in `a=`. |
+| `content.bimi_vmc_url` | The `a=` value is a valid **HTTPS** URL that resolves. | Parse scheme/host; first round resolves host; HTTPS `GET` is (future). | **critical:** `a=` is `http://` or unresolvable. | Host the VMC PEM at an `https://` URL returning `200`. |
+| `content.bimi_vmc_valid` *(future)* | The VMC/CMC certificate is a valid PEM chain, from a **recognized MVA**, not expired, and the mark type matches (VMC = trademarked, CMC = government-issued/other). | HTTPS fetch of `a=`, parse the X.509 chain, verify issuer against the MVA allow-list, check `notBefore`/`notAfter`. | **critical:** VMC expired or from an unrecognized issuer → logo suppressed. | Renew the VMC (they expire ~annually) or reissue from a recognized MVA; update the `a=` URL. |
+| `content.bimi_vmc_logo_match` *(future)* | The logo embedded in the VMC matches the SVG served at `l=` (hash/SHA-256 comparison). | Extract the logotype from the VMC extension; compare against the fetched SVG. | **critical:** VMC logo ≠ served SVG → receivers reject. | Re-issue the VMC against the exact SVG you serve, or serve the exact SVG the VMC certifies. |
+| `content.bimi_single` | Exactly one TXT record at the `_bimi` name (multiple is ambiguous, like multiple SPF/DMARC). | Count TXT records at the selector name. | **warning:** two or more `_bimi` TXT records. | Delete the extra TXT so exactly one `v=BIMI1` record remains. |
+| `content.bimi_dns_health` | The `_bimi` name resolves cleanly (no NXDOMAIN chain, no dangling CNAME to a dead host). | Resolve the name and any CNAME target. | **warning:** `_bimi` is a CNAME to an unclaimed target. | Point `_bimi` directly at the TXT record or a claimed host; remove dangling CNAMEs. |
+
+## 3. How it is measured
+
+**First round (pure `node:dns/promises`).** The checker runs
+`resolveTxt('default._bimi.<domain>')` (and, for each entry in `CheckContext.selectors` that is
+intended as a BIMI selector, `resolveTxt('<selector>._bimi.<domain>')`). It joins each TXT record's
+character-string chunks, tokenizes on `;`, and builds a tag map. It validates: `v=BIMI1` is present
+and first (`content.bimi_syntax`), exactly one record exists (`content.bimi_single`), `l=`/`a=` are
+present (`bimi_l_present`/`bimi_vmc`), and each URL is a syntactically valid **HTTPS** URL whose host
+resolves (`bimi_svg_url`/`bimi_vmc_url` — scheme + DNS resolution only, no body fetch). The
+**DMARC prerequisite** (`content.bimi_dmarc_prereq`) is evaluated by reading the sibling
+`dmarc.policy` finding produced in the *same* `AuditResult` rather than re-querying — the runner
+guarantees the DMARC checker runs before BIMI so BIMI can consume its result; if DMARC is absent or
+`p=none`, BIMI's presence is downgraded to `critical` regardless of an otherwise-perfect record,
+because it will render nowhere.
+
+**Selector handling.** If the operator supplies a sample message with a `BIMI-Selector:` header, the
+checker parses that header's `s=` value and verifies a matching `_bimi` record exists
+(`content.bimi_selector`); with no sample message it audits only `default`.
+
+**Future (HTTPS + SVG + certificate).** The body-level sub-checks need a network probe beyond DNS:
+an HTTPS client `GET`s the `l=` SVG and validates it against the **SVG Tiny-PS** profile (XML parse:
+`baseProfile="tiny-ps"`, square `viewBox`, reject `<script>`/`<a>`/external `href`/`xlink:href`,
+reject animation elements, enforce a size cap). A second `GET` fetches the `a=` VMC PEM; the chain is
+parsed (via `openssl`/a Node X.509 lib), the issuer checked against a configurable **MVA allow-list**
+(`bimi_mva` reference table), validity dates checked, and the embedded logotype hashed and compared
+to the served SVG (`bimi_vmc_logo_match`). These are gated behind the same HTTPS/TLS-probe capability
+used by `infra.mta_sts`.
+
+**Edge cases & caching.** BIMI TXT records are cacheable at their zone TTL; the checker respects the
+scheduler cadence and does not over-query. A **declined** record (`v=BIMI1; l=; a=;` with empty
+values) is valid and means "intentionally no logo" — treated as `info`, not a failure. Wildcard or
+CNAMEd `_bimi` names are followed. HTTPS fetches (future) apply a short timeout, follow one redirect,
+and back off on 5xx.
+
+**Severity mapping.** Missing record for a brand → `warning` (or `info` if BIMI not desired); malformed
+record / DMARC-not-enforcing with a record present / non-HTTPS URL / invalid VMC → `critical`;
+SVG-only-no-VMC / non-square / near-limit → `warning`; declined or not-opted-in → `info`.
+
+## 4. User interface
+
+**Dashboard contribution.** BIMI findings feed the **Spam & Content** category cell (one cell per
+domain). Per the roll-up rules in [Dashboard](../dashboard.mdx): all-`ok` keeps the cell dark green;
+a BIMI `warning` (e.g. no VMC) contributes amber; a BIMI `critical` (record present but DMARC not
+enforcing) turns the cell dark red. `info`-only BIMI advisories (not opted in) never turn the cell
+amber. BIMI is one contributor among the Spam & Content sub-checks; it does not get its own column.
+
+**Audit-detail view.** Within the audit-detail page, findings render grouped under a **BIMI** subhead
+inside the Spam & Content section. Each `content.bimi_*` finding is a row built with the React 19 +
+shadcn/ui stack: a severity `Badge` (green/amber/red via `lucide-react` icons), the sub-check label,
+the **observed detail** (the raw TXT string, the parsed `l=`/`a=` URLs, the resolved DMARC policy),
+the **remediation** string, and a **copy-to-clipboard** button on the exact record to publish.
+
+```
+Spam & Content › BIMI                                    2 problems
+┌────────────────────────────────────────────────────────────────────┐
+│ [●red]  content.bimi_dmarc_prereq   BIMI ignored: DMARC is p=none   │
+│         Record present at default._bimi but DMARC not enforcing.    │
+│         Fix → move DMARC to p=quarantine/reject   [Copy] [DMARC →]  │
+├────────────────────────────────────────────────────────────────────┤
+│ [●amb]  content.bimi_vmc            No VMC/CMC (a= tag missing)      │
+│         l=https://ex.com/logo.svg   a=(none)                        │
+│         Gmail/Apple won't show the logo without a verified mark.    │
+│         Fix → obtain a VMC from a Mark Verifying Authority  [Copy]  │
+├────────────────────────────────────────────────────────────────────┤
+│ [●grn]  content.bimi_svg_url        l= is a valid HTTPS URL         │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+**Logo preview panel (future).** Once the HTTPS/SVG round ships, the BIMI subsection renders a small
+**live preview** of the fetched SVG (sandboxed, scripts stripped) beside a "how it will appear in
+Gmail/Apple Mail" mock avatar, plus a VMC summary card (issuer, subject org, `notAfter` countdown).
+Until then the panel shows a "Logo & certificate validation is a future round" placeholder.
+
+**Per-domain config inputs.** The domain settings panel accepts optional **BIMI selectors** (beyond
+`default`) and an optional **sample message** upload (to read the `BIMI-Selector` header). These reuse
+the shared domain-config form.
+
+**States.** Empty / never-run → the cell shows "—" (light gray) and the BIMI subhead reads "Not run".
+Loading → skeleton rows. A domain that has intentionally declined BIMI shows a single `info` row
+("BIMI declined — no logo published") rather than warnings. VMC allow-list editing (which MVAs are
+recognized) is an **admin-only** setting.
+
+## 5. Information schema (database schema)
+
+Reference the shared core tables owned by [Engineering](../engineering.mdx) — do **not** redefine
+them: `domains`, `sending_ips`, `dkim_selectors`, `audit_runs`, and `findings` (each BIMI
+`content.bimi_*` result also emits a normal `findings` row with `category='content'`). BIMI adds one
+structured **result** table plus one **reference** table.
+
+```sql
+-- Structured result of one BIMI evaluation for one domain in one audit run.
+CREATE TABLE bimi_check_results (
+    id               bigserial   PRIMARY KEY,
+    audit_run_id     bigint      NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id        bigint      NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    selector         text        NOT NULL DEFAULT 'default', -- which _bimi selector was audited
+    present          boolean     NOT NULL,                   -- v=BIMI1 TXT record exists
+    raw_record       text,                                   -- exact TXT string observed
+    svg_url          text,                                   -- l= value
+    vmc_url          text,                                   -- a= value (NULL if no VMC)
+    dmarc_enforcing  boolean     NOT NULL,                   -- DMARC p=quarantine|reject at audit time
+    svg_valid        boolean,                                -- NULL until HTTPS/SVG round runs
+    vmc_valid        boolean,                                -- NULL until cert round runs
+    vmc_not_after    timestamptz,                            -- VMC expiry (NULL until parsed)
+    vmc_issuer       text,                                   -- MVA that issued the VMC (NULL until parsed)
+    checked_at       timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT bimi_results_unique_per_run UNIQUE (audit_run_id, domain_id, selector)
+);
+
+CREATE INDEX bimi_results_domain_idx  ON bimi_check_results (domain_id, checked_at DESC);
+CREATE INDEX bimi_results_run_idx     ON bimi_check_results (audit_run_id);
+CREATE INDEX bimi_results_expiry_idx  ON bimi_check_results (vmc_not_after)
+    WHERE vmc_not_after IS NOT NULL; -- drives "VMC expiring soon" alerts
+
+-- Reference table: recognized Mark Verifying Authorities (issuer allow-list for VMC/CMC).
+CREATE TABLE bimi_mva (
+    id             serial      PRIMARY KEY,
+    name           text        NOT NULL,          -- e.g. 'DigiCert', 'Entrust'
+    issuer_dn_match text       NOT NULL,          -- substring/regex matched against cert issuer DN
+    mark_types     text[]      NOT NULL DEFAULT '{vmc}', -- {vmc}, {cmc}, or both
+    enabled        boolean     NOT NULL DEFAULT true,
+    updated_at     timestamptz NOT NULL DEFAULT now()
+);
+```
+
+**Mapping to today's JSON file store.** There is no database yet; the store module persists these as
+JSON under `~/.email_delivery_hero/`:
+
+* `bimi_check_results` → embedded in each audit file `audits/<domainId>/<auditId>.json` under a
+  `bimi` key: `{ selector, present, rawRecord, svgUrl, vmcUrl, dmarcEnforcing, svgValid,
+  vmcValid, vmcNotAfter, vmcIssuer, checkedAt }`. The `findings[]` array in the same file holds the
+  human-facing `content.bimi_*` rows. One audit file per run is the file-store analog of the
+  `(audit_run_id, domain_id, selector)` unique key.
+* `bimi_mva` → the `bimi.mvaAllowList` array in `config.yaml` (`{ name, issuerDnMatch, markTypes,
+  enabled }`), editable via the admin-only settings.
+
+When the store migrates from files to Postgres it is a single store-module change: the `bimi` JSON
+object becomes a `bimi_check_results` row and the config array becomes `bimi_mva` rows.
+
+## 6. When we run the check
+
+**On-demand.** `POST /api/domains/:id/audit` runs the full engine, including the first-round BIMI DNS
+sub-checks, immediately — this is what the "Run now" button and initial domain add trigger. The
+future HTTPS/SVG/VMC sub-checks run in the same call once that capability ships.
+
+**Periodic.** The in-process scheduler (`POST /api/scheduler/run` or the interval job, cadence from
+`config.yaml`, default every 6h) re-runs BIMI per domain. The DNS sub-checks are cheap and run every
+cycle. When the VMC round exists, the certificate fetch honors a longer effective cadence (daily is
+plenty) and the `vmc_not_after` value drives a proactive **"VMC expiring within 30 days"** warning so
+the logo never silently drops when the annual cert lapses.
+
+**First-round vs gated.** `content.bimi_present`, `bimi_syntax`, `bimi_single`, `bimi_dmarc_prereq`,
+`bimi_selector`, `bimi_l_present`, `bimi_vmc`, and the URL-shape checks (`bimi_svg_url`/`bimi_vmc_url`
+at scheme + host-resolution level) ship **first round** — pure `node:dns/promises`. Everything that
+requires fetching the SVG body or the certificate (`bimi_svg_profile`, `bimi_svg_square`,
+`bimi_vmc_valid`, `bimi_vmc_logo_match`, and the `200`-status assertion on the URLs) is **future**,
+gated behind the HTTPS/TLS-probe capability shared with `infra.mta_sts`.
+
+**Cost / rate-limit / back-off.** DNS is free and cached at TTL. The future HTTPS fetches hit the
+brand's own logo host and the MVA's cert host — low volume, one request each per cadence, with a short
+timeout, single-redirect follow, and exponential back-off on 5xx. No paid feed or provider API is
+required for any BIMI sub-check.
+
+**Regression detection.** The scheduler diffs each run against the prior `bimi_check_results` snapshot:
+a BIMI record disappearing, DMARC dropping from enforcing to `p=none` (flipping `bimi_dmarc_prereq`
+to `critical`), a `vmc_not_after` crossing into the expiry window, or `svg_valid`/`vmc_valid` going
+`true`→`false` are all "new problems" that surface as fresh findings and a category-cell color
+regression on the Dashboard.
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises`) | Future (HTTPS fetch / SVG parse / cert validation) |
+| --- | --- | --- |
+| `content.bimi_present` | ✅ TXT lookup at `default._bimi.<domain>` | — |
+| `content.bimi_syntax` | ✅ tokenize/validate tag list | — |
+| `content.bimi_single` | ✅ count TXT records | — |
+| `content.bimi_dmarc_prereq` | ✅ reads sibling `dmarc.policy` finding | — |
+| `content.bimi_selector` | ✅ TXT lookup per selector + header compare | — |
+| `content.bimi_l_present` / `content.bimi_vmc` | ✅ parse `l=` / `a=` tags | — |
+| `content.bimi_svg_url` / `content.bimi_vmc_url` | ✅ URL scheme (HTTPS) + host DNS resolution | ⏳ HTTPS `GET` must return `200` |
+| `content.bimi_dns_health` | ✅ resolve name / dangling-CNAME check | — |
+| `content.bimi_svg_profile` | — | ⏳ fetch SVG, validate SVG Tiny-PS (no scripts/external refs/animation, size cap) |
+| `content.bimi_svg_square` | — | ⏳ fetch SVG, check square `viewBox` |
+| `content.bimi_vmc_valid` | — | ⏳ fetch VMC PEM, verify chain + MVA allow-list + expiry |
+| `content.bimi_vmc_logo_match` | — | ⏳ hash VMC logotype vs served SVG |
+
+Rule of thumb: **anything answerable from the `_bimi` TXT record (and the already-computed DMARC
+result) ships first**; anything that must fetch the SVG body or the VMC certificate over HTTPS is a
+later round. The `Checker`/`Finding` contract is identical in both rounds — only the checker's
+internals grow — so the Dashboard, store, and scheduler never change.
+
+## 8. Acceptance criteria
+
+1. A domain with no `_bimi` record yields `content.bimi_present` = `warning` (or `info` if BIMI is
+   not opted into) and no `critical`.
+2. A syntactically valid `v=BIMI1; l=https://…; a=https://…` record on a domain whose DMARC is
+   `p=none` yields `content.bimi_dmarc_prereq` = **`critical`** with a remediation pointing at
+   [DMARC](./dmarc.mdx), because the logo renders nowhere.
+3. The same record on a domain with DMARC `p=quarantine`/`p=reject` yields `bimi_dmarc_prereq` = `ok`.
+4. A record whose `l=` (or `a=`) is `http://` or an unresolvable host yields the corresponding
+   `bimi_svg_url`/`bimi_vmc_url` = `critical`.
+5. A record with `l=` but no `a=` yields `content.bimi_vmc` = `warning` ("Gmail/Apple won't show the
+   logo without a VMC/CMC").
+6. Two `_bimi` TXT records yield `content.bimi_single` = `warning`.
+7. A `BIMI-Selector:` header referencing a selector with no matching `_bimi` record yields
+   `content.bimi_selector` = `warning`; with a matching record it is `ok`.
+8. Every non-`ok` finding carries a concrete `remediation` string containing an exact record/value or
+   step, never a generic message; the record-to-publish is copy-to-clipboard in the UI.
+9. Each BIMI evaluation writes a `bimi_check_results` row (JSON `bimi` object today) keyed
+   `(audit_run_id, domain_id, selector)` with `present`, `raw_record`, `svg_url`, `vmc_url`,
+   `dmarc_enforcing`, and `checked_at`; `svg_valid`/`vmc_valid`/`vmc_not_after`/`vmc_issuer` are
+   `NULL` until the future round runs.
+10. First-round sub-checks use only `node:dns/promises`; `bimi_svg_profile`, `bimi_svg_square`,
+    `bimi_vmc_valid`, and `bimi_vmc_logo_match` are absent/skipped in the first round and clearly
+    labelled future in the UI.
+11. The scheduler flags a BIMI record disappearing, DMARC dropping below enforcement, or a VMC
+    crossing its expiry window as a regression (new problem) on the next diffed run.
+12. Findings surface under a BIMI subhead in the Spam & Content category and contribute to that one
+    dashboard cell's color per the [Dashboard](../dashboard.mdx) roll-up rules.
+
+<!--
+  Maintenance notes:
+  - BIMI is an IETF Internet-Draft, not yet a numbered RFC; re-check the draft
+    (draft-brand-indicators-for-message-identification) and the VMC/CMC specs on each edit and
+    update tag/profile references (SVG Tiny-PS, VMC vs CMC) as they finalize.
+  - Keep the DMARC-enforcement prerequisite in lockstep with ./dmarc.mdx (dmarc.policy) — BIMI
+    consumes that finding; if DMARC's policy semantics change (DMARCbis RFC 9989/9990/9991, pct
+    deprecated), revisit bimi_dmarc_prereq.
+  - Keep the `content.bimi` catalog row in ../spam_checks.mdx and the First-round-vs-future table in
+    ../engineering.mdx in sync with §7 here. Keep the bimi_mva issuer allow-list current as Mark
+    Verifying Authorities are added/removed.
+-->

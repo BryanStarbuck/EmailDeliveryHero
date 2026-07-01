@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — Engineering
-description: Architecture and engineering standards for EmailDeliveryHero — the pnpm monorepo layout (code/packages/backend, code/packages/frontend), the NestJS module list, the React 19 + Vite frontend, ports 9311/9312, the pluggable audit-engine design, the on-disk JSON/YAML store, and how periodic checks run.
+description: Architecture and engineering standards for EmailDeliveryHero — the pnpm monorepo layout (code/packages/backend, code/packages/frontend), the NestJS module list, the React 19 + Vite frontend, ports 4444/9312, the pluggable audit-engine design, the on-disk JSON/YAML store, and how periodic checks run.
 ---
 
 # EmailDeliveryHero — Engineering
@@ -26,7 +26,7 @@ store, no database** — is called out explicitly.
 | Package manager | **pnpm** with **workspaces** (never mix npm/yarn) |
 | Repo shape | **Monorepo**: `code/packages/backend`, `code/packages/frontend` |
 | Backend framework | **NestJS** (REST under `/api`), port **9312** |
-| Frontend | **React 19 + Vite + Tailwind + shadcn/ui + lucide-react + TanStack Router/Query**, port **9311** |
+| Frontend | **React 19 + Vite + Tailwind + shadcn/ui + lucide-react + TanStack Router/Query**, port **4444** |
 | Auth | **OpenAuthFederated** (`@auth/backend` + `@auth/react`), consumed as an external library |
 | Storage | On-disk **JSON/YAML** under a state dir (default `~/.email_delivery_hero/`) — **no database** |
 | DNS | Node's native **`node:dns/promises`**; shelling out to Brew tools (`dig`) is a future enhancement |
@@ -53,7 +53,7 @@ code/
     │   │   ├── store/          # on-disk JSON/YAML persistence layer
     │   │   └── shared/         # dtos base, filters, pagination, config
     │   └── package.json
-    └── frontend/                # React 19 + Vite SPA — port 9311
+    └── frontend/                # React 19 + Vite SPA — port 4444
         ├── src/
         │   ├── main.tsx         # <AuthProvider> root + router
         │   ├── router/          # TanStack Router routes + auth guard
@@ -115,7 +115,7 @@ client whenever the API changes.
 | Concern | Standard |
 | --- | --- |
 | Framework | **React 19** + TypeScript strict (named imports from `react`) |
-| Build tool | **Vite** (dev server on **9311**, proxies `/api` → backend on **9312**) |
+| Build tool | **Vite** (dev server on **4444**, proxies `/api` → backend on **9312**) |
 | Routing | **TanStack Router** (type-safe, file-based) + an auth guard that redirects unauthenticated users to sign-in |
 | Server state | **TanStack Query** (React Query) over the generated hooks |
 | HTTP transport | **axios** — one shared instance; request interceptor injects `Authorization: Bearer <jwt>` from the `@auth/react` session; response interceptor handles `401` (sign out) and `403` (permission toast) |
@@ -271,7 +271,7 @@ Scheduled re-audits re-run the same checkers on a cadence and surface **new** pr
   staged files. Generated API code (`src/@api/gen/`) is excluded.
 * **Tests:** Vitest for frontend units, Jest + supertest for backend; each checker gets unit tests
   with recorded DNS fixtures so audits are deterministic in CI.
-* **Run locally:** `pnpm --filter backend dev` (9312) and `pnpm --filter frontend dev` (9311); the
+* **Run locally:** `pnpm --filter backend dev` (9312) and `pnpm --filter frontend dev` (4444); the
   Vite dev server proxies `/api` to the backend.
 * **Deploy:** localhost-first; a `Dockerfile` + `docker-compose.yml` package the two services and
   mount the state dir as a volume.
@@ -284,7 +284,7 @@ Scheduled re-audits re-run the same checkers on a cadence and surface **new** pr
 * **Backend:** NestJS REST + Swagger on **9312**, modules `auth / health / domains / audit /
   scheduler / store`, global `JwtAuthGuard`, `class-validator` DTOs.
 * **Frontend:** React 19 + Vite + Tailwind + shadcn/ui + lucide-react + TanStack Router/Query on
-  **9311**, generated typed API client, `@auth/react`.
+  **4444**, generated typed API client, `@auth/react`.
 * **Audit engine:** a `Checker` interface + registry + runner; six first-round checkers producing
   severity-tagged findings with mandatory remediation.
 * **Storage:** flat JSON/YAML under `~/.email_delivery_hero/`, no database, isolated behind a store
@@ -293,7 +293,7 @@ Scheduled re-audits re-run the same checkers on a cadence and surface **new** pr
 * **Auth:** OpenAuthFederated consumed as an external library.
 
 <!--
-  This file is meant to grow. Keep the fixed decisions honest (NestJS 9312, React/Vite 9311, pnpm
+  This file is meant to grow. Keep the fixed decisions honest (NestJS 9312, React/Vite 4444, pnpm
   monorepo, file store under ~/.email_delivery_hero/, pluggable Checker engine). When a checker is
   added, add a row in §6.3. When storage or scheduling graduates past files/in-process, note it as a
   future enhancement and keep the Checker/store contracts stable.

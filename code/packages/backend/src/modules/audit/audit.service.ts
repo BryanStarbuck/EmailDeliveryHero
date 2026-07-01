@@ -40,6 +40,7 @@ export class AuditService {
   /** Run all checkers for one domain, persist and return the result. */
   async runForDomain(domainId: string): Promise<AuditResult> {
     const domain = this.domains.get(domainId)
+    logInfo(`Manual check started for ${domain.name}`, "AuditService")
     const result = await this.auditDomain(domain)
     const map = this.loadAll()
     map[domainId] = result
@@ -51,6 +52,7 @@ export class AuditService {
   /** Run audits for every monitored domain (used by the scheduler and the "audit all" button). */
   async runForAll(): Promise<AuditResult[]> {
     const domains = this.domains.list()
+    logInfo(`Check run started (${domains.length} domain(s))`, "AuditService")
     const map = this.loadAll()
     const results: AuditResult[] = []
     for (const domain of domains) {

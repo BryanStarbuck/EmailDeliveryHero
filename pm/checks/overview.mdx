@@ -1,0 +1,105 @@
+---
+title: EmailDeliveryHero — Per-check engineering specs
+description: Index of the per-check engineering specifications under pm/checks/ — one deep spec per deliverability check topic, grouped by the six dashboard categories (SPF, DKIM, DMARC, Blacklists, DNS & Infrastructure, Spam & Content). Each spec defines the sub-checks, the detection method, a User Interface section, and an Information Schema (database schema) section, plus when the check runs.
+---
+
+# EmailDeliveryHero — Per-check engineering specs
+
+This directory holds **one deep engineering specification per deliverability check topic**. Each is
+a detailed expansion of a slice of the master catalog in [../spam_checks.mdx](../spam_checks.mdx),
+and every file follows the same shape:
+
+1. **What it checks** — the standard(s)/RFC(s), why receivers care, and the common failure mode.
+2. **Sub-checks** — the full `checkId` table (what each verifies, how measured, typical
+   critical/warning finding, and the **concrete remediation**).
+3. **How it is measured** — the exact DNS queries / probes / external tools / parsing.
+4. **User interface** — how the check surfaces in the app (dashboard cell contribution, audit-detail
+   rows, per-domain config inputs, empty/never-run states).
+5. **Information schema (database schema)** — the relational tables for the check (referencing the
+   shared core tables and mapping onto today's JSON file store).
+6. **When we run the check** — on-demand vs the periodic scheduler, first-round vs future gating.
+7. **First round vs future** — pure-DNS now vs probe/tool/paid-feed later.
+8. **Acceptance criteria.**
+
+Read these alongside the specs that define the shared machinery — do not duplicate them:
+
+* [../overview.mdx](../overview.mdx) — product charter, personas, ports.
+* [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, the registry + runner,
+  the on-disk store, and the scheduler that every check below plugs into.
+* [../spam_checks.mdx](../spam_checks.mdx) — the master catalog: every sub-check in one table,
+  grouped into the six categories.
+* [../dashboard.mdx](../dashboard.mdx) — how each category rolls up into one color-coded cell.
+* [../scheduled_checks.mdx](../scheduled_checks.mdx) — the recurring-check cadence + per-OS scheduler.
+
+Every check belongs to **exactly one** of the six dashboard categories (its `checkId` prefix in
+parentheses). The specs are grouped that way below.
+
+## 1. SPF (`spf`)
+
+* [SPF — Sender Policy Framework](./spf.mdx) — the single `v=spf1` record, the 10-lookup / 2-void
+  limits, the terminal `all` qualifier, syntax/macros, and the alignment role for DMARC.
+
+## 2. DKIM (`dkim`)
+
+* [DKIM — DomainKeys Identified Mail](./dkim.mdx) — per-selector public-key presence, parseability,
+  key length (RFC 8301), algorithm, test flag, rotation headroom, and CNAME-delegated selectors.
+
+## 3. DMARC (`dmarc`, plus `arc`)
+
+* [DMARC](./dmarc.mdx) — policy presence/enforcement, alignment, subdomain policy, reporting
+  (`rua`/`ruf`), external-report authorization, and DMARCbis awareness (`pct` deprecated).
+* [ARC — Authenticated Received Chain](./arc.mdx) — the advisory companion that preserves prior
+  authentication across forwarders/mailing lists (largely message-sample-dependent / future).
+
+## 4. Blacklists (`dnsbl`)
+
+* [Blacklists — DNSBL / RHSBL](./blacklists.mdx) — IP and domain reputation blocklists (Spamhaus
+  ZEN/SBL/XBL/PBL/DBL, Barracuda, SpamCop, SORBS, UCEPROTECT, Invaluement, SURBL, Sender Score),
+  the query mechanics, and per-zone delisting steps.
+
+## 5. DNS & Infrastructure (`infra`)
+
+* [MX Records & Mail Routing](./mx_routing.mdx) — MX presence, resolution, priorities, redundancy,
+  null-MX, public-IP and not-a-CNAME rules, reachability.
+* [Reverse DNS / PTR / FCrDNS](./reverse_dns.mdx) — per-IP PTR presence, forward-confirmed reverse
+  DNS, and generic/dynamic-hostname detection.
+* [STARTTLS Transport & MX TLS Certificate Health](./tls_transport.mdx) — STARTTLS advertisement,
+  certificate validity/name-match/chain, TLS version and cipher strength (probe).
+* [MTA-STS](./mta_sts.mdx) — the `_mta-sts` TXT record plus the HTTPS policy file, `mode: enforce`,
+  and MX-list consistency.
+* [TLS-RPT](./tls_rpt.mdx) — the `_smtp._tls` reporting record so TLS-negotiation failures are
+  reported back.
+* [DANE / TLSA](./dane_tlsa.mdx) — DNSSEC-anchored TLSA records binding the MX certificate (the
+  "3 1 1" profile, rollover, DNSSEC prerequisite).
+* [DNSSEC](./dnssec.mdx) — zone signing, DS chain of trust, RRSIG validity, algorithm strength — the
+  prerequisite for trustworthy DANE.
+* [DNS Zone & Nameserver Health](./dns_health.mdx) — nameserver sanity/diversity, lame delegations,
+  SOA sanity, and dangling-record / subdomain-takeover risk.
+* [Domain Registration Reputation (WHOIS/RDAP)](./domain_reputation.mdx) — registration age, expiry,
+  registrar lock, parked/abuse and lookalike signals.
+* [SMTP Server Security & Hardening](./smtp_security.mdx) — open-relay, VRFY/EXPN, AUTH-over-TLS,
+  submission ports, backscatter (safe SMTP probe).
+
+## 6. Spam & Content (`content`)
+
+* [BIMI](./bimi.mdx) — the brand-logo record, its DMARC-enforcement prerequisite, and SVG + VMC/CMC
+  validation.
+* [Message Content Spam Scoring](./content_scoring.mdx) — SpamAssassin-style scoring of a sample
+  message (subject, image/text ratio, MIME, spammy phrases).
+* [List-Unsubscribe & One-Click](./list_unsubscribe.mdx) — the RFC 2369 / RFC 8058 headers and
+  From-alignment required by the 2024 Gmail/Yahoo bulk-sender rules.
+* [Link / URL Reputation](./link_url_reputation.mdx) — URI blocklists on the domains linked inside a
+  message (Spamhaus DBL, SURBL, Invaluement ivmURI).
+* [Sender Reputation Metrics](./reputation_metrics.mdx) — complaint/bounce rates, Google Postmaster
+  Tools reputation, feedback loops, and warmup/volume consistency.
+* [Inbox Placement Testing](./inbox_placement.mdx) — seed-list deliverability across Gmail, Outlook,
+  Yahoo, and Apple (inbox / spam / promotions / missing).
+
+<!--
+  Index maintenance: when a new per-check spec .mdx is added to this directory, add a bullet under
+  the right category above AND a bullet in ../overview.mdx's table of contents. Keep the six-category
+  grouping in sync with ../spam_checks.mdx (the master catalog) — every check belongs to exactly one
+  category; do not add a seventh.
+-->
+</content>
+</invoke>

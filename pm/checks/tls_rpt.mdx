@@ -1,0 +1,288 @@
+---
+title: TLS-RPT (SMTP TLS Reporting)
+description: Audits the _smtp._tls TXT record (RFC 8460) that tells sending MTAs where to report STARTTLS / MTA-STS / DANE negotiation failures — presence, syntax, rua endpoint validity, and singleton state as first-round pure DNS, with actual JSON failure-report ingestion scoped as future.
+---
+
+# TLS-RPT (SMTP TLS Reporting)
+
+TLS-RPT (SMTP TLS Reporting, RFC 8460) is a DNS-published opt-in that lets a domain owner receive
+aggregate reports about the success and failure of TLS negotiation on inbound SMTP. A remote sending
+MTA that supports TLS reporting reads a TXT record at `_smtp._tls.<domain>`, and when it later
+encounters a STARTTLS failure, an MTA-STS policy violation, or a DANE/TLSA validation error while
+delivering to your domain, it batches those events into a daily JSON report and sends it to the
+address you named. Without TLS-RPT you are blind: a receiver silently downgrades to cleartext or
+bounces mail on a broken policy and you never learn why deliverability dropped. This check verifies
+that the record exists, is syntactically valid per RFC 8460, and names a well-formed reporting
+endpoint — the DNS-observable half of the story. Actually *ingesting* the reports (standing up a
+mailbox or HTTPS endpoint and parsing the JSON) is a separate, future capability and is called out
+explicitly below.
+
+**Read alongside**
+- [MTA-STS](./mta_sts.mdx) — the policy TLS-RPT most often reports failures against; deploy them together.
+- [DANE/TLSA](./dane_tlsa.mdx) — the other policy layer whose validation failures land in TLS-RPT reports.
+- [Opportunistic TLS / STARTTLS transport](./tls_transport.mdx) — the underlying transport whose downgrades TLS-RPT surfaces.
+- [../spam_checks.mdx](../spam_checks.mdx) — master catalog; [../engineering.mdx](../engineering.mdx) — Checker/Finding contract and file store; [../overview.mdx](../overview.mdx), [../dashboard.mdx](../dashboard.mdx), [../scheduled_checks.mdx](../scheduled_checks.mdx).
+
+**Category:** DNS & Infrastructure. **checkId prefix:** `infra` (TLS-RPT sub-family, `infra.tls_rpt_*`).
+
+## 1. What it checks
+
+TLS-RPT is defined by **RFC 8460 (SMTP TLS Reporting)**. The domain publishes a single TXT record at
+the well-known name `_smtp._tls.<domain>`. Its two mandatory-ish tags are:
+
+- `v=TLSRPTv1` — version, MUST be the first tag, value fixed.
+- `rua=` — one or more reporting URIs, comma-separated, each either `mailto:<addr>` or
+  `https://<url>`. This is the destination for the daily aggregate reports.
+
+Example valid record:
+
+```
+_smtp._tls.example.com.  IN TXT  "v=TLSRPTv1; rua=mailto:tls-reports@example.com"
+```
+
+Receivers care because TLS-RPT is the feedback loop for the entire outbound-encryption stack. When a
+big receiver (Google, Microsoft, etc.) supports TLS reporting and your domain publishes MTA-STS or
+DANE, that receiver enforces your policy — and if enforcement *fails* (expired MTA-STS policy, a
+certificate name mismatch, a stale TLSA record after a key roll, a receiver that only offers
+cleartext), the receiver records it and mails you a report. TLS-RPT itself does not enforce anything
+and does not directly change whether a given message is accepted; it is diagnostic. But its absence
+is a real operational gap: the common real-world failure mode is a silent MTA-STS or DANE
+misconfiguration that quietly downgrades or bounces a slice of your mail for days before anyone
+notices. A degraded-but-not-dead TLS posture erodes inbox placement (some receivers weight transport
+security) and, worse, can cause hard delivery failures under `enforce` policies that you cannot
+diagnose without these reports. Publishing TLS-RPT costs one DNS record and turns those silent
+failures into a dated, structured feed.
+
+## 2. Sub-checks
+
+| Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+|---|---|---|---|---|
+| `infra.tls_rpt_present` | A TXT record exists at `_smtp._tls.<domain>` | `resolveTxt('_smtp._tls.' + domain)` returns ≥1 record containing `v=TLSRPTv1` | warning: no TLS-RPT record found (you are blind to TLS failures) | Publish `_smtp._tls.example.com. TXT "v=TLSRPTv1; rua=mailto:tls-reports@example.com"` |
+| `infra.tls_rpt_syntax` | Record is well-formed: starts `v=TLSRPTv1`, valid `tag=value` pairs, `;`-separated | Parse the joined string; first tag must be `v=TLSRPTv1`; every tag matches `^[a-z]+=` | critical: record present but `v=` missing/not first → whole record ignored by receivers | Rewrite record so it begins exactly `v=TLSRPTv1;` then `rua=...` |
+| `infra.tls_rpt_version` | Version token is exactly `TLSRPTv1` | Exact-match the `v=` value | critical: `v=TLSRPTv0` / typo → record invalid | Set `v=TLSRPTv1` |
+| `infra.tls_rpt_rua_present` | At least one `rua=` endpoint is declared | Presence of a `rua` tag with non-empty value | critical: record has no `rua` → receivers have nowhere to send reports; record is useless | Add `rua=mailto:tls-reports@example.com` |
+| `infra.tls_rpt_rua` | Every `rua` URI is a well-formed `mailto:` or `https:` URI | Split `rua` on `,`; validate each against mailto/https URI grammar | warning: malformed URI (e.g. `mail:` typo, bare address, `http:` not `https:`) | Use `rua=mailto:addr@example.com` or `rua=https://reports.example.com/tlsrpt` (HTTPS, not HTTP) |
+| `infra.tls_rpt_rua_scheme` | Only `mailto:`/`https:` schemes are used (no `http:`, `ftp:`) | Scheme prefix check per URI | warning: unsupported scheme; receivers skip it | Replace with `mailto:` or `https:` |
+| `infra.tls_rpt_single` | Exactly one TLS-RPT TXT record is published | Count TXT strings at the name containing `v=TLSRPTv1` | critical: multiple TLSRPTv1 records → RFC 8460 says treat as no policy | Delete the duplicate; keep exactly one `v=TLSRPTv1` TXT |
+| `infra.tls_rpt_no_extra_txt` | Non-TLSRPT TXT junk isn't polluting the name | Warn if TXT strings exist at `_smtp._tls` that are not TLSRPTv1 | info: stray TXT at reporting name | Remove unrelated TXT records from `_smtp._tls.<domain>` |
+| `infra.tls_rpt_unknown_tags` | No unknown/typo'd tags (only `v`, `rua` defined by RFC 8460) | Flag tags outside {`v`,`rua`} | info: unknown tag ignored by receivers (possible typo, e.g. `ruf=`) | Remove non-standard tags; TLS-RPT has no `ruf`/`pct` |
+| `infra.tls_rpt_endpoint_reachable` | (Advisory) mailto domain resolves + has MX, or https host resolves | For `mailto:` extract domain → `resolveMx`; for `https:` → `resolve4/6` of host | warning: `rua` mailbox domain has no MX → reports will bounce | Point `rua` at a domain with valid MX, or fix the reporting mailbox's DNS |
+| `infra.tls_rpt_rua_external_authorized` | (Advisory) cross-org `rua` (3rd-party report processor) is intended | Compare `rua` domain to audited domain; note when external | info: reports go to a third party (`rua=mailto:...@report-vendor.com`) | Confirm the external processor is intended; RFC 8460 allows external rua without an authorization record |
+| `infra.tls_rpt_ttl_sane` | (Advisory) record TTL isn't pathologically low/high | Read TTL (future: via `dig`, not exposed by node:dns) | info: TTL 60s causes excess lookups; 7d slows fixes | Set TTL 3600–86400 |
+| `infra.tls_rpt_reports_ingested` | **(FUTURE)** Actual JSON reports are being received/parsed; failure volume + trend | Requires a live mailbox/HTTPS endpoint + report parser; correlate against MTA-STS/DANE checks | warning: spike in `starttls`/`certificate-host-mismatch`/`validation-failure` report entries | Investigate the reported policy layer (fix MTA-STS policy, roll TLSA, fix cert SAN) |
+
+## 3. How it is measured
+
+**First-round detection (pure `node:dns/promises`, deterministic):**
+
+1. **Lookup.** Call `resolveTxt('_smtp._tls.' + ctx.domain)`. `resolveTxt` returns `string[][]`
+   (each record is an array of character-strings that must be concatenated with no separator — a long
+   record split across 255-byte chunks). Join each inner array, then trim.
+2. **Filter to TLS-RPT.** Keep only joined strings whose (case-insensitive on tag, but value
+   `TLSRPTv1` is case-sensitive per spec) first tag is `v=TLSRPTv1`. Ignore SPF/other TXT that could
+   never legitimately appear here.
+3. **Presence & singleton.** Zero TLSRPTv1 strings → `infra.tls_rpt_present` = warning, stop. Two or
+   more → `infra.tls_rpt_single` = critical (RFC 8460 §3.1: if more than one record exists, treat as
+   though no record is published).
+4. **Tokenize.** Split the single record on `;`, trim, split each on the first `=` into tag/value.
+   Enforce: first non-empty tag is `v`, value exactly `TLSRPTv1` (`infra.tls_rpt_version`,
+   `infra.tls_rpt_syntax`). Collect all tags; anything not in {`v`,`rua`} → `infra.tls_rpt_unknown_tags`.
+5. **rua parse.** If no `rua` → critical (`infra.tls_rpt_rua_present`). Else split the `rua` value on
+   `,`, trim each URI, and validate:
+   - `mailto:` — must have a non-empty address parseable as `local@domain`.
+   - `https:` — must parse as a URL with `https:` scheme and a host.
+   - `http:`, `mailto` without colon, bare addresses → `infra.tls_rpt_rua`/`_scheme` warning.
+   RFC 8460 also permits a size limit suffix on `mailto`/`https` URIs (`!10m`); accept and record it.
+6. **Endpoint advisory (still DNS-only).** For each `mailto:` URI, extract the domain and
+   `resolveMx` it; empty MX → `infra.tls_rpt_endpoint_reachable` warning. For each `https:` URI,
+   `resolve4`/`resolve6` the host; NXDOMAIN → warning. Flag external-org rua as info
+   (`infra.tls_rpt_rua_external_authorized`).
+
+**Edge cases:** DNS `ENODATA`/`ENOTFOUND` on the label = "not present" (warning, not an error);
+`SERVFAIL`/timeout = surface as an `info` "could not resolve, retry" rather than asserting absence.
+Multi-chunk TXT must be reassembled before parsing. Case: tags are case-insensitive but the
+`TLSRPTv1` version value is case-sensitive. A record present but with only `v=TLSRPTv1;` and no `rua`
+is *syntactically parseable but operationally useless* → critical, because receivers have nowhere to
+report.
+
+**Caching/rate-limits:** one TXT + at most a few MX/A lookups per domain per run; negligible. Respect
+DNS TTL via the resolver; no external rate limits in first round. The `_endpoint_reachable` MX/A
+probes are still DNS and stay first-round; anything requiring SMTP connection or HTTPS `POST`
+(delivering a test report) is future.
+
+**Severity mapping:** missing record → warning (a gap, not an active break). Malformed/duplicate/
+missing-rua record → critical (present-but-broken is worse than absent: it signals intent that
+receivers silently discard). Advisory reachability and stylistic issues → warning/info.
+`infra.tls_rpt_reports_ingested` severities derive from parsed report content and are future.
+
+**Future ingestion detection:** stand up a mailbox (e.g. `tls-reports@`) or an HTTPS collector,
+receive the daily `application/tlsrpt+gzip` reports, gunzip, parse the JSON (`organization-name`,
+`date-range`, `policies[]` with `policy-type` of `sts`/`tlsa`/`no-policy-found`, and
+`summary.total-successful-session-count`/`total-failure-session-count`, plus `failure-details[]`
+with `result-type` like `starttls-not-supported`, `certificate-host-mismatch`,
+`validation-failure`). Store per-day counts, compute a trend, and correlate spikes to the MTA-STS /
+DANE / TLS-transport checks.
+
+## 4. User interface
+
+TLS-RPT contributes to the **DNS & Infrastructure** dashboard column alongside MTA-STS, DANE, reverse
+DNS, and DNSSEC. Its worst sub-check severity feeds the category cell roll-up (a missing record makes
+it at most amber; a broken/duplicate record can push it red per the roll-up rule that any critical =
+dark red). `info`-only findings (unknown tag, external rua) never turn the cell amber.
+
+**Audit-detail view.** Findings render as grouped rows under a "TLS-RPT (SMTP TLS Reporting)"
+sub-header inside the DNS & Infrastructure section, using the shared React 19 + shadcn/ui finding
+row: a severity `Badge` (`ok`/`info`/`warning`/`critical`), the sub-check title, an observed-detail
+line (the raw record + parsed rua endpoints), the remediation string, and a copy-to-clipboard button
+(lucide-react `Copy`) that yields the exact DNS record to publish.
+
+```
+DNS & Infrastructure ▸ TLS-RPT                                    [ ⚠ warning ]
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ⚠  No TLS-RPT record                _smtp._tls.example.com → NXDOMAIN        │
+│    Fix: publish TXT "v=TLSRPTv1; rua=mailto:tls-reports@example.com"  [Copy] │
+│ ✔  Record is a singleton            1 TLSRPTv1 record found                  │
+│ ⓘ  Reports go to external org       rua=mailto:tls@vendor.com                │
+│ ⋯  Report ingestion (future)        not yet collecting JSON reports         │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Per-domain config inputs.** None required for the first-round DNS checks (the record name is
+derived from the domain). A future admin-only panel captures the ingestion mailbox/HTTPS endpoint and
+optional third-party report-processor credentials. The generated record string is shown read-only
+with a copy button so the user can paste it into DNS.
+
+**States.** Empty/never-run → light-gray cell, "Not yet audited". Loading → skeleton row while the
+TXT lookup runs. `infra.tls_rpt_reports_ingested` renders as a permanently muted/"future" row
+(disabled badge, tooltip "requires a report mailbox — coming soon") until ingestion ships. Admin-only
+settings (report endpoint config) live behind the OpenAuthFederated-gated settings route.
+
+## 5. Information schema (database schema)
+
+Reference the shared core tables (owned by engineering, do not redefine): `domains`, `audit_runs`,
+and `findings` (each parsed sub-check emits a row into `findings` with `category='infra'` and
+`check_id='infra.tls_rpt_*'`). This check adds one structured result table and one future table.
+
+```sql
+-- Structured observation from one TLS-RPT run (first-round).
+CREATE TABLE tls_rpt_check_results (
+    id              BIGSERIAL   PRIMARY KEY,
+    audit_run_id    BIGINT      NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id       BIGINT      NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    present         BOOLEAN     NOT NULL,               -- record exists at _smtp._tls.<domain>
+    record_count    SMALLINT    NOT NULL DEFAULT 0,     -- # of TLSRPTv1 TXT strings (singleton check)
+    raw_record      TEXT,                               -- reassembled TXT string as published
+    version_ok      BOOLEAN     NOT NULL DEFAULT FALSE, -- starts v=TLSRPTv1
+    rua_endpoints   JSONB       NOT NULL DEFAULT '[]',  -- [{ "uri":"mailto:...", "scheme":"mailto", "domain":"example.com", "size_limit":null, "reachable":true, "external":false }]
+    valid           BOOLEAN     NOT NULL DEFAULT FALSE, -- syntactically valid AND has ≥1 well-formed rua
+    unknown_tags    JSONB       NOT NULL DEFAULT '[]',  -- ["ruf", ...]
+    checked_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_tls_rpt_results_run    ON tls_rpt_check_results(audit_run_id);
+CREATE INDEX idx_tls_rpt_results_domain ON tls_rpt_check_results(domain_id, checked_at DESC);
+CREATE UNIQUE INDEX uq_tls_rpt_results_run_domain ON tls_rpt_check_results(audit_run_id, domain_id);
+
+-- FUTURE: parsed daily aggregate reports (needs a mailbox/HTTPS endpoint + parser).
+CREATE TABLE tls_rpt_reports (
+    id                BIGSERIAL   PRIMARY KEY,
+    domain_id         BIGINT      NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+    report_date       DATE        NOT NULL,             -- date-range start from the JSON report
+    reporter_org      TEXT,                             -- organization-name (e.g. "google.com")
+    policy_type       TEXT        NOT NULL,             -- 'sts' | 'tlsa' | 'no-policy-found'
+    success_count     BIGINT      NOT NULL DEFAULT 0,   -- total-successful-session-count
+    failure_count     BIGINT      NOT NULL DEFAULT 0,   -- total-failure-session-count
+    failure_details   JSONB       NOT NULL DEFAULT '[]',-- [{ "result-type":"certificate-host-mismatch", "count":12, ... }]
+    ingested_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_tls_rpt_reports_domain_date ON tls_rpt_reports(domain_id, report_date DESC);
+CREATE INDEX idx_tls_rpt_reports_policy      ON tls_rpt_reports(policy_type);
+```
+
+**Mapping to today's JSON file store.** There is no database yet; storage is the file store under
+`~/.email_delivery_hero/`. A `tls_rpt_check_results` row maps to the TLS-RPT slice of the persisted
+audit document `audits/<domainId>/<auditId>.json` — specifically a `checks.tls_rpt` object holding
+`{ present, recordCount, rawRecord, versionOk, ruaEndpoints[], valid, unknownTags[], checkedAt }`,
+plus the emitted `findings[]` entries for each `infra.tls_rpt_*` sub-check (already part of the shared
+audit JSON). The future `tls_rpt_reports` table has no file-store analog today; when ingestion ships
+it will land as `audits/<domainId>/tls_rpt_reports/<date>.json` (or directly in the DB if the
+DB migration happens first). The store module abstracts both, so the file-to-DB reconciliation is a
+single-module change: `tls_rpt_check_results` ← the `checks.tls_rpt` object, keyed by `(auditId,
+domainId)`.
+
+## 6. When we run the check
+
+TLS-RPT runs as part of every audit — both **on-demand** (`POST /api/domains/:id/audit`, `POST
+/api/scheduler/run`) and on the **periodic scheduler** (in-process interval job, cadence from
+`config.yaml`, e.g. every 6h). The first-round sub-checks are pure DNS: one `resolveTxt` plus a
+handful of `resolveMx`/`resolve4` for the endpoint-reachability advisory — cheap, deterministic, no
+external cost or rate limit, so there is no reason to gate them behind a slower cadence. Honor DNS TTL
+via the resolver; add light exponential back-off on `SERVFAIL`/timeout and treat transient failures
+as `info` rather than flipping `present` to false.
+
+**Regression detection.** The scheduler diffs each run against the previous stored
+`tls_rpt_check_results`/`checks.tls_rpt` snapshot. Newly-appearing or worsened findings are flagged as
+"new problems": e.g. a record that disappeared (`present` true→false), a rua that became malformed, a
+second record appearing (singleton→duplicate = new critical), or an endpoint whose MX/A stopped
+resolving. These are the exact silent breakages TLS-RPT exists to prevent, so surfacing them on the
+dashboard closes the loop even before report ingestion exists.
+
+`infra.tls_rpt_reports_ingested` is **gated behind a future dependency** (a report-collection mailbox
+or HTTPS endpoint plus a JSON parser). Until then it is registered but returns a single `info`
+"future" finding and does not affect the score. When it ships, ingestion runs on its own daily
+cadence (reports are daily) independent of the DNS audit interval.
+
+## 7. First round vs future
+
+| Sub-check | Round | Method |
+|---|---|---|
+| `infra.tls_rpt_present` | First round | `resolveTxt('_smtp._tls.'+domain)` |
+| `infra.tls_rpt_syntax` | First round | string parse of joined TXT |
+| `infra.tls_rpt_version` | First round | exact-match `v=TLSRPTv1` |
+| `infra.tls_rpt_rua_present` | First round | tag presence |
+| `infra.tls_rpt_rua` | First round | URI grammar validation |
+| `infra.tls_rpt_rua_scheme` | First round | scheme prefix check |
+| `infra.tls_rpt_single` | First round | count TLSRPTv1 records |
+| `infra.tls_rpt_no_extra_txt` | First round | inspect TXT at label |
+| `infra.tls_rpt_unknown_tags` | First round | tag whitelist |
+| `infra.tls_rpt_endpoint_reachable` | First round (advisory) | `resolveMx`/`resolve4/6` of rua target |
+| `infra.tls_rpt_rua_external_authorized` | First round (advisory) | domain comparison |
+| `infra.tls_rpt_ttl_sane` | Future | needs `dig` (TTL not exposed by node:dns) |
+| `infra.tls_rpt_reports_ingested` | Future | mailbox/HTTPS endpoint + JSON report parser |
+
+## 8. Acceptance criteria
+
+1. For a domain with a valid `v=TLSRPTv1; rua=mailto:...` record, all first-round sub-checks return
+   `ok` and `tls_rpt_check_results.valid = true`, `present = true`, `record_count = 1`.
+2. A domain with no `_smtp._tls` TXT yields exactly one `infra.tls_rpt_present` finding at `warning`
+   whose remediation is the concrete record `v=TLSRPTv1; rua=mailto:tls-reports@<domain>`.
+3. A record missing the `v=TLSRPTv1` prefix (or with `v` not first) yields `infra.tls_rpt_syntax`
+   `critical`; the record is treated as invalid.
+4. Two or more TLSRPTv1 records yield `infra.tls_rpt_single` `critical` and the checker treats the
+   domain as having no policy.
+5. A record present with no `rua` yields `infra.tls_rpt_rua_present` `critical`.
+6. A malformed rua (`http:`, bare address, `mail:` typo) yields `infra.tls_rpt_rua`/`_scheme`
+   `warning`, and well-formed URIs are captured in `rua_endpoints` JSONB with scheme + domain.
+7. A rua `mailto:` whose domain has no MX yields `infra.tls_rpt_endpoint_reachable` `warning`; a
+   third-party rua domain yields `infra.tls_rpt_rua_external_authorized` `info`.
+8. Multi-chunk (255-byte-split) TXT records are reassembled before parsing and parse identically to a
+   single-string record.
+9. Transient DNS errors (`SERVFAIL`/timeout) do NOT set `present = false`; they emit an `info`
+   retry-advisory instead.
+10. Every non-`ok` finding carries a concrete `remediation` string (the exact record or step), never a
+    generic message.
+11. `infra.tls_rpt_reports_ingested` is registered but returns a single `info` "future" finding and
+    contributes zero to the domain score until ingestion ships.
+12. The scheduler diff flags record disappearance, new duplicates, and rua breakage as new problems
+    against the prior `checks.tls_rpt` snapshot.
+
+<!--
+MAINTENANCE NOTES
+- Authoritative standard: RFC 8460 (SMTP TLS Reporting). Only tags v and rua are defined — do NOT add
+  ruf/pct/sp (those belong to DMARC, not TLS-RPT). Keep this note if readers confuse the two.
+- Related: RFC 8461 (MTA-STS) and RFC 6698/7671 (DANE/TLSA) are the policy layers whose failures these
+  reports describe; keep ./mta_sts.mdx, ./dane_tlsa.mdx, and ./tls_transport.mdx cross-links current.
+- Report media type is application/tlsrpt+gzip (email) / application/tlsrpt+json (HTTPS POST); update
+  the future ingestion parser section if RFC 8460 is revised.
+- Keep sub-check ids and the first-round/future split in sync with ../spam_checks.mdx and the
+  Checker/Finding contract in ../engineering.mdx.
+-->

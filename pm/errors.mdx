@@ -1,0 +1,265 @@
+---
+title: EmailDeliveryHero — Error Handling & Logging
+description: How EmailDeliveryHero handles errors and writes logs — the two append-only rolling files at the storage root ~/T/_emaildeliveryhero/ (log.log for the normal event trail, error.err for the fault trail), the dependency-free synchronous RollingFileWriter with size-capped rotation, the AppLogger that implements NestJS LoggerService so the whole framework flows through the same files, the global exception filter + process-level handlers that guarantee anything that can go wrong lands in error.err, and the timestamped INFO lines written whenever a manual or scheduled check runs. Learned from the reference internal app (~/BGit/all/app/), which uses the same two-file, no-external-library pattern.
+---
+
+# EmailDeliveryHero — Error Handling & Logging
+
+This is the spec for how EmailDeliveryHero **handles errors and writes logs**. There are exactly two
+append-only files, both at the **storage root** the app already uses for everything else
+(`~/T/_emaildeliveryhero/` — see [Storage](./storage.mdx)):
+
+```
+~/T/_emaildeliveryhero/log.log     # INFO / DEBUG / VERBOSE — the normal event trail
+~/T/_emaildeliveryhero/error.err   # WARN / ERROR / FATAL   — the fault trail
+```
+
+Two rules drive the whole design:
+
+1. **Every error the app can produce ends up in `error.err`.** Anything that can throw — an HTTP
+   request handler, a scheduled check, a DNS lookup, a file write, a promise nobody awaited, a crash
+   at boot — is captured and written to `error.err`. Nothing fails silently.
+2. **`log.log` is the "what happened, when" trail.** Normal operational events — notably **when a
+   manual check runs and when a scheduled check runs** — are written here with an ISO-8601
+   **timestamp** on every line.
+
+> **Learned from the house pattern.** The reference internal app (`~/BGit/all/app/`) implements this
+> exact model in `code/packages/backend/src/shared/logging/` — a two-file trail (`log.log` +
+> `error.err`) under its own storage root (`~/T/_act3_app`), written by a **dependency-free,
+> synchronous, size-capped rolling writer** rather than winston/pino, and surfaced through an
+> `AppLogger` that implements NestJS `LoggerService`. EmailDeliveryHero follows that model verbatim,
+> adapted to this app's storage root (`~/T/_emaildeliveryhero/`). See §6 for the library decision and
+> why it is dependency-free.
+
+Related specs:
+
+* [Storage](./storage.mdx) — the storage root `~/T/_emaildeliveryhero/` and everything else that
+  lives under it (config, domains, audits, sessions). §10 there is the storage-side view of these
+  same two log files; this document is the behavior side.
+* [Engineering](./engineering.mdx) — the NestJS module list and where the logger, the global
+  exception filter, and the scheduler sit in the architecture.
+* [Scheduled checks](./scheduled_checks.mdx) — the scheduled runs whose start/finish this document
+  requires to be logged to `log.log`.
+
+---
+
+## 1. The two files
+
+Both files live directly at the storage root — no `logs/` subdirectory — matching what the user
+specified and what the reference app does:
+
+| File | Levels written | Purpose |
+| --- | --- | --- |
+| `~/T/_emaildeliveryhero/log.log` | INFO, DEBUG, VERBOSE, **and a copy of every WARN/ERROR/FATAL** | The single chronological trail of everything that happened, in order. Reading it top-to-bottom tells the whole story with errors shown inline in context. |
+| `~/T/_emaildeliveryhero/error.err` | WARN, ERROR, FATAL only | The fault trail. Everything that needs attention, with nothing else to scroll past. |
+
+* **ERROR/WARN/FATAL are written to *both* files.** `error.err` is the complete list of problems;
+  `log.log` still shows each one inline so surrounding context is not lost. (This mirrors the
+  reference app's `AppLogger.emit`.)
+* The **location** follows [Storage](./storage.mdx): the storage root is `~/T/_emaildeliveryhero/`
+  by default, overridable with **`EDH_STATE_DIR`** (server mode). The log directory defaults to the
+  storage root and can be pointed elsewhere with **`EDH_LOG_DIR`** without moving the rest of the
+  state.
+* The directory is created on first write (`mkdirSync(dir, { recursive: true })`, best-effort) — the
+  app never crashes because the folder is missing.
+
+### Line format
+
+One event = one line. Every line is:
+
+```
+[<ISO-8601 timestamp>] [<LEVEL>] [<Context>] <message><optional extra>
+```
+
+Example lines:
+
+```
+[2026-07-01T14:03:10.900Z] [INFO] [AuditService] Manual check started for whitehatengineering.com
+[2026-07-01T14:03:11.204Z] [INFO] [AuditService] Audited whitehatengineering.com: score 85 (warning)
+[2026-07-01T06:00:00.010Z] [INFO] [AuditScheduler] Scheduled check run started (3 domain(s))
+[2026-07-01T06:00:02.551Z] [ERROR] [AuditService] Checker dnsbl failed for act3ai.com Error: queryTxt ETIMEOUT
+```
+
+* **Timestamp** is ISO-8601 UTC (`new Date().toISOString()`) — enough for a single-instance
+  localhost tool; no extra dependency for time formatting.
+* **Level** is one of `LOG | INFO | DEBUG | VERBOSE | WARN | ERROR | FATAL`.
+* **Context** is a short tag naming the source (`AuditService`, `AuditScheduler`, `DomainsService`,
+  `HttpException`, `Process`, `Bootstrap`, `Frontend`, …) so a line can be traced without a stack.
+* **Extra** is an optional serialized cause/detail: an `Error` becomes its `stack`; an object is
+  `JSON.stringify`-ed; anything else is `String()`-ed. Serialization is guarded so a hostile value
+  (a throwing getter, a circular object) can never turn a log call into a thrown error.
+
+---
+
+## 2. Rotation — bounded size, never unbounded growth
+
+Each file is size-capped and rotates so the disk footprint is bounded:
+
+* Each stream keeps a **5 MiB** live file plus **5 rotated backups** (`log.log.1` … `log.log.5`,
+  `error.err.1` … `error.err.5`). Worst case per stream ≈ 30 MiB; both streams ≈ 60 MiB.
+* When a write would push the live file past the cap, the chain shifts
+  (`<file>.(n-1)` → `<file>.n`), the live file becomes `<file>.1`, and a fresh live file starts.
+* The caps live in code as `MAX_BYTES` / `MAX_BACKUPS`; the storage-retention setting
+  (`config.yaml → storage.retentionDays`, [Storage §3](./storage.mdx)) governs **audit history**, not
+  these logs — they are two different lifetimes.
+
+Rotation is best-effort: if a rename fails, the writer truncates the live file rather than let it grow
+without bound, so the cap is always respected.
+
+---
+
+## 3. Comprehensive capture — everything that can go wrong reaches `error.err`
+
+The goal is that **no error escapes unlogged**. Coverage is layered so a failure at any level is
+caught by at least one net:
+
+| Layer | What it catches | How it lands in `error.err` |
+| --- | --- | --- |
+| **Global exception filter** (`AllExceptionsFilter`, `@Catch()`) | Every exception thrown out of any controller/route — validation errors, `NotFoundException`, and *unexpected* thrown values alike. | Registered with `app.useGlobalFilters(...)`. Logs method + URL + status + message/stack to `error.err` (WARN for expected 4xx `HttpException`s, ERROR for 5xx / non-HTTP throwables), then returns a clean JSON error body to the client. |
+| **NestJS framework logging** | Bootstrap, dependency-injection, request lifecycle, and internal Nest errors. | `app.useLogger(appLogger)` routes the whole framework through the same two files. |
+| **Process-level handlers** | `unhandledRejection` (a promise nobody awaited) and `uncaughtException` (a throw outside any request). | `process.on(...)` in `main.ts` calls `logError`/`logFatal`; an uncaught exception is logged as FATAL before exit. |
+| **Boot failure** | The backend failing to start (bad `PORT`, empty `CORS_ORIGINS`, listen failure). | `bootstrap().catch(...)` logs FATAL to `error.err` and `process.exit(1)`. |
+| **On-disk store writes** | A failed `writeJson` (disk full, permission denied) when persisting `domains.json` / `audits.json`. | `writeJson` is wrapped: the failure is logged to `error.err` and rethrown so the caller (and the exception filter) also see it — a lost write is never swallowed. |
+| **Store reads** | A malformed/unparseable JSON file. | `readJson` logs a WARN + ERROR and returns the typed fallback; an expected first-run *absence* is **not** an error and writes nothing (no `error.err` spam). |
+| **Per-checker failures** | One deliverability checker (SPF/DKIM/DMARC/MX/DNSBL) throwing mid-audit. | The audit runner wraps each checker in try/catch: logs the failure to `error.err` **and** turns it into a `warning` finding so one bad checker never aborts the whole audit. |
+| **DNS lookups** | Timeouts / SERVFAIL / `dig` missing. | The `dns-util` wrappers never throw; a genuine "no record" is a legitimate finding, a real failure is surfaced as the lookup's `error` field and logged by the checker. |
+| **Credentials file** | An unreadable/malformed `~/.credentials/email_delivery_hero.json`. | Logged as WARN (a missing file is silent — env vars are allowed to win); never fatal. |
+| **Frontend errors** | Uncaught browser errors, unhandled rejections, and API failures in the SPA (no filesystem in the browser). | The frontend `logger.error` and global `window` handlers **POST** to `POST /api/health/client-error`, which writes them to `error.err` tagged `[Frontend]`. So even browser-side faults land in the one error file. |
+
+The load-bearing pieces are the **global exception filter** (every HTTP error) plus the two
+**process handlers** (every non-HTTP error). Together they mean a developer never has to remember to
+wrap a handler — anything that throws anywhere is already captured.
+
+---
+
+## 4. When we log INFO — the operational trail
+
+`log.log` is written for normal events so the file answers "what has this app been doing, and when."
+The **required** INFO events (each timestamped) are:
+
+* **Manual check run** — when a user clicks **Run checks** and when it finishes:
+  `Manual check started for <domain>` / `Audited <domain>: score <n> (<status>)`, or
+  `Manual check started (all domains)` / `Audited all <n> domain(s)` for a run-all.
+* **Scheduled check run** — when the periodic scheduler fires and when it completes:
+  `Scheduled check run started (<n> domain(s))` / `Scheduled check run finished`. When periodic
+  audits are disabled, that fact is logged once at boot.
+* **Domain mutations** — `Added monitored domain <name>`, `Removed monitored domain <id>`.
+* **Boot** — the backend URL + port, and the resolved log directory, on successful start.
+* **Auth lifecycle** — the OpenAuthFederated frontend readiness / "OAuth not configured" state
+  (routed through the same logger by `auth-frontend.ts`).
+
+DEBUG/VERBOSE lines are written to `log.log` but only echoed to the console when `EDH_DEBUG=true`, so
+the console stays readable while the file keeps the full detail.
+
+---
+
+## 5. The logging API — one reusable module, used everywhere
+
+All logging goes through a single reusable module so call sites never touch `fs`, paths, timestamps,
+or rotation. It lives in the code tree (not under `pm/`, per the repo charter):
+
+```
+code/packages/backend/src/shared/rolling-file-writer.ts   # the dependency-free rotating writer (§6)
+code/packages/backend/src/shared/logging.ts               # AppLogger + the log* helpers + appLogger
+```
+
+### `RollingFileWriter` — the low-level sink
+
+A small class that owns one file: append a formatted line, roll when the size cap is hit, and **never
+throw** (a failed write falls back to `stderr`). Constructor options: `filePath`, `maxBytes`
+(default 5 MiB), `maxBackups` (default 5; `0` = single truncating file). Writes are **synchronous**
+(`appendFileSync`) on purpose — see §6.
+
+### `AppLogger` — the app-facing logger
+
+* Owns two `RollingFileWriter`s (`log.log`, `error.err`), formats lines (§1), and routes by level:
+  ERROR/WARN/FATAL → `error.err` **and** `log.log`; everything else → `log.log` only. Optionally
+  echoes to `stdout`/`stderr` (`EDH_LOG_CONSOLE`, default on).
+* **Implements NestJS `LoggerService`** (`log`, `error`, `warn`, `debug`, `verbose`, `fatal`) so
+  `app.useLogger(appLogger)` sends the entire framework through it.
+* Exposes a process-wide singleton **`appLogger`** and thin standalone helpers so non-Nest modules
+  (plain functions, guards, the scheduler, the store) can log without importing the class:
+
+```ts
+import { logInfo, logWarn, logError, logDebug, logFatal } from "@shared/logging"
+
+logInfo("Manual check started for whitehatengineering.com", "AuditService")
+logError("Periodic audit run failed", err, "AuditScheduler") // 2nd arg = cause (Error or any value)
+```
+
+Helper signatures (kept stable so existing call sites keep working):
+
+| Helper | Signature | Goes to |
+| --- | --- | --- |
+| `logInfo` | `(message, context?)` | `log.log` |
+| `logDebug` | `(message, context?)` | `log.log` (console only when `EDH_DEBUG=true`) |
+| `logWarn` | `(message, context?)` | `error.err` + `log.log` |
+| `logError` | `(message, cause?, context?)` | `error.err` + `log.log` |
+| `logFatal` | `(message, cause?, context?)` | `error.err` + `log.log` |
+
+**Logging must never throw.** Every write path is guarded; a logging failure degrades to `stderr` and
+the request/loop continues. A logger that can crash the process it is instrumenting is a bug.
+
+---
+
+## 6. Library decision — deliberately dependency-free
+
+The reference app evaluated winston/pino and chose **not** to take an external logging dependency, and
+EmailDeliveryHero makes the same call. The reasoning, captured so we don't relitigate it:
+
+* **Synchronous, never lose a line.** `appendFileSync` writes the line before the call returns, so a
+  crash immediately after an error is logged still leaves that error on disk. For an audit/error
+  trail on a single-instance localhost tool, *not losing the last line before a crash* matters more
+  than the throughput of async logging.
+* **Strict per-stream cap with no config.** The two-file split + size-bounded rotation is ~100 lines
+  of `node:fs` (`appendFileSync` / `renameSync` / `rmSync` / `statSync`) with zero transitive
+  dependencies, no transports to wire, and no supply-chain surface — consistent with the project's
+  "Brew-installed tools / minimal deps" posture.
+* **First-class NestJS integration is trivial** — implementing `LoggerService` is a handful of
+  methods, so the framework and the app share one code path without an adapter package.
+
+If the app ever grows to multi-instance/server scale where log shipping or structured JSON ingestion
+is needed, the swap-in options are **pino** (fast structured JSON, `pino-roll` for rotation) or
+**winston** (`winston-daily-rotate-file`). Because everything goes through `AppLogger`, that is a
+single-module change; no call site would move. Until then, the dependency-free writer is the choice.
+
+---
+
+## 7. Acceptance criteria
+
+Error handling & logging are correct when **all** of the following hold:
+
+1. There are exactly two log files, at the storage root: `~/T/_emaildeliveryhero/log.log` and
+   `~/T/_emaildeliveryhero/error.err` (dir overridable via `EDH_STATE_DIR` / `EDH_LOG_DIR`), created
+   on first write.
+2. Every line is `[<ISO-8601>] [<LEVEL>] [<Context>] <message>` with a timestamp; WARN/ERROR/FATAL
+   appear in **both** files, INFO/DEBUG/VERBOSE only in `log.log`.
+3. Each file is size-capped (5 MiB) with rotated backups (5); neither grows unbounded.
+4. A **global exception filter** logs every exception thrown from any route to `error.err` and
+   returns a clean JSON error to the client; `app.useLogger(appLogger)` routes framework logs to the
+   same files.
+5. `process.on("unhandledRejection")` and `process.on("uncaughtException")` are installed and log to
+   `error.err`; a boot failure logs FATAL and exits non-zero.
+6. `writeJson` failures are logged to `error.err` (and rethrown); `readJson` of a malformed file logs
+   an error and returns the fallback; an expected first-run *absence* logs nothing.
+7. A single checker throwing is logged to `error.err` and downgraded to a `warning` finding — the
+   audit still completes for the other checkers.
+8. A **manual** check run and a **scheduled** check run each write timestamped start/finish INFO lines
+   to `log.log`; domain add/remove and boot are logged too.
+9. Frontend uncaught errors / unhandled rejections / API failures POST to
+   `POST /api/health/client-error` and are written to `error.err` tagged `[Frontend]`.
+10. All logging flows through the one reusable module (`shared/logging.ts` + `shared/rolling-file-writer.ts`);
+    no call site writes to the log files directly, and **no logging call can throw**.
+11. No external logging library is added; the writer is dependency-free `node:fs` (§6).
+
+<!--
+  errors.mdx maintenance: keep consistent with storage.mdx §10 (same two files, same root
+  ~/T/_emaildeliveryhero/), engineering.mdx (logger + global filter placement), and scheduled_checks.mdx
+  (scheduled-run logging). Reflect the real code paths: shared/rolling-file-writer.ts (the writer),
+  shared/logging.ts (AppLogger + helpers), shared/all-exceptions.filter.ts (global filter),
+  main.ts (useLogger + useGlobalFilters + process handlers), json-store.ts (guarded writeJson),
+  audit.service.ts (per-checker try/catch + run logging), audit-scheduler.service.ts (scheduled-run
+  logging), health.controller.ts (/health/client-error ingest). When a new capture point is added,
+  add a row to §3 and, if it introduces a new INFO event, to §4. Keep the TOC bullet in overview.mdx.
+-->
+</content>

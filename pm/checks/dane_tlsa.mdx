@@ -1,0 +1,315 @@
+---
+title: DANE / TLSA for SMTP
+description: Audits DNSSEC-anchored TLSA records at _25._tcp.<mx-host> that bind each MX server's TLS certificate for opportunistic-to-mandatory SMTP transport security, verifying DNSSEC prerequisite, record presence, "3 1 1" parameters, live certificate match, rollover staging, and full MX coverage.
+---
+
+# DANE / TLSA for SMTP
+
+DANE (DNS-Based Authentication of Named Entities) publishes a **TLSA record** at
+`_25._tcp.<mx-host>` that pins the TLS certificate (or public key) a receiving MX must present.
+A sending MTA that supports DANE looks up the TLSA record, and — **only if the record is protected
+by DNSSEC** — requires the MX to present a certificate that matches the pinned digest before it will
+deliver mail over TLS. This upgrades opportunistic STARTTLS (which is trivially downgradeable by an
+active attacker) into **authenticated, downgrade-resistant** transport encryption. DANE is one of the
+two IETF answers to STARTTLS stripping; the other is MTA-STS (which uses the Web PKI + HTTPS instead
+of DNSSEC). Big DANE adopters on the receiving side include Gmail (inbound, since late 2023),
+Comcast, and most large German/Dutch/US-government mail systems.
+
+DANE for SMTP is defined by **RFC 7672** (SMTP DANE), which builds on **RFC 6698** (the TLSA record
+and DANE base) and **RFC 7671** (DANE operational/updated guidance). It has a **hard dependency on
+DNSSEC** (RFC 4033-4035): a TLSA record that is not DNSSEC-signed is worthless — a sending MTA MUST
+ignore it, and an attacker can simply strip or forge it. That dependency shapes this entire check.
+
+**Category:** DNS & Infrastructure. **checkId prefix:** `infra` (DANE sub-family, `infra.dane_*`).
+
+**Read alongside:**
+- [../overview.mdx](../overview.mdx) — product charter, personas, port list.
+- [../engineering.mdx](../engineering.mdx) — Checker/Finding contract, file store, scheduler.
+- [../spam_checks.mdx](../spam_checks.mdx) — master catalog; this spec expands the DANE slice of DNS & Infrastructure.
+- [../dashboard.mdx](../dashboard.mdx) — the 6-column status dashboard (this feeds the **DNS & Infrastructure** cell).
+- [../scheduled_checks.mdx](../scheduled_checks.mdx) — recurring-check config + per-OS scheduling.
+- [./dnssec.mdx](./dnssec.mdx) — **hard prerequisite**; DANE is ineffective without a signed zone.
+- [./mta_sts.mdx](./mta_sts.mdx) — the non-DNSSEC alternative for enforcing TLS on inbound mail.
+- [./tls_transport.mdx](./tls_transport.mdx) — STARTTLS availability, protocol/cipher, cert validity.
+- [./mx_routing.mdx](./mx_routing.mdx) — the MX host list DANE must fully cover.
+
+## 1. What it checks
+
+DANE for SMTP answers one question for each of a domain's inbound MX hosts: *"Is there a DNSSEC-signed
+TLSA record that pins this MX's TLS certificate, so a sending MTA can require authenticated TLS and
+refuse to be downgraded?"* EmailDeliveryHero audits this for the **sending** operator's own domains —
+if your MX hosts publish valid DANE, DANE-aware senders (a growing share of the internet, including
+Gmail) will deliver to you over authenticated TLS, which is now an implicit signal of a well-run mail
+system and, more importantly, protects your inbound mail from interception.
+
+Mechanics: a TLSA record name is `_<port>._<proto>.<hostname>`, i.e. `_25._tcp.mail.example.com` for
+SMTP. Its RDATA is four fields:
+
+| Field | Name | Recommended for SMTP | Meaning |
+|---|---|---|---|
+| 1st | **Usage** | `3` (DANE-EE) | 3 = pin the end-entity cert directly (no CA chain needed). 2 = DANE-TA (pin a trust anchor/CA). 0/1 (PKIX-TA/EE) are **not usable** for SMTP per RFC 7672 and MUST NOT be published. |
+| 2nd | **Selector** | `1` (SPKI) | 1 = match the SubjectPublicKeyInfo (survives cert renewal if the key is reused). 0 = match the full certificate. |
+| 3rd | **Matching type** | `1` (SHA-256) | 1 = SHA-256 digest. 2 = SHA-512. 0 = exact/full data (discouraged, large). |
+| 4th | **Association data** | hex digest | The hex-encoded digest the MX's presented cert/key must match. |
+
+The recommended SMTP profile is therefore **`3 1 1`** (DANE-EE + SPKI + SHA-256): it pins the public
+key, needs no valid CA chain, and lets you renew certs with the same key without republishing DNS.
+
+**Why receivers/senders care.** Plain STARTTLS is opportunistic: a man-in-the-middle can strip the
+`STARTTLS` capability from the SMTP banner and force cleartext, or present a self-signed cert that
+opportunistic senders accept anyway. DANE closes both holes: the sending MTA learns *out of band*
+(via signed DNS) that TLS is mandatory and exactly which cert to expect, so a stripped `STARTTLS`
+or a mismatched cert causes the sender to **defer/bounce** rather than fall back to cleartext.
+
+**Common real-world failure mode.** By far the most common: a **certificate renewal that changes the
+key without updating (or pre-staging) the TLSA record**. When the MX starts presenting the new cert,
+the pinned digest no longer matches, and every DANE-aware sender **hard-fails delivery** — inbound
+mail from Gmail and others silently queues and bounces. The fix is publishing **≥2 TLSA records**
+(current + next) ahead of rollover. The second most common failure is publishing a TLSA record on a
+**zone that is not DNSSEC-signed**, which is a no-op that gives false confidence.
+
+**How a failure degrades inbox/transport.** DANE failures are inbound-transport failures, not
+spam-score failures — but a broken DANE pin causes DANE-aware senders (including Gmail) to *stop
+delivering to you*, which is a far more severe outcome than a spam-folder placement. Absent DANE (and
+absent MTA-STS), your inbound mail is deliverable but downgradeable to cleartext.
+
+## 2. Sub-checks
+
+All ids use the `infra.` prefix (DANE sub-family). "Probe" = requires a live TLS/SMTP connection;
+"validating resolver" = requires DNSSEC-validating lookup (AD bit / local validation), both FUTURE.
+
+| Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+|---|---|---|---|---|
+| `infra.dane_dnssec_prereq` | The domain zone AND each MX host's zone are DNSSEC-signed (DANE's hard prerequisite). | Delegate to `./dnssec.mdx` result / DNSKEY+DS chain + AD bit (FUTURE validating resolver). | **critical** if TLSA present but zone unsigned; **warning** if no DANE at all and zone unsigned (DANE impossible until signed). | Sign the MX host's zone (publish DNSKEY, add DS at the parent registrar) before relying on DANE. See `./dnssec.mdx`. |
+| `infra.dane_tlsa_present` | A TLSA record exists at `_25._tcp.<mx>` for the MX. | `resolveTlsa('_25._tcp.<mx>')` / `dig TLSA`. | **warning** if no TLSA on any MX (no DANE protection; not a hard failure since DANE is optional). | Publish `_25._tcp.mail.example.com. IN TLSA 3 1 1 <sha256-of-SPKI>`. |
+| `infra.dane_tlsa_params` | Usage/selector/matching-type are the sane SMTP profile. | Parse RDATA fields; compare to allowed sets. | **critical** if usage is 0/1 (PKIX, unusable for SMTP per RFC 7672) → senders ignore it; **warning** if not `3 1 1` (e.g. selector 0 full-cert, or matching-type 0 full-data). | Republish as `3 1 1` (DANE-EE, SPKI, SHA-256). Remove any usage-0/1 records. |
+| `infra.dane_tlsa_cert_match` | The pinned digest matches the certificate/key the MX actually presents on `:25` STARTTLS. | **Probe (FUTURE):** STARTTLS on :25, grab leaf cert, compute SHA-256 of SPKI (selector 1) or full cert (selector 0), compare to every TLSA digest. | **critical** if no TLSA record matches the presented cert (DANE-aware senders hard-fail delivery). | Recompute the digest from the live cert and publish it, or reissue the cert to match the pin; keep a matching record live at all times. |
+| `infra.dane_rollover` | ≥2 TLSA records are staged (current + next) so cert renewal never breaks DANE. | Count TLSA records; ideally confirm one matches current cert and a second is pre-published. | **warning** if exactly one TLSA record (renewal will break DANE) or no "next" record staged. | Publish the **next** cert's `3 1 1` digest alongside the current one *before* renewing; remove the old only after the new cert is live. |
+| `infra.dane_without_dnssec` | TLSA is published but the zone is NOT signed = ineffective/misleading. | TLSA present AND `./dnssec.mdx` says unsigned. | **critical** — record gives false confidence; senders MUST ignore an unsigned TLSA. | Either sign the zone (preferred) or remove the TLSA record so it isn't mistaken for protection. |
+| `infra.dane_all_mx` | *Every* MX host (all priorities) has a valid TLSA, not just some. | Enumerate MX from `./mx_routing.mdx`; check TLSA presence+validity per host. | **critical** if some MX have DANE and others don't (attacker steers to the unprotected MX; partial DANE ≈ no DANE); **warning** if 0/N have it. | Publish `3 1 1` TLSA for **all** MX hosts including backups/secondaries. |
+| `infra.dane_tlsa_dangling` | No stale/dangling TLSA whose digest matches nothing the MX presents. | Compare all TLSA digests to live cert (probe, FUTURE). | **warning** if extra records match neither current nor next cert (clutter, or a botched rollover left a dead pin). | Remove TLSA records that match no current/staged cert. |
+| `infra.dane_name_alignment` | TLSA is published at the **MX hostname** itself, not at a CNAME target mismatch (RFC 7672 CNAME handling). | Resolve MX → follow CNAME chain; TLSA base name must be the final canonical name (all signed). | **critical** if MX is a CNAME to an unsigned target, or TLSA sits on the wrong name → senders can't validate. | Publish TLSA at the fully-qualified canonical MX name; ensure every name in the CNAME chain is DNSSEC-signed. |
+| `infra.dane_digest_length` | Association-data length matches the matching-type (SHA-256 = 32 bytes/64 hex, SHA-512 = 64 bytes/128 hex; not empty unless usage 2). | Length + hex validity check on field 4. | **critical** if digest length is wrong for the matching type (malformed record → senders treat as unusable). | Regenerate the digest with the correct hash; a `3 1 1` record's data must be exactly 64 hex chars. |
+| `infra.dane_ttl_sane` | TLSA TTL is short enough to roll certs safely (≤ ~1h recommended) but not absurdly low. | Read record TTL from the DNS answer. | **info/warning** if TTL is very long (rollover propagation risk) or zero. | Set TLSA TTL to 3600s (or lower during a planned rollover) so pins propagate quickly. |
+| `infra.dane_starttls_offered` | The MX actually offers STARTTLS on :25 (DANE is meaningless if TLS is never offered). | Probe SMTP banner + `EHLO` for `STARTTLS` (FUTURE; overlaps `./tls_transport.mdx`). | **critical** if TLSA published but MX doesn't offer STARTTLS. | Enable STARTTLS on the MX; a TLSA record with no TLS is a guaranteed delivery failure for DANE senders. |
+
+## 3. How it is measured
+
+**First-round (pure `node:dns/promises` + parsing), deterministic:**
+
+1. **Enumerate MX.** Reuse the MX list from `./mx_routing.mdx` (`resolveMx(domain)`), sorted by
+   priority. DANE must be evaluated for **every** host, not just the primary.
+2. **Lookup TLSA per host.** Query `_25._tcp.<mx-host>` for TLSA. Node's `dns.promises` does not
+   expose a native `resolveTlsa`, so first-round we use `resolve(name, 'TLSA')` where supported, and
+   otherwise fall back to shelling `dig +dnssec TLSA _25._tcp.<mx>` (Brew `dig`) — treat the `dig`
+   path as the reliable one. Parse each RR into `{usage, selector, mtype, data}` and the TTL.
+3. **Parameter/shape validation (`infra.dane_tlsa_params`, `_digest_length`, `_ttl_sane`).** Compare
+   usage ∈ {2,3} (SMTP-usable), flag {0,1} as critical; selector ∈ {0,1}; mtype ∈ {0,1,2}; validate
+   hex length vs mtype (mtype 1 ⇒ 64 hex chars, mtype 2 ⇒ 128). `3 1 1` earns `ok`; usable-but-not-
+   recommended (`2 x x`, selector 0, mtype 2) earns `info`; unusable usage earns `critical`.
+4. **DNSSEC prerequisite (`infra.dane_dnssec_prereq`, `_without_dnssec`).** Read the AD (Authenticated
+   Data) bit from `dig +dnssec` and/or delegate to the `./dnssec.mdx` checker's result for the MX
+   host's zone. First-round we can observe RRSIG/DS presence; **authoritative validation (trusting the
+   AD bit) requires a DNSSEC-validating resolver** and is FUTURE. If TLSA exists but the zone shows no
+   DNSSEC chain → `infra.dane_without_dnssec` = **critical**.
+5. **Coverage & alignment (`infra.dane_all_mx`, `_name_alignment`).** Roll up per-host TLSA presence.
+   If some MX have valid DANE and others don't → **critical** (`dane_all_mx`). Follow CNAME chains on
+   MX targets; TLSA must live on the final canonical name and every hop must be signed.
+6. **Rollover staging (`infra.dane_rollover`).** Count records: `<2` ⇒ **warning** (renewal risk).
+   True "next record matches next cert" confirmation needs a probe and is FUTURE, but record-count is
+   a strong first-round heuristic.
+
+**Future (needs a probe / validating resolver):**
+
+7. **Certificate match (`infra.dane_tlsa_cert_match`, `_dangling`, `_starttls_offered`).** Open a TCP
+   connection to the MX on **:25**, issue `EHLO`, `STARTTLS`, complete the TLS handshake (via Brew
+   `openssl s_client -starttls smtp -connect <mx>:25` or a Node TLS socket), extract the leaf cert,
+   and compute the digest per each TLSA's selector/matching-type: selector 1 ⇒ SHA-256 of the DER
+   SubjectPublicKeyInfo; selector 0 ⇒ SHA-256 of the full DER cert. A record **matches** if any
+   staged TLSA digest equals the computed one. No match with valid TLSA present ⇒ **critical**.
+
+**Edge cases & operational concerns.** (a) TLSA lookups can be blocked/mangled by resolvers that don't
+understand the RRtype — always prefer `dig` for TLSA. (b) `NXDOMAIN` vs `NODATA` at the TLSA name are
+both "no DANE", but `SERVFAIL` on a signed zone signals a DNSSEC validation failure (treat as
+critical, not "absent"). (c) Cache TLSA/MX per host for the audit run; honor DNS TTLs; DANE probes
+must rate-limit per MX to avoid tripping connection-rate limits on the target MTA. (d) During a
+planned rollover a host legitimately has 2+ records where only one matches the live cert — that is
+`ok`, not dangling.
+
+**Severity mapping.** usage 0/1 published, TLSA-on-unsigned-zone, cert mismatch, partial-MX coverage,
+CNAME-to-unsigned, malformed digest, TLSA-without-STARTTLS ⇒ **critical**. No DANE at all,
+single-record (rollover risk), non-recommended-but-usable params, long TTL ⇒ **warning**. Usable-but-
+`2 x x` / selector-0 / mtype-2 ⇒ **info**. Full `3 1 1` on all MX, DNSSEC-signed, cert-matched, ≥2
+records ⇒ **ok**.
+
+## 4. User interface
+
+DANE contributes to the **DNS & Infrastructure** dashboard column (shared with DNSSEC, MTA-STS,
+TLS-RPT, reverse DNS, TLS transport, MX routing). The cell color is the worst DANE severity present,
+rolled up with the other infra checks per the standard rule (dark green all-ok, amber worst=warning,
+dark red any critical, light gray never-run; `info` alone never turns it amber).
+
+**Audit-detail view.** Findings render grouped under a **"DANE / TLSA"** subsection of the DNS &
+Infrastructure group. Each finding row (React 19 + shadcn/ui `<Card>`/`<Table>`, `lucide-react`
+`ShieldCheck`/`ShieldAlert`/`Lock` icons) shows: a severity `<Badge>`, the sub-check title, the
+observed detail (MX host + the parsed `usage selector mtype data`), the remediation string, and a
+`<Button variant="ghost">` **copy-to-clipboard** of the exact TLSA record to publish. A small per-MX
+matrix makes multi-MX coverage legible:
+
+```
+DANE / TLSA — example.com                              [ 2 critical · 1 warning ]
+┌───────────────────────────┬────────┬───────────┬─────────┬────────────┬──────────┐
+│ MX host (prio)            │ DNSSEC │ TLSA       │ Params  │ Cert match │ Rollover │
+├───────────────────────────┼────────┼───────────┼─────────┼────────────┼──────────┤
+│ mail.example.com (10)     │  ✔ AD  │ present(2) │  3 1 1  │  ✔ (probe) │  ✔ ≥2    │
+│ mail2.example.com (20)    │  ✖     │ present(1) │  3 1 1  │   —        │  ✖ (1)   │  ← critical: TLSA on unsigned zone
+└───────────────────────────┴────────┴───────────┴─────────┴────────────┴──────────┘
+[ Copy fix: _25._tcp.mail2.example.com. 3600 IN TLSA 3 1 1 5c1b… ]   [ Re-run DANE ]
+```
+
+**Per-domain config inputs.** DANE needs no per-domain input beyond the MX list (auto-discovered) —
+optionally an admin can pin an **expected next-cert SPKI digest** so the app can proactively warn when
+a rollover record is missing. **Empty/never-run:** light-gray cell, "DANE not yet checked." **Loading:**
+skeleton rows. **No DANE published:** a single `warning` row "No TLSA records on any MX" with a
+one-click generator that, given a probed cert (future) or a pasted PEM, emits the `3 1 1` record.
+**Admin-only settings:** toggle whether the cert-match probe is enabled (it opens outbound :25),
+probe timeout, and whether to require the DNSSEC AD bit from a validating resolver.
+
+## 5. Information schema (database schema)
+
+Reference the shared core tables (do **not** redefine): `domains`, `sending_ips`, `dkim_selectors`,
+`audit_runs`, `findings`. DANE emits `Finding[]` into `findings` (category `infra`, `check_id`
+`infra.dane_*`) exactly like every check. Below is the DANE-specific structured result table (one row
+per MX host per audit run) plus its indexes.
+
+```sql
+-- One row per MX host observed for DANE in a given audit run.
+CREATE TABLE dane_check_results (
+    id              BIGSERIAL PRIMARY KEY,
+    audit_run_id    BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id       BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    mx_host         TEXT    NOT NULL,          -- canonical MX hostname (post-CNAME)
+    mx_preference   INT,                       -- MX priority, for coverage reporting
+    dnssec_signed   BOOLEAN NOT NULL,          -- MX host's zone DNSSEC-signed (AD/DS observed)
+    tlsa_present    BOOLEAN NOT NULL,          -- any TLSA at _25._tcp.<mx>
+    tlsa_records    JSONB,                     -- [{usage,selector,mtype,data,ttl}]
+    params_ok       BOOLEAN,                   -- at least one record is SMTP-usable (usage 2/3)
+    recommended_311 BOOLEAN,                   -- a 3 1 1 record is present
+    cert_match      BOOLEAN,                   -- NULL until the probe runs (FUTURE)
+    rollover_ready  BOOLEAN NOT NULL DEFAULT FALSE, -- >=2 staged TLSA records
+    starttls_offered BOOLEAN,                  -- NULL until probe (FUTURE)
+    probe_error     TEXT,                      -- last probe/lookup error, if any
+    checked_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_dane_results_domain_mx  ON dane_check_results (domain_id, mx_host);
+CREATE INDEX idx_dane_results_audit_run  ON dane_check_results (audit_run_id);
+```
+
+`tlsa_records` JSONB shape (array, one object per RR):
+`[{ "usage": 3, "selector": 1, "mtype": 1, "data": "5c1b…", "ttl": 3600 }]`.
+
+**Mapping to today's JSON file store.** There is no database yet; storage is JSON under
+`~/.email_delivery_hero/`. The full `AuditResult` (including every DANE `Finding`) is persisted at
+`audits/<domainId>/<auditId>.json`. The structured `dane_check_results` rows live inside that same
+file under a `checkResults.dane` array — one object per MX host mirroring the columns above, e.g.:
+
+```json
+{
+  "checkResults": {
+    "dane": [
+      { "mxHost": "mail.example.com", "mxPreference": 10, "dnssecSigned": true,
+        "tlsaPresent": true, "tlsaRecords": [{"usage":3,"selector":1,"mtype":1,"data":"5c1b…","ttl":3600}],
+        "paramsOk": true, "recommended311": true, "certMatch": null,
+        "rolloverReady": true, "starttlsOffered": null, "checkedAt": "2026-07-01T12:00:00Z" }
+    ]
+  }
+}
+```
+
+When the store migrates to Postgres, each element of `checkResults.dane[]` becomes one
+`dane_check_results` row keyed by `(audit_run_id, domain_id)`; the isolated store module is the single
+place that changes. No new reference/config table is required for DANE (MX come from
+`./mx_routing.mdx`; the recommended-profile constants `3 1 1` live in code, not data).
+
+## 6. When we run the check
+
+- **On-demand:** runs as part of a full manual audit (`POST /api/domains/:id/audit`) and can be
+  re-run standalone from the DANE subsection ("Re-run DANE"). First-round record lookups are cheap
+  and always run; the cert-match **probe** runs only when the admin has enabled it.
+- **Periodic scheduler:** the in-process interval job (cadence from `config.yaml`, default every 6h)
+  re-runs DANE per domain. Because the highest-value DANE failure is a **rollover-induced cert
+  mismatch that appears suddenly**, DANE is a strong candidate for a *tighter* cadence than the global
+  default once the probe is enabled — a mismatched pin means inbound mail is bouncing *now*.
+- **First-round vs future gating:** presence/params/DNSSEC-observation/coverage/rollover-count are
+  first-round (pure DNS + parsing). Authoritative DNSSEC validation (trusting the AD bit) needs a
+  validating resolver, and cert-match/STARTTLS/dangling need a live :25 probe — both **FUTURE**.
+- **Cost / rate-limit / back-off:** DNS/TLSA lookups are free but should be cached per host per run
+  and respect TTLs. The :25 probe opens outbound SMTP connections — rate-limit to one probe per MX
+  per run, short timeout, exponential back-off on `SERVFAIL`/connection refusal, and never hammer a
+  target MTA (some throttle repeated connections). `SERVFAIL` on a signed zone ≠ "absent"; surface it.
+- **Regression detection:** the scheduler diffs against the previous run. A newly-appearing
+  `infra.dane_tlsa_cert_match` critical (pin stopped matching after a renewal), a drop from ≥2 to 1
+  TLSA record, or a host losing DNSSEC are flagged as **new problems** and drive the domain's DNS &
+  Infrastructure cell red — exactly the "someone renewed a cert and forgot to stage the TLSA" alarm.
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises` / `dig`) | Future (probe / validating resolver / external) |
+|---|---|---|
+| `infra.dane_tlsa_present` | ✅ TLSA lookup at `_25._tcp.<mx>` | |
+| `infra.dane_tlsa_params` | ✅ parse usage/selector/mtype | |
+| `infra.dane_digest_length` | ✅ length vs matching-type | |
+| `infra.dane_ttl_sane` | ✅ read RR TTL | |
+| `infra.dane_all_mx` | ✅ coverage over MX list | |
+| `infra.dane_rollover` | ✅ record-count heuristic (≥2) | ⏳ confirm "next" matches next cert (probe) |
+| `infra.dane_name_alignment` | ✅ CNAME chain resolution | ⏳ authoritative signed-chain trust |
+| `infra.dane_dnssec_prereq` | ✅ observe RRSIG/DS presence | ⏳ trust AD bit via **validating resolver** |
+| `infra.dane_without_dnssec` | ✅ TLSA-present + unsigned observation | ⏳ definitive via validating resolver |
+| `infra.dane_tlsa_cert_match` | | ⏳ **probe** :25 STARTTLS, digest the live cert |
+| `infra.dane_tlsa_dangling` | | ⏳ **probe** — compare all records to live cert |
+| `infra.dane_starttls_offered` | | ⏳ **probe** SMTP `EHLO`/`STARTTLS` |
+
+## 8. Acceptance criteria
+
+1. For each MX host of a domain, the checker queries `_25._tcp.<mx-host>` for TLSA and records every
+   RR as `{usage, selector, mtype, data, ttl}` in `dane_check_results.tlsa_records` (JSON `checkResults.dane[]` today).
+2. A `3 1 1` record on all MX, on DNSSEC-signed zones, produces only `ok`/`info` findings; the DNS &
+   Infrastructure cell is not turned amber/red by DANE.
+3. A TLSA record on an **unsigned** zone yields `infra.dane_without_dnssec` = **critical** with a
+   remediation to sign the zone or remove the record.
+4. A record with **usage 0 or 1** yields `infra.dane_tlsa_params` = **critical** (unusable for SMTP),
+   remediation republishes as `3 1 1`.
+5. When some MX have valid DANE and others do not, `infra.dane_all_mx` = **critical**; when none do,
+   it is **warning** — never silently `ok`.
+6. A host with exactly one TLSA record yields `infra.dane_rollover` = **warning** with a remediation
+   to pre-stage the next cert's `3 1 1` digest.
+7. A malformed digest (wrong hex length for the matching type) yields `infra.dane_digest_length` =
+   **critical**.
+8. Every non-`ok` finding carries a **concrete** remediation containing the exact TLSA record or step
+   (never a generic "check your DNS"), and the audit-detail row exposes copy-to-clipboard of it.
+9. The cert-match probe (`infra.dane_tlsa_cert_match`), `dangling`, and `starttls_offered` are cleanly
+   gated behind the FUTURE probe flag; with the probe disabled their `cert_match`/`starttls_offered`
+   columns are `NULL` and no false criticals are emitted.
+10. `SERVFAIL` on a DNSSEC-signed zone is reported as a validation error (`probe_error`), not silently
+    treated as "no DANE".
+11. The scheduler diff flags a newly-appearing DANE critical (e.g. cert mismatch after renewal, or a
+    drop from ≥2 to 1 TLSA record) as a "new problem".
+12. `dane_check_results` has PK `id`, FKs to `audit_runs` and `domains`, and index
+    `(domain_id, mx_host)`; the JSON `checkResults.dane[]` shape maps 1:1 to its columns.
+
+<!--
+MAINTENANCE NOTES
+- Keep RFC refs current: DANE base RFC 6698, updated ops RFC 7671, SMTP DANE RFC 7672; DNSSEC
+  RFC 4033-4035. Recommended SMTP profile remains "3 1 1" (DANE-EE / SPKI / SHA-256) — revisit if
+  RFC 7671/7672 guidance changes or SHA-256 is deprecated for TLSA.
+- DANE has a HARD dependency on ./dnssec.mdx — keep the prerequisite wording in sync with that spec;
+  MTA-STS (./mta_sts.mdx) is the documented non-DNSSEC alternative. TLS availability overlaps
+  ./tls_transport.mdx (STARTTLS/cert) — avoid duplicating; cross-reference.
+- Keep sub-check ids (infra.dane_*) and the first-round/future split in sync with ../spam_checks.mdx
+  (DNS & Infrastructure category) and the Checker/Finding contract in ../engineering.mdx.
+- When the file store moves to Postgres, dane_check_results must stay a straight projection of
+  checkResults.dane[]; update the store module and this section together.
+- If a native node:dns TLSA resolver becomes reliable, prefer it over shelling to dig, but keep dig as
+  the fallback for resolvers that mangle the TLSA RRtype.
+-->

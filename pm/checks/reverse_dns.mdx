@@ -1,0 +1,212 @@
+---
+title: Reverse DNS / PTR / FCrDNS
+description: Audits every sending IP for a PTR record, Forward-Confirmed reverse DNS, non-generic hostname naming, single-PTR hygiene, IPv6 parity, and sender-domain alignment — the reverse-lookup signals mail receivers use to decide an IP is a legitimate mail server rather than a compromised or dynamic host.
+---
+
+# Reverse DNS / PTR / FCrDNS
+
+Reverse DNS is the mirror image of forward DNS: given a sending IP address, a PTR record answers "what hostname claims this IP?" Receiving mail servers (Gmail, Yahoo/AOL, Microsoft, Proofpoint, Mimecast) treat reverse DNS as one of the cheapest, hardest-to-fake trust signals available at SMTP connect time. An IP with **no PTR**, a **generic/dynamic PTR** (e.g. `203-0-113-24.dsl.isp.example`), or a PTR whose hostname does **not forward-resolve back to the same IP** (Forward-Confirmed reverse DNS, FCrDNS) is routinely rejected outright or scored heavily toward spam before the message body is even seen. The 2024 Gmail/Yahoo bulk-sender requirements make valid forward and reverse DNS a hard gate. This check iterates over every IP in the domain's `sending_ips` and validates the full reverse-DNS posture of each.
+
+**Category:** DNS & Infrastructure. **checkId prefix:** `infra` (PTR sub-family).
+
+**Read alongside:**
+- [../overview.mdx](../overview.mdx) — product charter, personas, port list.
+- [../engineering.mdx](../engineering.mdx) — the Checker/Finding contract, file store, scheduler.
+- [../spam_checks.mdx](../spam_checks.mdx) — master catalog; this spec is the PTR/FCrDNS slice of the `infra` category.
+- [../dashboard.mdx](../dashboard.mdx) — the 6-column status dashboard (this feeds the DNS & Infrastructure cell).
+- [../scheduled_checks.mdx](../scheduled_checks.mdx) — recurring-check config and per-OS scheduling.
+- Peers: [./mx_routing.mdx](./mx_routing.mdx) (inbound host naming, forward DNS of MX), [./smtp_security.mdx](./smtp_security.mdx) (HELO/EHLO and the SMTP probe that `infra.helo_match` depends on).
+
+## 1. What it checks
+
+Reverse DNS maps an IP back to a name using the `in-addr.arpa` (IPv4) and `ip6.arpa` (IPv6) special-use zones. For `203.0.113.24` the resolver queries the PTR record at `24.113.0.203.in-addr.arpa`; for IPv6 each nibble is reversed under `ip6.arpa`. The authoritative party for the reverse zone is the IP's **network owner** (the hosting provider / ISP / cloud), not the domain owner — so fixing reverse DNS almost always means a provider control-panel action or a support ticket, and the remediation strings below reflect that.
+
+Relevant standards: **RFC 1035 / 3596** (PTR, `in-addr.arpa`, `ip6.arpa`), **RFC 8499** (FCrDNS terminology), **RFC 5321 §4.1.4** (SMTP HELO/EHLO must be a valid FQDN identifying the client), and the **2024 Gmail/Yahoo bulk-sender requirements** (sending IP must have valid forward and reverse DNS; PTR must exist).
+
+Why receivers care:
+- **Anti-spam heuristic.** Botnets and compromised residential hosts overwhelmingly send from IPs with missing or ISP-generic PTR. A missing or generic PTR is a strong "not a real mail server" signal; SpamAssassin ships rules such as `RDNS_NONE` and `RDNS_DYNAMIC` for exactly this.
+- **FCrDNS as an identity anchor.** If the PTR hostname forward-resolves back to the connecting IP, the operator demonstrably controls both directions of DNS for that IP — a credential a spoofer on a hijacked IP usually cannot produce.
+- **Hard gates.** Many MTAs reject at connect (`450`/`550 ... no reverse DNS`) when a PTR is absent, or defer when FCrDNS fails.
+
+Common real-world failure mode: a new VPS or elastic cloud IP ships with a provider-default generic PTR (`ec2-203-0-113-24.compute-1.amazonaws.com`, `203-0-113-24.static.example-isp.net`). Forward DNS may even confirm it (FCrDNS passes) but the name is *generic*, so it still scores as a non-mailserver. The operator must set a **custom PTR** to their own mail hostname (e.g. `mail1.example.com`) AND publish a matching forward A/AAAA record so FCrDNS holds.
+
+How a failure degrades inbox placement: missing PTR → connect-time rejection or large spam score; generic PTR → moderate spam score and lower reputation accrual; FCrDNS mismatch → deferrals and reduced trust. Compounded with a HELO that does not match the PTR, deliverability collapses to bulk/spam foldering.
+
+## 2. Sub-checks
+
+All sub-checks iterate over each IP in `ctx.sendingIps`. Findings are emitted per IP so the operator can see exactly which host is at fault.
+
+| Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+|---|---|---|---|---|
+| `infra.ptr_present` | Each sending IP has at least one PTR record | `dns.reverse(ip)` returns ≥1 name (no `ENOTFOUND`/`ENODATA`) | **critical:** `203.0.113.24` has no PTR record; many receivers reject IPs with no reverse DNS | Ask your host/ISP to add a PTR for `203.0.113.24` → `mail1.example.com`. In AWS: Route 53 → "Request reverse DNS" or EC2 Elastic IP reverse DNS form. In a cPanel/WHM or provider panel: set rDNS = `mail1.example.com`. |
+| `infra.fcrdns` | Forward-Confirmed reverse DNS: the PTR hostname forward-resolves (A/AAAA) back to the same IP | `reverse(ip)` → for each PTR host, `resolve4`/`resolve6`; require the original IP to appear in the result set | **critical:** PTR `mail1.example.com` does not resolve back to `203.0.113.24` (got `198.51.100.9`); FCrDNS fails → deferrals/spam scoring | Publish `mail1.example.com. A 203.0.113.24` (and `AAAA` for IPv6) so the PTR forward-confirms. Ensure the A record matches the PTR exactly. |
+| `infra.ptr_generic` | PTR is NOT an auto-generated generic/dynamic hostname | Regex/heuristic match of the PTR host against dynamic/generic naming patterns (see §3) | **warning:** PTR `203-0-113-24.dsl.example-isp.net` looks auto-generated (contains the IP octets + `dsl`); reads as a dynamic/residential host, a strong spam signal | Replace the provider-default rDNS with a dedicated mail hostname, e.g. `mail1.example.com`, and publish the matching A record. Never leave the ISP-generated PTR on a mail-sending IP. |
+| `infra.ptr_single` | Exactly one PTR per IP (no multi-PTR ambiguity) | Count of names returned by `reverse(ip)` | **warning:** `203.0.113.24` returns 2 PTR records (`mail1.example.com`, `old-host.example.net`); receivers may pick either, and FCrDNS may fail on the wrong one | Reduce to a single PTR = `mail1.example.com`. Remove stale reverse-zone entries at your provider. |
+| `infra.ptr_ipv6` | Every IPv6 sending IP also has PTR + FCrDNS | For each IPv6 in `sendingIps`: `reverse` + forward `resolve6` confirm under `ip6.arpa` | **critical:** IPv6 `2001:db8::25` sends mail but has no PTR (`ip6.arpa`); Gmail requires reverse DNS on the *actual* connecting IP, which may be IPv6 | Add an `ip6.arpa` PTR for `2001:db8::25` → `mail1.example.com` and publish `mail1.example.com AAAA 2001:db8::25`. Or disable IPv6 sending until reverse DNS is configured. |
+| `infra.ptr_matches_sender_domain` (advisory) | PTR hostname is within the sender's own domain/branding | String check: PTR host is a subdomain of `ctx.domain` (or its registrable org domain) | **info:** PTR `mail1.smtp-provider.net` is valid and forward-confirmed but not under `example.com`; branding/alignment is weaker (acceptable when using an ESP) | Optional: if you run your own IPs, name them under your domain (`mail1.example.com`) for brand alignment. When using an ESP, the ESP-owned PTR is expected and fine. |
+| `infra.ptr_tld_valid` | PTR host is a syntactically valid, resolvable FQDN (has a real public TLD, not `.local`/`.internal`/bare label) | Parse PTR host; reject empty label, `.local`, `.lan`, `.internal`, trailing-dot-only, or non-resolving apex | **warning:** PTR `mailserver` / `host.local` is not a public FQDN; receivers treat it as invalid reverse DNS | Set the PTR to a fully-qualified public hostname, e.g. `mail1.example.com`, and ensure its zone is publicly resolvable. |
+| `infra.ptr_no_ip_literal` | PTR host does not merely re-encode the IP address | Detect the four IPv4 octets (or v6 groups) embedded in the hostname label | **warning:** PTR `203.0.113.24.example-isp.net` embeds the literal IP; classic generic pattern | Replace with a semantic mail hostname (`mail1.example.com`). |
+| `infra.ptr_cname` (advisory) | The reverse (`in-addr.arpa`) name is a PTR, not a CNAME to something unexpected (RFC 2317 delegation) | Detect `CNAME` on the reverse name and whether the target chain ends in a resolvable PTR | **info:** reverse name is CNAMEd (RFC 2317 /24-delegation) — valid, but confirm the delegated PTR forward-confirms | No action if the delegated PTR forward-confirms; otherwise fix the delegated PTR at the sub-delegated provider. |
+| `infra.helo_match` (advisory, **future**) | Sending host's SMTP HELO/EHLO FQDN matches its PTR and forward DNS | Requires an outbound SMTP probe (or log ingestion) to observe the HELO string — not available first-round | **warning:** HELO `localhost.localdomain` ≠ PTR `mail1.example.com`; misaligned HELO lowers trust and can trigger `HELO_MISMATCH` rules | Configure the MTA HELO/EHLO to the FCrDNS-valid hostname `mail1.example.com` (Postfix `myhostname`, exim `primary_hostname`). See [./smtp_security.mdx](./smtp_security.mdx). |
+
+## 3. How it is measured
+
+**Core algorithm (per IP, first-round, pure `node:dns/promises`):**
+
+1. `const ptrHosts = await dns.reverse(ip)` — resolves the PTR under `in-addr.arpa` (v4) or `ip6.arpa` (v6). `ENOTFOUND`/`ENODATA` → `infra.ptr_present` **critical**; stop the FCrDNS/generic sub-checks for that IP (nothing to confirm).
+2. `infra.ptr_single`: if `ptrHosts.length > 1` → **warning**. Use the first host for the remaining checks but report all.
+3. For the chosen `ptrHost`:
+   - **FCrDNS:** `const fwd = ip.includes(':') ? await dns.resolve6(ptrHost) : await dns.resolve4(ptrHost)`; normalize (lowercase, compress IPv6 via a canonicalizer) and test whether `ip` ∈ `fwd`. Not present or `ENOTFOUND` → `infra.fcrdns` **critical**.
+   - **Generic detection** (`infra.ptr_generic`): apply the pattern set below against the leftmost labels of `ptrHost`.
+   - **IP-literal detection** (`infra.ptr_no_ip_literal`): build the dashed/dotted octet strings from `ip` and test for substring presence.
+   - **FQDN validity** (`infra.ptr_tld_valid`): reject `.local/.lan/.internal/.home.arpa`, single-label names, and hosts whose apex does not resolve.
+   - **Sender-domain alignment** (`infra.ptr_matches_sender_domain`): `ptrHost` endsWith `.${ctx.domain}` or shares the registrable org domain → aligned (info if not).
+4. `infra.ptr_ipv6`: same pipeline gated on `net.isIPv6(ip)`; ensures IPv6 senders are not silently exempt.
+
+**Generic/dynamic PTR heuristics** (case-insensitive; match on the hostname labels left of the org domain):
+- Embedded IP: contains the four IPv4 octets joined by `-`, `.`, or `x` (e.g. `203-0-113-24`, `203.0.113.24`, `ip-203-0-113-24`), or reversed octet order.
+- Dynamic keywords: `dhcp`, `dyn`, `dynamic`, `dsl`, `dialup`, `ppp`, `pppoe`, `cable`, `broadband`, `pool`, `client`, `customer`, `res`, `residential`, `static` (when combined with embedded IP), `wireless`, `cust`, `user`, `host` + digits, `unassigned`, `no-rdns`.
+- Cloud defaults: `compute-1.amazonaws.com`, `.bc.googleusercontent.com`, `.cloudapp.azure.com`, `.digitalocean.com`-style `NNN-NNN.` prefixes, `.vultr.com`, `.linode.com` default patterns (these are *generic* even though they forward-confirm).
+- Hex/long-random labels: a leftmost label that is a long hex/random string with no vowels.
+
+A hit downgrades `infra.ptr_generic` to **warning** (not critical) because generic-but-FCrDNS-valid still delivers to some receivers; combine with the score weights in [../engineering.mdx](../engineering.mdx).
+
+**Severity mapping:**
+- No PTR (`infra.ptr_present`) → **critical**. FCrDNS mismatch (`infra.fcrdns`) → **critical** (IPv6 no-PTR `infra.ptr_ipv6` → **critical**).
+- Generic PTR, multi-PTR, IP-literal, invalid FQDN → **warning**.
+- Sender-domain alignment, RFC 2317 CNAME note → **info**.
+- All present + FCrDNS-valid + non-generic → **ok** finding per IP.
+
+**Edge cases / concerns:**
+- **No sending IPs configured.** If `ctx.sendingIps` is empty, emit one `info` finding: "No sending IPs recorded for `example.com`; add IPs (or import from SPF `ip4:`/`ip6:` / MX A records) to audit reverse DNS." Optionally seed candidates from [./mx_routing.mdx](./mx_routing.mdx) MX host A/AAAA.
+- **Shared ESP IPs.** When the sender uses an ESP pool, PTRs are ESP-owned and generic-looking-but-valid; `infra.ptr_matches_sender_domain` stays **info**, and `infra.ptr_generic` should tolerate known-good ESP patterns (config allowlist).
+- **CGNAT / behind NAT.** The configured IP may not be the actual egress IP; note this in detail. True HELO/egress verification is the `infra.helo_match` future SMTP probe.
+- **Multi-PTR round-robin.** `dns.reverse` order is not stable; test FCrDNS against *every* returned host and pass if any forward-confirms, but still warn on count > 1.
+- **Caching / rate limits:** wrap all lookups in the shared resolver with a short in-run memo (dedupe repeated IPs), a per-lookup timeout (~5s), and bounded concurrency (e.g. `p-limit(8)`) since a domain may list many IPs. Respect TTLs; the scheduler's cadence (§6) is far longer than any TTL so no extra caching is needed. Reverse zones can be slow/lame-delegated — treat `ESERVFAIL`/timeout distinctly from `ENOTFOUND` (transient → `info` "reverse lookup timed out, will retry", not a false critical).
+
+## 4. User interface
+
+Built on the React 19 + Vite + Tailwind + shadcn/ui + lucide-react stack, data via the generated TanStack-Query client.
+
+**Dashboard contribution.** All `infra.ptr_*` findings roll up into the shared **DNS & Infrastructure** column cell (alongside MX, STARTTLS, MTA-STS, DNSSEC). Cell color = worst PTR/other-infra severity: any missing-PTR or FCrDNS-fail → dark red; generic/multi-PTR only → amber; all IPs clean → dark green; never-run → light gray. Info-only (alignment) never turns the cell amber.
+
+**Audit-detail view.** A collapsible "Reverse DNS / PTR" group under the DNS & Infrastructure section. One sub-group **per sending IP** (badge shows the IP and a v4/v6 chip), then a row per sub-check:
+
+```
+DNS & Infrastructure ▸ Reverse DNS / PTR                         2 critical · 1 warning
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ 203.0.113.24  (IPv4)                                                            │
+│  ● critical  PTR present        No PTR record for 203.0.113.24        [Copy fix]│
+│  ○ warning   Generic PTR        —                                              │
+│  ● critical  FCrDNS             —                                              │
+│  Fix: Add rDNS 203.0.113.24 → mail1.example.com AND publish                    │
+│       mail1.example.com. A 203.0.113.24            [Copy record] [Copy ticket]  │
+├───────────────────────────────────────────────────────────────────────────────┤
+│ 2001:db8::25  (IPv6)                                                            │
+│  ● critical  PTR present (v6)   No ip6.arpa PTR for 2001:db8::25      [Copy fix]│
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+Each row renders: severity badge (`ok`=green check, `info`=slate, `warning`=amber, `critical`=red — lucide `ShieldAlert`/`CircleCheck`), the sub-check `label`, observed `detail` (PTR host observed, forward-resolve result, matched generic pattern), and the `remediation` string with two copy-to-clipboard buttons: **Copy record** (the exact A/AAAA line to publish) and **Copy ticket** (a prefilled "please set rDNS for `<ip>` to `<host>`" message the operator pastes to their host/ISP). A small **FCrDNS diagram** chip renders `IP → PTR host → forward IP` with a green/red equality mark.
+
+**Per-domain config inputs.** The domain settings drawer exposes the **Sending IPs** editor (add/remove `ip4`/`ip6`, "import from SPF" and "import from MX" buttons) — the same `sending_ips` used by SPF/MX checks. An **admin-only** "Generic PTR patterns" panel lets an operator extend/allowlist the generic-detection regex set and mark known-good ESP PTR patterns.
+
+**Empty / never-run / loading.** No IPs → an info card "Add sending IPs to audit reverse DNS" with the import buttons. Never-run → gray dashes in the dashboard cell and a "Run audit" button. Loading → skeleton rows per IP. The `infra.helo_match` row renders **disabled** with a "Future — needs SMTP probe" tooltip linking [./smtp_security.mdx](./smtp_security.mdx).
+
+## 5. Information schema (database schema)
+
+Reference the shared core tables (do NOT redefine): `domains`, `sending_ips`, `dkim_selectors`, `audit_runs`, `findings`. Each PTR finding is written to `findings` with `category='infra'` and `check_id` in the `infra.ptr_*` family. The structured per-IP observations go in a check-specific result table.
+
+```sql
+-- Structured per-IP reverse-DNS observations captured during one audit run.
+CREATE TABLE ptr_check_results (
+    id            bigserial   PRIMARY KEY,
+    audit_run_id  bigint      NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id     bigint      NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    ip            inet        NOT NULL,                 -- the sending IP audited (v4 or v6)
+    ptr_host      text        NULL,                     -- PTR hostname observed; NULL when none
+    ptr_count     smallint    NOT NULL DEFAULT 0,       -- number of PTR records returned
+    fcrdns_ok     boolean     NOT NULL DEFAULT false,   -- PTR forward-resolves back to ip
+    is_generic    boolean     NOT NULL DEFAULT false,   -- matched a generic/dynamic pattern
+    is_ipv6       boolean     NOT NULL DEFAULT false,   -- convenience flag (family(ip)=6)
+    matches_sender_domain boolean NOT NULL DEFAULT false,
+    generic_pattern text      NULL,                     -- which pattern matched, for transparency
+    forward_ips   inet[]      NULL,                     -- addresses ptr_host resolved to
+    lookup_ms     integer     NULL,                     -- reverse+forward timing
+    error_code    text        NULL,                     -- ENOTFOUND | ESERVFAIL | ETIMEOUT | NULL
+    checked_at    timestamptz NOT NULL DEFAULT now()
+);
+
+-- Fast lookup for the audit-detail view and run-over-run diffing.
+CREATE INDEX ptr_check_results_domain_ip_idx  ON ptr_check_results (domain_id, ip);
+CREATE INDEX ptr_check_results_run_idx        ON ptr_check_results (audit_run_id);
+
+-- Config/reference table: editable generic/dynamic PTR patterns (admin-managed).
+CREATE TABLE ptr_generic_patterns (
+    id          bigserial PRIMARY KEY,
+    pattern     text      NOT NULL,              -- regex or substring
+    is_regex    boolean   NOT NULL DEFAULT true,
+    kind        text      NOT NULL,              -- 'dynamic' | 'cloud_default' | 'ip_literal' | 'allowlist'
+    note        text      NULL,
+    enabled     boolean   NOT NULL DEFAULT true,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX ptr_generic_patterns_pattern_idx ON ptr_generic_patterns (pattern);
+```
+
+**Mapping onto TODAY's JSON file store** (`~/.email_delivery_hero/`, no DB yet):
+- `ptr_check_results` rows live inside the run file `audits/<domainId>/<auditId>.json` under a `checkResults.ptr[]` array — one object per audited IP with exactly the columns above (`ip`, `ptrHost`, `ptrCount`, `fcrdnsOk`, `isGeneric`, `isIpv6`, `matchesSenderDomain`, `genericPattern`, `forwardIps`, `lookupMs`, `errorCode`, `checkedAt`). The parent audit file already carries `id`, `domain`, `startedAt`, `finishedAt`, so `audit_run_id`/`domain_id` are implicit from the file path.
+- The `findings` rows are the same file's top-level `findings[]` array (shared with every other check).
+- `ptr_generic_patterns` is a section of `config.yaml` (`infra.ptrGenericPatterns:` list with `pattern`, `isRegex`, `kind`, `note`, `enabled`); `sending_ips` is the existing `domains.json` `sendingIps[]` per domain. The store module isolates these shapes so the file→Postgres migration is a single-module change.
+
+## 6. When we run the check
+
+- **On-demand:** runs inside every manual audit — `POST /api/domains/:id/audit` — as part of the `infra` category. Pure DNS, so it always executes first-round with no external dependency.
+- **Periodic:** the in-process scheduler re-runs the engine per domain at the `config.yaml` cadence (default every 6h). Reverse DNS changes rarely, but a provider re-imaging an IP, an IP being reassigned, or a forward A record being edited can silently break FCrDNS — periodic re-checks catch it.
+- **First-round vs future:** all `infra.ptr_*` sub-checks are **first-round** (`node:dns/promises`). Only `infra.helo_match` is **future** — it needs an outbound SMTP probe (or MTA-log ingestion) to observe the HELO/EHLO string; it renders disabled until the probe subsystem in [./smtp_security.mdx](./smtp_security.mdx) lands.
+- **Cost / rate-limit / back-off:** reverse zones are sometimes lame-delegated and slow. Use bounded concurrency (`p-limit(8)`), a 5s per-lookup timeout, and one retry with jittered back-off on `ESERVFAIL`/`ETIMEOUT` before classifying as transient (`info`, not `critical`). Dedupe duplicate IPs within a run. No paid feeds or external quotas apply.
+- **Regression detection:** the scheduler diffs this run's `findings` against the previous run. A newly-appearing `infra.ptr_present` critical (PTR disappeared), a `false`→`true` on `is_generic` (provider reset rDNS to a default), or an `fcrdns_ok` flip `true`→`false` (forward A edited) is surfaced as a "new problem" alert. The `ptr_check_results` per-IP rows make the exact regressing IP unambiguous.
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises`) | Future (probe / tool / feed / API) |
+|---|---|---|
+| `infra.ptr_present` | ✅ `dns.reverse(ip)` | — |
+| `infra.fcrdns` | ✅ `reverse` + `resolve4`/`resolve6` | — |
+| `infra.ptr_generic` | ✅ pattern match on PTR host | — |
+| `infra.ptr_single` | ✅ count of `reverse` results | — |
+| `infra.ptr_ipv6` | ✅ `reverse` + `resolve6` under `ip6.arpa` | — |
+| `infra.ptr_matches_sender_domain` | ✅ string/domain compare | — |
+| `infra.ptr_tld_valid` | ✅ FQDN parse + apex resolve | — |
+| `infra.ptr_no_ip_literal` | ✅ octet-substring test | — |
+| `infra.ptr_cname` | ✅ detect CNAME on reverse name (RFC 2317) | — |
+| `infra.helo_match` | — | ⏳ needs outbound SMTP probe / MTA-log ingestion to read HELO/EHLO |
+
+## 8. Acceptance criteria
+
+1. The checker registers under `id = 'infra.reverse_dns'`, `label = 'Reverse DNS / PTR'`, and iterates over every entry in `ctx.sendingIps` (v4 and v6).
+2. For an IP with no PTR, it emits `infra.ptr_present` **critical** with a remediation naming the exact rDNS mapping (`<ip> → mail1.example.com`) and the provider action.
+3. For an IP whose PTR host does not forward-resolve to that IP, it emits `infra.fcrdns` **critical** including the observed forward-resolve result.
+4. For an IP whose PTR matches any enabled generic/dynamic pattern (embedded IP, `dsl`/`dyn`/`pool`, cloud defaults, etc.), it emits `infra.ptr_generic` **warning** and records `generic_pattern`.
+5. For an IP returning >1 PTR, it emits `infra.ptr_single` **warning** and still evaluates FCrDNS against every returned host (pass if any confirms).
+6. IPv6 sending IPs are audited under `ip6.arpa` via `resolve6`; a missing v6 PTR yields `infra.ptr_ipv6` **critical**.
+7. `infra.ptr_matches_sender_domain` and `infra.ptr_cname` emit **info** only and never turn the dashboard cell amber.
+8. `infra.helo_match` is present in the catalog, marked **future/disabled**, and emits no critical/warning first-round.
+9. Empty `ctx.sendingIps` yields a single **info** finding prompting the user to add IPs (with import-from-SPF/MX offered), not a crash or false critical.
+10. Transient resolver errors (`ESERVFAIL`/timeout) are classified **info** (retry-later), distinct from `ENOTFOUND`, after one back-off retry.
+11. Each audited IP produces one `ptr_check_results` row (→ `checkResults.ptr[]` in the run JSON today) with `ip`, `ptr_host`, `ptr_count`, `fcrdns_ok`, `is_generic`, `is_ipv6`, `checked_at` populated; the `(domain_id, ip)` index exists.
+12. Every non-ok finding carries a concrete remediation string (exact record + provider step); the audit-detail UI exposes Copy-record and Copy-ticket buttons that reproduce it verbatim.
+13. Findings roll into the DNS & Infrastructure dashboard cell with correct worst-severity coloring, and the scheduler flags a PTR/FCrDNS regression as a new problem on the next run.
+
+<!--
+MAINTENANCE NOTES
+- Keep RFC refs current: RFC 1035 / 3596 (PTR, in-addr.arpa / ip6.arpa), RFC 8499 (FCrDNS term),
+  RFC 5321 §4.1.4 (HELO/EHLO FQDN), RFC 2317 (classless in-addr.arpa delegation). Track any update
+  to the Gmail/Yahoo bulk-sender reverse-DNS requirement.
+- Keep the generic/dynamic PTR pattern set (§3 and ptr_generic_patterns) in sync with real-world
+  ISP/cloud defaults; new providers ship new default naming schemes regularly.
+- Keep the infra.* checkId list and severity/weights in sync with ../spam_checks.mdx and
+  ../engineering.mdx. infra.helo_match stays FUTURE until the SMTP probe in ./smtp_security.mdx ships.
+- Cross-links: ./mx_routing.mdx (MX host forward DNS, IP sourcing), ./smtp_security.mdx (HELO/EHLO,
+  SMTP probe). Update if those file names change.
+-->

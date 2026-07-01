@@ -191,9 +191,9 @@ Read the values under the key **`email_delivery_hero.google`**:
 
 The same code runs in both environments; only values and origin strictness differ.
 
-* **Dev (localhost).** Frontend on `http://localhost:9311/`, backend on `http://localhost:9312/`
+* **Dev (localhost).** Frontend on `http://localhost:4444/`, backend on `http://localhost:9312/`
   (API under `/api`, embedded auth middleware under `/api/v1`). The SPA uses the `pk_test_`
-  publishable key; the backend uses the `sk_test_` secret key. Register `http://localhost:9311` as
+  publishable key; the backend uses the `sk_test_` secret key. Register `http://localhost:4444` as
   an allowed origin. The two-domain enforcement, the Google handoff, and token issuance all behave
   exactly as in production — only origin/email strictness is relaxed.
 * **Prod.** Swap to `pk_live_` / `sk_live_` keys and register the production origin(s). HTTPS only;

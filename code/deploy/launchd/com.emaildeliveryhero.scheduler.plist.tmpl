@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  EmailDeliveryHero — launchd LaunchAgent template.
+
+  `just build` renders this template (substituting __NODE_BIN__, __TRIGGER_SCRIPT__, __API_PORT__,
+  __LOG_OUT__, __LOG_ERR__) and installs the result to
+  ~/Library/LaunchAgents/com.emaildeliveryhero.scheduler.plist.
+
+  It runs our own Node trigger script on a calendar schedule, which POSTs to the local backend to
+  run every due deliverability audit. Edit the StartCalendarInterval entries to change the times /
+  add more runs per day (one <dict> per time of day).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.emaildeliveryhero.scheduler</string>
+
+    <!-- Run our TypeScript-on-Node trigger (not a raw curl) so background work stays in-stack. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NODE_BIN__</string>
+        <string>__TRIGGER_SCRIPT__</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>API_PORT</key>
+        <string>__API_PORT__</string>
+    </dict>
+
+    <!-- 06:00 and 18:00 every day = two calendar entries. Add more <dict>s for more runs/day. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key><integer>6</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>18</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+    </array>
+
+    <!-- If the Mac was asleep at the scheduled time, launchd runs it at next wake. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_OUT__</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_ERR__</string>
+</dict>
+</plist>

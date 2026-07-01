@@ -1,0 +1,248 @@
+---
+title: DNS Zone & Nameserver Health
+description: Audits the foundational DNS plumbing beneath a mail domain — nameserver count/diversity, lame delegation, parent↔child NS consistency, SOA sanity, glue records, apex-CNAME violations, TXT bloat, TTL sanity, wildcards, zone-transfer exposure, and dangling CNAME / SPF-include / MX targets that create subdomain-takeover and spoofing risk — and prescribes the exact records to fix each one.
+---
+
+# DNS Zone & Nameserver Health
+
+Before SPF, DKIM, DMARC, or MX can even be *read* by a receiver, the domain's DNS delegation has to resolve correctly and answer authoritatively. This check audits that plumbing: the nameserver (NS) set, the delegation from the parent zone, the SOA record that governs the zone's cache/secondary behavior, glue records, and structural hazards like a CNAME at the apex, wildcard records, TXT bloat near UDP limits, and an open zone transfer. It also hunts the highest-impact modern DNS risk for a mail domain: **dangling records** — a CNAME (or an SPF `include:`/`redirect:`, or an MX) pointing at a deprovisioned or unclaimed target, which lets an attacker claim that endpoint and take over the subdomain to serve content or send authenticated-looking mail. A lame or inconsistent delegation makes authentication records intermittently unresolvable; a dangling CNAME on a sending subdomain is a direct spoofing and phishing vector. DNS health is therefore the substrate every other check depends on.
+
+This check belongs to the **DNS & Infrastructure** dashboard category. All sub-check ids use the **`infra`** prefix (DNS-health sub-family, e.g. `infra.ns_sanity`).
+
+**Read alongside:**
+- [../overview.mdx](../overview.mdx) — product charter, personas, port list.
+- [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
+- [../spam_checks.mdx](../spam_checks.mdx) — master catalog; this spec is the DNS-health slice of the DNS & Infrastructure category.
+- [../dashboard.mdx](../dashboard.mdx) — how the DNS & Infrastructure cell rolls up.
+- [./dnssec.mdx](./dnssec.mdx) — DNSSEC chain-of-trust validation (a separate infra sub-family; this check stops at unsigned zone sanity).
+- [./spf.mdx](./spf.mdx) — SPF record semantics; this check flags *dangling* `include:`/`redirect:` targets that SPF depends on.
+- [./mx_routing.mdx](./mx_routing.mdx) — MX topology; this check provides the NS/SOA/glue substrate MX resolution needs.
+
+## 1. What it checks
+
+A domain is *delegated* by its parent zone (e.g. `.com`) via a set of NS records, and served *authoritatively* by the nameservers named in that set. The zone's own apex carries a second NS RRset plus a single **SOA** (Start Of Authority) record. This check enforces the correctness rules from **RFC 1034/1035** (zone structure, delegation, glue), **RFC 1912** (common operational errors — lame delegation, SOA sanity, multiple diverse NS), **RFC 2181** (name-server authority, TTL rules, MX/CNAME target rules), **RFC 2182** ("Selection and Operation of Secondary DNS Servers" — ≥2 NS, topological/geographic diversity), **RFC 1035 §3.3.11 / RFC 2181** (CNAME must not coexist with other data — hence no CNAME at a zone apex), and treats **open AXFR** (RFC 5936 zone transfer offered to the public) as an information-leak finding.
+
+Why receivers care: authentication records (SPF TXT, DKIM TXT, DMARC TXT, MX, MTA-STS) are only as reliable as the delegation serving them. If half the NS set is **lame** (listed but not answering authoritatively), a receiver's resolver that happens to query the lame server gets `SERVFAIL`/`REFUSED` and may treat SPF/DMARC as *temperror* — which many receivers score as "no policy," softening enforcement and letting spoofed mail through, or deferring legitimate mail. A **single nameserver** (or two on the same host/ASN/network) means one outage takes the whole domain — and all its mail auth — dark. A stale **SOA serial** that never advances can leave secondaries serving old records after a legitimate SPF/DKIM rotation, causing intermittent auth failures. An **apex CNAME** silently masks or breaks the apex MX/TXT/SOA, a classic "why did all my mail stop" incident.
+
+The highest-severity real-world failure is the **dangling record → subdomain takeover**: a `CNAME` on `mail.example.com` or `links.example.com` that still points at `example.herokudns.com`, a de-provisioned S3 bucket, a cancelled SaaS tenant, or an NXDOMAIN target. An attacker registers/claims that target, and now controls a hostname *inside the victim's domain* — usable to host phishing pages under a trusted name, satisfy an ACME/HTTP challenge for a rogue TLS cert, or (when the dangling target is an SPF `include:` or a sending host) send mail that passes SPF alignment for the victim domain. This degrades inbox placement both defensively (spoofed mail from a takeover hostname damages domain reputation) and operationally (auth records that intermittently fail resolution get scored as unauthenticated).
+
+## 2. Sub-checks
+
+Every remediation is a concrete record or step. `example.com` is the audited domain; replace names/IPs with the domain's real values.
+
+| Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+|---|---|---|---|---|
+| `infra.ns_sanity` | ≥2 NS exist, each resolves to an address and answers, on diverse networks/ASNs (RFC 2182) | `resolveNs(domain)`; `resolve4/6` each NS; group by `/24`+`/48`+ASN | **critical** if <2 NS or all fail to resolve; **warning** if 2+ but all one ASN/subnet | Add a second provider's nameservers, e.g. `example.com. IN NS ns1.provider-b.net.` on a different network/ASN |
+| `infra.ns_lame` | Every listed NS actually answers **authoritatively** (AA bit) for the zone (RFC 1912) | Query each NS directly for `SOA example.com`; require an authoritative answer | **critical** if any NS returns REFUSED/SERVFAIL/non-authoritative | Fix the server's zone config so it is authoritative, or remove the lame NS from the delegation |
+| `infra.ns_parent_child` | NS set at the **parent** (`.com`) matches the NS set at the **zone apex** | Compare parent-delegation NS vs apex `resolveNs` set | **warning** if the two sets differ (added/removed NS not propagated) | Update the registrar/parent delegation to match the in-zone NS RRset exactly (both directions) |
+| `infra.ns_all_answer` | Each NS answers over both UDP and TCP within timeout | Probe each NS `SOA` query over UDP then TCP/53 | **warning** if an NS answers UDP but not TCP (breaks large/DNSSEC responses) | Open TCP/53 on the nameserver / fix the firewall; DNS requires TCP fallback (RFC 7766) |
+| `infra.ns_no_cname` | No NS target is itself a CNAME (RFC 2181 §10.3) | `resolveCname` on each NS hostname | **warning** if an NS name is a CNAME | Repoint the NS to a hostname with its own A/AAAA; NS/MX targets must not be CNAMEs |
+| `infra.soa_sanity` | SOA `refresh`/`retry`/`expire`/`minimum` within sane bounds and ordered correctly | `resolveSoa(domain)`; range-check each field | **warning** if `expire`<`refresh`, `minimum`>86400, or values wildly off RFC 1912 guidance | Set sane SOA timers, e.g. `refresh 7200 retry 3600 expire 1209600 minimum 3600` |
+| `infra.soa_serial` | SOA serial is present, non-zero, and **advances** across runs (monotonic) | Persist prior serial; compare to current | **info** if unchanged across many runs after a known record change; **warning** if serial went **backwards** | Bump the serial on every zone edit (use `YYYYMMDDnn` or unix-time convention) so secondaries reload |
+| `infra.soa_mname_ns` | SOA `MNAME` (primary master) is a real, resolvable host, ideally in the NS set | Resolve MNAME; check membership in NS RRset | **warning** if MNAME is NXDOMAIN or not in the NS set | Set SOA MNAME to your primary authoritative server's FQDN |
+| `infra.soa_rname` | SOA `RNAME` (hostmaster mailbox) is well-formed and the mailbox domain resolves | Parse RNAME → email; MX/A check the mailbox domain | **info** if RNAME missing/malformed (e.g. still `hostmaster.` placeholder) | Set RNAME to a monitored mailbox, e.g. `hostmaster.example.com.` mapping to `hostmaster@example.com` |
+| `infra.cname_at_apex` | No CNAME at the zone apex (`example.com` itself) | `resolveCname(domain)` must be empty | **critical** if apex is a CNAME (masks SOA/NS/MX/TXT) | Remove the apex CNAME; use ALIAS/ANAME/flattening at your DNS provider, or publish real A/AAAA + MX/TXT |
+| `infra.dangling_cname` | Every CNAME (apex + mail-relevant subdomains) points at a **live, claimed** target | `resolveCname` chain → resolve final target; classify NXDOMAIN / unclaimed cloud endpoint | **critical** if target is NXDOMAIN or a known-unclaimed provider endpoint (takeover risk) | Delete the stale CNAME, or re-provision the target service; never leave a CNAME to a deprovisioned host |
+| `infra.dangling_include` | SPF `include:`/`redirect:` and MX targets resolve to a live service | Fetch SPF TXT; resolve each `include:`/`redirect:` domain and MX host | **critical** if an `include:` target is NXDOMAIN/empty or an MX points at a dead host | Remove the dead `include:`/`redirect:` from SPF; repoint MX to a live host (see [./spf.mdx](./spf.mdx), [./mx_routing.mdx](./mx_routing.mdx)) |
+| `infra.dangling_ns` | No delegated **subdomain** NS points at a nameserver that no longer serves it (lame sub-delegation) | For discovered sub-delegations, verify the child NS answers authoritatively | **warning** if a sub-delegated NS is lame/NXDOMAIN (takeover of the whole subtree) | Remove or fix the sub-delegation; a lame delegated NS can be hijacked to control the subdomain |
+| `infra.txt_bloat` | TXT RRsets are not excessive/duplicated and stay clear of DNS response limits | Count TXT RRs + total octets at apex and mail names; detect duplicate SPF/verification strings | **warning** if a name's TXT set risks TCP-only/UDP-fragmentation or SPF has duplicate records | Consolidate/remove stale verification TXT; ensure exactly **one** SPF TXT (multiple = permerror) |
+| `infra.multi_txt_spf` | Exactly one SPF (`v=spf1`) TXT record at the apex (RFC 7208 §3.2) | Count TXT records starting `v=spf1` | **critical** if 0 (no SPF) is out of scope here, but **warning/critical** if ≥2 SPF records | Merge into a single `v=spf1 ... -all` record; delete the duplicate (see [./spf.mdx](./spf.mdx)) |
+| `infra.ttl_sanity` | TTLs on mail-critical records (MX, SPF/TXT, DKIM, DMARC, A/AAAA of MX hosts) are neither absurdly long nor short | Read RRset TTLs (via `dig`, future; else provider API) | **info** if TTL <300s (fragile/chatty) or >86400s (slow to fix a bad record) | Set mail-critical record TTLs to 3600s (1h); drop to 300s only during a planned migration |
+| `infra.glue_records` | Glue A/AAAA present and consistent for **in-bailiwick** NS (NS inside the delegated zone) | Compare parent-supplied glue vs the authoritative A/AAAA of each in-zone NS | **critical** if in-bailiwick NS has missing glue (delegation cannot bootstrap); **warning** if glue ≠ authoritative address | Add/fix glue at the registrar so it matches the NS host's real A/AAAA |
+| `infra.wildcard` | No unexpected wildcard (`*.example.com`) that could shadow subdomains or forge mail names | Query a random nonce label; if it resolves, a wildcard exists | **warning** if a wildcard A/MX/TXT is present unexpectedly (masks typos, forges arbitrary hostnames) | Remove the wildcard, or scope it deliberately; ensure it does not create bogus MX/SPF for arbitrary names |
+| `infra.zone_transfer` | AXFR is **refused** to the public (RFC 5936) *(FUTURE — probe)* | Attempt `AXFR example.com` against each NS | **critical** if any NS answers AXFR with the full zone (info-leak: every host/record exposed) | Restrict AXFR with `allow-transfer { none; }` / TSIG-only on every authoritative server |
+| `infra.ns_response_time` | Nameservers answer within a reasonable latency *(FUTURE — probe/heuristic)* | Time each NS `SOA` query | **info** if median NS latency is high (slow resolution can tempfail auth under load) | Add anycast/closer secondaries; investigate the slow NS |
+| `infra.recursion_open` | Authoritative NS is not also an **open recursive resolver** *(FUTURE — probe)* | Query the NS for an unrelated external name with RD set | **warning** if the NS recurses for arbitrary names (amplification/abuse risk) | Disable recursion on authoritative-only servers |
+
+## 3. How it is measured
+
+**First-round (pure `node:dns/promises`), deterministic:**
+
+1. `resolveNs(domain)` → the apex NS set. `resolveSoa(domain)` → `{ nsname (MNAME), hostmaster (RNAME), serial, refresh, retry, expire, minttl }`. These two calls drive `infra.ns_sanity`, `infra.soa_sanity`, `infra.soa_serial`, `infra.soa_mname_ns`, `infra.soa_rname`.
+2. For each NS hostname: `resolveCname(ns)` (must be empty → `infra.ns_no_cname`), then `resolve4`/`resolve6` to get its address; classify addresses by `/24`(v4)/`/48`(v6) prefix for network diversity (`infra.ns_sanity`). **True ASN diversity is FUTURE** (Cymru/pyasn feed), same gate as [./mx_routing.mdx](./mx_routing.mdx).
+3. `infra.cname_at_apex`: `resolveCname(domain)` — any answer at the apex is critical.
+4. **Dangling detection** (`infra.dangling_cname`): for the apex and a curated set of mail-relevant labels (from CheckContext: MX hosts, DKIM `<selector>._domainkey`, `_dmarc`, `_mta-sts`, `mta-sts`, `mail`, `smtp`, `links`, `email`, `click`, `newsletter`, plus any operator-supplied labels), `resolveCname(label)`; follow the chain; `resolve4/6` the final target. NXDOMAIN/`ENOTFOUND`/empty ⇒ dangling (critical). Match the final CNAME target against a bundled **takeover-fingerprint list** (`*.herokudns.com`, `*.s3.amazonaws.com`, `*.github.io`, `*.azurewebsites.net`, `*.cloudfront.net`, `*.wordpress.com`, `*.pantheonsite.io`, `*.sendgrid.net`, etc.); a CNAME to a known-provider pattern whose target does not resolve, or resolves but returns a provider "no such app/bucket" signature, ⇒ unclaimed-endpoint takeover risk (critical). The signature-body confirmation (HTTP GET for the provider's "not found" page) is **FUTURE** (needs an HTTPS probe); first round flags on NXDOMAIN + fingerprint match alone as `warning→critical`.
+5. `infra.dangling_include`: fetch the apex SPF TXT (`resolveTxt`, join char-strings, find `v=spf1`), extract `include:` / `redirect=` domains and `a`/`mx` mechanism hosts, and `resolveMx`; resolve each and flag NXDOMAIN/empty targets. Cross-references [./spf.mdx](./spf.mdx) (which owns SPF semantics; this check owns the *dead-target* aspect).
+6. `infra.txt_bloat` / `infra.multi_txt_spf`: `resolveTxt(domain)` returns `string[][]` (each record is an array of ≤255-char segments). Count records, count `v=spf1` records (≥2 ⇒ warning/critical, permerror), sum total octets per name, and detect duplicate verification strings (`google-site-verification`, `MS=`, etc.). Warn when a single name's TXT set approaches sizes that force TCP or risk UDP fragmentation.
+7. `infra.wildcard`: query a random nonce label `<rand>.example.com` for A/AAAA/MX/TXT; any positive answer implies a wildcard (or a catch-all). Record which types are wildcarded.
+8. `infra.soa_serial`: persist the observed serial in the check result; on the next run compare — advancing is expected after edits; going **backwards** is a warning; never-advancing across many runs after a detected record delta is an info nudge.
+
+**Parent↔child, lameness, glue, AXFR — need direct/authoritative queries (mostly FUTURE / `dig`):**
+
+- `infra.ns_parent_child`: `node:dns` returns only the *effective* (child) NS set. Getting the **parent-delegation** NS requires querying the parent (TLD) servers directly. First round approximates by comparing the child NS set across two different public resolvers (drift signal); the authoritative parent-vs-child compare is **FUTURE** via `dig +norecurse NS example.com @<tld-server>`.
+- `infra.ns_lame` / `infra.ns_all_answer`: `node:dns` cannot target a *specific* server or read the AA bit. First round infers likely lameness when an NS fails to resolve or the domain intermittently `SERVFAIL`s; the precise per-server authoritative probe is **FUTURE** via `dig +norecurse SOA example.com @<each-ns>` and checking the `aa` flag + UDP/TCP.
+- `infra.glue_records`: comparing parent glue to authoritative addresses needs parent queries — **FUTURE** via `dig +norecurse` at the parent plus in-zone lookups.
+- `infra.zone_transfer`: **FUTURE** probe — `dig AXFR example.com @<each-ns>`; a full-zone answer ⇒ critical.
+- `infra.ttl_sanity`: `node:dns` does not expose RRset TTLs — **FUTURE** via `dig +noall +answer` parsing (same limitation noted in [./mx_routing.mdx](./mx_routing.mdx)).
+
+**Edge cases:** IDN/punycode normalized to A-label before query; NS/CNAME targets lowercased + FQDN-normalized before set-compare; CNAME chains capped at 8 hops (loop/`ELOOP` guard); a domain with **no delegation of its own** (a bare subdomain served by the parent zone) skips NS/SOA sub-checks with an `info`; DNSSEC validation is explicitly **out of scope here** and delegated to [./dnssec.mdx](./dnssec.mdx). **Caching / rate-limits:** all lookups honor resolver TTL and are deduped per audit run (a label referenced by two checks resolves once); future `dig`/AXFR probes are throttled to ≤1 query per NS per run with a 5s timeout and back-off across scheduled runs; the nonce-wildcard probe uses a fresh random label each run to defeat caching.
+
+**Severity mapping:** <2 NS / all-lame / apex CNAME / dangling CNAME (NXDOMAIN or unclaimed endpoint) / dead SPF `include:` / missing in-bailiwick glue / open AXFR ⇒ **critical**. Single-ASN NS, parent↔child drift, backwards serial, bad SOA timers, unexpected wildcard, TXT bloat, ≥2 SPF, UDP-only NS, NS-as-CNAME, lame sub-delegation ⇒ **warning**. TTL bounds, RNAME hygiene, stale-serial nudge, NS latency ⇒ **info**.
+
+## 4. User interface
+
+**Dashboard contribution.** This check feeds the **DNS & Infrastructure** column (shared with MX, reverse DNS, TLS transport, MTA-STS, DANE, DNSSEC). The cell color is the worst DNS-health severity present for that domain, rolled up with its infra siblings: a dangling CNAME, apex CNAME, all-lame NS, or open AXFR turns the whole DNS & Infrastructure cell **dark red**; single-ASN NS, parent↔child drift, or bad SOA timers turn it **amber** (unless something is already red); a clean, redundant, consistent delegation contributes **dark green**; info-only (TTL, RNAME, serial nudge) does not move the cell.
+
+**Audit-detail view.** Findings render in a collapsible "DNS Zone & Nameserver Health" group (React 19 + shadcn/ui `Accordion` + `Card`, `lucide-react` icons). A header sub-table shows the delegation snapshot (NS set, resolved IPs, network group, lame flag) and the SOA line so the operator sees the substrate at a glance; each finding below is a row with a severity `Badge`, observed `detail`, a `remediation` line, and a `Copy` button (shadcn `Button` + `useCopyToClipboard`) yielding a paste-ready zone-file line or `dig` command. Dangling findings get a distinct red "takeover risk" `Badge` and show the full CNAME chain.
+
+```
+DNS & Infrastructure ▸ DNS Zone & Nameserver Health          [ 2 critical · 1 warning ]
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Nameserver              Resolved IP        Net(/24·ASN)  Auth?  TCP  Lame       │
+│  ns1.provider-a.net.    198.51.100.2       198.51.100·A  ✓      ✓    no         │
+│  ns2.provider-a.net.    198.51.100.3       198.51.100·A  ✓      ✓    no         │
+│  SOA  serial 2026063001  refresh 7200  retry 3600  expire 1209600  min 3600     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ ● critical  infra.dangling_cname  links.example.com → app.herokudns.com (NXDOM)│
+│    takeover risk — remediation: delete the CNAME or re-provision the app  [Copy]│
+│ ● critical  infra.cname_at_apex   example.com is a CNAME (masks SOA/MX/TXT)     │
+│    remediation: remove apex CNAME; use ALIAS/flattening + real A/AAAA     [Copy]│
+│ ▲ warning   infra.ns_sanity       both NS share ASN A / subnet 198.51.100/24    │
+│    remediation: add ns1.provider-b.net. on a different network/ASN        [Copy]│
+│ ○ info      infra.ttl_sanity      MX TTL not evaluated in first round (dig)     │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Per-domain config inputs.** A "DNS health" panel on the domain settings page lets the operator supply an **extra-labels** list (subdomains to include in dangling-CNAME scanning beyond the mail defaults), a **skip-AXFR-probe** toggle, and an **expected-NS allow-list** (optional; flags drift if the published NS set differs). Fields map to a `dns_health_expectations` shape (see §5). Admin-only: enabling AXFR/HTTP-fingerprint probing, choosing the ASN-diversity data source, and editing the bundled **takeover-fingerprint list**.
+
+**States.** *Never-run:* light-gray cell, "Not yet audited." *Loading:* skeleton rows while `resolveNs`/`resolveSoa` run. *Healthy:* one green summary row "Delegation OK — 2+ diverse NS, consistent SOA, no dangling records." *No own delegation:* single info row "Served by parent zone; NS/SOA checks skipped." *Probe-gated rows* (lameness precision, parent↔child authoritative, AXFR, TTL): rendered with a muted `⏳ future` chip. All admin-only controls sit behind the OpenAuthFederated admin role.
+
+## 5. Information schema (database schema)
+
+Reference the shared core tables — do **not** redefine: `domains`, `sending_ips`, `dkim_selectors`, `audit_runs`, `findings`. This check adds one summary result table (one row per audit run × domain), one child table (one row per discovered nameserver), and two reference/config tables.
+
+```sql
+-- One summary row per (audit_run, domain): the zone/delegation verdict.
+CREATE TABLE dns_health_results (
+    id                  BIGSERIAL PRIMARY KEY,
+    audit_run_id        BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id           BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    ns_count            INT     NOT NULL DEFAULT 0,    -- NS RRs at the apex
+    ns_asn_diverse      BOOLEAN,                       -- NULL until ASN feed (future)
+    lame_ns             JSONB   NOT NULL DEFAULT '[]', -- [{host, reason}] lame/no-answer NS
+    parent_child_match  BOOLEAN,                       -- NULL in first round (needs parent query)
+    soa                 JSONB   NOT NULL DEFAULT '{}', -- {mname,rname,serial,refresh,retry,expire,minttl}
+    soa_serial          BIGINT,                        -- extracted for monotonic compare
+    apex_is_cname       BOOLEAN NOT NULL DEFAULT FALSE,-- infra.cname_at_apex
+    wildcard_types      JSONB   NOT NULL DEFAULT '[]', -- ["A","MX"] if a wildcard answers
+    txt_record_count    INT     NOT NULL DEFAULT 0,
+    spf_record_count    INT     NOT NULL DEFAULT 0,    -- >1 => permerror warning
+    dangling            JSONB   NOT NULL DEFAULT '[]', -- [{name,type,target,kind}] cname/include/mx/ns
+    glue_ok             BOOLEAN,                       -- NULL until parent query (future)
+    axfr_open           BOOLEAN,                       -- NULL until AXFR probe (future)
+    worst_severity      TEXT    NOT NULL DEFAULT 'ok', -- ok|info|warning|critical
+    checked_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (audit_run_id, domain_id)
+);
+CREATE INDEX idx_dns_health_domain ON dns_health_results (domain_id);
+CREATE INDEX idx_dns_health_run    ON dns_health_results (audit_run_id);
+
+-- One row per discovered nameserver (child of the summary above).
+CREATE TABLE dns_nameservers (
+    id                  BIGSERIAL PRIMARY KEY,
+    audit_run_id        BIGINT NOT NULL REFERENCES audit_runs(id)        ON DELETE CASCADE,
+    domain_id           BIGINT NOT NULL REFERENCES domains(id)           ON DELETE CASCADE,
+    dns_health_id       BIGINT NOT NULL REFERENCES dns_health_results(id) ON DELETE CASCADE,
+    host                TEXT    NOT NULL,               -- NS FQDN
+    resolved_ips        JSONB   NOT NULL DEFAULT '[]',  -- ["198.51.100.2","2001:db8::2"]
+    net_group           TEXT,                           -- "/24+/48" prefix key for diversity
+    asn                 INT,                            -- resolved ASN (future)
+    is_cname            BOOLEAN NOT NULL DEFAULT FALSE,  -- NS-as-CNAME (RFC 2181 violation)
+    authoritative       BOOLEAN,                        -- NULL until per-server probe (future)
+    answers_tcp         BOOLEAN,                        -- NULL until TCP probe (future)
+    lame                BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_dns_ns_domain ON dns_nameservers (domain_id);
+CREATE INDEX idx_dns_ns_result ON dns_nameservers (dns_health_id);
+CREATE INDEX idx_dns_ns_host   ON dns_nameservers (host);
+
+-- Reference: bundled subdomain-takeover fingerprints (seedable, admin-editable).
+CREATE TABLE takeover_fingerprints (
+    id                  BIGSERIAL PRIMARY KEY,
+    provider            TEXT    NOT NULL,               -- "Heroku","AWS/S3","GitHub Pages",...
+    cname_pattern       TEXT    NOT NULL,               -- e.g. "%.herokudns.com"
+    unclaimed_signature TEXT,                           -- HTTP body marker (future HTTP probe)
+    enabled             BOOLEAN NOT NULL DEFAULT TRUE,
+    UNIQUE (provider, cname_pattern)
+);
+
+-- Optional per-domain expectation/config (drives scan scope + drift detection).
+CREATE TABLE dns_health_expectations (
+    domain_id           BIGINT PRIMARY KEY REFERENCES domains(id) ON DELETE CASCADE,
+    extra_labels        JSONB   NOT NULL DEFAULT '[]',  -- extra subdomains to scan for dangling CNAME
+    expected_ns         JSONB   NOT NULL DEFAULT '[]',  -- optional NS allow-list for drift alerts
+    skip_axfr_probe     BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+**Mapping to today's JSON file store.** There is no DB yet; the store module persists the same shapes as JSON under `~/.email_delivery_hero/`:
+- `dns_health_results` + `dns_nameservers` are embedded in the per-audit file `audits/<domainId>/<auditId>.json` under `checks.infra_dns_health = { summary: {...}, nameservers: [ {...} ] }` — the `summary` object is the `dns_health_results` row, `nameservers[]` are `dns_nameservers` rows (FKs implicit from the file path: `<domainId>`, `<auditId>`).
+- Generic per-finding rows still land in the same file's `findings[]` array (matching the core `findings` table); nothing here duplicates that.
+- `takeover_fingerprints` maps to a bundled `config/takeover_fingerprints.json` (seed data, editable in admin settings under `config.yaml → infra.dns_health.fingerprints`).
+- `dns_health_expectations` maps to a per-domain block in `domains.json` under `domains[i].config.dnsHealth = { extraLabels, expectedNs, skipAxfrProbe }`.
+- `soa_serial` history for the monotonic-serial check reads the *previous* audit file for the domain (the store's "latest prior audit" accessor), so no extra table is needed today.
+When the store moves to PostgreSQL, this is a single-module change: the store adapter writes these tables instead of the JSON blocks; column names deliberately mirror the JSON keys so reconciliation is mechanical.
+
+## 6. When we run the check
+
+- **On-demand:** runs on every manual audit (`POST /api/domains/:id/audit`) and when a domain is first added. First-round DNS-health resolution (NS/SOA/CNAME/TXT/dangling/wildcard) is pure DNS and completes in well under a second, so it is always in the default audit path — and it runs *early*, since other checks depend on the delegation it validates.
+- **Periodic:** the in-process scheduler re-runs the full engine per domain on the `config.yaml` cadence (default every 6h). DNS-health is cheap enough to run every cycle; the dangling-CNAME scan is the most valuable to run frequently because takeover windows open the moment a target is deprovisioned.
+- **First-round vs future:** pure-DNS sub-checks (NS sanity/diversity-by-prefix, apex CNAME, dangling CNAME/include/MX by NXDOMAIN+fingerprint, SOA sanity/serial/MNAME/RNAME, TXT bloat, multi-SPF, wildcard, NS-as-CNAME) ship first round. Precise lameness/AA-bit, parent↔child authoritative compare, glue compare, AXFR probe, TTL values, HTTP takeover-signature confirmation, and real-ASN diversity are **future**, gated behind the `dig`/authoritative-query and HTTPS-probe capabilities. When those are disabled/blocked, the affected sub-checks emit an `info` "not evaluated" finding rather than false-critical.
+- **Cost / rate-limit / back-off:** DNS honors resolver TTLs and dedupes labels within a run — negligible cost. Future `dig`/AXFR probes are throttled to one query per NS per run with a 5s timeout and back off (skip N cycles) after repeated failures to avoid hammering a nameserver.
+- **Regression detection:** the scheduler diffs each run against the previous audit. A newly-appearing critical (a CNAME that resolved yesterday now NXDOMAINs → takeover risk; an NS that went lame; an apex that became a CNAME; a second SPF record that appeared), or a worsened severity (2 diverse NS → both on one ASN; serial went backwards), is flagged as a **new problem** in the "what changed" view. A fixed delegation clears its prior finding.
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises`) | Future (probe / external tool / feed) |
+|---|---|---|
+| `infra.ns_sanity` | ✅ `resolveNs` + resolve each + `/24`,`/48` diversity | ⏳ true ASN diversity (Cymru/pyasn feed) |
+| `infra.ns_lame` | ⚠️ inferred from resolve failure / intermittent SERVFAIL | ⏳ `dig +norecurse SOA @<ns>` AA-bit probe |
+| `infra.ns_parent_child` | ⚠️ multi-resolver drift approximation | ⏳ authoritative parent (TLD) NS query |
+| `infra.ns_all_answer` | | ⏳ per-NS UDP+TCP/53 probe |
+| `infra.ns_no_cname` | ✅ `resolveCname` on each NS | |
+| `infra.soa_sanity` / `infra.soa_serial` / `infra.soa_mname_ns` / `infra.soa_rname` | ✅ `resolveSoa` + prior-run serial compare | |
+| `infra.cname_at_apex` | ✅ `resolveCname(apex)` | |
+| `infra.dangling_cname` | ✅ `resolveCname` chain + NXDOMAIN + fingerprint match | ⏳ HTTP GET provider "not found" signature confirm |
+| `infra.dangling_include` | ✅ SPF TXT parse + resolve `include:`/`redirect:`/MX | |
+| `infra.dangling_ns` | ✅ resolve sub-delegated NS | ⏳ authoritative sub-delegation AA probe |
+| `infra.txt_bloat` / `infra.multi_txt_spf` | ✅ `resolveTxt` count/size/dup analysis | |
+| `infra.wildcard` | ✅ random-nonce label probe | |
+| `infra.glue_records` | | ⏳ parent glue vs authoritative compare (`dig`) |
+| `infra.ttl_sanity` | ⏳ TTL not exposed by node:dns | ⏳ `dig +noall +answer` parse |
+| `infra.zone_transfer` | | ⏳ `dig AXFR @<each-ns>` |
+| `infra.ns_response_time` / `infra.recursion_open` | | ⏳ latency + open-recursion probe |
+
+## 8. Acceptance criteria
+
+1. Given a domain with fewer than 2 NS (or all NS failing to resolve), `infra.ns_sanity` is **critical** with a concrete "add a second provider's NS on a different ASN" remediation; `dns_health_results.ns_count` reflects the count.
+2. Given two NS that resolve but share one `/24`/ASN, `infra.ns_sanity` is **warning** and `ns_asn_diverse` is `false` (or NULL pending the ASN feed) with the prefix recorded in `dns_nameservers.net_group`.
+3. Given a CNAME at the apex, `infra.cname_at_apex` is **critical**, `apex_is_cname = true`, and the remediation says to remove it and use ALIAS/flattening + real A/AAAA.
+4. Given a mail-relevant subdomain CNAME whose target returns NXDOMAIN (or matches an unclaimed-provider fingerprint), `infra.dangling_cname` is **critical**, appears in `dns_health_results.dangling` with `kind:"cname"`, and is badged as a takeover risk with a delete/re-provision remediation.
+5. Given an SPF `include:` target that no longer resolves, `infra.dangling_include` is **critical** with a concrete "remove the dead include from SPF" remediation and a `dangling` entry `kind:"include"`.
+6. Given an SOA with `expire < refresh` or `minimum > 86400`, `infra.soa_sanity` is **warning** with concrete corrected timers; `soa` JSONB stores the observed fields.
+7. Given an SOA serial that is lower than the previously recorded serial, `infra.soa_serial` is **warning** ("serial went backwards"); an unchanged serial after a detected record change is **info**.
+8. Given ≥2 `v=spf1` TXT records, `infra.multi_txt_spf` is **warning/critical** (permerror) with a merge remediation; `spf_record_count` ≥ 2.
+9. Given an unexpected wildcard, the random-nonce probe resolves and `infra.wildcard` is **warning** with `wildcard_types` populated.
+10. All first-round sub-checks run using only `node:dns/promises` with no egress beyond DNS and complete deterministically; every probe-gated sub-check (`ns_lame` precise, `ns_parent_child` authoritative, `glue_records`, `zone_transfer`, `ttl_sanity`, real-ASN) emits an `info` "not evaluated" finding when its capability is disabled/blocked.
+11. Every non-ok finding carries a `remediation` string containing an exact record, command, or step (never a generic "check your DNS").
+12. A full audit persists one `dns_health_results` summary row and one `dns_nameservers` row per NS (JSON-store shape `checks.infra_dns_health` today), with `domain_id` indexed.
+13. The audit-detail UI renders the delegation + SOA snapshot table plus per-finding rows with severity badges and working copy-to-clipboard of each fix, and the DNS & Infrastructure dashboard cell rolls up to the worst DNS-health severity.
+14. On a scheduled re-run, a CNAME that changes from resolvable to dangling (or an NS that goes lame, or an apex that becomes a CNAME) is diffed and surfaced as a **new problem**; a fixed record clears its prior finding.
+
+<!--
+MAINTENANCE NOTES
+- Keep RFC references current: RFC 1034/1035 (zone/delegation/glue), RFC 1912 (operational errors: lame
+  delegation, SOA sanity, multiple NS), RFC 2181 (name-server authority, NS/MX-not-CNAME, TTL rules),
+  RFC 2182 (>=2 diverse secondaries), RFC 5936 (AXFR), RFC 7766 (DNS-over-TCP requirement), RFC 7208 (single
+  SPF record). DNSSEC validation intentionally lives in ./dnssec.mdx — do not duplicate it here.
+- Keep sub-check ids and the DNS & Infrastructure category assignment in sync with ../spam_checks.mdx.
+- Keep the Checker/Finding contract and file-store shapes in sync with ../engineering.mdx; if the store moves
+  to PostgreSQL, dns_health_results/dns_nameservers/takeover_fingerprints/dns_health_expectations column names
+  mirror the JSON keys.
+- Keep the takeover-fingerprint list fresh (new SaaS/cloud endpoints appear constantly); when the HTTPS-probe
+  and dig/authoritative-query rounds land, move ns_lame/ns_parent_child/glue_records/zone_transfer/ttl_sanity/
+  HTTP-signature/real-ASN from FUTURE to first-round and update §7.
+- Coordinate dangling-include/MX findings with ./spf.mdx and ./mx_routing.mdx so remediation text stays aligned.
+-->

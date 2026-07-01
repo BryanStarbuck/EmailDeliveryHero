@@ -12,6 +12,78 @@ of contents that links to all of them.
 EmailDeliveryHero is an **open source project**. Git remote (origin):
 `https://github.com/BryanStarbuck/EmailDeliveryHero.git`.
 
+## Specifications (table of contents)
+
+All MDX specifications in this directory and its subdirectories:
+
+* [Overview](./overview.mdx) — this file: charter, personas, feature set, the deliverability
+  checks, tech stack, ports, and the OpenAuthFederated relationship.
+* [Authentication](./authentication.mdx) — how access is gated: OpenAuthFederated federated Google
+  Workspace SSO consumed as an external library (`@auth/backend` + `@auth/react`), embedded
+  Frontend API middleware at `/api/v1`, Bearer-token verification, the global NestJS
+  `JwtAuthGuard`, allowed domains, cookie prefix `oaf_edh`, and the out-of-repo credentials file.
+* [Engineering](./engineering.mdx) — architecture: the pnpm monorepo layout, the NestJS module
+  list, the frontend structure, ports, the pluggable audit-engine design, the on-disk
+  JSON/YAML store, and how periodic checks run.
+* [Spam & deliverability checks](./spam_checks.mdx) — the full catalog of every health check the
+  app performs, grouped into the six dashboard categories (SPF, DKIM, DMARC, Blacklists, DNS &
+  Infrastructure, Spam & Content): what each sub-check measures, how it is measured, and the
+  concrete remediation.
+* [Per-check engineering specs](./checks/overview.mdx) — the `checks/` subdirectory: one deep spec
+  per check topic (SPF, DKIM, DMARC, ARC, Blacklists, MX, PTR, TLS/STARTTLS, MTA-STS, TLS-RPT,
+  DANE/TLSA, DNSSEC, DNS health, domain reputation, SMTP security, BIMI, content scoring,
+  List-Unsubscribe, link/URL reputation, reputation metrics, inbox placement). Each expands a slice
+  of the catalog with its sub-checks, detection method, a **User Interface** section, an
+  **Information Schema (database schema)** section, and when the check runs.
+* [Dashboard](./dashboard.mdx) — the main screen: the big "Email Delivery Hero" brand header, the
+  TanStack table (one run per day × six color-coded category columns), the metric cell text, and
+  the top-right **Run checks** button + scheduled-checks toggle/chevron.
+* [Domains](./domains.mdx) — the Monitored Domains CRUD UI and, per domain, its sending IPs, DKIM
+  selectors, and its own **scheduled on/off** toggle (e.g. 10 domains but only 3 on the recurring
+  schedule).
+* [Scheduled checks](./scheduled_checks.mdx) — recurring checks: the configuration page (frequency,
+  time-of-day, multiple times per day) and the OS-appropriate scheduler for each platform (macOS
+  launchd plist, Linux cron/systemd timer, Windows Task Scheduler).
+* [Settings](./settings.mdx) — the Settings page: checks configuration, DNSBL zones, notifications,
+  storage & data, tools & environment, and the `role:admin`-gated Admin sub-section.
+* [Storage](./storage.mdx) — how state is persisted on disk (no database): the state root
+  `~/T/_emaildeliveryhero/`, the hierarchical app-level `config.yaml` (settings), the
+  per-logged-in-user `users/<email>/config.yaml`, the `domains.json` domain list + each domain's sync
+  on/off flag, `audits.json`, the auth session store + signing secret, the two log files, the
+  browser `localStorage` conventions (theme mirror, never secrets), and the store layer that fronts
+  it all — identical in local and server mode.
+* [Error handling & logging](./errors.mdx) — how errors and logs are handled: the two append-only
+  rolling files at the storage root (`log.log` for the normal event trail, `error.err` for the fault
+  trail), the dependency-free synchronous `RollingFileWriter`, the `AppLogger` that routes all of
+  NestJS through the same files, the global exception filter + process handlers that guarantee
+  *anything that can go wrong* lands in `error.err`, and the timestamped INFO lines for manual and
+  scheduled check runs.
+* Use cases:
+  * [Audit a domain](./use_cases/audit_a_domain.mdx) — a user adds a domain, runs an audit, and
+    sees the findings plus the exact fixes.
+  * [Domain on a blacklist](./use_cases/domain_on_blacklist.mdx) — an audit finds the domain's IP
+    on a DNSBL and shows the delisting remediation.
+  * [View a health-check run](./use_cases/view_health_check_run.mdx) — clicking a dashboard row
+    opens one run in full: the summary header and every finding grouped by the six categories.
+
+## Key facts
+
+The load-bearing constants for the app, stored here as the single reference point:
+
+| Key | Value |
+| --- | --- |
+| **UI WebApp localhost port** | **4444** — the web app always runs on `http://localhost:4444/`. |
+| Backend REST API port | `9312` (NestJS, served under `/api`; API only — not opened directly in a browser). |
+| Runtime | Node >= 20, **TypeScript** (strict) throughout. |
+| Repo layout | pnpm workspace monorepo under `code/` (`packages/backend`, `packages/frontend`). |
+| Auth | OpenAuthFederated federated Google Workspace SSO (no email/password). |
+| Storage | On-disk JSON/YAML under `~/T/_emaildeliveryhero/` — no database. |
+| Git remote | `https://github.com/BryanStarbuck/EmailDeliveryHero.git` |
+
+The **UI WebApp must always run on localhost on port 4444**. This is the canonical value for the
+browser-facing web app; treat it as the source of truth when wiring the frontend dev/preview
+server and any launch scripts.
+
 ## Charter
 
 EmailDeliveryHero is a **web app that runs on localhost** for **auditing email deliverability** —
@@ -81,13 +153,13 @@ The full engine design (each checker is a pluggable module returning findings) i
 
 * **Language/runtime:** Node + **TypeScript** (strict), **pnpm** workspaces monorepo.
 * **Backend:** **NestJS** REST API under `/api`, on port **9312**.
-* **Frontend:** **React 19 + Vite + Tailwind + shadcn/ui + lucide-react + TanStack Router/Query**,
-  on port **9311**.
+* **Frontend (UI WebApp):** **React 19 + Vite + Tailwind + shadcn/ui + lucide-react + TanStack
+  Router/Query**, always on localhost port **4444** (`http://localhost:4444/`).
 * **Auth:** **OpenAuthFederated**, consumed as an external open-source library (`@auth/backend` +
   `@auth/react`) — federated Google Workspace SSO, no email/password. See
   [Authentication](./authentication.mdx).
 * **Storage:** first round uses on-disk **JSON/YAML files** under a state dir (default
-  `~/.email_delivery_hero/`) — **no database**.
+  `~/T/_emaildeliveryhero/`) — **no database**.
 * **DNS checks:** Node's native `node:dns/promises` (TXT/MX/reverse); shelling out to
   Brew-installed tools (`dig`, etc.) is noted as a future enhancement.
 
@@ -97,7 +169,7 @@ See [Engineering](./engineering.mdx) for the full, buildable architecture.
 
 | Port | Surface | Browser URL |
 | --- | --- | --- |
-| **9311** | Frontend (React 19 + Vite) | `http://localhost:9311/` |
+| **4444** | Frontend / UI WebApp (React 19 + Vite) | `http://localhost:4444/` |
 | **9312** | Backend (NestJS REST API under `/api`) | API only — not opened directly in a browser |
 
 ## Left navigation
@@ -130,7 +202,7 @@ EmailDeliveryHero/
 ├── code/                    # application code (pnpm monorepo; owned by another process)
 │   └── packages/
 │       ├── backend/         # NestJS REST API (port 9312)
-│       └── frontend/        # React 19 + Vite SPA (port 9311)
+│       └── frontend/        # React 19 + Vite SPA — UI WebApp (port 4444)
 ├── pm/                      # product management — this directory of MDX specs
 │   ├── overview.mdx         # this file
 │   ├── authentication.mdx
@@ -140,7 +212,32 @@ EmailDeliveryHero/
 │   ├── domains.mdx          # Monitored Domains CRUD + per-domain schedule toggle
 │   ├── scheduled_checks.mdx # recurring checks: config page + per-OS scheduling
 │   ├── settings.mdx         # the Settings page
+│   ├── storage.mdx          # on-disk state: config.yaml, per-user config, domains.json, logs
+│   ├── errors.mdx           # error handling & logging: log.log + error.err, rolling writer, filter
 │   ├── left_bar.yaml        # nav source of truth (written by a separate process)
+│   ├── checks/              # one deep engineering spec per check topic (21 files + index)
+│   │   ├── overview.mdx     # index of the per-check specs, grouped by category
+│   │   ├── spf.mdx          # SPF
+│   │   ├── dkim.mdx         # DKIM
+│   │   ├── dmarc.mdx        # DMARC
+│   │   ├── arc.mdx          # ARC (DMARC companion)
+│   │   ├── blacklists.mdx   # DNSBL / RHSBL blacklists
+│   │   ├── mx_routing.mdx           # MX & mail routing
+│   │   ├── reverse_dns.mdx          # PTR / FCrDNS
+│   │   ├── tls_transport.mdx        # STARTTLS + MX cert health
+│   │   ├── mta_sts.mdx              # MTA-STS
+│   │   ├── tls_rpt.mdx              # TLS-RPT
+│   │   ├── dane_tlsa.mdx            # DANE / TLSA
+│   │   ├── dnssec.mdx               # DNSSEC
+│   │   ├── dns_health.mdx           # NS/zone health + dangling records
+│   │   ├── domain_reputation.mdx    # WHOIS/RDAP registration reputation
+│   │   ├── smtp_security.mdx        # open relay / SMTP hardening
+│   │   ├── bimi.mdx                 # BIMI
+│   │   ├── content_scoring.mdx      # SpamAssassin content scoring
+│   │   ├── list_unsubscribe.mdx     # List-Unsubscribe / one-click
+│   │   ├── link_url_reputation.mdx  # URI blocklists on message links
+│   │   ├── reputation_metrics.mdx   # complaint/bounce/FBL/Postmaster
+│   │   └── inbox_placement.mdx      # seed-list inbox placement
 │   └── use_cases/
 │       ├── audit_a_domain.mdx
 │       ├── domain_on_blacklist.mdx
@@ -148,46 +245,11 @@ EmailDeliveryHero/
 └── CLAUDE.md                # project charter
 ```
 
-## Table of contents
-
-All MDX specifications in this directory and its subdirectories:
-
-* [Overview](./overview.mdx) — this file: charter, personas, feature set, the deliverability
-  checks, tech stack, ports, and the OpenAuthFederated relationship.
-* [Authentication](./authentication.mdx) — how access is gated: OpenAuthFederated federated Google
-  Workspace SSO consumed as an external library (`@auth/backend` + `@auth/react`), embedded
-  Frontend API middleware at `/api/v1`, Bearer-token verification, the global NestJS
-  `JwtAuthGuard`, allowed domains, cookie prefix `oaf_edh`, and the out-of-repo credentials file.
-* [Engineering](./engineering.mdx) — architecture: the pnpm monorepo layout, the NestJS module
-  list, the frontend structure, ports 9311/9312, the pluggable audit-engine design, the on-disk
-  JSON/YAML store, and how periodic checks run.
-* [Spam & deliverability checks](./spam_checks.mdx) — the full catalog of every health check the
-  app performs, grouped into the six dashboard categories (SPF, DKIM, DMARC, Blacklists, DNS &
-  Infrastructure, Spam & Content): what each sub-check measures, how it is measured, and the
-  concrete remediation.
-* [Dashboard](./dashboard.mdx) — the main screen: the big "Email Delivery Hero" brand header, the
-  TanStack table (one run per day × six color-coded category columns), the metric cell text, and
-  the top-right **Run checks** button + scheduled-checks toggle/chevron.
-* [Domains](./domains.mdx) — the Monitored Domains CRUD UI and, per domain, its sending IPs, DKIM
-  selectors, and its own **scheduled on/off** toggle (e.g. 10 domains but only 3 on the recurring
-  schedule).
-* [Scheduled checks](./scheduled_checks.mdx) — recurring checks: the configuration page (frequency,
-  time-of-day, multiple times per day) and the OS-appropriate scheduler for each platform (macOS
-  launchd plist, Linux cron/systemd timer, Windows Task Scheduler).
-* [Settings](./settings.mdx) — the Settings page: checks configuration, DNSBL zones, notifications,
-  storage & data, tools & environment, and the `role:admin`-gated Admin sub-section.
-* Use cases:
-  * [Audit a domain](./use_cases/audit_a_domain.mdx) — a user adds a domain, runs an audit, and
-    sees the findings plus the exact fixes.
-  * [Domain on a blacklist](./use_cases/domain_on_blacklist.mdx) — an audit finds the domain's IP
-    on a DNSBL and shows the delisting remediation.
-  * [View a health-check run](./use_cases/view_health_check_run.mdx) — clicking a dashboard row
-    opens one run in full: the summary header and every finding grouped by the six categories.
-
 <!--
-  TOC maintenance: when a new .mdx file is added anywhere under this directory, add a bullet here
-  linking to it (relative ./path/to/file.mdx) with a one-line description. Keep subdirectory specs
-  grouped and indented under a parent bullet.
+  TOC maintenance: the table of contents lives at the top of this file under
+  "## Specifications (table of contents)". When a new .mdx file is added anywhere under this
+  directory, add a bullet there (relative ./path/to/file.mdx) with a one-line description. Keep
+  subdirectory specs grouped and indented under a parent bullet.
 -->
 </content>
 </invoke>

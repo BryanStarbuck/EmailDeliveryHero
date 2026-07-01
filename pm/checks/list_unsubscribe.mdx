@@ -1,0 +1,344 @@
+---
+title: EmailDeliveryHero — List-Unsubscribe & One-Click Check
+description: Engineering specification for the List-Unsubscribe / one-click-unsubscribe audit — how EmailDeliveryHero inspects a sample bulk message's headers for List-Unsubscribe (RFC 2369) plus List-Unsubscribe-Post one-click (RFC 8058), verifies an https method exists and its POST endpoint answers 2xx, confirms From-domain alignment and sane precedence/priority headers per the 2024 Gmail/Yahoo bulk-sender rules, and prescribes the exact headers to publish.
+---
+
+# EmailDeliveryHero — List-Unsubscribe & One-Click Check
+
+**List-Unsubscribe** ([RFC 2369](https://www.rfc-editor.org/rfc/rfc2369)) and **one-click
+unsubscribe** ([RFC 8058](https://www.rfc-editor.org/rfc/rfc8058)) are message **headers** that let a
+recipient (or their mail client) leave a mailing list without hunting for a link in the body. Since
+**February 2024**, Gmail and Yahoo require every **bulk sender** (defined by Google/Yahoo as roughly
+**> 5,000 messages/day** to their users) to (a) support **one-click** unsubscribe via
+`List-Unsubscribe-Post: List-Unsubscribe=One-Click`, (b) offer an unsubscribe **link in the message
+body** as well, and (c) **honor** unsubscribe requests **within 2 days**. A bulk campaign that ships
+without these headers is now rate-limited, sent to spam, or rejected outright at those receivers — so
+this is not a nice-to-have, it is a hard gate on bulk deliverability.
+
+This check belongs to the **Spam & Content** dashboard category; all sub-check ids use the
+**`content`** checkId prefix and form the **list-management** sub-family. It is implemented as
+`list_unsubscribe.checker.ts` (see [Engineering §6.3](../engineering.mdx)). Because it inspects a
+**sample bulk message's headers**, it is a **FUTURE-round** check: it needs a captured message sample
+(and, for the endpoint probe, network egress) — it cannot run from DNS alone.
+
+**Read alongside**
+- [Overview](../overview.mdx) — product charter, personas, port list (4444 UI / 9312 API).
+- [Engineering](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
+- [Spam Checks catalog](../spam_checks.mdx) — §Spam & Content is the summary slice this spec expands.
+- [Dashboard](../dashboard.mdx) — how the Spam & Content cell rolls up per domain.
+- [Content scoring](./content_scoring.mdx) — owns the **`content_sample_messages`** store this check
+  reads the sample headers from; `content.spamassassin`/`content.multipart` share the same sample.
+- [DMARC check](./dmarc.mdx) — `content.from_alignment` is the message-level view of the same
+  identifier alignment DMARC evaluates at the domain level.
+- [Reputation metrics](./reputation_metrics.mdx) — `content.list_unsub_honored`,
+  complaint-rate, and list-hygiene signals are the reputational payoff of a working unsubscribe.
+
+---
+
+## 1. What it checks
+
+RFC 2369 defines the `List-Unsubscribe` header, whose value is one or more angle-bracketed URIs —
+typically a `mailto:` and/or an `https:` URI — that a recipient uses to unsubscribe. RFC 8058 layers
+**one-click** on top: the sender adds `List-Unsubscribe-Post: List-Unsubscribe=One-Click`, and the
+receiving mail provider performs an **HTTP `POST`** (body `List-Unsubscribe=One-Click`, content-type
+`application/x-www-form-urlencoded`) to the header's **https** URI when the user clicks the client's
+built-in "Unsubscribe" affordance. One-click exists specifically so the provider can unsubscribe the
+user **without loading the sender's page**, following a redirect, or requiring a login/confirmation
+step — which is why a `mailto:`-only header does **not** satisfy the one-click requirement.
+
+**Why receivers care.** Gmail and Yahoo's 2024 bulk-sender program treats a working one-click
+unsubscribe as a proxy for consent hygiene: senders who make leaving easy accrue **fewer spam
+complaints**, and the complaint rate (< 0.3% required, < 0.1% target) is itself a hard bulk gate.
+Providers now surface a native "Unsubscribe" button when they see valid RFC 8058 headers; if that
+button fails (missing header, dead endpoint, non-2xx response) users click "Report spam" instead,
+which is far more damaging.
+
+**Common failure modes.** (1) `List-Unsubscribe` present but **no** `List-Unsubscribe-Post` — the
+single most common gap; the sender has RFC 2369 but not RFC 8058. (2) The header lists **only** a
+`mailto:` — no https URI for one-click. (3) The https endpoint **404s / 500s / requires a GET
+confirmation page** so the provider's automated POST fails. (4) The endpoint answers but does not
+actually **honor** the request (still mails the user 3 days later). (5) The visible `From:` domain
+does **not align** with any SPF/DKIM-authenticated domain, so the whole message fails the Gmail/Yahoo
+auth gate regardless of unsubscribe. (6) Marketing mail forces `X-Priority: 1 (High)` / `Importance:
+High` on routine bulk sends, a classic spam signal.
+
+---
+
+## 2. Sub-checks
+
+Detection: parse the captured sample message's **headers** (from `content_sample_messages`, owned by
+[content scoring](./content_scoring.mdx)); the reachability sub-check additionally performs an HTTPS
+`POST` probe. All are **future-round** (need a sample and/or network egress).
+
+| Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `content.list_unsubscribe` | A `List-Unsubscribe` header (RFC 2369) is present with at least one valid angle-bracketed `mailto:` and/or `https:` URI. | Parse the header; validate URI grammar. | **critical:** bulk message with no `List-Unsubscribe` header. | Add `List-Unsubscribe: <https://unsub.example.com/u/{id}>, <mailto:unsubscribe@example.com?subject=unsub-{id}>`. |
+| `content.list_unsub_oneclick` | `List-Unsubscribe-Post: List-Unsubscribe=One-Click` (RFC 8058) is present — the hard Gmail/Yahoo bulk requirement. | Exact header/value match; must accompany an https URI. | **critical:** bulk sender lacks the one-click POST header → fails Gmail/Yahoo Feb-2024 rules. | Add the header verbatim: `List-Unsubscribe-Post: List-Unsubscribe=One-Click` alongside an https `List-Unsubscribe` URI. |
+| `content.list_unsub_https` | At least one method is an **https** URI (not `mailto:`-only); one-click POST needs an https target. | Scan the parsed URI list for scheme `https`. | **critical:** header is `mailto:`-only, so one-click is impossible; **warning:** `http:` (insecure) URI used. | Add an `https://` unsubscribe URL to the header; keep the `mailto:` as a secondary method. |
+| `content.list_unsub_mailto` | A `mailto:` method is also offered (belt-and-suspenders; some clients/older providers prefer it). | Scan for scheme `mailto`. | **warning:** no `mailto:` fallback present. | Add a `mailto:unsubscribe@<domain>?subject=unsubscribe` alongside the https URI. |
+| `content.list_unsub_syntax` | Header grammar is RFC 2369-conformant: URIs in `<...>`, comma-separated, no bare/naked URLs, no `{{merge_tag}}` left unrendered. | Tokenize on `,`; require each token wrapped in `< >`; validate scheme. | **critical:** malformed header (missing brackets, unrendered merge tag, stray text) → provider ignores it. | Wrap each URI in angle brackets, comma-separate, and ensure merge tags render to a real per-recipient URL. |
+| `content.list_unsub_https_get_safe` | The https URI is **not** triggered by a bare `GET` (RFC 8058 §4 — link scanners/prefetchers must not accidentally unsubscribe users). | Probe: a `GET` should not unsubscribe; only the one-click `POST` should. | **warning:** endpoint unsubscribes on `GET` → anti-virus/prefetch link-scanners silently unsubscribe recipients. | Require the RFC 8058 `POST` body `List-Unsubscribe=One-Click`; make `GET` render a confirmation page only. |
+| `content.list_unsub_reachable` | The https endpoint answers a one-click `POST` with a **2xx** status (RFC 8058 §3.2). | HTTPS `POST` probe with body `List-Unsubscribe=One-Click`. | **critical:** endpoint returns 4xx/5xx, times out, or redirects to a login → the provider's one-click fails. | Make the endpoint accept an unauthenticated `POST` and return `200`/`204`; do not require cookies, JS, or a confirmation click. |
+| `content.list_unsub_tls` | The https endpoint presents a **valid, non-expired** TLS certificate for its hostname. | Inspect the TLS handshake during the probe (cert chain, expiry, SAN match). | **warning:** self-signed/expired/hostname-mismatch cert → providers may refuse the POST. | Serve the unsubscribe endpoint behind a valid CA-issued certificate matching the URL host. |
+| `content.list_unsub_honored` *(advisory)* | Unsubscribe requests are actually **honored within 2 days** (Gmail/Yahoo rule). | Attestation / suppression-list export / seed-address follow-up over audit history. | **warning:** requests not suppressed within 48h; **info:** cannot verify. | Suppress unsubscribed addresses within 2 days (ideally immediately) across every list and campaign. |
+| `content.list_unsub_url_reputation` | The unsubscribe **host domain** is not itself on a URI/RHS blocklist and aligns with the sending brand (not a random shortener). | Extract the https host; cross-check via `link_url_reputation`. | **warning:** unsubscribe URL uses a blocklisted domain or an unrelated shortener. | Host the unsubscribe link on your own authenticated domain, not a bare link-shortener. |
+| `content.precedence` | Bulk/automated mail sets `Precedence: bulk` (or `list`/`junk`) and/or `Auto-Submitted:` appropriately so auto-responders/vacation replies stay quiet. | Inspect `Precedence:` / `Auto-Submitted:` headers. | **warning:** bulk mail missing `Precedence: bulk`; **info:** non-standard precedence value. | Set `Precedence: bulk` on bulk campaigns and `Auto-Submitted: auto-generated` on automated system mail. |
+| `content.from_alignment` | The visible `From:` domain aligns with an SPF- or DKIM-authenticated domain — a 2024 Gmail/Yahoo bulk requirement. | Compare `From:` org-domain vs the SPF envelope-from org-domain and the DKIM `d=` org-domain (relaxed alignment). | **critical:** `From:` aligns with **neither** SPF nor DKIM → fails the auth gate; **warning:** aligns with only one. | Send from a `From:` whose org-domain matches your DKIM `d=` (and/or SPF Return-Path) domain, e.g. sign with `d=<domain>`. |
+| `content.no_priority_abuse` | Routine/bulk mail does **not** force `X-Priority: 1`, `Priority: urgent`, or `Importance: High`. | Inspect priority headers. | **warning:** forced high-priority on bulk/routine mail (spam signal). | Remove `X-Priority`/`Importance` from bulk mail; reserve high priority for genuinely urgent transactional messages. |
+| `content.list_id` | A stable `List-Id` ([RFC 2919](https://www.rfc-editor.org/rfc/rfc2919)) header identifies the list, aiding client-side filtering and provider grouping. | Inspect `List-Id:` header. | **info:** no `List-Id` present. | Add `List-Id: <newsletter.example.com>` so clients and providers can group and filter the list. |
+| `content.list_headers_consistent` | The unsubscribe host, `List-Id`, and `From:` domain are mutually consistent (no copy-pasted competitor/vendor domains left in). | Cross-compare parsed hosts/domains. | **warning:** unsubscribe/List-Id domain differs from the sending brand domain. | Align `List-Unsubscribe`, `List-Id`, and `From:` on the same brand org-domain. |
+| `content.list_unsub_per_recipient` *(advisory)* | The unsubscribe URL/mailto is **per-recipient** (carries an opaque token), not a single shared link. | Heuristic: presence of a unique token/query param in the URI. | **info:** unsubscribe link looks shared/static (harder to honor, easier to abuse). | Embed a per-recipient opaque token so a POST unsubscribes exactly one address. |
+
+> **Future-round note:** every sub-check here needs a **captured sample message** (from
+> `content_sample_messages`), so none ship in the pure-DNS first round. `content.list_unsub_reachable`,
+> `content.list_unsub_https_get_safe`, and `content.list_unsub_tls` additionally require an **HTTPS
+> probe** (network egress). `content.list_unsub_honored` needs an attestation / suppression-list feed
+> and is advisory.
+
+---
+
+## 3. How it is measured
+
+**Obtain the sample.** The checker reads the latest **captured bulk message** for the domain from
+`content_sample_messages` (see [content scoring](./content_scoring.mdx)) — an operator uploads a
+`.eml`, forwards a copy to a per-domain ingest address, or the tool captures one via `swaks`. If no
+sample exists, every sub-check emits a single **info** "no sample message — upload one to run
+list-management checks" finding (never a false critical). Bulk-sender scope (> 5,000/day) is a
+per-domain config flag (`isBulkSender`); when false, missing one-click is **warning**, when true it is
+**critical**.
+
+**Parse headers.** The raw RFC 5322 header block is parsed (unfolding continuation lines) into a
+case-insensitive multimap. `List-Unsubscribe` is split on top-level commas; each token must be wrapped
+in `< >` (RFC 2369) — a bare URL fails `content.list_unsub_syntax`. Each URI's scheme drives
+`content.list_unsub_https` / `content.list_unsub_mailto`. `List-Unsubscribe-Post` is compared exactly
+(case-insensitive header name; value `List-Unsubscribe=One-Click`) for `content.list_unsub_oneclick`.
+
+**Alignment.** `content.from_alignment` extracts the `From:` header address, derives its org-domain
+(registrable domain via the public-suffix list), and compares against (a) the SPF envelope-from
+org-domain from the `Return-Path:`/`Authentication-Results:` header and (b) the DKIM `d=` org-domain
+from the `DKIM-Signature:`/`Authentication-Results:` header, under **relaxed** alignment. No alignment
+with either → critical; one → warning; both → ok.
+
+**Endpoint probe (RFC 8058 §3–4).** For `content.list_unsub_reachable`: extract the first `https` URI,
+issue an HTTPS **`POST`** with header `Content-Type: application/x-www-form-urlencoded` and body
+`List-Unsubscribe=One-Click`, following at most one redirect, with a **5s** timeout and a descriptive
+`User-Agent`. A `2xx` → ok; `3xx`→login, `4xx`, `5xx`, TLS failure, or timeout → critical. For
+`content.list_unsub_https_get_safe`, a separate **`GET`** to the same URI must **not** report an
+unsubscribe as done (the tool cannot fully verify suppression, so it flags endpoints that return a
+"you are unsubscribed" 200 to a bare GET as a warning). **Safety:** the probe uses a synthetic/opt-in
+token where possible and is **rate-limited to one POST per endpoint per audit**; the operator is warned
+that probing a live unsubscribe URL may unsubscribe the sampled recipient, and the probe is **opt-in**
+per domain (`probeUnsubEndpoint` config, default off).
+
+**Map to severities.** Missing one-click on a bulk sender, a `mailto:`-only header on a bulk sender, a
+malformed header, an unreachable endpoint, and total From-misalignment are **critical**. Missing
+`mailto:` fallback, insecure `http:`, GET-unsubscribes, TLS warnings, forced priority, missing
+`Precedence: bulk`, and single-sided alignment are **warning**. `List-Id`, per-recipient token, and
+unverifiable "honored" are **info**. **Caching / rate-limits:** header parsing is instant and cached
+with the sample; the endpoint probe is the only network cost — one request per audit, backed off on
+failure, and skipped entirely when `probeUnsubEndpoint` is off.
+
+---
+
+## 4. User interface
+
+This check surfaces through the **Spam & Content dashboard column** and the **audit-detail view**, on
+the React 19 + Vite + Tailwind + shadcn/ui + lucide-react stack.
+
+**Dashboard cell.** It contributes to the single **Spam & Content** cell per domain (shared with
+`content.spamassassin`, `content.url_reputation`, etc.). The cell color = the worst severity among all
+`content.*` findings: dark green (all ok), amber (worst = warning), dark red (any critical), light gray
+(never run / no sample). A `Tooltip` summarizes e.g. "One-click unsubscribe missing — fails Gmail/Yahoo
+bulk rules". `info`-only findings (`content.list_id`, honored-unverifiable) never turn the cell amber.
+
+**Audit-detail view.** Findings render inside the shadcn `Accordion`/`Card` group titled
+**Spam & Content**, in a **List-management** sub-group, one row per non-ok finding:
+
+```
+┌─ Spam & Content › List-management ─────── [ CRITICAL ] ─┐
+│ content.list_unsub_oneclick ⛔ No one-click unsubscribe │
+│   Observed : List-Unsubscribe present (mailto: only);   │
+│              List-Unsubscribe-Post header absent         │
+│   Fix      : Add https URI + header:                     │
+│              List-Unsubscribe-Post: List-Unsubscribe=One-Click  [ Copy fix ]
+├──────────────────────────────────────────── [ WARNING ] ┤
+│ content.from_alignment ⚠ Aligns with DKIM only          │
+│   Fix      : Also align SPF Return-Path to <domain>      [ Copy fix ]
+└─────────────────────────────────────────────────────────┘
+```
+
+Each row: a severity `Badge` (lucide `MailX` / `ShieldAlert`), the `title`, the observed `detail` (the
+raw header values parsed out of the sample), the `remediation`, and a **Copy fix** button
+(`navigator.clipboard`) that copies the exact header line(s) to add. A **"Sample headers"** disclosure
+shows the raw `List-Unsubscribe`, `List-Unsubscribe-Post`, `From`, `Return-Path`, `DKIM-Signature`,
+`Precedence`, and priority headers verbatim. When the endpoint probe ran, an **"Endpoint probe"** panel
+shows the POST status, latency, TLS validity, and GET-safety result.
+
+**Per-domain config inputs.** On the domain detail page: an **"Upload sample message"** control
+(`.eml` drop zone) feeding `content_sample_messages`; an **`isBulkSender`** toggle (> 5,000/day) that
+escalates one-click gaps to critical; a **`probeUnsubEndpoint`** toggle (default off) with an inline
+warning that a live POST may unsubscribe the sampled recipient. **Empty/never-run:** light-gray cell +
+"Upload a sample message to audit list-management headers" CTA; **loading:** skeleton row; **all-ok:** a
+single green "One-click unsubscribe valid — https + mailto, endpoint 200, From aligned" summary.
+**Admin-only settings** (Settings → Admin): the bulk-sender daily threshold (default 5,000), probe
+timeout (default 5s), and whether the endpoint probe is globally permitted.
+
+---
+
+## 5. Information schema (database schema)
+
+This check extends the **shared core tables** (owned by engineering — do not redefine): `domains`,
+`audit_runs`, and `findings`. Each sub-check emits a row into the shared `findings` table
+(`category='content'`, `check_id='content.list_unsub_oneclick'`, etc.). It references the
+**`content_sample_messages`** table defined by [content scoring](./content_scoring.mdx) (the captured
+sample), and adds one **result table** for its parsed observation.
+
+```sql
+-- content_sample_messages(id PK, domain_id FK, source, raw_headers, raw_body, captured_at, ...)
+--   is OWNED by ./content_scoring.mdx — referenced here, NOT redefined.
+
+-- One row per audit run: the parsed list-management observation for a domain's sample.
+CREATE TABLE list_unsub_check_results (
+  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  audit_run_id  BIGINT  NOT NULL REFERENCES audit_runs(id)            ON DELETE CASCADE,
+  domain_id     BIGINT  NOT NULL REFERENCES domains(id)               ON DELETE CASCADE,
+  sample_id     BIGINT  REFERENCES content_sample_messages(id)        ON DELETE SET NULL, -- nullable: no sample yet
+  has_header    BOOLEAN NOT NULL,                 -- List-Unsubscribe present at all
+  has_oneclick  BOOLEAN NOT NULL,                 -- List-Unsubscribe-Post: List-Unsubscribe=One-Click present
+  has_https     BOOLEAN NOT NULL,                 -- an https method exists
+  has_mailto    BOOLEAN NOT NULL,                 -- a mailto method exists
+  https_uri     TEXT,                             -- the first https unsubscribe URL (NULL if none)
+  mailto_uri    TEXT,                             -- the mailto unsubscribe target (NULL if none)
+  endpoint_ok   BOOLEAN,                          -- nullable: POST returned 2xx (NULL = not probed)
+  endpoint_status INT,                            -- HTTP status from the one-click POST (NULL = not probed)
+  get_safe      BOOLEAN,                          -- nullable: bare GET did NOT unsubscribe
+  tls_valid     BOOLEAN,                          -- nullable: endpoint cert valid
+  from_aligned  BOOLEAN NOT NULL,                 -- From: aligns with SPF or DKIM
+  from_spf_aligned  BOOLEAN NOT NULL DEFAULT FALSE,
+  from_dkim_aligned BOOLEAN NOT NULL DEFAULT FALSE,
+  precedence_bulk   BOOLEAN NOT NULL DEFAULT FALSE, -- Precedence: bulk/list present
+  priority_abuse    BOOLEAN NOT NULL DEFAULT FALSE, -- forced X-Priority:1 / Importance:High on routine mail
+  list_id       TEXT,                             -- List-Id header value (NULL if absent)
+  is_bulk_sender BOOLEAN NOT NULL DEFAULT FALSE,  -- config flag at audit time (> 5000/day)
+  checked_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (audit_run_id, domain_id)
+);
+CREATE INDEX idx_list_unsub_domain ON list_unsub_check_results(domain_id, checked_at DESC);
+CREATE INDEX idx_list_unsub_sample ON list_unsub_check_results(sample_id);
+```
+
+**Mapping to today's JSON file store.** There is no database yet (see
+[Engineering §7](../engineering.mdx)). Each audit run is one file
+`~/.email_delivery_hero/audits/<domainId>/<auditId>.json`; its `findings[]` array holds these
+`content.*` findings (future `findings` table). The `list_unsub_check_results` row lives inside that
+same file under `results.content.listUnsubscribe`; the referenced sample lives under
+`~/.email_delivery_hero/samples/<domainId>/<sampleId>.eml` with metadata in `samples/index.json`
+(the future `content_sample_messages`):
+
+```jsonc
+// audits/<domainId>/<auditId>.json  →  results.content.listUnsubscribe
+{
+  "sampleId": "smpl_2026_06_30_a",
+  "hasHeader": true, "hasOneclick": false, "hasHttps": false, "hasMailto": true,
+  "httpsUri": null, "mailtoUri": "mailto:unsubscribe@example.com?subject=unsub-{id}",
+  "endpointOk": null, "endpointStatus": null, "getSafe": null, "tlsValid": null,
+  "fromAligned": true, "fromSpfAligned": false, "fromDkimAligned": true,
+  "precedenceBulk": true, "priorityAbuse": false,
+  "listId": "<newsletter.example.com>", "isBulkSender": true, "checkedAt": "2026-06-30T14:03:00Z"
+}
+```
+
+The `store` module is the only code that reads/writes this shape, so promoting
+`results.content.listUnsubscribe` into `list_unsub_check_results` (and joining `sampleId` →
+`content_sample_messages`) is a single-module change; `UNIQUE(audit_run_id, domain_id)` maps to "one
+`results.content.listUnsubscribe` object per audit file".
+
+---
+
+## 6. When we run the check
+
+- **On-demand:** every manual audit (`POST /api/domains/:id/audit`) and "run now"
+  (`POST /api/scheduler/run`) runs `list_unsubscribe.checker.ts` **iff** a sample message exists for
+  the domain; otherwise it emits the single "no sample" info finding and returns.
+- **Periodic:** the in-process scheduler re-runs the engine per domain on the `config.yaml` cadence
+  (default every 6h). Header parsing runs every tick against the current sample. The **endpoint probe**
+  is throttled: run at most **once per cadence** (or a longer `probeCadence`, default 24h) and only
+  when `probeUnsubEndpoint` is enabled, to avoid hammering — and possibly repeatedly triggering — a
+  live unsubscribe endpoint.
+- **First-round vs future:** the entire check is **future-round** — it needs a captured message sample
+  (§What it checks). The header sub-checks need only the sample; `content.list_unsub_reachable`,
+  `content.list_unsub_https_get_safe`, and `content.list_unsub_tls` also need network egress;
+  `content.list_unsub_honored` needs a suppression/attestation feed.
+- **Cost / rate-limits / back-off:** header parsing is free; the probe is one HTTPS `POST` (+ optional
+  `GET`) per domain per probe-cadence, 5s timeout, exponential back-off on failure, and hard-capped at
+  one unsubscribe POST per endpoint per audit. No paid feed is required (URL-reputation cross-check
+  reuses `link_url_reputation`).
+- **Regression detection:** each run's `content.*` list-management findings are diffed against the
+  previous run (Engineering §8). A newly-appearing or worsened finding — one-click header removed by an
+  ESP template change, the https endpoint starting to 500, From-alignment breaking after a sending-
+  domain change, or a forced high-priority header appearing — is flagged as a **new problem** on the
+  Dashboard.
+
+---
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises`) | Future (probe / tool / feed / API) |
+| --- | --- | --- |
+| `content.list_unsubscribe`, `content.list_unsub_oneclick`, `content.list_unsub_https`, `content.list_unsub_mailto`, `content.list_unsub_syntax` | — (need a message sample) | ⏳ parse captured sample headers (`content_sample_messages`) |
+| `content.precedence`, `content.no_priority_abuse`, `content.list_id`, `content.list_headers_consistent`, `content.list_unsub_per_recipient` | — (need a message sample) | ⏳ parse captured sample headers |
+| `content.from_alignment` | — (needs `From:`/auth headers from the sample) | ⏳ parse sample + SPF/DKIM identifiers |
+| `content.list_unsub_reachable`, `content.list_unsub_https_get_safe`, `content.list_unsub_tls` | — | ⏳ HTTPS `POST`/`GET` + TLS probe (network egress) |
+| `content.list_unsub_url_reputation` | — | ⏳ URI/RHS blocklist cross-check via `link_url_reputation` |
+| `content.list_unsub_honored` (advisory) | — | ⏳ suppression-list export / attestation / seed follow-up |
+
+---
+
+## 8. Acceptance criteria
+
+1. With **no** sample message for a domain, the checker emits exactly one **info** finding ("upload a
+   sample") and no false criticals.
+2. A bulk-sender sample (`isBulkSender=true`) whose headers lack `List-Unsubscribe-Post:
+   List-Unsubscribe=One-Click` yields `content.list_unsub_oneclick` **critical** with the exact header
+   to add.
+3. A sample whose `List-Unsubscribe` is **`mailto:`-only** yields `content.list_unsub_https`
+   **critical** (bulk) with a publishable https URI in the remediation.
+4. A sample with **no** `List-Unsubscribe` header yields `content.list_unsubscribe` **critical**.
+5. A malformed header (naked URL, missing angle brackets, unrendered merge tag) yields
+   `content.list_unsub_syntax` **critical**.
+6. When `probeUnsubEndpoint` is on, a one-click `POST` returning non-2xx / timing out / redirecting to
+   login yields `content.list_unsub_reachable` **critical** with the observed status; a 2xx yields ok
+   and records `endpoint_status`.
+7. An endpoint that unsubscribes on a bare `GET` yields `content.list_unsub_https_get_safe`
+   **warning**.
+8. `content.from_alignment` is **critical** when the `From:` org-domain aligns with **neither** SPF nor
+   DKIM, **warning** when it aligns with exactly one, and **ok** when it aligns with both; the persisted
+   row records `from_spf_aligned` and `from_dkim_aligned`.
+9. Bulk mail missing `Precedence: bulk` yields `content.precedence` **warning**; a forced `X-Priority:
+   1`/`Importance: High` on routine mail yields `content.no_priority_abuse` **warning**.
+10. The endpoint probe issues at most **one** unsubscribe `POST` per endpoint per audit, honors the 5s
+    timeout and back-off, and never runs when `probeUnsubEndpoint` is off.
+11. Every non-`ok` finding carries a **concrete** remediation string (exact header line / URL / step),
+    never a generic "add an unsubscribe link".
+12. The parsed observation (`has_header`, `has_oneclick`, `has_https`, `has_mailto`, `endpoint_ok`,
+    `from_aligned`, sample linkage) is persisted to `results.content.listUnsubscribe` in the audit JSON
+    today and maps cleanly onto `list_unsub_check_results` referencing `content_sample_messages`.
+13. The Spam & Content dashboard cell reflects the worst `content.*` severity; `info`-only findings
+    (`content.list_id`, unverifiable-honored) never turn it amber.
+14. The scheduler re-runs the check each cadence (header parse every tick; endpoint probe throttled to
+    the probe-cadence) and flags any newly-appearing or worsened list-management finding as a new
+    problem.
+
+<!--
+  Maintenance notes:
+  - Keep RFC references current: List-Unsubscribe = RFC 2369; one-click = RFC 8058 (POST body
+    `List-Unsubscribe=One-Click`, §3.2 2xx requirement, §4 GET-safety); List-Id = RFC 2919;
+    message format = RFC 5322.
+  - Keep the 2024 Gmail/Yahoo bulk-sender thresholds in sync with ../spam_checks.mdx (> 5000/day,
+    one-click required, honor within 2 days, complaint rate < 0.3%, From-alignment required) and with
+    ./reputation_metrics.mdx (complaint-rate) and ./content_scoring.mdx (sample source).
+  - content_sample_messages is OWNED by ./content_scoring.mdx — reference it, do not redefine it here.
+  - content.from_alignment is the message-level mirror of ./dmarc.mdx alignment — keep them consistent.
+  - Keep this file's sub-check list and the `content` list-management prefix in sync with
+    ../spam_checks.mdx (Spam & Content slice) and the checker table in ../engineering.mdx §6.3.
+-->

@@ -1,0 +1,361 @@
+---
+title: STARTTLS Transport Encryption & MX TLS Certificate Health
+description: The DNS & Infrastructure check that connects to every MX host, negotiates STARTTLS (RFC 3207), and audits the presented TLS certificate — validity window, hostname match, chain trust, protocol version, cipher strength, expiry runway, downgrade resistance, SNI handling, and OCSP stapling — so opportunistic transport encryption is actually offered and actually trustworthy.
+---
+
+# STARTTLS Transport Encryption & MX TLS Certificate Health
+
+Modern receivers increasingly demand that inbound mail arrive over TLS, and the 2024 Gmail/Yahoo
+bulk-sender rules push senders to encrypt in transit. **STARTTLS** ([RFC 3207](https://www.rfc-editor.org/rfc/rfc3207))
+is the SMTP extension that upgrades a plaintext connection on port 25 to TLS after `EHLO`. This check
+**connects to each of a domain's MX hosts, issues `EHLO`, looks for the `250-STARTTLS` capability,
+performs the TLS handshake, and inspects the certificate and negotiated parameters**. A missing
+STARTTLS advertisement, an expired or hostname-mismatched certificate, a self-signed or
+broken-chain certificate, or a downgrade to SSLv3/TLS 1.0 all mean mail can be delivered in the
+clear or with an untrustworthy cert — receivers that enforce TLS (via **MTA-STS** or **DANE**) will
+then **defer or bounce** your inbound mail, and your outbound TLS reputation suffers.
+
+This is **opportunistic-TLS hygiene**: it measures whether TLS is *offered and healthy*. It does
+**not** measure whether TLS is *enforced* — enforcement is the job of MTA-STS and DANE, covered in
+their own specs. A domain can pass every sub-check here and still be trivially downgradable by an
+active attacker unless MTA-STS `enforce` or DANE/TLSA is also published.
+
+**Read alongside:**
+- [../overview.mdx](../overview.mdx) — product charter, personas, port list.
+- [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
+- [../spam_checks.mdx](../spam_checks.mdx) — master catalog; this spec expands its `infra.starttls` row.
+- [../dashboard.mdx](../dashboard.mdx) — the six-column status dashboard.
+- [../scheduled_checks.mdx](../scheduled_checks.mdx) — recurring-check config and per-OS scheduling.
+- Peers: [./mx_routing.mdx](./mx_routing.mdx) (supplies the MX host list this check iterates),
+  [./mta_sts.mdx](./mta_sts.mdx) and [./dane_tlsa.mdx](./dane_tlsa.mdx) (which **enforce** the TLS
+  this check merely audits).
+
+**Category:** DNS & Infrastructure. **checkId prefix:** `infra` (TLS sub-family). Every sub-check id
+below is `infra.tls_*` / `infra.starttls_*`.
+
+---
+
+## 1. What it checks
+
+**The standard.** SMTP is plaintext by default ([RFC 5321](https://www.rfc-editor.org/rfc/rfc5321)).
+[RFC 3207](https://www.rfc-editor.org/rfc/rfc3207) defines the `STARTTLS` service extension: after a
+client sends `EHLO`, a TLS-capable server advertises `250-STARTTLS`; the client issues the
+`STARTTLS` command, the server replies `220 Ready to start TLS`, and both sides run a TLS handshake
+before the session continues with a fresh `EHLO`. Everything after the handshake — envelope,
+headers, body — is encrypted.
+
+**Why receivers care.** Opportunistic STARTTLS protects mail from passive interception on the wire.
+Large receivers report TLS-negotiation outcomes back via TLS-RPT and increasingly gate delivery on
+it. If your MX cannot complete a clean handshake — no STARTTLS, expired cert, wrong hostname, broken
+chain, or an ancient protocol — a sender that has committed to TLS (because you publish an MTA-STS
+`enforce` policy or DANE TLSA records) has no safe way to deliver and will **defer then bounce**.
+Even without enforcement, weak transport TLS is a negative signal that suppresses inbox placement.
+
+**The common real-world failure mode.** A certificate silently expires (nobody renewed the MX
+cert), or the MX host presents a cert for the *mail platform's* hostname (e.g. `mail.provider.net`)
+while your MX record points at `mx.yourdomain.com` and you also publish MTA-STS listing
+`mx.yourdomain.com` — so the name never matches under `enforce`. Self-signed certs and
+missing-intermediate chains are the next most common: the handshake completes but no public CA
+trusts it, so DANE-`PKIX-TA`/MTA-STS validation fails.
+
+**How a failure degrades inbox placement.** No STARTTLS → mail in clear, TLS-enforcing receivers
+refuse. Expired/mismatched/untrusted cert → MTA-STS `enforce` and DANE validation fail → inbound
+deferrals/bounces and outbound TLS-reputation loss. Legacy protocol/cipher → downgrade exposure and
+receiver distrust. All of it caps deliverability quietly, because a plaintext delivery still
+"works" — until a receiver stops accepting it.
+
+---
+
+## 2. Sub-checks
+
+Each MX host discovered via [./mx_routing.mdx](./mx_routing.mdx) is probed independently; findings
+are emitted **per MX host** (the `detail` names the host and IP). Worst severity across all hosts
+rolls into the `infra` dashboard cell.
+
+| Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `infra.starttls_offered` | Each MX advertises `STARTTLS` in the `EHLO` response. | SMTP connect :25 → `EHLO edh.local` → scan for `250-STARTTLS`. | **critical:** MX offers no STARTTLS (plaintext-only). | Enable the STARTTLS extension on the MTA (Postfix `smtpd_tls_security_level = may`; Exim `tls_advertise_hosts = *`) and install a cert. |
+| `infra.tls_cert_valid` | Presented cert is within its validity window (`notBefore ≤ now ≤ notAfter`). | Read `notBefore`/`notAfter` from the handshake peer cert. | **critical:** cert expired or not-yet-valid. | Renew/replace the MX certificate so `notAfter` is in the future; automate renewal (e.g. certbot/ACME) and reload the MTA. |
+| `infra.tls_cert_expiry_soon` | Cert expiry is not imminent (advisory runway). | `notAfter − now`; warn `< 14 days`, info `< 30 days`. | **warning:** cert expires in `< 14 days`. | Renew now and switch to automated ACME renewal so certs roll ≥ 30 days before expiry. |
+| `infra.tls_cert_name_match` | Cert CN/SAN matches the MX hostname being connected to. | Compare MX host against cert `subjectAltName` DNS entries (wildcards per RFC 6125), fall back to CN. | **critical:** MX host not in cert SAN/CN. | Issue a cert whose SAN includes the exact MX hostname (`mx.<domain>`); do not rely on the provider's default cert name. |
+| `infra.tls_cert_chain` | Cert chains to a publicly trusted CA; no missing intermediates; not self-signed. | Verify against Node's bundled Mozilla CA store; detect self-signed / `unable to get local issuer`. | **critical:** self-signed or broken/incomplete chain (untrusted). | Install the full chain (leaf + intermediates) in the MTA cert file; replace self-signed certs with a CA-issued cert. |
+| `infra.tls_version` | Negotiated protocol is ≥ TLS 1.2 (ideally 1.3). | Read `TLSSocket.getProtocol()`; also probe max supported version. | **critical:** SSLv3/TLS 1.0/1.1 negotiated or highest offered. | Disable SSLv3/TLS 1.0/1.1; set minimum to TLS 1.2 and enable TLS 1.3 (Postfix `smtpd_tls_protocols = >=TLSv1.2`). |
+| `infra.tls_cipher` | Negotiated cipher is strong with forward secrecy; no RC4/3DES/export/NULL. | Read `getCipher()`/`getEphemeralKeyInfo()`; classify suite. | **critical:** RC4/3DES/EXPORT/NULL or non-PFS cipher. | Restrict to modern PFS suites (ECDHE-\* AEAD, `TLS_AES_128_GCM_SHA256`); remove RC4/3DES/export ciphers. |
+| `infra.tls_downgrade` | The session is not forced/observed to fall back to cleartext or a weak version. | If `STARTTLS` advertised but handshake fails/plaintext succeeds where TLS should hold. | **warning:** STARTTLS advertised but handshake fails → server falls back to cleartext. | Fix the handshake failure; pair with MTA-STS `enforce`/DANE (see [./mta_sts.mdx](./mta_sts.mdx), [./dane_tlsa.mdx](./dane_tlsa.mdx)) so downgrade is refused. |
+| `infra.tls_sni` | Server handles SNI: presents the correct cert when the MX hostname is sent as SNI. | Handshake sending `servername = <mx-host>`; compare cert vs a no-SNI handshake. | **warning:** wrong/default cert returned unless SNI sent, or SNI ignored. | Configure per-hostname TLS (SNI) on the MTA so `mx.<domain>` gets its matching cert. |
+| `infra.tls_ocsp` *(advisory)* | Cert is not revoked; OCSP stapling offered. | Request OCSP staple during handshake; note presence/`good`/`revoked`. | **critical:** cert revoked. **info:** no OCSP staple. | Replace a revoked cert immediately; enable OCSP stapling on the MTA to speed revocation checks. |
+| `infra.tls_key_strength` *(advisory)* | Public key meets modern strength (RSA ≥ 2048, ECDSA ≥ 256). | Read peer cert public-key type/bits. | **warning:** RSA < 2048 or weak key. | Reissue the cert with RSA ≥ 2048 or ECDSA P-256. |
+| `infra.tls_sig_algorithm` *(advisory)* | Signature algorithm is not deprecated (no SHA-1/MD5). | Inspect cert `sigalg`. | **warning:** SHA-1-signed cert. | Reissue with SHA-256+ signature. |
+| `infra.tls_consistency` *(advisory)* | All MX hosts present coherent TLS posture (no one host dragging the domain down). | Compare per-host results across the MX set. | **warning:** one MX host lacks STARTTLS/valid cert while others pass. | Bring the lagging MX host to parity (STARTTLS + valid, name-matching cert). |
+
+> All rows in this spec are **network-probe** sub-checks — none are pure `node:dns/promises`. The
+> only DNS this check does is reuse the MX host list from [./mx_routing.mdx](./mx_routing.mdx).
+
+---
+
+## 3. How it is measured
+
+**Prerequisite (DNS).** Reuse the MX result from [./mx_routing.mdx](./mx_routing.mdx)
+(`resolveMx(domain)` sorted by priority) and each MX host's A/AAAA. This check does **not** re-derive
+MX; it consumes it. If the domain has no MX, this check is skipped with an `info` and defers to the
+MX-routing finding.
+
+**The probe (FUTURE round — TLS-aware SMTP).** For each MX host, on port 25:
+
+1. TCP connect, read the `220` banner.
+2. Send `EHLO edh.<local-fqdn>`; parse the multiline `250-` capability list. Absence of
+   `250-STARTTLS` → `infra.starttls_offered` critical; stop (plaintext only).
+3. Send `STARTTLS`; expect `220`. Anything else → `infra.tls_downgrade` warning.
+4. Perform the TLS handshake with `servername = <mx-host>` (SNI), presenting our client hello with
+   TLS 1.3+1.2 offered. Two implementation paths, both acceptable:
+   - **Node built-in:** `net.connect` for SMTP, drive EHLO/STARTTLS as text, then
+     `tls.connect({ socket, servername, rejectUnauthorized: false })` and read
+     `socket.getPeerCertificate(true)`, `getProtocol()`, `getCipher()`, `getEphemeralKeyInfo()`,
+     `getPeerX509Certificate()`. We set `rejectUnauthorized: false` so we can *report* trust
+     problems instead of throwing, then evaluate trust ourselves.
+   - **Shell to a Brew tool:** `openssl s_client -starttls smtp -connect <mx>:25 -servername <mx>`
+     (parse `Verify return code`, `Protocol`, `Cipher`, cert `notBefore/notAfter`, SAN), or
+     **`swaks --to probe@<domain> --server <mx> -tls`** for an end-to-end STARTTLS transcript. The
+     project charter favors Brew tools; the `Checker` contract is unchanged — only the checker
+     internals differ.
+5. Extract from the leaf cert: `subject`, `issuer`, `notBefore`, `notAfter`, SAN DNS names, public
+   key type/bits, `sigalg`, and (if stapled) the OCSP response status.
+
+**Trust & name evaluation.**
+- **Chain:** verify the presented chain against Node's bundled Mozilla root store. `self-signed
+  certificate` / `unable to get local issuer certificate` → `infra.tls_cert_chain` critical. A
+  handshake that only succeeds because we sent extra intermediates ourselves indicates a
+  server-side missing-intermediate → still flag.
+- **Name match:** apply RFC 6125 matching — exact SAN DNS entry, or left-most wildcard
+  (`*.example.com` matches `mx.example.com` but not `example.com` or `a.b.example.com`). CN is a
+  fallback only, and is ignored if any SAN is present.
+- **Protocol/cipher:** map `getProtocol()` to severity (`TLSv1.3`/`TLSv1.2` ok; `TLSv1.1`/`TLSv1`
+  critical; `SSLv3` critical). Classify the cipher: AEAD + ECDHE/DHE = ok; CBC-only = info; RC4,
+  3DES, EXPORT, NULL, anon = critical; non-PFS (static RSA kx) = warning.
+
+**Edge cases.** Port 25 blocked outbound from the app host (many ISPs) → probe cannot run; emit
+`info` "TLS probe unavailable from this host" rather than a false critical, and surface a settings
+hint (see §4). Greylisting/tarpitting → apply a connect timeout (default 10 s) and one retry.
+IPv6-only MX where the host lacks IPv6 egress → fall back to A record. Multiple A records per MX
+host → probe the first reachable, note the IP tested. A host that offers `STARTTLS` but resets on
+the `STARTTLS` command → `infra.tls_downgrade` warning (broken TLS worse than honest cleartext for
+enforcing senders).
+
+**Caching / rate limits.** Probing costs a live SMTP+TLS handshake per MX host, so results are
+cached per audit run (not per sub-check) — one handshake yields *all* `infra.tls_*` findings for
+that host. Cap concurrency (e.g. 4 hosts in parallel) and back off per MX IP to avoid tripping
+connection-rate limits on shared mail platforms. Never probe more than once per host per audit.
+
+**Severity mapping (worst-wins per host, then per domain):** expired/mismatched/untrusted cert,
+no STARTTLS, revoked cert, or SSLv3/TLS1.0/1.1/weak-cipher = **critical**; expiry `< 14 days`,
+downgrade/handshake failure, SNI misbehavior, weak key/sig, host inconsistency = **warning**; no
+OCSP staple, expiry `< 30 days`, probe-unavailable = **info**.
+
+---
+
+## 4. User interface
+
+**Dashboard contribution.** These findings feed the **DNS & Infrastructure** column cell (shared
+with MX, PTR, MTA-STS, etc. per [../dashboard.mdx](../dashboard.mdx)). A critical TLS finding on any
+MX host turns the cell **dark red**; a warning-only TLS posture contributes **amber**; info alone
+(no OCSP staple) does not change the color. The cell tooltip summarizes e.g. "2 MX hosts: 1 cert
+expired".
+
+**Audit-detail view.** Findings render as grouped rows under a **"Transport Security (TLS)"**
+sub-group, one block per MX host, each row = severity badge + observed `detail` + `remediation` with
+a **copy-to-clipboard** button (React 19 + shadcn/ui `Badge`, `Card`, `Button`, `lucide-react`
+`ShieldCheck`/`ShieldAlert`/`Clock` icons; `Collapsible` per host). Certificate facts render in a
+compact key/value panel.
+
+```
+┌ Transport Security (TLS) ─────────────────────────────── infra ┐
+│  mx1.example.com  (203.0.113.10)                    ● critical │
+│   ● critical  Certificate expired                              │
+│      notAfter 2026-06-20 (11 days ago) · issuer Let's Encrypt  │
+│      Fix: renew the MX cert (certbot renew) & reload  [copy]   │
+│   ✔ ok        STARTTLS offered · TLS 1.3 · ECDHE-AES256-GCM    │
+│      SAN mx1.example.com,mx2.example.com                        │
+│  ──────────────────────────────────────────────────────────── │
+│  mx2.example.com  (203.0.113.11)                    ● ok       │
+│   ✔ ok  Valid cert · matches host · chain trusted · 71 days    │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Cert detail fields shown:** MX host, IP tested, negotiated protocol, cipher + PFS flag, subject,
+issuer, SAN list, `notBefore`, `notAfter`, days-to-expiry, name-match bool, chain-trusted bool,
+OCSP status.
+
+**Per-domain config.** An admin-only **"TLS probe"** panel: toggle the probe on/off (for hosts where
+port 25 is blocked), set the connect timeout and expiry-warning threshold (default 14/30 days), and
+an optional EHLO name override. **Empty / never-run:** the cell renders light gray "Not yet
+audited"; the TLS group shows "Run an audit to probe MX TLS." **Loading:** a skeleton per MX host
+while handshakes run. **Probe-unavailable** (port 25 blocked): an inline `info` banner "TLS probe
+could not connect from this host — outbound :25 may be blocked" with a link to the settings toggle.
+
+---
+
+## 5. Information schema (database schema)
+
+Reference the shared core tables (owned by engineering, do **not** redefine): `domains`,
+`sending_ips`, `dkim_selectors`, `audit_runs`, `findings`. Every emitted finding is a row in
+`findings` with `category = 'infra'` and `check_id` = one of the `infra.tls_*` / `infra.starttls_*`
+ids. This check adds one structured result table, keyed per MX host per audit run.
+
+```sql
+-- One row per MX host probed in an audit run.
+CREATE TABLE tls_check_results (
+  id              BIGSERIAL   PRIMARY KEY,
+  audit_run_id    BIGINT      NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+  domain_id       BIGINT      NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+  mx_host         TEXT        NOT NULL,             -- the MX hostname probed
+  mx_ip           INET,                             -- the address actually connected to
+  starttls_offered BOOLEAN    NOT NULL,             -- 250-STARTTLS advertised
+  handshake_ok    BOOLEAN     NOT NULL,             -- TLS negotiation completed
+  tls_version     TEXT,                             -- 'TLSv1.3' | 'TLSv1.2' | 'TLSv1.1' | ...
+  cipher          TEXT,                             -- negotiated suite, e.g. 'ECDHE-RSA-AES256-GCM-SHA384'
+  forward_secrecy BOOLEAN,                          -- ECDHE/DHE key exchange
+  cert_subject    TEXT,
+  cert_issuer     TEXT,
+  cert_sans       TEXT[],                           -- SAN DNS names
+  cert_not_before TIMESTAMPTZ,
+  cert_not_after  TIMESTAMPTZ,
+  cert_name_match BOOLEAN,                          -- SAN/CN matches mx_host (RFC 6125)
+  chain_trusted   BOOLEAN,                          -- chains to a Mozilla root, not self-signed
+  self_signed     BOOLEAN,
+  key_type        TEXT,                             -- 'RSA' | 'EC'
+  key_bits        INT,
+  sig_algorithm   TEXT,                             -- e.g. 'sha256WithRSAEncryption'
+  ocsp_status     TEXT,                             -- 'good' | 'revoked' | 'none'
+  probe_error     TEXT,                             -- populated when handshake_ok = false
+  checked_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_tls_results_domain_host ON tls_check_results (domain_id, mx_host);
+CREATE INDEX idx_tls_results_audit       ON tls_check_results (audit_run_id);
+-- Fast "which certs expire soon" queries across all domains:
+CREATE INDEX idx_tls_results_expiry      ON tls_check_results (cert_not_after);
+```
+
+**Mapping onto today's JSON file store.** There is **no database today** (see
+[../engineering.mdx](../engineering.mdx) §7). Each audit run is a single file
+`~/.email_delivery_hero/audits/<domainId>/<auditId>.json`. The `findings[]` array in that file
+already holds the human-facing TLS findings. The structured `tls_check_results` rows are persisted
+in the **same file** under a `checkData.tls` key — an array of per-MX-host objects whose fields are
+exactly the columns above (camelCase), e.g.:
+
+```jsonc
+"checkData": {
+  "tls": [
+    { "mxHost": "mx1.example.com", "mxIp": "203.0.113.10", "starttlsOffered": true,
+      "handshakeOk": true, "tlsVersion": "TLSv1.3", "cipher": "TLS_AES_256_GCM_SHA384",
+      "forwardSecrecy": true, "certSubject": "CN=mx1.example.com", "certIssuer": "R11 / Let's Encrypt",
+      "certSans": ["mx1.example.com","mx2.example.com"], "certNotBefore": "2026-03-01T00:00:00Z",
+      "certNotAfter": "2026-06-20T00:00:00Z", "certNameMatch": true, "chainTrusted": true,
+      "selfSigned": false, "keyType": "EC", "keyBits": 256, "sigAlgorithm": "ecdsa-with-SHA256",
+      "ocspStatus": "good", "checkedAt": "2026-07-01T12:00:00Z" }
+  ]
+}
+```
+
+The `store` module owns this shape. When storage graduates to PostgreSQL, `checkData.tls[]`
+maps one-to-one onto `tls_check_results` rows (join key: `audit_run_id` = the audit file's `id`,
+`domain_id` = the folder's domain). No lookup/reference tables are required for this check — trust
+anchors come from Node's bundled Mozilla CA store, not a DB table.
+
+---
+
+## 6. When we run the check
+
+**On-demand.** Runs as part of a full audit: `POST /api/domains/:id/audit` (and the dashboard
+"Run now"). Because it opens live SMTP+TLS handshakes, it is one of the slower checks; the runner
+executes it in parallel with pure-DNS checkers but bounds MX-host concurrency to ~4.
+
+**Periodic.** The in-process scheduler ([../scheduled_checks.mdx](../scheduled_checks.mdx)) re-runs it
+on the configured cadence (default every 6 h). Certificate expiry makes periodic runs especially
+valuable: the diff engine catches `infra.tls_cert_expiry_soon` crossing the 30-day and 14-day
+thresholds and `infra.tls_cert_valid` flipping to expired **before** a receiver starts bouncing.
+Consider a daily minimum cadence for TLS specifically so expiry is caught with runway.
+
+**First-round vs future.** **FUTURE round.** The entire check depends on an outbound SMTP+TLS probe
+(EHLO → STARTTLS → handshake → certificate inspection) via Node's `tls`/`net` or shelling to
+`openssl s_client` / `swaks`. None of it runs on first-round `node:dns/promises`. Enable it once the
+probe harness (and admin toggle for port-25-blocked hosts) ships. This is the enforcement-free
+sibling of MTA-STS/DANE: it needs the same TLS machinery those checks build on.
+
+**Cost / rate-limit / back-off.** One handshake per MX host per run; cache results per run so all
+`infra.tls_*` sub-checks read a single handshake. Back off per MX IP; respect a connect timeout
+(10 s) with a single retry; skip cleanly with `info` if outbound :25 is blocked. Never hammer a
+shared mail platform — cap concurrency and honor `4xx`/rate replies.
+
+**Regression detection.** The scheduler diff treats any newly-appearing or worsened TLS finding as a
+"new problem": cert newly expired, chain that stopped validating, protocol downgraded, or a
+previously-passing MX host that stopped offering STARTTLS all surface on the Dashboard as new
+problems on the next tick.
+
+---
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises`) | Future (probe / external tool) |
+| --- | --- | --- |
+| `infra.starttls_offered` | | ✅ SMTP `EHLO` probe |
+| `infra.tls_cert_valid` | | ✅ TLS handshake + cert parse |
+| `infra.tls_cert_expiry_soon` | | ✅ cert parse |
+| `infra.tls_cert_name_match` | | ✅ handshake + SAN/CN (RFC 6125) |
+| `infra.tls_cert_chain` | | ✅ handshake + CA-store verify |
+| `infra.tls_version` | | ✅ handshake protocol read |
+| `infra.tls_cipher` | | ✅ handshake cipher read |
+| `infra.tls_downgrade` | | ✅ STARTTLS command probe |
+| `infra.tls_sni` | | ✅ dual handshake (SNI / no-SNI) |
+| `infra.tls_ocsp` | | ✅ OCSP staple / revocation |
+| `infra.tls_key_strength` | | ✅ cert key read |
+| `infra.tls_sig_algorithm` | | ✅ cert sigalg read |
+| `infra.tls_consistency` | | ✅ cross-host comparison |
+
+Every sub-check in this spec is **future** — the check is gated behind the SMTP+TLS probe harness.
+No part of it is first-round.
+
+---
+
+## 8. Acceptance criteria
+
+1. For a domain with healthy MX TLS (STARTTLS offered, valid CA cert, SAN matching the MX host,
+   TLS 1.2/1.3, PFS cipher), the check emits only `ok`/`info` findings and does not turn the
+   `infra` cell red or amber.
+2. Given an MX host that does **not** advertise STARTTLS, `infra.starttls_offered` is `critical`
+   with a remediation naming the exact MTA directive to enable STARTTLS.
+3. Given an expired certificate, `infra.tls_cert_valid` is `critical` and `detail` shows `notAfter`
+   and days-since-expiry; given a cert expiring in `< 14 days`, `infra.tls_cert_expiry_soon` is
+   `warning`.
+4. Given a cert whose SAN/CN does not include the MX hostname, `infra.tls_cert_name_match` is
+   `critical` and lists the presented SAN names vs the expected MX host.
+5. Given a self-signed cert or a chain missing intermediates, `infra.tls_cert_chain` is `critical`;
+   a fully trusted chain yields `ok`.
+6. Given a negotiated protocol below TLS 1.2 (or a highest-offered below 1.2),
+   `infra.tls_version` is `critical`; a RC4/3DES/export/NULL/non-PFS cipher makes
+   `infra.tls_cipher` `critical`.
+7. The check **iterates every MX host** for the domain and emits per-host findings; the worst host's
+   severity determines the domain's `infra` roll-up.
+8. Every non-`ok` finding carries a concrete `remediation` (exact renewal command / MTA directive /
+   cert reissue instruction) — never a generic "fix your TLS".
+9. When outbound port 25 is blocked from the app host, the check emits a single `info`
+   "probe unavailable" finding and does **not** produce false criticals.
+10. One handshake per MX host per audit run populates all `infra.tls_*` findings and one
+    `tls_check_results`-shaped object (persisted under `checkData.tls` in the audit JSON today).
+11. The scheduler diff flags a cert that newly expired, a chain that stopped validating, or an MX
+    host that stopped offering STARTTLS as a "new problem" on the next run.
+12. The spec correctly distinguishes this **audit-only** check from the **enforcement** checks in
+    [./mta_sts.mdx](./mta_sts.mdx) and [./dane_tlsa.mdx](./dane_tlsa.mdx), and reuses the MX host
+    list from [./mx_routing.mdx](./mx_routing.mdx).
+
+<!--
+  Maintenance notes:
+  - Keep RFC refs current: STARTTLS RFC 3207, SMTP RFC 5321, RFC 6125 (name matching). Cross-check
+    protocol/cipher thresholds against current IETF/industry guidance (min TLS 1.2, prefer 1.3, PFS
+    AEAD only) and bump as the ecosystem deprecates suites.
+  - Keep in sync with ../spam_checks.mdx (this spec expands the infra.starttls row into the
+    infra.tls_* sub-family) and ../engineering.mdx (Checker/Finding contract, file store shape,
+    scheduler). If the shared core tables change, update §5.
+  - This is the opportunistic-TLS AUDIT check. Enforcement lives in ./mta_sts.mdx and ./dane_tlsa.mdx;
+    keep the audit-vs-enforce boundary explicit so the three specs do not overlap.
+-->

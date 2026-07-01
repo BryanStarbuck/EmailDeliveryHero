@@ -10,7 +10,7 @@ Product specs live in [`../pm/`](../pm/) — start with `pm/overview.mdx`.
 ```
 code/
 ├── packages/backend    # NestJS REST API (:9312, routes under /api)
-└── packages/frontend   # React 19 + Vite SPA (:9311)
+└── packages/frontend   # React 19 + Vite SPA — UI WebApp (:4444)
 ```
 
 ## Authentication — OpenAuthFederated (external library)
@@ -39,7 +39,7 @@ pnpm install
 cp packages/backend/.env.example packages/backend/.env   # then fill in Google OAuth creds
 pnpm --filter @edh/backend dev
 
-# Terminal 2 — frontend (:9311)  → open http://localhost:9311
+# Terminal 2 — frontend / UI WebApp (:4444)  → open http://localhost:4444
 pnpm --filter @edh/frontend dev
 ```
 

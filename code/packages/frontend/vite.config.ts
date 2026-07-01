@@ -3,9 +3,9 @@ import tailwindcss from "@tailwindcss/vite"
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vitest/config"
 
-// The webapp always runs on :9311 (override with WEBAPP_PORT). strictPort fails loudly rather
-// than silently drifting to another port.
-const WEBAPP_PORT = Number(process.env.WEBAPP_PORT ?? 9311)
+// The UI WebApp always runs on :4444 (override with WEBAPP_PORT). strictPort fails loudly rather
+// than silently drifting to another port. See pm/overview.mdx "Key facts".
+const WEBAPP_PORT = Number(process.env.WEBAPP_PORT ?? 4444)
 const API_PORT = Number(process.env.API_PORT ?? 9312)
 
 export default defineConfig({

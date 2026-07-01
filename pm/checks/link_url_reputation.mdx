@@ -1,0 +1,191 @@
+---
+title: Link / URL Reputation (URI Blocklists on Links Inside the Message)
+description: How EmailDeliveryHero extracts every link from a sample message, resolves each linked domain (including shortener and redirect-chain expansion), queries URI/domain blocklists (Spamhaus DBL, SURBL multi, Invaluement ivmURI), and flags shorteners, raw-IP URLs, punycode/homograph hosts, http-not-https links, and off-domain links — handing the user the exact per-domain delisting path or link-hygiene fix.
+---
+
+# Link / URL Reputation (URI Blocklists on Links Inside the Message)
+
+Receiving mail systems do not only judge *who* sent a message — they judge *where its links point*. Every URL in the body is extracted, its host reduced to a registrable domain, and that domain is checked against URI blocklists (Spamhaus DBL, SURBL, Invaluement ivmURI) exactly the way an RHSBL checks a sending domain. A single bad linked domain — a listed URL shortener, a compromised WordPress site you link to, a tracking domain that got swept into DBL — can spam-file the whole message **even when your SPF, DKIM, and DMARC are perfect**, because content filters (SpamAssassin `URIBL_*`, Rspamd `SURBL_*`/`DBL`, and every commercial gateway) weight body-URL reputation heavily. This spec is the URL-reputation sub-family of the **Spam & Content** dashboard category; every sub-check id uses the **`content`** prefix (`content.url_*`).
+
+**Read alongside:**
+- [../overview.mdx](../overview.mdx) — product charter, personas, port list.
+- [../engineering.mdx](../engineering.mdx) — Checker/Finding contract, file store, scheduler.
+- [../spam_checks.mdx](../spam_checks.mdx) — master catalog; Spam & Content is one of its six categories.
+- [../dashboard.mdx](../dashboard.mdx) — the 6-column status dashboard (Spam & Content is a column).
+- [../scheduled_checks.mdx](../scheduled_checks.mdx) — recurring-check config; URI listings are time-varying, so cadence matters.
+- [./content_scoring.mdx](./content_scoring.mdx) — SpamAssassin/Rspamd body scoring; this check contributes the URL-reputation rules and shares its `content_sample_messages` sample store.
+- [./blacklists.mdx](./blacklists.mdx) — the sending-domain/IP DNSBL side; this check **reuses its `dnsbl_zones`** RHSBL machinery but targets domains found *inside* the message body, not your sending domain/IPs.
+- [./inbox_placement.mdx](./inbox_placement.mdx) — seed-list placement; a listed body link is a top cause of a clean-auth message still landing in spam.
+
+This check belongs to exactly one of the six dashboard categories: **Spam & Content** (`content`), URL-reputation sub-family.
+
+## 1. What it checks
+
+There is no RFC that defines the URI blocklists themselves, but the query mechanism is the RHSBL half of **RFC 5782 (DNS Blacklists and Whitelists)**: the *registrable* domain of a link is queried **directly, with no reversal** — `<linkdomain>.<zone>`, `A`/`TXT` lookup, `127.0.0.x` return codes decode the reason. The registrable domain is derived with the **Public Suffix List** (PSL, publicsuffix.org) so that `foo.bar.co.uk` reduces to `bar.co.uk`, not `co.uk`; SURBL and DBL are queried on that reduced domain (SURBL additionally tests a couple of nested labels for wildcard abuse). URLs themselves are structured by **RFC 3986**; internationalized hosts by **IDNA2008 / RFC 5890-5891** (punycode `xn--`).
+
+Why receivers care: botnet and snowshoe spam rotates sending IPs constantly but must always drive the recipient to a payload URL, so the *link* domain is the most stable spam fingerprint. URI blocklists like SURBL and Spamhaus DBL catch the overwhelming majority of spam/phish/malware by domain, and mailbox providers additionally consult Google Safe Browsing and Microsoft SmartScreen on click. The common real-world failure modes: (1) linking through a **URL shortener** (bit.ly, t.co, tinyurl) that hides — and cannot vouch for — the true destination, which filters penalize on principle; (2) linking a **compromised legitimate site** (a hacked blog, an "abused-legit" DBL entry) you have no control over; (3) a **tracking/click domain** from your ESP that got listed by neighbor abuse; (4) **http-not-https** links, **raw-IP** URLs, or **punycode/homograph** lookalike domains, all of which are classic phishing signals. A single high-trust URI listing (DBL spam/phish, SURBL phishing bit) can drop inbox placement to near zero regardless of authentication.
+
+## 2. Sub-checks
+
+Each row extracts and evaluates the links in a **sample message** (see §3 for how samples are supplied). "Link domain" = the PSL-registrable domain of the URL host; "final domain" = the link domain *after* following shorteners/redirects. RHSBL zone rows reuse `dnsbl_zones` from [./blacklists.mdx](./blacklists.mdx). Every remediation is concrete: a per-domain delisting portal, or the exact link-hygiene edit.
+
+| Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+|---|---|---|---|---|
+| `content.url_extract` | All links are parsed from the sample (href, plain-text, `background`, `<area>`, CSS `url()`, AMP) and reduced to registrable domains | Parse HTML + text parts; RFC 3986 URL parse; PSL reduction; dedupe to a domain set | **info**: N unique link domains found; **warning**: message has zero parseable links but is HTML (broken/tracking-only) | Informational; feeds every zone check below. If links fail to parse, fix malformed `href`/encoding so receivers (and users) can resolve them |
+| `content.url_dbl` | No linked domain is on **Spamhaus DBL** (RHSBL) | Direct `A`/`TXT` at `<linkdomain>.dbl.spamhaus.org`; codes `127.0.1.2-.6` (spam/phish/malware/botnet), `.102-.106` (abused-legit) | **critical** on `.2-.6`; **warning** on `.102-.106` (abused-legit) | Stop linking the domain; if it is yours, follow the DBL removal flow at https://www.spamhaus.org/dbl/removal/ and secure the compromised site/shortener first |
+| `content.url_surbl` | No linked domain is on **SURBL multi** (phishing/malware/abuse/cracked) | Direct `A`/`TXT` at `<linkdomain>.multi.surbl.org`; bitmask return code | **critical**: phishing (`0x08`)/malware (`0x10`) bit set; **warning**: abuse (`0x40`)/cracked (`0x80`) bit | Identify the exact bit from the return code, then request removal at https://www.surbl.org/surbl-analysis; remove the link if it is not yours |
+| `content.url_ivmuri` | No linked domain is on **Invaluement ivmURI** | Direct `A`/`TXT` at `<linkdomain>.uri.invaluement.com` | **warning/critical**: listed | Removal via https://www.invaluement.com/lookup/. **Paid** subscription/licensed resolver required — future-round |
+| `content.url_uribl` | No linked domain is on the **URIBL** multi (black/grey/red) zone | Direct `A`/`TXT` at `<linkdomain>.multi.uribl.com`; codes `127.0.0.2/.4/.8` | **critical**: black bit; **warning**: grey bit | Delist via https://admin.uribl.com/; stop linking the domain if third-party. **Free only for low volume / registered resolver** |
+| `content.url_shortener` | Links do not hide the destination behind a shortener | Match link domain against a shortener list (bit.ly, t.co, tinyurl, ow.ly, buff.ly, goo.gl, is.gd, rebrand.ly, lnkd.in, etc.) | **warning**: message routes recipients through a public shortener | Replace shortener links with the full destination URL, or use a **branded/custom domain** shortener you authenticate; expand + re-check the final domain (`content.url_redirect_chain`) |
+| `content.url_redirect_chain` | Following redirects reveals a short, honest path to an on-brand final domain | HTTP `HEAD`/`GET` follow of `30x`/`meta refresh`/JS where safe; record hop chain + final domain | **warning**: long chain (>3 hops), cross-domain cloaking, or final domain differs from displayed domain; **critical**: final domain is URI-listed | Shorten the redirect path; ensure the final landing domain is your own/authenticated; remove cloaking. **Probe — future-round** |
+| `content.url_https` | Every link uses `https`, not `http` | Inspect URL scheme per link | **warning**: one or more `http://` links (downgrade/interception risk, phishing signal) | Change links to `https://`; ensure the landing site has a valid TLS cert so `https` does not break |
+| `content.url_domain_alignment` | Links point at the sender's own or related domains, not unrelated third parties (advisory) | Compare each link's registrable domain to the sending/`d=`/org domain and a configured allowlist | **info/warning**: majority of links point at unrelated domains (looks forwarded/spoofed) | Advisory: link primarily to your own authenticated domains; register tracking/click domains under your org and align them (see [./content_scoring.mdx](./content_scoring.mdx)) |
+| `content.url_ip_literal` | No link uses a raw IP-literal host (`http://203.0.113.9/...`) | Detect IPv4/IPv6 literal in URL host | **critical**: raw-IP URL present (strong phishing/malware signal, near-guaranteed spam score) | Replace the IP-literal with a proper hostname on an authenticated domain |
+| `content.url_punycode` | No link host is punycode/homograph (IDN lookalike) | Detect `xn--` labels; flag mixed-script / confusable homographs vs. a known-brand set | **warning**: punycode host; **critical**: homograph impersonating a known brand (`аpple.com`) | Use the real ASCII domain; if IDN is intentional and legitimate, note it and confirm it is not a lookalike of a protected brand |
+| `content.url_safe_browsing` | No linked/final domain is flagged by **Google Safe Browsing** / phishing feeds (advisory) | Safe Browsing Lookup/Update API v4 (hashed) on link + final domains; optional PhishTank/OpenPhish | **critical**: SB flags malware/phishing/unwanted software | Remove the link; if it is your site, clean it and request review in Google Search Console. **Needs API key — future-round** |
+| `content.url_dnsbl_cross` | Linked domains cross-checked against the sending-side domain zones already configured | Reuse enabled `dnsbl_zones WHERE kind='domain'` against each link domain | **warning/critical** per zone weight | Same per-zone delisting portal from `dnsbl_zones.delisting_url`; dedupes with `content.url_dbl`/`surbl`/`ivmuri` |
+| `content.url_reachable` | Links resolve and load (no dead/parked/NXDOMAIN destinations) | Resolve host + optional `HEAD`; classify NXDOMAIN / parked / `4xx`/`5xx` | **warning**: broken/parked link (hurts engagement and looks spammy) | Fix or remove the dead link; ensure the destination returns `200`. **Probe — future-round** |
+| `content.url_count` | Link volume and text-to-link ratio are not spam-shaped | Count links, unique domains, and link-heavy/image-only ratio | **warning**: excessive links or many distinct off-domain hosts | Reduce link count; consolidate to your own domain; balance text vs. links |
+| `content.url_aggregate` | Roll-up across every link × zone/heuristic with per-item weight | Worst weighted severity across all sub-checks above | **critical** if any high-weight URI listing or raw-IP/homograph; **warning** for shortener/http/alignment | Single prioritized action list: fix highest-weight listing/link first, each with its delisting URL or hygiene edit |
+
+Notes: the RHSBL rows (`content.url_dbl`, `content.url_surbl`, `content.url_ivmuri`, `content.url_uribl`, `content.url_dnsbl_cross`) run the **same** query machinery as [./blacklists.mdx](./blacklists.mdx) but with the target = each **link domain** rather than the sending domain; we keep distinct ids so a finding names the exact offending body domain and zone. `content.url_shortener` and `content.url_redirect_chain` are complementary — the shortener flag is DNS-cheap and always available; the redirect expansion that reveals the true `final_domain` is a network probe (future-round), and once expanded the final domain is fed back through the URI zones.
+
+## 3. How it is measured
+
+**Sample source.** Unlike auth/DNS checks, this check needs the *message body*. A sample is supplied one of three ways, stored in `content_sample_messages` (owned by [./content_scoring.mdx](./content_scoring.mdx)): (1) the operator pastes/uploads a raw `.eml`; (2) the operator sends a real campaign to a per-domain **ingest mailbox/seed address** the app monitors; (3) an HTML/text snippet is pasted. If no sample exists, every `content.url_*` sub-check is **`info` "no sample message — add one to check link reputation"**, never a false pass. Each audit pins the `sample_id` used so results are reproducible.
+
+**Extraction & normalization.** The HTML part is parsed (DOM), harvesting `a[href]`, `area[href]`, `img[src]` used as links, `[background]`, inline CSS `url(...)`, and AMP `href`s; the text part is scanned with an RFC 3986-aware URL matcher. Each URL is parsed, lowercased, IDNA-encoded, and reduced to its **registrable domain via the Public Suffix List**. `mailto:`/`tel:`/`data:` are excluded from reputation but `mailto:` domains may feed alignment. The result is a de-duplicated map of `{ url, link_domain }`, plus per-URL flags (`is_https`, `is_ip_literal`, `is_punycode`, `is_shortener`).
+
+**Redirect / shortener expansion (probe, future-round).** For shortener or otherwise-suspicious links, a bounded HTTP client issues `HEAD` (falling back to a ranged `GET`), following `301/302/303/307/308`, `<meta http-equiv=refresh>`, and obvious `Location`/JS hops up to a hop cap (e.g. 5) with a timeout (e.g. 5s) and no cookies/JS execution. The hop chain and the **final_domain** are recorded; the final domain is then run through the URI zones. This is disabled in first round (no outbound HTTP); until then `final_domain` is null and `content.url_redirect_chain`/`content.url_reachable`/`content.url_safe_browsing` are `info`-gated.
+
+**URI-zone resolution.** For each unique link (and final) domain, the checker queries the enabled RHSBL zones with `node:dns/promises` `resolve4()` (`A`) and `resolveTxt()` (`TXT`): `NXDOMAIN` = not listed; any `127.0.0.x`/`127.0.1.x` answer = listed, stored as the return code and decoded via the zone's `return_code_map` (reused from `dnsbl_zones`) to a sub-label + severity. SURBL/URIBL bitmask codes are decoded bit-by-bit. The **RFC 5782 test-point probe** (`2.0.0.127.<zone>`→`127.0.0.2`, `1.0.0.127.<zone>`→`NXDOMAIN`) runs once per zone per audit; on failure the zone's results are marked `inconclusive` (info), never false-listed. Results dedupe per domain across the message so linking the same bad domain twice is one finding.
+
+**Resolver policy & rate limits.** SURBL, Spamhaus DBL public mirrors, and URIBL **block large open resolvers (8.8.8.8, 1.1.1.1) and high-volume clients**; Invaluement is paid; Safe Browsing needs an API key. The checker reuses `dnsbl_zones.requires_registration`/`is_paid` to skip or degrade a zone cleanly. Queries are capped at a small concurrency (~8 in-flight), cached for the audit run honoring DNS TTL, and use jittered back-off on `SERVFAIL`/timeout. Because a message can contain many links, the domain set is deduped *before* querying so query count = (unique link domains) × (enabled URI zones), not (links) × (zones).
+
+**Severity mapping.** High-trust URI listings (DBL spam/phish/malware, SURBL phishing/malware bit, URIBL black) → **critical**; abused-legit/grey/cracked bits and shortener/http/redirect-chain/alignment heuristics → **warning**; raw-IP literal and brand-homograph → **critical** (unambiguous phishing shapes); count/reachability/alignment advisories → **info** unless thresholds cross. The category roll-up (`content.url_aggregate`) takes the worst *weighted* severity; advisory `info` alone does not turn the Spam & Content cell amber.
+
+## 4. User interface
+
+**Dashboard contribution.** The URL-reputation findings feed the **Spam & Content** column cell alongside the content-scoring rules from [./content_scoring.mdx](./content_scoring.mdx): dark green when every link resolves clean on every enabled zone and no hygiene flags fire, amber when the worst issue is a shortener/http/alignment/abused-legit `warning`, dark red when any link domain hits a high-weight URI zone or a raw-IP/homograph link is present, light gray when never run (no sample). The cell shows a compact badge, e.g. `1/12 links flagged`.
+
+**Audit-detail view.** Findings render grouped under a "Link / URL Reputation" subsection of Spam & Content, one row per flagged link/domain, using shadcn/ui `Table` + `Badge` (React 19, lucide-react icons):
+
+```
+Spam & Content ▸ Link / URL Reputation (content.url_*)     2 flagged · 10 clean
+┌───────────┬───────────────────────┬───────────────┬────────────────────────────┬──────────┐
+│ Severity  │ Check (checkId)       │ Link domain   │ Observed                   │ Fix      │
+├───────────┼───────────────────────┼───────────────┼────────────────────────────┼──────────┤
+│ ● CRITICAL│ url_dbl               │ hacked-blog   │ 127.0.1.4 (phish)          │ [Delist ↗]│
+│           │ (content.url_dbl)     │ .example      │ TXT: dbl.spamhaus.org/...  │ [Copy]   │
+├───────────┼───────────────────────┼───────────────┼────────────────────────────┼──────────┤
+│ ● WARNING │ url_shortener         │ bit.ly        │ shortener → final: promo   │ [Copy]   │
+│           │ (content.url_shortener)│              │ .example.com (2 hops)      │          │
+├───────────┼───────────────────────┼───────────────┼────────────────────────────┼──────────┤
+│ ○ INFO    │ url_domain_alignment  │ tracker.3rd   │ 4/12 links off-brand       │ advisory │
+│           │ (content.url_domain..)│ party.io      │                            │          │
+└───────────┴───────────────────────┴───────────────┴────────────────────────────┴──────────┘
+Clean links (10) ▸ expand      Sample: campaign_2026-06-28.eml ▸ change
+```
+
+Each row shows the severity badge, the check label + `checkId`, the offending link domain (and `final_domain` on hover when expanded), the observed return code/reason or heuristic detail, a **[Delist ↗]** deep-link to the per-zone `delisting_url` for URI listings, and a **[Copy]** action that copies the full remediation (reason + delisting URL or exact link edit). A **"Links in this sample"** expander lists every extracted URL with its per-URL chips (`https`/`http`, `shortener`, `IP-literal`, `punycode`, listed-zones) so the operator can see exactly which `<a href>` to fix.
+
+**Dedicated panel.** A "Sample Message" panel (shared with content scoring) lets the operator paste an `.eml`, upload, or copy the per-domain ingest address; it shows the parsed link table with domains, schemes, and expansion status. Shortener list and URI-zone selection live in an admin "URL Reputation" settings sub-panel (reusing the Blocklist Zones panel filtered to `kind='domain'`, plus a shortener-domain editor and Safe Browsing key field).
+
+**Per-domain config inputs.** The domain's own/related/allowlisted link domains (for `content.url_domain_alignment`), the sample message, and any pinned known-collateral link listings. **States:** *Never-run/no sample:* gray, "Add a sample message to check link reputation." *Loading:* skeleton + progress ("extracting links… querying 5 URI zones…"). *Inconclusive:* amber-outline info row "zone unavailable / paid feed not configured / redirect probe disabled (first round)." *All clean:* green, "All 12 links clean across DBL/SURBL/URIBL." Zone weights, paid/registration keys, Safe Browsing key, and shortener list are **admin-only**.
+
+## 5. Information schema (database schema)
+
+Reference the shared core tables (owned by engineering, do **not** redefine): `domains`, `sending_ips`, `dkim_selectors`, `audit_runs`, `findings`. This check **reuses** `dnsbl_zones` (from [./blacklists.mdx](./blacklists.mdx), filtered to `kind='domain'` for URI zones) and **references** `content_sample_messages` (owned by [./content_scoring.mdx](./content_scoring.mdx)). It adds one **per-URL** table and one **per-run summary** result table.
+
+```sql
+-- Per-extracted-URL detail for one audit's sample message.
+CREATE TABLE message_urls (
+    id            BIGSERIAL PRIMARY KEY,
+    audit_run_id  BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id     BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    sample_id     BIGINT REFERENCES content_sample_messages(id) ON DELETE SET NULL, -- nullable: snippet-only samples
+    url           TEXT   NOT NULL,          -- the raw URL as it appeared in the body
+    link_domain   TEXT   NOT NULL,          -- PSL-registrable domain of the URL host
+    final_domain  TEXT,                     -- registrable domain after redirect/shortener expansion (null in first round)
+    is_shortener  BOOLEAN NOT NULL DEFAULT FALSE,
+    is_https      BOOLEAN NOT NULL DEFAULT FALSE,
+    is_ip_literal BOOLEAN NOT NULL DEFAULT FALSE,
+    is_punycode   BOOLEAN NOT NULL DEFAULT FALSE,
+    redirect_hops INTEGER,                  -- number of hops followed (null when probe disabled)
+    listings      JSONB  NOT NULL DEFAULT '[]', -- [{ "zone":"dbl.spamhaus.org", "listed":true, "code":"127.0.1.4", "bit":"phish" }, ...]
+    aligned       BOOLEAN,                  -- link_domain matches sender/org/allowlist (null = not evaluated)
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_message_urls_domain      ON message_urls (domain_id);
+CREATE INDEX idx_message_urls_link_domain ON message_urls (link_domain);
+CREATE INDEX idx_message_urls_run         ON message_urls (audit_run_id);
+CREATE INDEX idx_message_urls_listings    ON message_urls USING GIN (listings);
+
+-- Per-run roll-up of the URL-reputation checks for the sample.
+CREATE TABLE url_check_results (
+    id                BIGSERIAL PRIMARY KEY,
+    audit_run_id      BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id         BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    sample_id         BIGINT REFERENCES content_sample_messages(id) ON DELETE SET NULL, -- nullable
+    total_links       INTEGER NOT NULL DEFAULT 0,
+    unique_domains    INTEGER NOT NULL DEFAULT 0,
+    listed_domains    INTEGER NOT NULL DEFAULT 0,
+    shortener_count   INTEGER NOT NULL DEFAULT 0,
+    http_count        INTEGER NOT NULL DEFAULT 0,
+    ip_literal_count  INTEGER NOT NULL DEFAULT 0,
+    punycode_count    INTEGER NOT NULL DEFAULT 0,
+    offbrand_count    INTEGER NOT NULL DEFAULT 0,
+    inconclusive      BOOLEAN NOT NULL DEFAULT FALSE, -- zone(s) unavailable / paid feed / probe disabled
+    weighted_worst    TEXT,                 -- 'ok'|'info'|'warning'|'critical'
+    checked_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_url_check_results_domain ON url_check_results (domain_id);
+CREATE INDEX idx_url_check_results_run    ON url_check_results (audit_run_id);
+```
+
+**Zone reuse.** URI zones are rows of `dnsbl_zones WHERE kind='domain'` (DBL, SURBL, ivmURI, URIBL) plus their `requires_registration`/`is_paid`/`return_code_map`/`weight`/`delisting_url` — no separate zone table. The shortener domain list and Safe Browsing key live in `config.yaml` (`content.url.shorteners`, `secrets.safe_browsing_key`), not in a DB table (or a small `url_shortener_domains` reference table if operators want UI editing).
+
+**File-store mapping.** Today each audit writes `~/.email_delivery_hero/audits/<domainId>/<auditId>.json` under a `content.url` key: `{ "content": { "url": { "sampleId": 7, "summary": { "totalLinks":12, "uniqueDomains":8, "listedDomains":1, "shortenerCount":1, "httpCount":0, "inconclusive":false, "weightedWorst":"critical" }, "links": [ { "url":"https://bit.ly/x", "linkDomain":"bit.ly", "finalDomain":"promo.example.com", "isShortener":true, "isHttps":true, "isIpLiteral":false, "isPunycode":false, "redirectHops":2, "listings":[], "aligned":true }, { "url":"http://hacked-blog.example/p", "linkDomain":"hacked-blog.example", "finalDomain":null, "isShortener":false, "isHttps":false, "isIpLiteral":false, "isPunycode":false, "listings":[{"zone":"dbl.spamhaus.org","listed":true,"code":"127.0.1.4","bit":"phish"}], "aligned":false } ] } } }`. Each `links[]` element becomes one `message_urls` row and the `summary` object becomes the one `url_check_results` row (both keyed to the enclosing `audit_run_id`/`domain_id`); derived `findings` land in the shared `findings` table/array via the normal Checker→Finding contract. Sample bytes live in the content-scoring sample store, referenced by `sample_id`.
+
+## 6. When we run the check
+
+**On-demand.** Runs on every manual audit (`POST /api/domains/:id/audit`) and any Spam & Content category-scoped run **provided a sample message is available**; otherwise it emits the single `info` "add a sample" finding. After a user submits a URI delisting request or fixes a link, a fresh manual run against the same (or new) sample is the "am I clean yet?" tool.
+
+**Periodic.** The in-process scheduler re-runs per domain at the `config.yaml` cadence (default every 6h for Spam & Content — URI listings are volatile like IP/domain blacklists). It re-uses the domain's **latest pinned sample**; if none, it stays `info` and is skipped for regression purposes. Each run **diffs against the previous audit**: a link domain flipping `listed:false → true`, a `warning → critical` bit escalation, or a newly introduced shortener/raw-IP/homograph link is a **new problem** eligible for alerting (per [../scheduled_checks.mdx](../scheduled_checks.mdx)); a `listed:true → false` transition is reported resolved. Because the sample can change between runs, the diff is computed on the *link-domain* set with the sample id noted, and inconclusive↔listed transitions are ignored to avoid resolver-blockage false alarms.
+
+**Cost / rate-limit / back-off.** Query count per audit = (unique link + final domains) × (enabled URI zones); dedup keeps this small (a typical newsletter has < 10 unique domains). Cap concurrency (~8), reuse a dedicated non-public resolver for zones that block open resolvers, honor TTL caching, back off with jitter on `SERVFAIL`/timeout, and auto-degrade a zone whose RFC 5782 test point fails. Redirect-following and Safe Browsing add outbound HTTP/API cost — both gated behind config, rate-limited, and cached per final domain per run.
+
+## 7. First round vs future
+
+| Sub-check(s) | First round (pure `node:dns/promises` + local parsing) | Future (probe / external tool / paid feed / provider API / registration) |
+|---|---|---|
+| `content.url_extract`, `content.url_https`, `content.url_ip_literal`, `content.url_punycode`, `content.url_shortener`, `content.url_domain_alignment`, `content.url_count` | ✅ local HTML/text parse + PSL reduction, deterministic (needs a sample) | — |
+| `content.url_dbl`, `content.url_surbl`, `content.url_uribl`, `content.url_dnsbl_cross` | ✅ RHSBL `A`/`TXT` on link domains, free public zones, low volume | URIBL/SURBL need **registered resolver / DQS-style key** at commercial volume |
+| `content.url_ivmuri` | — | **paid** Invaluement ivmURI subscription + licensed resolver |
+| `content.url_redirect_chain`, `content.url_reachable` | — | outbound **HTTP probe** (follow redirects / HEAD), off in first round |
+| `content.url_safe_browsing` | — | **Google Safe Browsing API key** (or PhishTank/OpenPhish feed) |
+| `content.url_aggregate` | ✅ pure roll-up over whatever ran | weights/thresholds refined as feeds/probes come online |
+
+## 8. Acceptance criteria
+
+1. Given a sample message, the checker extracts every link from both HTML (`href`, `area`, `img`/`background`, CSS `url()`, AMP) and text parts, parses each per RFC 3986, and reduces the host to its **Public Suffix List** registrable domain, de-duplicating to a domain set before any DNS query.
+2. With no sample message present, every `content.url_*` sub-check yields exactly one `info` "add a sample" finding — never a false pass or false listing — and the audit records no `message_urls` rows.
+3. For each unique link domain, RHSBL zones are queried as `<linkdomain>.<zone>` with **no reversal**; a `127.0.0.x`/`127.0.1.x` `A` answer sets `listed=true` with the exact return code decoded (SURBL/URIBL by bitmask) via the zone's `return_code_map`; `NXDOMAIN` sets `listed=false`.
+4. Per-URL flags are set correctly: `is_https` (scheme), `is_ip_literal` (IPv4/IPv6 host literal), `is_punycode` (`xn--` label), `is_shortener` (configured shortener list), and `aligned` (link domain vs. sender/org/allowlist).
+5. High-trust URI listings (DBL `.2-.6`, SURBL phish/malware bit, URIBL black) and raw-IP/brand-homograph links map to **critical**; shortener/http/redirect/alignment/abused-legit map to **warning**; count/reachability advisories to **info**; the roll-up uses the worst **weighted** severity and info alone does not turn the Spam & Content cell amber.
+6. The RFC 5782 test-point probe runs once per URI zone per audit; on failure the zone's results are `inconclusive` (info), never false-listed; zones flagged `requires_registration`/`is_paid` without credentials are skipped with an explanatory `info` note and a UI fix link.
+7. Every non-ok finding's `remediation` is concrete — a correct per-zone `delisting_url` for a listing (with return code/reason), or the exact link-hygiene edit (replace shortener with full URL, switch to `https`, remove IP-literal, use the real ASCII domain) — never a generic message.
+8. Redirect expansion, `content.url_reachable`, and `content.url_safe_browsing` are disabled in first round (`final_domain` null, findings `info`-gated) and, when enabled, respect the hop cap, timeout, no-cookie/no-JS policy, and per-final-domain caching.
+9. `message_urls` and `url_check_results` exist with the specified PKs, FKs (`audit_run_id`, `domain_id`, nullable `sample_id`), the GIN index on `listings`, and B-tree indexes on `(domain_id)` and `(link_domain)`; URI zones are read from `dnsbl_zones WHERE kind='domain'` (no duplicate zone table), and each result serializes into the audit JSON under the `content.url` key round-tripping 1:1.
+10. The scheduler diff (over the pinned sample's link-domain set) flags any clean→listed, warning→critical, or newly-introduced shortener/raw-IP/homograph link as a new problem and any listed→clean as resolved, ignoring inconclusive transitions.
+
+<!--
+MAINTENANCE NOTES
+- Keep zone hosts, bitmask/return-code maps, and delisting URLs current (Spamhaus DBL, SURBL multi, URIBL, Invaluement ivmURI change codes/portals); verify each URI zone via its RFC 5782 test point before shipping.
+- Keep the Public Suffix List bundled and refreshed; registrable-domain reduction correctness depends on it.
+- RFC refs: RHSBL query mechanics = RFC 5782; URL syntax = RFC 3986; IDNA/punycode = RFC 5890-5891.
+- Reuse ./blacklists.mdx dnsbl_zones (kind='domain') — do NOT fork a second zone table; keep the split clear (this spec = domains inside message bodies; blacklists.mdx = sending domain + IPs).
+- Reference ./content_scoring.mdx content_sample_messages for the sample store; keep sample_id nullable for snippet-only samples.
+- Keep the sub-check list and checkId prefixes (content.url_*) in sync with ../spam_checks.mdx (Spam & Content) and the Checker/Finding contract in ../engineering.mdx.
+- Revisit shortener list, per-zone weights, and Safe Browsing/redirect gating as real-world placement data and feed access accrue; weights/lists are config, not code.
+-->

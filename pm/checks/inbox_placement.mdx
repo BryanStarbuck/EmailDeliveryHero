@@ -1,0 +1,397 @@
+---
+title: EmailDeliveryHero — Inbox Placement Check
+description: Engineering specification for seed-list inbox-placement testing — how EmailDeliveryHero sends a probe message to a curated seed list of mailboxes across Gmail, Outlook/Microsoft 365, Yahoo, and Apple iCloud, reads back where each copy landed (Inbox / Spam / a specific Gmail tab / Missing), verifies SPF·DKIM·DMARC actually passed at the receivers, aggregates a per-provider and overall inbox-placement rate, and points every miss back at the auth/content/reputation cause that produced it.
+---
+
+# EmailDeliveryHero — Inbox Placement Check
+
+**Inbox placement testing** (a.k.a. seed-list / deliverability testing) is the closest thing to
+**ground truth** for the only question that matters — *"is our mail actually reaching the inbox?"*
+Every other check in EmailDeliveryHero is a **predictor**: SPF/DKIM/DMARC prove you *can* authenticate,
+content scoring estimates spamminess, reputation feeds estimate how mailbox providers *probably* see
+you. Inbox placement is the **measurement**: it sends a real message to a **seed list** of accounts
+spread across the major mailbox providers and reads back, per account, which folder the message
+landed in — Inbox, Spam/Junk, a specific Gmail tab (Primary / Promotions / Updates), or Missing (never
+arrived = a hard block/drop). The aggregate "we hit the inbox at 82% of seeds, but 0% at Outlook and
+everything at Yahoo went to Junk" is the single most actionable deliverability signal a sender can get,
+because it is **observed**, not inferred.
+
+Because it must **send a probe** and **read remote mailboxes**, this check is **FUTURE-round**: it is
+gated behind a seed-list integration — either a third-party seed service (GlockApps / Mailtrap /
+Everest / MailReach style) whose API returns per-provider placement, or a set of **self-hosted seed
+mailboxes** the app owns and reads via IMAP/OAuth. It never runs in the first (pure-DNS) round; the
+whole family is dark until that integration and the "send a probe" capability are configured.
+
+This check belongs to the **Spam & Content** dashboard category; all sub-check ids use the
+**`content`** checkId prefix (the **placement** sub-family). It is implemented as
+`inbox-placement.checker.ts` (see [Engineering §6.3](../engineering.mdx)).
+
+**Read alongside**
+- [Overview](../overview.mdx) — product charter, personas, port list (4444 UI / 9312 API).
+- [Engineering](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
+- [Spam Checks catalog](../spam_checks.mdx) — the Spam & Content category this spec expands.
+- [Dashboard](../dashboard.mdx) — how the Spam & Content cell rolls up per domain.
+- [Content scoring](./content_scoring.mdx) — a Spam/Junk placement result routes here for the *why*
+  (SpamAssassin/rspamd score, spammy phrases, HTML/image ratio, broken `List-Unsubscribe`).
+- [Reputation metrics](./reputation_metrics.mdx) — a provider-wide block (Outlook 100% Junk, Gmail all
+  Missing) routes here for IP/domain reputation, Google Postmaster, and SNDS signals.
+- [Blacklists](./blacklists.mdx) — Missing at multiple providers cross-references live DNSBL listings.
+- [SPF](./spf.mdx) · [DKIM](./dkim.mdx) · [DMARC](./dmarc.mdx) — `content.seed_auth_pass` reads the
+  **actual** auth results parsed from each seed's `Authentication-Results` header, i.e. what the
+  receiver saw, not what the DNS predicts.
+
+---
+
+## 1. What it checks
+
+There is no RFC for "inbox placement"; it is an **empirical measurement layered on top of the
+delivery stack** ([SMTP RFC 5321](https://www.rfc-editor.org/rfc/rfc5321)). The mechanics:
+
+1. **Seed list.** A curated set of mailbox addresses spanning the providers that dominate real inbox
+   share: **Gmail / Google Workspace**, **Outlook.com / Hotmail / Microsoft 365**, **Yahoo / AOL**,
+   **Apple iCloud / me.com / mac.com**, plus long-tail (Zoho, GMX, Mail.ru, corporate) as coverage
+   allows. Seeds are ordinary inboxes the tester controls (or the seed service controls).
+2. **Probe send.** The domain under test sends **one representative message** to every seed address
+   in a single injection — ideally a real campaign copy (`sample_id` links the audited sample) so the
+   test reflects the actual content/auth/reputation footprint that production mail carries. Each seed
+   list is tagged with a unique token (a per-test address, header, or subject tag) so the reader can
+   find exactly this send.
+3. **Read-back.** After a settle window (typically 2–15 min; providers are eventually-consistent),
+   each seed mailbox is inspected: which **folder** did the copy land in, and what did the receiver's
+   own `Authentication-Results` header say about SPF/DKIM/DMARC? Gmail additionally exposes the **tab**
+   (Primary / Promotions / Social / Updates / Forums) the message was filed under.
+4. **Aggregate + attribute.** Placement is rolled into a per-provider breakdown and an overall
+   inbox-placement rate, and each non-inbox outcome is **attributed** to a likely cause (auth failure,
+   content score, reputation/block) that points the operator at the peer check that fixes it.
+
+**Why receivers care / why it matters.** Mailbox providers do not publish their filtering verdict to
+the sender in-band; the only way to know the verdict is to *be* a recipient. A domain can pass SPF,
+DKIM, and DMARC perfectly and still land in Spam because of poor IP/domain reputation, spammy content,
+or a provider-specific policy (e.g. Microsoft's SmartScreen, Yahoo's engagement model). Inbox
+placement is the check that catches those "everything is green but mail still isn't delivered" cases.
+
+**Common real-world failure modes.** (1) **Provider-specific junking** — inboxes fine at Gmail/Yahoo
+but 100% Junk at Outlook (Microsoft reputation is notoriously its own world). (2) **Gmail
+Promotions exile** — mail arrives but in the Promotions tab, tanking open rates for transactional/
+relationship mail that belongs in Primary. (3) **Missing at a provider** — messages never arrive at
+all: a silent drop or a hard block (often a fresh listing on a provider-internal blocklist). (4)
+**Auth passing in DNS but failing at the receiver** — DKIM body hash breaks because an ESP rewrites
+the body, or SPF fails because the Return-Path isn't aligned, so the seed's own
+`Authentication-Results` says `fail` even though `./dkim.mdx` said the DNS was fine. (5) **Placement
+decay** — a domain that inboxed last week starts sliding to Spam as reputation erodes; only a
+**trend** over repeated tests reveals it.
+
+---
+
+## 2. Sub-checks
+
+Detection: send a tokenized probe to the seed list (via the seed service API or self-hosted SMTP),
+wait for the settle window, then read each seed mailbox (seed-service results API, or IMAP/Graph/JMAP
+for self-hosted) and parse folder + `Authentication-Results`. **Every sub-check here is FUTURE-round**
+(needs the send probe + seed read-back); none ship in the pure-DNS first round.
+
+| Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `content.seedlist_overall` | Aggregate inbox-placement rate across **all** providers (inbox seeds ÷ delivered seeds, and ÷ total seeds). | Sum folder verdicts over the whole seed list. | **critical:** overall inbox rate < 50%; **warning:** 50–79% (industry "good" is ≥ 80–90%). | Fix the lowest-scoring provider first (see per-provider rows); each maps to an auth/content/reputation cause below. |
+| `content.placement_gmail` | Inbox vs Spam vs tab vs Missing at **Gmail / Google Workspace** seeds. | Read Gmail seeds; classify folder + tab. | **critical:** majority Spam or Missing at Gmail; **warning:** majority delivered to Promotions/Updates instead of Primary. | Raise Gmail Postmaster reputation (`./reputation_metrics.mdx`), ensure DMARC pass + one-click `List-Unsubscribe` (`./list_unsubscribe.mdx`), reduce promotional markup for Primary placement. |
+| `content.placement_outlook` | Inbox vs Junk vs Missing at **Outlook.com / Hotmail / Microsoft 365** seeds. | Read Outlook seeds; classify folder. | **critical:** majority Junk or Missing at Outlook (SmartScreen filtering / SNDS reputation). | Enrol the sending IP in **Microsoft SNDS** + **JMRP**, keep complaint rate low, verify DKIM/DMARC pass; if Missing, check for a Microsoft block and request delisting via the Sender Support form. |
+| `content.placement_yahoo` | Inbox vs Bulk/Spam vs Missing at **Yahoo / AOL** seeds. | Read Yahoo seeds; classify folder. | **critical:** majority Bulk or Missing at Yahoo (engagement-driven filtering). | Meet the 2024 Yahoo bulk-sender rules (aligned DMARC, one-click unsubscribe, complaint rate < 0.3%); improve engagement/list hygiene; use Yahoo's Sender Hub for feedback. |
+| `content.placement_apple` | Inbox vs Junk vs Missing at **Apple iCloud / me.com / mac.com** seeds. | Read iCloud seeds; classify folder. | **critical:** majority Junk or Missing at Apple. | Ensure valid SPF+DKIM+DMARC and clean IP/domain reputation; Apple weights authentication and prior recipient interaction heavily. |
+| `content.seed_auth_pass` | SPF **and** DKIM **and** DMARC all reported `pass` in the receivers' own `Authentication-Results` at the seeds (cross-ref `./spf.mdx` `./dkim.mdx` `./dmarc.mdx`). | Parse `Authentication-Results` / `ARC-Authentication-Results` from each delivered seed. | **critical:** DMARC `fail` (or SPF+DKIM both `fail`) observed at the receiver despite green DNS — usually DKIM body-hash break or Return-Path misalignment. | If DKIM `fail`: stop the ESP/relay rewriting the signed body/headers, or re-sign after modification. If SPF `fail`: align the Return-Path to the `From:` org-domain. Re-test. |
+| `content.seed_tab_placement` | Gmail **tab** placement: Primary vs Promotions vs Social vs Updates vs Forums. | Read Gmail category label on delivered seeds. | **warning:** relationship/transactional mail lands in **Promotions** (hurts open rate). | Reduce promotional signals (fewer images/CTAs/tracking links, plainer HTML), send from a consistent Primary-associated stream; note Promotions is *delivered*, not spam. |
+| `content.seed_missing` | Messages that **never arrived** at a seed (not Inbox, not Spam) = a silent drop or hard block. | Absence of the tokenized message after the max settle window + retries. | **critical:** ≥ 1 provider shows Missing across its seeds (hard block / drop). | Treat as a block: check `./blacklists.mdx` for a fresh DNSBL listing, check provider block pages (Microsoft/Google/Yahoo), request delisting, and pause sending to that provider until cleared. |
+| `content.seed_trend` *(advisory)* | Inbox-placement rate **over time** (per provider and overall) across repeated scheduled tests. | Diff current test's rates against the stored history. | **info/warning:** a downward trend (e.g. Gmail inbox 95%→70% over two weeks) signalling reputation decay. | Investigate the reputation trend early (`./reputation_metrics.mdx`), tighten list hygiene, and slow send volume before the slide becomes Spam/Missing. |
+| `content.placement_longtail` | Inbox vs Spam vs Missing at **secondary providers** (Zoho, GMX, Mail.ru, corporate/on-prem). | Read long-tail seeds when present in the list. | **warning:** systemic Spam/Missing across long-tail providers (often a blacklist or PTR/HELO issue). | Cross-check `./blacklists.mdx`, `./reverse_dns.mdx` (PTR), and HELO/EHLO identity; fix the shared infrastructure fault the long tail exposes. |
+| `content.seed_delivery_latency` | Time from send to arrival at each provider (a proxy for greylisting / throttling / tempfail). | Timestamp send vs each seed's arrival time. | **warning:** delivery > 15 min or repeated tempfails at a provider (greylisting/rate-limiting). | Expect and honor 4xx tempfails with correct retry backoff; warm the IP/domain more gradually; verify you are not being rate-limited for volume spikes. |
+| `content.seed_coverage` | The seed list itself is **healthy**: enough live seeds per major provider to make the rate meaningful. | Count valid, reachable seeds per provider before scoring. | **warning:** a provider has 0 live seeds (its placement row is "unknown", not "ok"). | Add/repair seed mailboxes for the uncovered provider (or enable it in the seed service) so its column produces a real verdict. |
+| `content.seed_spf_receiver` | SPF specifically reported `pass` at the receiver (the SPF slice of `seed_auth_pass`, isolated for attribution). | Parse `spf=` in `Authentication-Results`. | **critical:** `spf=fail`/`softfail` observed at seeds. | Align Return-Path and confirm sending IP is in the SPF pass-set — see `./spf.mdx` `spf.ip_coverage`. |
+| `content.seed_dkim_receiver` | DKIM specifically reported `pass` at the receiver (DKIM slice, isolated for attribution). | Parse `dkim=` in `Authentication-Results`. | **critical:** `dkim=fail`/`none` observed at seeds despite a valid published key. | Body-hash break: stop post-signing modification, verify the selector the receiver used matches a published key — see `./dkim.mdx`. |
+| `content.seed_dmarc_receiver` | DMARC specifically reported `pass` at the receiver (DMARC slice, isolated for attribution). | Parse `dmarc=` in `Authentication-Results`. | **critical:** `dmarc=fail` observed — neither aligned SPF nor aligned DKIM passed. | Achieve at least one **aligned** authenticated identifier (`From:` org-domain) — see `./dmarc.mdx`. |
+
+> **Attribution note.** Placement rows answer *where* the mail landed; the `seed_*_receiver` rows and
+> the cross-links answer *why*. Every non-inbox verdict is emitted with a `remediation` that names the
+> peer check to open next: auth misses → `./spf.mdx`/`./dkim.mdx`/`./dmarc.mdx`; Spam/Promotions with
+> passing auth → `./content_scoring.mdx`; provider-wide Junk/Missing → `./reputation_metrics.mdx` and
+> `./blacklists.mdx`.
+
+---
+
+## 3. How it is measured
+
+**Send the probe.** The checker builds one test message tagged with a unique **test token** (unique
+per-seed plus-address, an `X-EDH-Test-Id` header, and a subject suffix — belt-and-suspenders because
+some providers strip custom headers and some rewrite subjects). Two send paths:
+
+- **Seed-service path (default future integration):** call the service API (e.g. `POST /tests`) with
+  the message and let it fan out to its managed seed list; poll its results API for per-provider
+  placement. The service returns folder + often the parsed auth verdict directly.
+- **Self-hosted path:** the app sends via the domain's own MTA / an authenticated SMTP relay
+  (Homebrew `swaks` or nodemailer) to seed mailboxes the app owns, then reads each mailbox over
+  **IMAP** (Gmail/Yahoo/iCloud via OAuth2/app-password), **Microsoft Graph** (Outlook/M365), or
+  **JMAP** — matching messages by the test token and recording the folder they were filed into.
+
+**Read the folder.** Folder is normalized to the enum `inbox | spam | promotions | missing`:
+`inbox` = the primary Inbox (or, for Gmail, any of the category tabs that are *not* Spam — the
+specific tab is recorded separately for `seed_tab_placement`); `spam` = the Spam/Junk/Bulk folder;
+`promotions` is recorded when the Gmail category is Promotions/Social/Updates/Forums (still delivered,
+surfaced in the tab sub-check); `missing` = the token never appeared after the max settle window and
+retry polls. Gmail's tab is read from the message's category label (`CATEGORY_PROMOTIONS`, etc.).
+
+**Read the auth verdict.** From each *delivered* seed, parse the topmost `Authentication-Results`
+header the receiver stamped (and `ARC-Authentication-Results` when ARC sealing is present — see
+`./arc.mdx`): extract `spf=`, `dkim=`, `dmarc=` results and the identities they authenticated. This is
+the **receiver's** verdict — the ground-truth complement to the DNS-side `./spf.mdx`/`./dkim.mdx`/
+`./dmarc.mdx` predictions. A mismatch (green DNS, `fail` at the receiver) is exactly the high-value
+finding this check exists to surface.
+
+**Aggregate + score.** Per provider: `inboxRate = inbox / delivered`, plus counts of spam / promotions
+/ missing. Overall: weighted by seed count (or by real inbox market share when configured). Map to
+severity: overall inbox rate ≥ 80% → **ok**, 50–79% → **warning**, < 50% → **critical**; any provider
+with majority Spam/Missing → that provider's row **critical**; Gmail majority Promotions →
+`seed_tab_placement` **warning**; any receiver-observed DMARC `fail` → `seed_auth_pass` **critical**.
+
+**Edge cases.** Providers are **eventually consistent** — poll with backoff (e.g. 2, 5, 10, 15 min)
+before declaring Missing. Some providers **rewrite** the subject or **strip** custom headers → rely on
+the per-seed plus-address token, not the header, as the primary matcher. **Bounces** (5xx) are
+distinguished from Missing (message accepted then filtered/dropped): a hard bounce is a
+`missing`-with-reason. **Consumed seeds:** a probe can affect the seed's own reputation, so seeds are
+rotated/cleaned. **Sample selection:** if a `sample_id` is provided the test uses that exact campaign
+copy; otherwise a neutral default template is sent (and the result is labelled "default template",
+since content is a placement input).
+
+**Caching / rate-limits / cost.** This is the **expensive** check: it consumes a paid seed-service
+credit (or self-hosted mailbox capacity) **and sends real email** every run. It therefore runs on a
+**much slower cadence** than DNS checks (daily/weekly, not every 6h), is **debounced** so a burst of
+manual audits does not fire many probe sends, and honors the seed service's API rate limits with
+backoff. Results are cached per test; re-reading a mailbox is idempotent on the test token.
+
+---
+
+## 4. User interface
+
+Inbox placement surfaces through the **Spam & Content dashboard column** and a **dedicated Inbox
+Placement panel** in the audit-detail view, on the React 19 + Vite + Tailwind + shadcn/ui +
+lucide-react stack.
+
+**Dashboard cell.** Contributes to the single **Spam & Content** cell per domain (shared with content
+scoring, list-unsubscribe, etc.). Its color = worst severity among all `content.*` findings for the
+latest audit: dark green (all ok), amber (worst = warning), dark red (any critical), light gray
+(**never run** — the common state until the seed integration is configured). A `Tooltip` summarizes
+e.g. "Inbox 82% · Outlook 0% Junk". `info`-only findings (`content.seed_trend` advisory) never turn
+the cell amber.
+
+**Audit-detail — Inbox Placement panel.** A shadcn `Card` with a per-provider matrix plus a findings
+list. The matrix is the headline:
+
+```
+┌─ Inbox Placement ───────────────────────── overall inbox 82%  [ WARNING ] ─┐
+│ Provider    │ Inbox │ Spam │ Promo │ Missing │ Auth (SPF/DKIM/DMARC) │      │
+│ Gmail       │  90%  │  0%  │  10%  │   0%    │  pass / pass / pass   │  ✓   │
+│ Outlook     │   0%  │ 100% │   0%  │   0%    │  pass / pass / pass   │  ⛔  │
+│ Yahoo       │ 100%  │  0%  │   0%  │   0%    │  pass / pass / pass   │  ✓   │
+│ Apple       │  80%  │ 20%  │   0%  │   0%    │  pass / pass / pass   │  ⚠   │
+├─────────────────────────────────────────────────────────────── findings ──┤
+│ content.placement_outlook  ⛔  100% Junk at Outlook                        │
+│   Cause : auth passes → reputation. Enrol SNDS/JMRP, request delist  [Copy]│
+│ content.seed_tab_placement ⚠  10% of Gmail in Promotions tab              │
+│   Fix   : reduce promo markup for Primary placement                 [Copy] │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+Each finding row: severity `Badge` (lucide `Inbox` / `ShieldAlert` / `MailX`), the `title`, the
+observed `detail` (per-provider counts + the receiver's auth verdict), the `remediation`, and a
+**Copy fix** button (`navigator.clipboard`). Because placement is a *symptom*, each row renders a
+**"Fix cause"** link that deep-links to the responsible peer check panel (Outlook Junk → Reputation;
+Promotions → Content scoring; a `*_receiver` fail → SPF/DKIM/DMARC). A **Trend** sparkline
+(`content.seed_trend`) plots overall + per-provider inbox rate across the last N scheduled tests.
+
+**Per-domain config inputs.** A dedicated **Seed Test** config section (admin-gated): choose the seed
+**source** (seed-service API key, or self-hosted mailbox credentials), select which **providers** to
+test, pick the **sample message** (`sample_id` from the domain's stored samples, or the default
+template), and set the **cadence**. Sending is a deliberate action — a **"Send seed test now"** button
+with a confirm dialog (it spends a credit and sends real mail).
+
+**States.** **Never-run / not configured:** light-gray cell with a "Configure seed list to enable
+inbox placement testing" CTA (this is the default until the integration exists). **Loading /
+in-flight:** the panel shows a "Probe sent — waiting for delivery (polling, ~2–15 min)" progress state
+with the settle-window countdown. **All-ok:** a single green "Inbox 94% across all providers, auth
+passing" summary line. **Admin-only settings** (Settings → Admin): the seed-service credentials, the
+overall inbox-rate warning/critical thresholds (defaults 80% / 50%), the settle-window and poll
+schedule, and the max monthly test budget.
+
+---
+
+## 5. Information schema (database schema)
+
+Inbox placement extends the **shared core tables** (owned by engineering — do not redefine):
+`domains`, `audit_runs`, and `findings`. Each sub-check emits a row into the shared `findings` table
+(`category='content'`, `check_id='content.placement_outlook'`, etc.). It adds one **test table** (the
+send envelope) and one **results child table** (one row per seed/provider verdict), plus a small
+**config reference table** for the seed list.
+
+```sql
+-- One row per seed-test send for a domain in an audit run.
+CREATE TABLE inbox_placement_tests (
+  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  audit_run_id  BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+  domain_id     BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+  sample_id     BIGINT,                 -- NULL = default template; else the campaign copy tested
+  sent_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  seed_service  TEXT        NOT NULL,   -- 'glockapps' | 'mailtrap' | 'self_hosted' | …
+  test_token    TEXT        NOT NULL,   -- unique tag used to find this send in the seeds
+  seed_count    INT         NOT NULL DEFAULT 0,  -- seeds targeted
+  delivered_cnt INT         NOT NULL DEFAULT 0,  -- seeds that produced any verdict (inbox|spam|promo)
+  overall_inbox NUMERIC(5,2),           -- computed overall inbox rate % at scoring time
+  settled_at    TIMESTAMPTZ,            -- when read-back completed
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_ipt_domain ON inbox_placement_tests(domain_id);
+
+-- One row per (seed) result: which folder, and the receiver's own auth verdict.
+CREATE TABLE inbox_placement_results (
+  id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  test_id      BIGINT  NOT NULL REFERENCES inbox_placement_tests(id) ON DELETE CASCADE,
+  provider     TEXT    NOT NULL,        -- 'gmail' | 'outlook' | 'yahoo' | 'apple' | …
+  folder       TEXT    NOT NULL CHECK (folder IN ('inbox','spam','promotions','missing')),
+  gmail_tab    TEXT,                    -- 'primary'|'promotions'|'social'|'updates'|'forums'|NULL
+  spf_pass     BOOLEAN,                 -- parsed from Authentication-Results (NULL if not delivered)
+  dkim_pass    BOOLEAN,
+  dmarc_pass   BOOLEAN,
+  latency_secs INT,                     -- send → arrival (NULL if missing)
+  seed_address TEXT,                    -- the seed mailbox (or hashed, for privacy)
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_ipr_test     ON inbox_placement_results(test_id);
+CREATE INDEX idx_ipr_provider ON inbox_placement_results(test_id, provider);
+
+-- Config reference: the seed mailboxes / providers the tester uses (self-hosted or mirror of service).
+CREATE TABLE seed_list_config (
+  id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  provider     TEXT    NOT NULL,        -- 'gmail' | 'outlook' | …
+  seed_address TEXT    NOT NULL UNIQUE,
+  read_method  TEXT    NOT NULL,        -- 'imap' | 'graph' | 'jmap' | 'service'
+  active       BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+**Mapping to today's JSON file store.** There is no database yet (see
+[Engineering §7](../engineering.mdx)); this whole family is future anyway. When it ships, each audit
+run is still the file `~/.email_delivery_hero/audits/<domainId>/<auditId>.json`. The `findings[]`
+array holds the placement findings (future `findings` table). The `inbox_placement_tests` row and its
+`inbox_placement_results` children live in that same file under `results.inbox_placement`; the
+`seed_list_config` reference table maps to a top-level `~/.email_delivery_hero/config.yaml`
+`seedList:` block (not per-audit).
+
+```jsonc
+// audits/<domainId>/<auditId>.json  →  results.inbox_placement
+{
+  "seedService": "glockapps", "sampleId": 42, "testToken": "edh-7f3a…",
+  "sentAt": "2026-07-01T18:04:00Z", "settledAt": "2026-07-01T18:12:10Z",
+  "seedCount": 40, "deliveredCount": 40, "overallInbox": 82.5,
+  "results": [
+    { "provider": "gmail",   "folder": "inbox", "gmailTab": "promotions",
+      "spfPass": true, "dkimPass": true, "dmarcPass": true, "latencySecs": 41 },
+    { "provider": "outlook", "folder": "spam",  "gmailTab": null,
+      "spfPass": true, "dkimPass": true, "dmarcPass": true, "latencySecs": 63 }
+    /* … one per seed … */
+  ]
+}
+```
+
+The `store` module is the only code that reads/writes this shape, so promoting
+`results.inbox_placement` into `inbox_placement_tests` + `inbox_placement_results` is a single-module
+change; `seedList:` in `config.yaml` promotes to `seed_list_config`.
+
+---
+
+## 6. When we run the check
+
+- **Feature-gated (future):** the entire family is **dark** until a seed-list integration is
+  configured (seed-service API key, or self-hosted seed mailboxes) **and** the "send a probe"
+  capability is enabled. Until then every `content.placement_*` sub-check reports *not configured*
+  (light-gray cell), never a false ok/critical.
+- **On-demand:** once configured, an operator triggers a test with **"Send seed test now"** (a
+  confirmed action — it spends a credit and sends real mail). The manual audit endpoints
+  (`POST /api/domains/:id/audit`, `POST /api/scheduler/run`) may include it **only if** the domain
+  opts in, because unlike DNS checks it is not free and not instant.
+- **Periodic:** the scheduler runs it on a **slow, dedicated cadence** (daily or weekly per
+  `config.yaml`), decoupled from the 6h DNS cadence, so probe sends and seed credits are bounded.
+- **Cost / rate-limits / back-off:** each run costs a seed-service credit (or self-hosted capacity)
+  **and** emits real email; runs are **debounced/rate-limited**, respect a configurable **monthly
+  budget cap**, honor the service's API limits, and poll seeds with backoff (2/5/10/15 min) before
+  declaring Missing. Because it sends mail, it must never be triggered in a tight loop.
+- **Regression detection:** each test's per-provider and overall rates are diffed against the previous
+  test (Engineering §8). A newly-appearing or worsened result — overall inbox rate dropping a
+  threshold band, a provider flipping Inbox→Spam or Inbox→Missing, or a receiver-observed auth verdict
+  turning `fail` — is flagged as a **new problem**; `content.seed_trend` renders the longer arc.
+
+---
+
+## 7. First round vs future
+
+Every sub-check in this spec is **future** — none run in the pure-DNS first round, because all of them
+require sending a probe and reading remote mailboxes.
+
+| Sub-check | First round (pure `node:dns/promises`) | Future (probe / tool / feed / API) |
+| --- | --- | --- |
+| `content.seedlist_overall`, `content.placement_gmail`, `content.placement_outlook`, `content.placement_yahoo`, `content.placement_apple`, `content.placement_longtail` | — | ⏳ send probe → seed-service API **or** self-hosted SMTP send + IMAP/Graph/JMAP read-back |
+| `content.seed_auth_pass`, `content.seed_spf_receiver`, `content.seed_dkim_receiver`, `content.seed_dmarc_receiver` | — | ⏳ parse `Authentication-Results` from delivered seeds |
+| `content.seed_tab_placement`, `content.seed_missing`, `content.seed_delivery_latency` | — | ⏳ read Gmail category label / arrival timing / absence-after-settle |
+| `content.seed_coverage` | — | ⏳ enumerate live seeds per provider before scoring |
+| `content.seed_trend` (advisory) | — | ⏳ history diff across repeated scheduled tests |
+
+---
+
+## 8. Acceptance criteria
+
+1. Until a seed-list integration is configured, the whole family reports **not configured** (light-gray
+   Spam & Content contribution), never a false `ok` or `critical`.
+2. With the integration configured, a manual **"Send seed test now"** sends exactly **one** tokenized
+   probe to the seed list, records an `inbox_placement_tests` row, and does not fire on incidental
+   audit runs unless the domain opts in.
+3. Each seed produces exactly one `inbox_placement_results` row with `folder ∈ {inbox, spam,
+   promotions, missing}`, a `provider`, and (when delivered) parsed `spf_pass`/`dkim_pass`/`dmarc_pass`.
+4. `content.seedlist_overall` computes the overall inbox rate; ≥ 80% → **ok**, 50–79% → **warning**,
+   < 50% → **critical**, with the exact percentage in the detail.
+5. A provider whose seeds are majority Spam/Junk yields that provider's `content.placement_*`
+   **critical**; Gmail majority Promotions yields `content.seed_tab_placement` **warning** (not
+   critical — it is delivered).
+6. A message absent from a seed after the full settle window + retries is classified **missing** and,
+   when a provider is majority-missing, yields `content.seed_missing` **critical** with a delisting/
+   block remediation.
+7. `content.seed_auth_pass` marks **critical** any receiver-observed DMARC `fail` (or SPF+DKIM both
+   `fail`) even when the DNS-side SPF/DKIM/DMARC checks were green, and the finding names the specific
+   failing mechanism (`seed_spf_receiver` / `seed_dkim_receiver` / `seed_dmarc_receiver`).
+8. Every non-inbox finding carries a **concrete** remediation naming the cause and the peer check to
+   open next (auth → `./spf.mdx`/`./dkim.mdx`/`./dmarc.mdx`; Spam/Promotions with passing auth →
+   `./content_scoring.mdx`; provider-wide Junk/Missing → `./reputation_metrics.mdx` +
+   `./blacklists.mdx`), never a generic "improve deliverability".
+9. Providers are polled with backoff before a Missing verdict; subject-rewriting/header-stripping
+   providers are still matched via the per-seed token; hard bounces (5xx) are distinguished from
+   filtered-then-dropped Missing.
+10. The check runs on a **slow dedicated cadence** distinct from the 6h DNS cadence, respects a
+    monthly budget cap and the seed-service rate limits, and is debounced so it never sends in a loop.
+11. The parsed observation (test envelope + per-seed results) is persisted to
+    `results.inbox_placement` in the audit JSON today and maps cleanly onto `inbox_placement_tests` +
+    `inbox_placement_results`, with `seedList:` config mapping to `seed_list_config`.
+12. The Spam & Content dashboard cell reflects the worst placement severity; the advisory
+    `content.seed_trend` (`info`) never turns it amber; a downward trend renders in the sparkline.
+13. The scheduler diffs each test against the previous run and flags any Inbox→Spam, Inbox→Missing,
+    receiver-auth turning `fail`, or overall-rate band drop as a **new problem**.
+
+<!--
+  Maintenance notes:
+  - No RFC defines "inbox placement"; keep SMTP RFC 5321 and the 2024 Gmail/Yahoo bulk-sender
+    requirements current, and keep Authentication-Results parsing aligned with ./arc.mdx and
+    ./spf.mdx / ./dkim.mdx / ./dmarc.mdx.
+  - This whole family is FUTURE (needs a seed-service or self-hosted seed mailboxes + a send probe).
+    When the integration ships, move rows out of the "future" column in §7 and register the external
+    dependency + credentials in ../engineering.mdx and ../scheduled_checks.mdx.
+  - Placement is a SYMPTOM: keep the cross-links to ./content_scoring.mdx, ./reputation_metrics.mdx,
+    and ./blacklists.mdx accurate so every miss routes to its cause.
+  - Keep this file's sub-check list and checkId prefix (content, placement sub-family) in sync with
+    the Spam & Content section of ../spam_checks.mdx and the checker table in ../engineering.mdx §6.3.
+  - Provider seed set (Gmail/Outlook/Yahoo/Apple + long-tail) will drift with market share; revisit
+    the seed_list_config coverage periodically.
+-->

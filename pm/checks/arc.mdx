@@ -1,0 +1,355 @@
+---
+title: EmailDeliveryHero — ARC (Authenticated Received Chain)
+description: The ARC check spec — how EmailDeliveryHero advises on and (in a future round) verifies Authenticated Received Chain header sets (RFC 8617) so that forwarders and mailing lists can preserve prior SPF/DKIM/DMARC results across a hop that would otherwise break DMARC; covers the seven-plus arc.* sub-checks, why this is largely advisory and message-sample-dependent, the swaks-through-a-forwarder capture method, the arc_check_results table, and the first-round-vs-future split.
+---
+
+# EmailDeliveryHero — ARC (Authenticated Received Chain)
+
+ARC (**Authenticated Received Chain**, **RFC 8617**) is the mechanism that lets an intermediary — a
+forwarder, a mailing list, or a security gateway — **preserve the SPF/DKIM/DMARC authentication
+results it observed** and hand them, cryptographically sealed, to the next hop. It exists because
+forwarding routinely **breaks DMARC**: the forwarder changes the envelope (breaking SPF alignment)
+and often rewrites the body or `Subject:` (breaking the DKIM signature), so a message that passed
+DMARC at the origin arrives at the final receiver failing both. ARC gives the final receiver a
+trustworthy record of "this message *did* pass at the last honest hop," which the receiver **may**
+choose to honor as a local override instead of rejecting on a `p=reject` policy.
+
+The crucial architectural fact for this app: **ARC is not a published DNS record.** It is a set of
+three header fields (`ARC-Seal`, `ARC-Message-Signature`, `ARC-Authentication-Results`) **added by
+intermediaries to a message in transit**. You cannot audit a domain's ARC posture from DNS alone —
+you need a **captured, forwarded message sample** to see whether a chain was applied and whether it
+validates. Consequently **most of this check is FUTURE** (message-sample-dependent), and the parts
+that ship first round are **advisory/informational**: they warn that a domain's sending patterns
+*could* be broken by forwarding, and they check the one DNS-answerable piece (the intermediary's
+signing selector). Be honest with the user: for a domain that never sends through forwarders, ARC is
+simply **not applicable**, and even where it applies, ARC is an *advisory* signal — receivers are
+free to ignore it.
+
+**Read alongside** (do not duplicate these):
+
+* [DMARC](./dmarc.mdx) — the policy ARC exists to rescue across forwarding hops; ARC is its advisory
+  companion and rolls up into the **same DMARC dashboard cell**.
+* [DKIM](./dkim.mdx) — ARC-Seal / ARC-Message-Signature are DKIM-style signatures with their own
+  `_domainkey` selector at the intermediary; the crypto and key-strength concerns mirror DKIM.
+* [Spam & Content catalog](../spam_checks.mdx) — where `arc.present` is listed as the advisory note
+  under the DMARC category; this file expands that one row into the full sub-check set.
+* [Engineering](../engineering.mdx) — the `Checker`/`Finding` contract, the file store, and the
+  scheduler this check plugs into.
+
+**Category & prefix.** ARC belongs to the **DMARC** dashboard category (column 3). Its sub-check ids
+use the **`arc.`** prefix (e.g. `arc.chain_present`) — a distinct, advisory companion namespace whose
+findings **roll into the DMARC category cell**. ARC has no column of its own; there are exactly six
+categories.
+
+---
+
+## 1. What it checks
+
+**Background & standard.** RFC 8617 defines ARC as three cooperating header fields, stamped as a
+numbered set at each participating hop, identified by an **instance number** `i=` starting at `1`:
+
+* **`ARC-Authentication-Results` (AAR)** — a snapshot of the `Authentication-Results` the
+  intermediary observed *before* it altered the message (the SPF/DKIM/DMARC verdicts at that hop).
+* **`ARC-Message-Signature` (AMS)** — a DKIM-style signature over the message headers and body *as
+  the intermediary received them*, so a later validator can confirm the AAR describes this message.
+* **`ARC-Seal` (AS)** — a signature over the **entire prior chain** (all earlier AS/AMS/AAR sets plus
+  this hop's AAR and AMS). The seal is what makes the chain tamper-evident hop-to-hop, and carries the
+  **chain validation status** `cv=` (`none` at `i=1`, then `pass` or `fail`).
+
+**Why receivers care.** Large receivers (Google, Microsoft) evaluate ARC when a message fails DMARC:
+if a valid ARC chain (`cv=pass`) shows the message passed authentication at a **trusted** forwarder,
+the receiver may deliver it rather than quarantine/reject. Trust is per-receiver and reputation-based
+— ARC does **not** compel delivery; it merely *supplies evidence* the receiver may weigh.
+
+**Common real-world failure mode.** A domain publishes `p=reject`, then a subset of its mail is
+forwarded (employee `.forward` rules, a `listserv`/Google Group, an "email to a friend" relay, a
+security appliance that re-injects mail). At the final receiver SPF and DKIM both fail, DMARC fails,
+and — because the forwarder does **not** apply ARC (or applies a broken chain) — the legitimate mail
+is rejected. The symptom is "some recipients never get our mail, but only when it goes through
+list X." ARC applied correctly by that forwarder fixes it.
+
+**How a failure degrades inbox placement.** Without ARC on a forwarding path, DMARC-failing forwarded
+mail is quarantined or rejected at strict receivers; with a broken ARC chain (`cv=fail`, out-of-order
+instances, an unresolvable signing selector) the receiver discards the ARC evidence and falls back to
+the raw DMARC failure — the same bad outcome. ARC never *hurts* a directly-sent message; its absence
+only matters on hops that mutate the message.
+
+---
+
+## 2. Sub-checks
+
+Expanded well beyond the seed list. Advisory sub-checks (marked *advisory*) are the ones that ship
+first round from configuration/DNS; the message-sample sub-checks are FUTURE (need a captured
+forwarded message — see §3).
+
+| Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `arc.applicable` *(advisory)* | Whether ARC is even relevant: does the domain enforce DMARC (`p=quarantine`/`reject`) **and** send through forwarders/lists? If not, ARC is N/A. | Read the DMARC policy (from the DMARC checker) + the domain's configured "uses forwarding" flag. | **info:** DMARC not enforcing, or no forwarding configured → ARC not applicable. | None needed; revisit if you adopt `p=reject` or start sending via lists/forwarders. |
+| `arc.forwarding_risk` *(advisory)* | The domain sends through paths that break DMARC without ARC (mailing lists, `.forward`, gateways) while enforcing DMARC. | Config flag + heuristic over known list/forwarder indicators the operator enters per domain. | **warning:** enforcing DMARC + forwarding, but ARC status unverified (likely silent losses). | Confirm each forwarder/list applies ARC (`cv=pass`); for lists you run, enable ARC sealing on the MLM (e.g. Mailman 3, `mlmmj` + `OpenARC`). |
+| `arc.selector_dns` | The ARC-signing intermediary's DKIM-style selector resolves in DNS: `<d>._domainkey.<s>` from a known/observed AMS+AS `d=`/`s=`. | `resolveTxt('<selector>._domainkey.<signing-domain>')` for each configured/observed ARC signer. | **critical:** signer's selector NXDOMAIN/empty `p=` → AMS/AS cannot be verified. **warning:** weak/legacy key. | Ask the forwarder to publish/repair its ARC signing key; if you operate the sealer, publish the 2048-bit key at `<selector>._domainkey.<domain>`. |
+| `arc.chain_present` | An ARC header set (AS + AMS + AAR at `i=1…n`) is present on a **sampled forwarded message**. | Parse `ARC-*` headers from a captured sample (§3). | **warning:** forwarded sample carries **no** ARC headers (forwarder does not seal). | Enable ARC on the forwarder/MLM, or route mail through an intermediary that seals (many do by default). |
+| `arc.seal_valid` | The ARC-Seal chain validates cryptographically and the newest seal is **`cv=pass`**. | Verify each `ARC-Seal` signature over the cumulative chain; read final `cv=`. | **critical:** `cv=fail` (broken/tampered chain) → receivers ignore the ARC evidence. | Fix the sealing intermediary (clock skew, header mutation after sealing, wrong key); re-test the sample until `cv=pass`. |
+| `arc.ams_valid` | The most recent `ARC-Message-Signature` verifies against the message as sealed (body hash + header hash match). | DKIM-style AMS verification on the sample. | **critical:** AMS does not verify (message altered after sealing, or bad `bh=`). | Ensure nothing rewrites the message body/headers *after* the ARC signer; place the sealer last in the pipeline. |
+| `arc.instance_ordering` | The `i=` instances are **contiguous and correctly ordered** (`1,2,3…` with no gaps/dupes), each set having exactly one AS, AMS, AAR. | Collect all `i=` values across the three header types; assert a complete, gapless sequence. | **critical:** missing/duplicate/out-of-order instance → chain invalid per RFC 8617 §5.2. | Fix the offending hop's sealer so it increments `i=` correctly and emits all three headers per hop. |
+| `arc.oldest_pass` | The **oldest** hop's preserved authentication results (`i=1` AAR) show the message **passed** SPF/DKIM/DMARC at origin — the evidence downstream trust rests on. | Parse the `i=1` `ARC-Authentication-Results`; confirm `dmarc=pass` (or aligned dkim/spf) there. | **warning:** oldest AAR shows the message already failed auth at origin (nothing worth preserving). | Fix the origin authentication first (see [DKIM](./dkim.mdx)/[DMARC](./dmarc.mdx)); ARC cannot rescue mail that never passed. |
+| `arc.cv_at_i1` | The first seal correctly reports `cv=none` (per spec, `i=1` has no prior chain to validate). | Read `cv=` on the `i=1` `ARC-Seal`. | **warning:** `i=1` seal with `cv=pass/fail` (malformed sealer). | Report the malformed sealer to the intermediary; `cv` must be `none` at the first hop. |
+| `arc.signature_algorithm` | ARC signatures use a modern algorithm (`rsa-sha256` or `ed25519-sha256`; no SHA-1) with an adequate key length (mirrors DKIM RFC 8301). | Read `a=` on AMS/AS; inspect the resolved key modulus. | **warning:** weak/legacy algorithm or <1024-bit key on the signer. | Ask the signer to reissue with RSA-SHA256 / 2048-bit (or ed25519). |
+| `arc.aar_completeness` *(advisory)* | The AAR at each hop actually records the SPF/DKIM/DMARC methods (not an empty/`none` stub). | Parse each AAR's `Authentication-Results` methods. | **info:** AAR present but records no usable auth methods. | Configure the sealer to snapshot full `Authentication-Results` before mutation. |
+| `arc.receiver_honors` *(advisory)* | Whether downstream receivers (Gmail/Outlook) actually honored the chain and delivered DMARC-failing forwarded mail to the inbox. | Requires seed-list placement + DMARC `rua` evidence (fully future/paid). | **info:** cannot confirm receivers honored ARC (trust is per-receiver, reputation-based). | Build the forwarder's/sealer's sending reputation; ARC honoring is a receiver-side trust decision, not guaranteed. |
+
+---
+
+## 3. How it is measured
+
+**Advisory / first-round path (deterministic).** Two things are answerable without a message sample:
+
+1. **Applicability & forwarding risk** (`arc.applicable`, `arc.forwarding_risk`): read the DMARC
+   policy the DMARC checker already parsed (enforcing vs `p=none`) and a per-domain
+   **`usesForwarding`** flag / list of known forwarders the operator entered. If DMARC is not
+   enforcing **or** the domain declares no forwarding, emit a single `info` "ARC not applicable" and
+   stop. If DMARC is enforcing **and** forwarding is declared but no verified chain exists, emit the
+   `warning`.
+2. **Signer selector resolution** (`arc.selector_dns`, `arc.signature_algorithm`): for each ARC
+   signing domain/selector — either configured for a known forwarder, or *observed* from a prior
+   sample — run `resolveTxt('<selector>._domainkey.<signing-domain>')` via `node:dns/promises`, parse
+   the DKIM key record, base64-decode `p=`, and read the modulus. This reuses the exact machinery of
+   the [DKIM](./dkim.mdx) checker.
+
+**Message-sample path (FUTURE).** Everything about an actual chain (`arc.chain_present`,
+`arc.seal_valid`, `arc.ams_valid`, `arc.instance_ordering`, `arc.oldest_pass`, `arc.cv_at_i1`,
+`arc.aar_completeness`) requires a **captured forwarded message**. Obtaining the sample:
+
+* **Probe through a forwarder.** Use Homebrew **`swaks`** to send a known test message from the
+  monitored domain **to an address that forwards** to a mailbox we control (e.g. a Google Group, a
+  `listserv`, or a `.forward` alias set up for the audit). Example shape:
+  `swaks --to list@example.org --from probe@<domain> --server <mx> --h-Subject "EDH-ARC-<auditId>"`.
+* **Retrieve & parse the delivered copy.** Read the received message from the destination mailbox
+  (IMAP fetch, or a maildrop the audit watches), extract the full header block, and parse the
+  `ARC-Seal`, `ARC-Message-Signature`, `ARC-Authentication-Results`, and the receiver's own
+  `Authentication-Results` (which frequently states `arc=pass (i=N ...)`).
+* **Validate the chain.** Verify seals/signatures with an ARC validator: shell to **`OpenARC`**
+  (`openarc`/`arcsign`/`arcverify`) or use a Node ARC/DKIM verification library. Read the final
+  `cv=`, walk the `i=` sequence, and verify the `i=1` AAR's origin verdict.
+
+**Edge cases & rate limits.** ARC selectors share DKIM's caching (respect TTL; a `dig` fallback is a
+future cache-buster). Probe sends must be **throttled** — one probe per forwarder per audit at most —
+to avoid tripping the forwarder's own spam controls or polluting reputation; store the last probe
+timestamp per (domain, forwarder). A single "no ARC headers" result is inconclusive if the forwarder
+sometimes seals and sometimes doesn't; treat `arc.chain_present` as `warning`, never `critical`.
+
+**Mapping to severities.** Cryptographic/structural failures on a *present* chain (`arc.seal_valid`
+`cv=fail`, `arc.ams_valid` fail, `arc.instance_ordering` gap, unresolved `arc.selector_dns`) are
+**critical** — the chain is worthless. "Forwarder applies no ARC at all" and "oldest hop already
+failed auth" are **warning**. Applicability, honoring, and completeness advisories are **info**
+(they never turn the DMARC cell amber on their own, per the roll-up rules in
+[Spam & Content catalog](../spam_checks.mdx)).
+
+---
+
+## 4. User interface
+
+**Dashboard contribution.** ARC has **no cell of its own**; its findings feed the **DMARC** category
+cell (column 3). Because ARC findings are advisory-heavy, an `info`-only ARC result does **not** turn
+the DMARC cell amber; an `arc.seal_valid` `critical` on a captured sample *does* contribute red. When
+ARC has never been sampled for a domain, it contributes nothing (the cell reflects only the DNS-based
+DMARC sub-checks) and surfaces as a "Not yet sampled" advisory in detail.
+
+**Audit-detail view (React 19 + shadcn/ui).** Inside the expanded DMARC group, ARC findings render as
+their own labelled sub-group ("ARC — forwarding preservation (advisory)"). Each row uses the standard
+finding layout shared with the other checks:
+
+```
+DMARC ▸ ARC (Authenticated Received Chain)                       [advisory]
+────────────────────────────────────────────────────────────────────────────
+● info      arc.applicable        DMARC=reject + 1 forwarder declared → ARC applies
+▲ warning   arc.forwarding_risk   "acme-users" Google Group; ARC status unverified   [Copy fix]
+✕ critical  arc.selector_dns      lists.acme.org selector "arc1" → NXDOMAIN            [Copy fix]
+◻ n/a       arc.chain_present     No message sample captured yet          [Capture sample…]
+```
+
+* Severity badge (`ok`/`info`/`warning`/`critical`), the observed **detail** (parsed `cv=`, `i=`
+  range, signer `d=`/`s=`, oldest-hop verdict), the **remediation** string, and a **Copy** button
+  that copies the exact fix (e.g. the selector TXT record to publish, or the MLM setting to toggle).
+* A **"Capture sample…"** action on FUTURE sub-checks opens a small panel to configure the
+  swaks-through-forwarder probe (target list/alias, destination mailbox) and shows the last capture's
+  parsed chain in a compact table: `i= | signer (d=) | AMS | AS cv= | AAR verdict`.
+
+**Per-domain config inputs.** On the domain's settings, an **ARC / forwarding** section: a
+`usesForwarding` toggle, a repeatable list of **forwarders/mailing lists** (label + address + optional
+known ARC signing domain/selector), and the probe destination mailbox. These drive `arc.applicable`
+and `arc.selector_dns` today and the capture probe later.
+
+**States.** *Empty/never-run:* "ARC not yet evaluated." *Not applicable:* a muted "ARC N/A — no
+enforcing DMARC or no forwarding declared" note. *Loading:* skeleton rows. *Sampled:* the parsed
+chain table. **Admin-only:** enabling the live swaks probe (which sends real mail) is gated behind
+`role:admin`; non-admins see advisory + DNS results only.
+
+---
+
+## 5. Information schema (database schema)
+
+ARC reuses the **shared core tables** owned by [Engineering](../engineering.mdx) — `domains`,
+`audit_runs`, and `findings` (each `arc.*` finding is one `findings` row with `category = 'dmarc'`
+and `check_id` like `arc.seal_valid`). It also reuses `dkim_selectors` conceptually for the signer
+selector. ARC adds **one result table** plus **one reference table**. Because first round is
+advisory-only, **most columns are nullable** (they populate only once a message sample exists).
+
+```sql
+-- Per-audit structured ARC observation. Almost everything is nullable: first-round runs
+-- record only applicability + selector-DNS results; the sample-derived columns fill in later.
+CREATE TABLE arc_check_results (
+    id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    audit_run_id      BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id         BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    message_sample_id TEXT,              -- id/hash of the captured forwarded message; NULL if none
+    applicable        BOOLEAN,           -- DMARC enforcing AND forwarding declared
+    chain_present     BOOLEAN,           -- ARC header set found on the sample
+    chain_length      INT,               -- highest i= observed (hop count); NULL if no sample
+    cv_result         TEXT CHECK (cv_result IN ('none','pass','fail')),  -- newest ARC-Seal cv=
+    seal_valid        BOOLEAN,           -- entire seal chain verified
+    ams_valid         BOOLEAN,           -- newest ARC-Message-Signature verified
+    instances_ok      BOOLEAN,           -- i= contiguous, ordered, complete
+    oldest_pass       BOOLEAN,           -- i=1 AAR shows origin dmarc/dkim/spf pass
+    signer_domain     TEXT,              -- d= of the newest ARC signature
+    signer_selector   TEXT,              -- s= of the newest ARC signature
+    selector_resolves BOOLEAN,           -- <selector>._domainkey.<signer_domain> resolved
+    instances         JSONB,             -- per-hop detail: [{i, d, s, ams_valid, as_cv, aar}]
+    probe_sent_at     TIMESTAMPTZ,       -- when the swaks-through-forwarder probe last ran
+    notes             TEXT,              -- freeform (e.g. "forwarder seals intermittently")
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (audit_run_id, domain_id)
+);
+CREATE INDEX arc_results_domain_idx     ON arc_check_results (domain_id, created_at DESC);
+CREATE INDEX arc_results_cv_idx         ON arc_check_results (cv_result);
+CREATE INDEX arc_results_instances_gin  ON arc_check_results USING GIN (instances);
+
+-- Reference/config: the forwarders & mailing lists a domain sends through, and the ARC signer
+-- each is expected to use. Drives arc.applicable / arc.forwarding_risk / arc.selector_dns and
+-- the capture probe target. Operator-maintained (see §4 per-domain config).
+CREATE TABLE arc_forwarders (
+    id               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    domain_id        BIGINT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+    label            TEXT NOT NULL,           -- "acme-users Google Group"
+    forward_address  TEXT NOT NULL,           -- probe target that forwards to us
+    signer_domain    TEXT,                    -- expected ARC d= (nullable until observed)
+    signer_selector  TEXT,                    -- expected ARC s=
+    probe_mailbox    TEXT,                    -- where the forwarded copy lands for capture
+    enabled          BOOLEAN NOT NULL DEFAULT true,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (domain_id, forward_address)
+);
+CREATE INDEX arc_forwarders_domain_idx ON arc_forwarders (domain_id);
+```
+
+**Mapping to today's JSON file store.** No database exists first round; this maps onto the file store
+under `~/.email_delivery_hero/` ([Engineering §store](../engineering.mdx)):
+
+* `arc_check_results` → an **`arc`** object inside the per-run audit file
+  `audits/<domainId>/<auditId>.json` (alongside the run's `findings[]`), holding the same fields
+  (`applicable`, `chainPresent`, `chainLength`, `cvResult`, `sealValid`, `instances[]`, `notes`,
+  `messageSampleId`, `probeSentAt`). One audit file = one `arc_check_results` row. First round this
+  object is mostly `null`/absent except `applicable`, `forwardingRisk`, and the selector-DNS result.
+* `arc_forwarders` → the per-domain **`arc.forwarders`** array in `domains.json` (operator-entered
+  config), plus the global **`arc`** block in `config.yaml` for probe throttle defaults.
+* Captured raw messages (future) live as opaque blobs under `audits/<domainId>/samples/<sampleId>.eml`;
+  `message_sample_id` is the filename stem. The store module hides this so the DB migration is a
+  single-module change.
+
+---
+
+## 6. When we run the check
+
+**On-demand.** A manual audit (`POST /api/domains/:id/audit`) always runs the **advisory + DNS**
+ARC sub-checks (`arc.applicable`, `arc.forwarding_risk`, `arc.selector_dns`,
+`arc.signature_algorithm`) — they are cheap and deterministic. The **live capture probe** (swaks
+through a forwarder) is **not** part of the routine audit: it sends real mail and is triggered
+explicitly from the "Capture sample…" action (admin-only), or on an opt-in slow cadence.
+
+**Periodic scheduler.** The in-process scheduler ([Scheduled checks](../scheduled_checks.mdx)) re-runs
+the advisory/DNS ARC sub-checks on the normal domain cadence (e.g. every 6h) — selector NXDOMAIN or a
+newly-declared forwarder is caught here. Capture probes, if enabled, run on a **much slower** cadence
+(e.g. weekly per forwarder) with a per-(domain, forwarder) back-off recorded in `probe_sent_at`, so we
+never spam a mailing list or damage the domain's reputation.
+
+**First-round vs gated.** Only the advisory + selector-DNS sub-checks are first round; everything
+sample-derived is gated behind the swaks-probe + ARC-validator dependency (§7).
+
+**Cost / rate-limit / back-off.** DNS selector lookups are free and cached (respect TTL). Probe sends
+cost real mail volume and reputation, so they are strictly throttled and admin-gated. Never probe a
+list the operator did not explicitly register.
+
+**Regression detection.** The scheduler diffs each run against the previous: a signer selector that
+**stops resolving** (`arc.selector_dns` ok→critical), a chain that **starts failing**
+(`arc.seal_valid` pass→fail on the next captured sample), or a **newly-declared forwarder with no
+verified chain** all register as a new problem and can turn the DMARC cell's advisory state worse. An
+`info`-only ARC change (applicability flips because DMARC moved to enforcing) is logged but does not
+by itself worsen the cell.
+
+---
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises` / config, deterministic) | Future (probe / external tool / paid feed / provider API) |
+| --- | --- | --- |
+| `arc.applicable` | ✅ from DMARC policy + `usesForwarding` config | |
+| `arc.forwarding_risk` | ✅ config heuristic (declared forwarders + enforcing DMARC) | |
+| `arc.selector_dns` | ✅ `resolveTxt('<selector>._domainkey.<signer>')` | selector auto-discovery from observed samples |
+| `arc.signature_algorithm` | ✅ parse `a=`/key from the resolved selector | confirm against the algorithm actually used on a sample |
+| `arc.chain_present` | | swaks-through-forwarder capture + header parse |
+| `arc.seal_valid` | | `OpenARC`/validator over the captured chain |
+| `arc.ams_valid` | | AMS (DKIM-style) verification on the sample |
+| `arc.instance_ordering` | | parse `i=` sequence from the sample |
+| `arc.oldest_pass` | | parse `i=1` AAR verdict from the sample |
+| `arc.cv_at_i1` | | read `cv=` on the first seal from the sample |
+| `arc.aar_completeness` | | parse per-hop AAR methods from the sample |
+| `arc.receiver_honors` | | seed-list placement + `rua` evidence (paid/provider data) |
+
+Rule of thumb: **anything answerable from DNS/config ships first (all advisory-only)**; anything that
+needs to capture and cryptographically validate a **real forwarded message** is a later round. The
+`Checker`/`Finding` contract is unchanged across rounds — only the checker's internals grow — so the
+Dashboard, store, and scheduler never change as ARC matures.
+
+---
+
+## 8. Acceptance criteria
+
+A developer can verify the ARC check is correct when **all** of the following hold:
+
+1. The checker registers under **`id: 'arc'`**, emits `Finding`s with `category` rolled into the
+   **DMARC** dashboard cell, and every non-`ok` finding carries a **concrete** remediation (a selector
+   TXT to publish, or the exact MLM/forwarder setting to change) — never a generic "check your DNS."
+2. For a domain with `p=none` **or** no declared forwarding, the check emits a single `info`
+   `arc.applicable` "not applicable" and does **not** turn the DMARC cell amber.
+3. For an enforcing-DMARC domain that declares a forwarder, `arc.forwarding_risk` emits a `warning`
+   until a valid chain is verified, and `arc.selector_dns` resolves each declared/observed signer via
+   `node:dns/promises`, returning `critical` on NXDOMAIN/empty `p=`.
+4. Given a captured forwarded sample, the checker parses `ARC-Seal`, `ARC-Message-Signature`, and
+   `ARC-Authentication-Results`, populates `chain_length`, `cv_result`, `seal_valid`, `ams_valid`,
+   `instances_ok`, `oldest_pass`, and stores per-hop detail in `instances` JSONB.
+5. A tampered/out-of-order/`cv=fail` chain yields a **critical** finding; a forwarded sample with **no**
+   ARC headers yields a **warning** (`arc.chain_present`), never a false `critical`.
+6. `arc.cv_at_i1` flags any first-hop seal whose `cv` is not `none`; `arc.oldest_pass` reads the
+   `i=1` AAR and warns when origin authentication already failed.
+7. The advisory/DNS sub-checks run in every manual and scheduled audit; the **live swaks capture
+   probe** runs only on explicit admin-gated trigger (or a slow opt-in cadence) and records
+   `probe_sent_at` with per-(domain, forwarder) back-off.
+8. Results persist to the audit run's **`arc`** JSON object today and map cleanly onto
+   `arc_check_results` + `arc_forwarders` (with the nullable columns above) when the store moves to
+   PostgreSQL — a single store-module change, no checker change.
+9. The scheduler's diff flags a selector that stops resolving or a chain that starts failing as a
+   **new problem** between runs; `info`-only applicability flips are logged but do not worsen the cell.
+10. The UI renders ARC as an advisory sub-group inside the DMARC audit-detail group, with severity
+    badges, parsed chain detail, copy-to-clipboard remediation, a "Capture sample…" action, and clear
+    empty / not-applicable / never-sampled states, built on React 19 + shadcn/ui.
+
+<!--
+  Maintenance: ARC is RFC 8617. Keep this in sync with ../spam_checks.mdx (where arc.present is the
+  one-row advisory under the DMARC category) and ../engineering.mdx (Checker/Finding contract, file
+  store, scheduler). ARC is an ADVISORY companion to DMARC — it has no dashboard column of its own;
+  its arc.* findings roll into the DMARC cell (category 3). Most of this check is FUTURE and
+  message-sample-dependent: only arc.applicable / arc.forwarding_risk / arc.selector_dns /
+  arc.signature_algorithm are first-round pure DNS/config; everything else needs a captured forwarded
+  message (swaks-through-a-forwarder + OpenARC/validator). Keep RFC refs current (ARC 8617; DKIM 6376
+  / key strength 8301; DMARC 7489 -> DMARCbis 9989/9990/9991) and keep the arc_check_results columns
+  nullable while first round stays advisory-only.
+-->

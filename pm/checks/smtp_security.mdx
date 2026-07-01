@@ -1,0 +1,211 @@
+---
+title: SMTP Server Security & Hardening
+description: Drives a SAFE, non-abusive SMTP conversation against a domain's MX and submission hosts to audit open-relay posture, VRFY/EXPN address-harvesting, AUTH-in-cleartext, submission-port hygiene (587/465 vs 25), banner leakage, greylisting/backscatter behavior, and flood/pipelining limits — prescribing the exact MTA config to close each hole.
+---
+
+# SMTP Server Security & Hardening
+
+Every deliverability problem this app audits assumes the domain's mail servers themselves are competently locked down. This check verifies that by actually *speaking SMTP* to the domain's MX and submission hosts: it opens a TCP connection, reads the banner, issues `EHLO`, inspects the advertised capabilities, and runs a small set of **safe, non-destructive probes** (a deliberately-rejected off-domain `RCPT`, a `VRFY`, `EXPN`, and a `STARTTLS` capability check) to confirm the server rejects abuse. The single most important thing it looks for is an **open relay** — an MTA that accepts and forwards mail for external, non-local recipients. An open relay is catastrophic: spammers find them within hours, and the sending IP lands on the SBL/XBL/CBL and every major DNSBL, tanking deliverability for every legitimate message from that domain. VRFY/EXPN leaks let attackers harvest valid addresses; AUTH offered in cleartext leaks credentials; port-25 "submission" invites password spraying; a version-leaking banner hands attackers a CVE shopping list. This spec covers the SMTP-conversation layer that sits underneath [./mx_routing.mdx](./mx_routing.mdx) (which hosts to talk to) and [./tls_transport.mdx](./tls_transport.mdx) (how STARTTLS is negotiated).
+
+**Category:** DNS & Infrastructure. **checkId prefix:** `infra` (SMTP-security sub-family, e.g. `infra.open_relay`).
+
+**Read alongside:**
+- [../overview.mdx](../overview.mdx) — product charter, personas, port list.
+- [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
+- [../spam_checks.mdx](../spam_checks.mdx) — master catalog; this spec is the SMTP-hardening slice of the `infra` category.
+- [../dashboard.mdx](../dashboard.mdx) — how the DNS & Infrastructure cell rolls up.
+- Peers: [./mx_routing.mdx](./mx_routing.mdx) (which MX/backup hosts to probe), [./tls_transport.mdx](./tls_transport.mdx) (STARTTLS cipher/cert grading these checks depend on), [./reverse_dns.mdx](./reverse_dns.mdx) (the `infra.helo_match` HELO/PTR check that consumes this probe's observed HELO/banner), [./blacklists.mdx](./blacklists.mdx) (an open relay is the fastest route to a DNSBL listing).
+
+## 1. What it checks
+
+This check is grounded in the SMTP standards themselves:
+
+- **RFC 5321** (SMTP) — the base protocol: `EHLO/HELO`, `MAIL FROM`, `RCPT TO`, transaction reply codes, the requirement that a server only relay for domains it is responsible for, and the optional/discouraged `VRFY`/`EXPN` verbs (§3.5, §7.3 explicitly warn these leak information and SHOULD be disableable).
+- **RFC 6409** (Message Submission) — user mail must be *submitted* on the **submission port 587** (or the implicit-TLS variant 465, "submissions", per RFC 8314), where the MSA **requires authentication** and may rewrite/add headers. Port **25 is for MTA-to-MTA relay only**, never for authenticated user submission.
+- **RFC 3207** (SMTP STARTTLS) — the `STARTTLS` extension; **RFC 8314** mandates that `AUTH` is never offered before TLS on submission, and modern practice is implicit TLS on 465.
+
+Why receivers and operators care: an open relay is exploited almost immediately and gets the IP mass-listed on Spamhaus SBL/XBL, Barracuda, and SORBS, at which point *nothing* from that IP delivers (see [./blacklists.mdx](./blacklists.mdx)). VRFY/EXPN turn the MTA into a free directory service for spammers building target lists. AUTH advertised on a cleartext (pre-STARTTLS) channel means any credential submitted travels in the clear and is trivially sniffed. Accepting user logins on port 25 exposes them to internet-wide brute-force. **Backscatter** — accepting a message and *later* bouncing it to the (forged) envelope sender — is itself a spam vector that gets a server listed on the Backscatterer.org BRBL. A banner that prints `220 mail.example.com ESMTP Postfix (Ubuntu) 3.6.4` advertises the exact software and version to attackers.
+
+Common real-world failure modes: (a) a misconfigured `mynetworks`/`relay_domains` in Postfix (or a permissive Exchange receive connector) leaves the server relaying for the world; (b) VRFY left enabled on a default sendmail; (c) an MSA offering `AUTH LOGIN` in the pre-STARTTLS `EHLO` response; (d) users configured to submit on port 25 instead of 587; (e) a "catch-all + later bounce" setup that backscatters to forged senders. Each degrades inbox placement indirectly (blacklisting from relay/backscatter abuse) or directly (credential theft leading to account-takeover spam runs from your own domain).
+
+## 2. Sub-checks
+
+All sub-checks run against each host discovered for the domain: MX hosts (from [./mx_routing.mdx](./mx_routing.mdx)) on port 25, and submission endpoints on 587/465. `example.com` is the audited domain; `probe.invalid-audit.test` is the app's fixed, non-routable off-domain relay-test recipient. **Every relay probe ends in `QUIT` without ever issuing `DATA`** — no message body is ever transmitted.
+
+| Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+|---|---|---|---|---|
+| `infra.open_relay` | Server REJECTS relaying mail for external, non-local recipients | Open 25, `EHLO auditor.<self>`, `MAIL FROM:<probe@auditor.invalid>`, `RCPT TO:<probe@probe.invalid-audit.test>`; expect a **5xx** reject, then `QUIT`. Never send `DATA`. | **critical** if `RCPT` to an off-domain recipient returns **2xx** (accepted for relay) | Postfix: set `smtpd_relay_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination`. Exim: ensure ACL `acl_smtp_rcpt` has no `accept` before `require verify = recipient`/`relay` checks. Exchange: uncheck "Anonymous users" relay on the receive connector. |
+| `infra.open_relay_variants` | Reject classic relay-evasion address forms too | Additionally test `RCPT TO:<user%remote@localdomain>`, `<remote!user>`, `<"user@remote"@localdomain>`, source routes `<@a.example:user@remote>` — all must **5xx** | **critical** if any bang-path/percent-hack/source-route form is accepted for an off-domain target | Upgrade the MTA; disable `%`-hack and source-route relaying (`allow_percent_hack=no`, `allow_source_routing=no` on Exim; modern Postfix rejects by default). |
+| `infra.vrfy_disabled` | `VRFY` is disabled/refused (no address harvesting) | Issue `VRFY postmaster`; expect **502** (`command not implemented`) or **252/550/551** non-confirming; **not** a 250 that confirms a real local address | **warning** if `VRFY` returns 250 and discloses a valid mailbox | Postfix: `disable_vrfy_command = yes`. sendmail: `O PrivacyOptions=goaway` (includes `novrfy`). Exim: `acl_smtp_vrfy = acl_check_vrfy` that returns `deny`. |
+| `infra.expn_disabled` | `EXPN` is disabled/refused (no mailing-list expansion) | Issue `EXPN postmaster`/`EXPN staff`; expect **502**/**550**, never a 250 listing members | **warning** if `EXPN` expands a list or confirms addresses | sendmail: `PrivacyOptions=goaway`/`noexpn`. Postfix does not implement EXPN by default (returns 502) — verify no alias exposes it. Exim: `acl_smtp_expn` denies. |
+| `infra.auth_requires_tls` | `AUTH` is only advertised AFTER STARTTLS, never in cleartext | Compare `EHLO` capability list before vs after `STARTTLS`: an `250-AUTH ...` line present **before** STARTTLS is the failure | **critical** if `AUTH LOGIN`/`PLAIN` appears in the pre-STARTTLS EHLO on any port | Postfix: `smtpd_tls_auth_only = yes`. Dovecot SASL/submission: `disable_plaintext_auth = yes`. Exim: `server_advertise_condition = ${if def:tls_in_cipher}` on plaintext authenticators. |
+| `infra.submission_ports` | User submission offered on 587 (STARTTLS) and/or 465 (implicit TLS), each requiring AUTH; port 25 not used for user submission | Connect 587 and 465; confirm banner + `EHLO` advertise `STARTTLS`/AUTH-after-TLS; confirm 25 does **not** accept authenticated user submission | **warning** if neither 587 nor 465 is open/authenticated; **info** if only one present | Open MSA on 587 with mandatory STARTTLS+AUTH (RFC 6409) and/or 465 implicit TLS (RFC 8314). Postfix `master.cf`: enable `submission` and `smtps` services with `smtpd_tls_security_level=encrypt`, `smtpd_sasl_auth_enable=yes`. |
+| `infra.submission_auth_required` | Submission ports REJECT mail without AUTH | On 587/465, `MAIL FROM`/`RCPT TO` to an off-domain target without authenticating must **5xx** (`530 5.7.0 Authentication required`) | **critical** if 587/465 relays off-domain without AUTH (an authenticated-port open relay) | Postfix submission: `smtpd_relay_restrictions = permit_sasl_authenticated, reject`. Require `permit_sasl_authenticated` before any relay permit. |
+| `infra.no_open_proxy` | Host is not an open proxy chained into SMTP (CONNECT / SOCKS to 25) | Advisory: confirm the SMTP port speaks SMTP (220 ESMTP), not an HTTP/proxy banner; flag proxy-style `200 Connection established` | **warning** if the port answers as an HTTP proxy or accepts `CONNECT host:25` | Disable proxy CONNECT to mail ports; bind the MTA only, firewall proxy ports. |
+| `infra.banner_hygiene` | 220 banner is a valid FQDN and does NOT leak software/version, isn't generic/dynamic | Parse the 220 line; flag embedded product+version (`Postfix 3.x`, `Exim 4.x`, `Microsoft ESMTP`, OS names) and generic/IP-literal hostnames (cross-ref [./reverse_dns.mdx](./reverse_dns.mdx)) | **warning** if banner prints version string or a dynamic/generic host (`localhost.localdomain`, bare IP) | Postfix: `smtpd_banner = $myhostname ESMTP` (drop `$mail_name`/version). Exim: `smtp_banner = ${primary_hostname} ESMTP`. Ensure the banner FQDN matches PTR + HELO. |
+| `infra.helo_required` | Server requires a syntactically valid HELO/EHLO FQDN | Send a bare/invalid `HELO localhost` and an empty HELO; a hardened server may `reject_invalid_helo_hostname` | **info/warning** if it accepts obviously invalid/empty HELO from the probe | Postfix: `smtpd_helo_required = yes`, add `reject_invalid_helo_hostname, reject_non_fqdn_helo_hostname` (tune to avoid false positives on legit senders). |
+| `infra.greylisting` (advisory) | Greylisting/retry behavior is sane — tempfails (4xx) then accepts on retry, not a silent drop | Observe whether first-contact `RCPT` returns `450`/`451` tempfail; note expected delay; confirm it is not a permanent `5xx` for legitimate first contact | **info** advisory: greylisting active (expect first-delivery delay); **warning** if first contact hard-fails legitimate senders | None required if 4xx→retry works; if legit mail is 5xx'd, relax greylist or whitelist known senders. Document expected delay. |
+| `infra.backscatter` | Server does not accept-then-bounce to forged/misdirected senders | Advisory/heuristic: prefer servers that reject unknown recipients **at RCPT time** (5xx in-session) rather than accepting then bouncing later; detect catch-all-accept posture | **warning** if the server accepts all RCPTs then generates DSNs to (forged) senders (backscatter → Backscatterer.org listing) | Reject invalid recipients during the SMTP session (`reject_unverified_recipient` / recipient tables), do NOT bounce after acceptance. Disable catch-all + later-bounce. |
+| `infra.pipelining_sanity` (advisory) | If `PIPELINING` is advertised, the server enforces command ordering (rejects early/out-of-order commands) | Send a benign out-of-order command group; a hardened server rejects commands sent before its greeting/`EHLO` | **info** if PIPELINING advertised; **warning** if it accepts commands before the banner (pre-greeting pipelining, a spammer tell) | Postfix: `smtpd_data_restrictions = reject_unauth_pipelining`; enable `postscreen` pre-greeting tests. |
+| `infra.max_rcpt_limit` (advisory) | Rate/flood protection: server bounds recipients per message and connections per client | Issue N (e.g. 5) benign `RCPT TO` for *local* postmaster-style addresses (still no DATA) and observe if an unbounded count is accepted | **info** advisory: no observed RCPT cap; **warning** if hundreds accepted with no throttle | Postfix: set `smtpd_recipient_limit` (default 1000 → lower, e.g. 100), `smtpd_client_connection_rate_limit`, `anvil` rate controls. |
+| `infra.tls_required_inbound` (advisory) | Inbound TLS is at least offered (STARTTLS present) on 25 | Confirm `STARTTLS` in the 25 `EHLO` capabilities (grade defers to [./tls_transport.mdx](./tls_transport.mdx)) | **warning** if no STARTTLS offered on 25 (opportunistic TLS impossible) | Enable STARTTLS on 25 (`smtpd_tls_security_level = may`); full cipher/cert grading is [./tls_transport.mdx](./tls_transport.mdx). |
+| `infra.starttls_downgrade` (advisory) | STARTTLS is not stripped/broken (no plaintext-only after advertising it) | After `STARTTLS`, the TLS handshake must actually succeed; a `STARTTLS` advertised but failing handshake is a downgrade risk | **warning** if `STARTTLS` advertised but handshake fails | Fix the TLS listener/cert so STARTTLS completes; see [./tls_transport.mdx](./tls_transport.mdx). |
+
+## 3. How it is measured
+
+**This entire check is FUTURE-round** — it requires an outbound SMTP conversation, not DNS. It is gated behind the network-probe subsystem and outbound port-25/587/465 egress (many residential ISPs and cloud security groups block 25; when blocked, every sub-check degrades to `info` "could not test from this host — outbound SMTP blocked" rather than a false critical).
+
+**Probe engine.** Preferred implementation is a small internal SMTP client (Node `net`/`tls` sockets with a strict state machine) or shelling to **`swaks`** (Brew-installed) for the relay/AUTH/STARTTLS conversations. Host discovery reuses [./mx_routing.mdx](./mx_routing.mdx): MX exchanges → probe on 25; submission endpoints (from config or common defaults) → probe on 587 and 465.
+
+**Per-host conversation (safe, bounded):**
+
+1. TCP connect (5s timeout). Read the **220** greeting → `infra.banner_hygiene`, `infra.no_open_proxy` (must look like SMTP, not HTTP/proxy).
+2. `EHLO auditor.<audit-host-fqdn>` → capture the capability list (**pre-STARTTLS snapshot**): note `STARTTLS`, `AUTH ...`, `PIPELINING`, `SIZE`, `VRFY`. An `AUTH` line here on any port ⇒ `infra.auth_requires_tls` **critical**.
+3. `VRFY postmaster` → classify reply code (`infra.vrfy_disabled`). `EXPN postmaster` → `infra.expn_disabled`. A confirming **250** with a real address = leak.
+4. **Relay test (the core, must be SAFE):** `MAIL FROM:<probe@auditor.invalid>` then `RCPT TO:<probe@probe.invalid-audit.test>` (a fixed non-routable off-domain recipient the app owns/reserves). The **expected, healthy** result is a **5xx** reject (`554 5.7.1 Relay access denied`). If the server returns **2xx**, it accepted relay → `infra.open_relay` **critical** — **immediately `RSET` + `QUIT`; NEVER issue `DATA`**, so no message is ever relayed. Then run `infra.open_relay_variants` with the evasion address forms, same 5xx expectation, same no-DATA rule.
+5. If `STARTTLS` was advertised on 25/587: issue `STARTTLS`, complete the TLS handshake (`infra.starttls_downgrade`, `infra.tls_required_inbound`), then send a **second `EHLO`** and take the **post-STARTTLS snapshot**. `AUTH` should appear *only* here. On 465, connect with implicit TLS first, then `EHLO`.
+6. Submission-specific (587/465): attempt `MAIL FROM`/`RCPT TO` to an off-domain target **without** authenticating → expect `530 5.7.0 Authentication required` (`infra.submission_auth_required`); confirm 587/465 are present and AUTH-gated (`infra.submission_ports`).
+7. Advisory observations: first-contact `4xx` → `infra.greylisting`; recipient-acceptance posture → `infra.backscatter`; pre-greeting/out-of-order acceptance → `infra.pipelining_sanity`; bounded RCPT count with a handful of local RCPTs → `infra.max_rcpt_limit`. `QUIT` to close cleanly every time.
+
+**Safety invariants (non-negotiable, enforced in code):** never send `DATA` during any relay probe; only ever use the reserved non-routable `probe.invalid-audit.test` recipient and an `auditor.invalid` sender; cap to one connection per host per run; total ≤ ~12 commands per host; hard timeout; back off (skip N cycles) on repeated failures. The probe is a *rejection confirmation*, not a delivery — a healthy server 5xx-rejects and we record "correctly refused". This keeps the auditor itself off blacklists.
+
+**Severity mapping:** open relay (any form) and authenticated-port off-domain relay and pre-TLS AUTH ⇒ **critical** (immediate abuse/credential exposure). VRFY/EXPN open, no submission ports, banner version leak, no STARTTLS on 25, backscatter posture, HELO-not-required ⇒ **warning**. Greylisting active, pipelining advertised, RCPT-cap advisory, single submission port ⇒ **info**.
+
+**Edge cases:** port-25 egress blocked → all sub-checks `info` "not evaluated". A backup MX (from [./mx_routing.mdx](./mx_routing.mdx)) is probed too — backup MXes are a classic open-relay/backscatter blind spot. Some MTAs tarpit/rate-limit the probe (slow 4xx) — treat as `info` transient, retry once. Greylisting will 4xx the relay probe on first contact; distinguish a *greylist* 4xx from a *relay-refused* 5xx (only 5xx counts as "not an open relay"; a 4xx is inconclusive → re-probe next cycle). IDN hosts normalized to A-label. TLS grading is delegated to [./tls_transport.mdx](./tls_transport.mdx); this check only confirms STARTTLS presence/handshake.
+
+## 4. User interface
+
+Built on the React 19 + Vite + Tailwind + shadcn/ui + lucide-react stack, data via the generated TanStack-Query client.
+
+**Dashboard contribution.** All `infra.*` SMTP-security findings roll into the shared **DNS & Infrastructure** column cell (alongside MX, reverse DNS, TLS transport, MTA-STS, DNSSEC). Cell color = worst severity present: any `infra.open_relay`/`infra.submission_auth_required`/`infra.auth_requires_tls` critical → **dark red**; VRFY/EXPN/banner/no-submission warnings → **amber**; all-clean → **dark green**; probe never run (or egress-blocked) → **light gray**. Info-only (greylisting, pipelining) never turns the cell amber.
+
+**Audit-detail view.** A collapsible "SMTP Server Security" group under the DNS & Infrastructure section, with one sub-group **per host×port** (badge shows `mail.example.com:25`, a `MX`/`Submission` chip, and a TLS chip). Each sub-check renders a row: severity `Badge`, sub-check `label`, observed `detail` (the exact SMTP reply code/line seen, e.g. `RCPT off-domain → 554 5.7.1 (correctly refused)`), the `remediation` line, and a **Copy fix** button (shadcn `Button` + `useCopyToClipboard`) that yields the exact MTA directive.
+
+```
+DNS & Infrastructure ▸ SMTP Server Security                 1 critical · 2 warning
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ mail.example.com : 25   (MX)                              [TLS: STARTTLS ok]    │
+│  ● critical  Open relay        RCPT probe.invalid-audit.test → 250 ACCEPTED     │
+│      Fix: smtpd_relay_restrictions = ... reject_unauth_destination   [Copy fix] │
+│  ○ warning   VRFY disabled     VRFY postmaster → 250 (leaks address)            │
+│  ○ warning   Banner hygiene    220 ... ESMTP Postfix 3.6.4 (Ubuntu)  [Copy fix] │
+│  ○ info      Greylisting       first RCPT → 451 tempfail (retry expected)       │
+├───────────────────────────────────────────────────────────────────────────────┤
+│ mail.example.com : 587  (Submission)                     [TLS: STARTTLS ok]     │
+│  ● ok        AUTH after TLS    AUTH only in post-STARTTLS EHLO ✓                 │
+│  ● ok        Auth required     unauth off-domain RCPT → 530 5.7.0 ✓             │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Per-domain config inputs.** The domain settings drawer exposes a **Submission endpoints** editor (hosts + ports to probe on 587/465, defaulting to MX host names) and a **skip-SMTP-probe** switch (for auditors whose egress blocks 25). An **admin-only** panel exposes: master enable for SMTP probing, connect/command timeouts, the reserved relay-test recipient/sender identities, per-host probe rate limit, and a "relay-test evasion set" toggle. A prominent **safety notice** states the probe never sends `DATA` and only confirms rejection.
+
+**Empty / never-run / loading.** Probe disabled or egress-blocked → an info card "SMTP probing not available from this host — outbound SMTP (25/587/465) appears blocked" with a link explaining the future-round gate. Never-run → gray dashes + "Run audit". Loading → skeleton rows per host×port. Every SMTP-security row carries a muted **⏳ future — needs SMTP probe** chip until the probe subsystem ships.
+
+## 5. Information schema (database schema)
+
+Reference the shared core tables (do NOT redefine): `domains`, `sending_ips`, `dkim_selectors`, `audit_runs`, `findings`. Each SMTP-security finding is written to `findings` with `category='infra'` and `check_id` in the `infra.*` SMTP-security family. Structured per-host observations go in a check-specific result table.
+
+```sql
+-- One row per probed host×port during a single audit run.
+CREATE TABLE smtp_security_results (
+    id                bigserial   PRIMARY KEY,
+    audit_run_id      bigint      NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id         bigint      NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    host              text        NOT NULL,                 -- the MX / submission host probed
+    port              smallint    NOT NULL DEFAULT 25,      -- 25 | 587 | 465
+    role              text        NOT NULL DEFAULT 'mx',    -- 'mx' | 'submission'
+    open_relay        boolean     NOT NULL DEFAULT false,   -- true = accepted off-domain RCPT (critical)
+    vrfy_open         boolean     NOT NULL DEFAULT false,   -- VRFY confirmed an address
+    expn_open         boolean     NOT NULL DEFAULT false,   -- EXPN expanded a list
+    auth_requires_tls boolean     NOT NULL DEFAULT true,    -- false = AUTH advertised pre-STARTTLS
+    submission_auth_required boolean,                       -- 587/465: unauth relay refused (NULL on 25)
+    starttls_offered  boolean     NOT NULL DEFAULT false,
+    starttls_ok       boolean,                              -- handshake succeeded (NULL if not attempted)
+    greylisting       boolean,                              -- observed first-contact tempfail
+    backscatter_risk  boolean     NOT NULL DEFAULT false,   -- accept-then-bounce posture
+    banner            text        NULL,                     -- raw 220 greeting line
+    banner_leaks_version boolean  NOT NULL DEFAULT false,
+    submission_ports  jsonb       NOT NULL DEFAULT '[]',    -- e.g. [{"port":587,"auth":true,"tls":"starttls"}]
+    ehlo_capabilities jsonb       NOT NULL DEFAULT '[]',    -- captured post-STARTTLS capability list
+    relay_probe_reply text        NULL,                     -- exact reply code+text to off-domain RCPT
+    probe_notes       text        NULL,                     -- free-form conversation notes / evasion results
+    probe_ms          integer     NULL,                     -- conversation timing
+    error_code        text        NULL,                     -- ECONNREFUSED | ETIMEDOUT | EGRESS_BLOCKED | NULL
+    worst_severity    text        NOT NULL DEFAULT 'ok',    -- ok|info|warning|critical
+    checked_at        timestamptz NOT NULL DEFAULT now()
+);
+
+-- Fast lookup for the audit-detail view and run-over-run diffing.
+CREATE INDEX smtp_security_results_domain_host_idx ON smtp_security_results (domain_id, host);
+CREATE INDEX smtp_security_results_run_idx         ON smtp_security_results (audit_run_id);
+
+-- Per-domain probe config / submission endpoint declarations.
+CREATE TABLE smtp_probe_config (
+    domain_id        bigint PRIMARY KEY REFERENCES domains(id) ON DELETE CASCADE,
+    submission_hosts jsonb   NOT NULL DEFAULT '[]',  -- [{"host":"smtp.example.com","ports":[587,465]}]
+    skip_smtp_probe  boolean NOT NULL DEFAULT false,
+    updated_at       timestamptz NOT NULL DEFAULT now()
+);
+```
+
+**Mapping onto TODAY's JSON file store** (`~/.email_delivery_hero/`, no DB yet):
+- `smtp_security_results` rows live inside the run file `audits/<domainId>/<auditId>.json` under `checkResults.smtpSecurity[]` — one object per host×port with exactly the columns above (`host`, `port`, `role`, `openRelay`, `vrfyOpen`, `expnOpen`, `authRequiresTls`, `submissionAuthRequired`, `starttlsOffered`, `starttlsOk`, `greylisting`, `backscatterRisk`, `banner`, `bannerLeaksVersion`, `submissionPorts`, `ehloCapabilities`, `relayProbeReply`, `probeNotes`, `probeMs`, `errorCode`, `worstSeverity`, `checkedAt`). `audit_run_id`/`domain_id` are implicit from the file path.
+- The per-finding rows are the same file's top-level `findings[]` array (shared with every other check).
+- `smtp_probe_config` maps to a per-domain block in `domains.json` under `domains[i].config.smtpProbe = { submissionHosts, skipSmtpProbe }`; provider-wide probe toggles (enable, timeouts, reserved probe identities, rate limits) live in `config.yaml` under `infra.smtpProbe`. The store module isolates these shapes so the file→Postgres migration is a single-module change; column names mirror the JSON keys.
+
+## 6. When we run the check
+
+- **On-demand:** part of every manual audit (`POST /api/domains/:id/audit`) as an `infra` check — but only executes when the SMTP-probe subsystem is enabled and outbound SMTP egress is available; otherwise it records `info` "not evaluated".
+- **Periodic:** the in-process scheduler re-runs the engine per domain at the `config.yaml` cadence (default every 6h). SMTP hardening can silently regress (a config reload re-opens relay, a package upgrade resets the banner), so periodic re-probes matter — but because SMTP probing is heavier and abuse-sensitive, it can be pinned to a **longer cadence** (e.g. daily) via config independent of the DNS checks.
+- **First-round vs future:** the **entire check is FUTURE** — it needs an outbound SMTP conversation (internal SMTP client or `swaks`) and port-25/587/465 egress. It renders disabled with a "Future — needs SMTP probe" chip until the probe subsystem lands. It shares the port-25 egress gate with [./mx_routing.mdx](./mx_routing.mdx) (`infra.mx_reachable`/`infra.mx_banner`) and [./tls_transport.mdx](./tls_transport.mdx).
+- **Cost / rate-limit / back-off / safety:** one connection per host per run, ≤ ~12 commands, 5s connect + per-command timeouts, exponential back-off (skip N cycles) after repeated connect failures so we neither hammer a down host nor trip the remote's rate limits — and, critically, so **the auditor's own IP is never mistaken for an abuser**. The relay probe is strictly rejection-confirming (no `DATA` ever), keeping the auditor off blacklists.
+- **Regression detection:** the scheduler diffs each run's `findings`/`smtp_security_results` against the prior run. An `open_relay` flip `false`→`true`, an `auth_requires_tls` flip `true`→`false`, a `vrfy_open`/`expn_open` newly-`true`, or a submission port disappearing is surfaced as a **new problem** alert. Per-host×port rows make the exact regressing endpoint unambiguous.
+
+## 7. First round vs future
+
+Everything here is future (no pure-DNS SMTP-hardening signal exists), but the table records the probe/tool each sub-check needs.
+
+| Sub-check | First round (pure `node:dns/promises`) | Future (probe / external tool) |
+|---|---|---|
+| `infra.open_relay` / `infra.open_relay_variants` | — | ⏳ safe SMTP relay probe (5xx-confirm, no DATA) / `swaks` |
+| `infra.vrfy_disabled` / `infra.expn_disabled` | — | ⏳ SMTP `VRFY`/`EXPN` reply-code probe |
+| `infra.auth_requires_tls` | — | ⏳ EHLO pre/post-STARTTLS capability diff |
+| `infra.submission_ports` / `infra.submission_auth_required` | — | ⏳ 587/465 connect + unauth-relay probe |
+| `infra.no_open_proxy` | — | ⏳ banner/protocol sniff on mail port |
+| `infra.banner_hygiene` | — | ⏳ 220 banner parse (cross-ref reverse_dns) |
+| `infra.helo_required` | — | ⏳ invalid-HELO probe |
+| `infra.greylisting` / `infra.backscatter` | — | ⏳ tempfail + recipient-acceptance heuristic |
+| `infra.pipelining_sanity` / `infra.max_rcpt_limit` | — | ⏳ ordering + bounded-RCPT probe |
+| `infra.tls_required_inbound` / `infra.starttls_downgrade` | — | ⏳ STARTTLS presence + handshake (grade via tls_transport) |
+
+## 8. Acceptance criteria
+
+1. The checker registers under `id = 'infra.smtp_security'`, `label = 'SMTP Server Security'`, discovers hosts from MX ([./mx_routing.mdx](./mx_routing.mdx)) + configured submission endpoints, and probes 25/587/465 per host.
+2. The relay probe issues `MAIL FROM`/`RCPT TO` to the reserved off-domain recipient `probe.invalid-audit.test` and **never sends `DATA`**; a **5xx** reject records `open_relay=false` ("correctly refused"), a **2xx** records `open_relay=true` and emits `infra.open_relay` **critical** with the exact `smtpd_relay_restrictions` remediation.
+3. Relay-evasion forms (percent-hack, bang-path, source-route, quoted) are each tested and any off-domain acceptance emits `infra.open_relay_variants` **critical**.
+4. `VRFY`/`EXPN` that confirm/expand addresses emit `infra.vrfy_disabled`/`infra.expn_disabled` **warning** with the exact `disable_vrfy_command`/`PrivacyOptions` remediation; a `502` is treated as healthy.
+5. `AUTH` advertised in the **pre-STARTTLS** EHLO on any port emits `infra.auth_requires_tls` **critical**; AUTH appearing only post-STARTTLS is `ok`.
+6. Submission is verified on 587/465 with AUTH required; an unauthenticated off-domain relay on 587/465 emits `infra.submission_auth_required` **critical**; missing submission ports emit `infra.submission_ports` **warning**.
+7. A 220 banner containing a software+version string or a generic/IP-literal hostname emits `infra.banner_hygiene` **warning** with the exact `smtpd_banner`/`smtp_banner` remediation.
+8. Advisory sub-checks (`infra.greylisting`, `infra.pipelining_sanity`, `infra.max_rcpt_limit`, `infra.backscatter`, `infra.tls_required_inbound`) emit **info/warning** appropriately and never a false critical.
+9. When outbound SMTP egress is blocked (or probing disabled), every sub-check emits a single `info` "not evaluated — outbound SMTP blocked" finding with `error_code='EGRESS_BLOCKED'`, not a crash or false critical.
+10. Safety invariants hold in code: no `DATA` on relay probes, reserved probe identities only, ≤1 connection/host/run, bounded command count, timeouts, and back-off — verified so the auditor IP cannot be misread as an abuser.
+11. Each probed host×port produces one `smtp_security_results` row (→ `checkResults.smtpSecurity[]` in the run JSON today) with `host`, `port`, `open_relay`, `vrfy_open`, `expn_open`, `auth_requires_tls`, `banner`, `submission_ports`, `probe_notes`, `checked_at` populated; the `(domain_id, host)` index exists.
+12. Every non-ok finding carries a concrete remediation string (exact MTA directive for Postfix/Exim/sendmail/Exchange); the audit-detail UI exposes a Copy-fix button reproducing it verbatim.
+13. Findings roll into the DNS & Infrastructure dashboard cell with correct worst-severity coloring, and the scheduler flags any SMTP-hardening regression (relay opened, AUTH-pre-TLS, VRFY/EXPN opened, submission port lost) as a new problem on the next run.
+
+<!--
+MAINTENANCE NOTES
+- Keep RFC refs current: RFC 5321 (SMTP, relay/VRFY/EXPN §3.5/§7.3), RFC 6409 (submission port 587),
+  RFC 8314 (implicit TLS / submissions 465 / AUTH-after-TLS), RFC 3207 (STARTTLS). Track Backscatterer.org
+  and Spamhaus policy changes for the relay/backscatter sub-checks.
+- SAFETY IS LOAD-BEARING: the relay probe must remain rejection-confirming only — never issue DATA, only the
+  reserved non-routable off-domain recipient/sender, bounded commands, one connection per host per run. Any
+  change here must preserve these invariants or the auditor's own IP will get blacklisted.
+- Keep the infra.* SMTP-security checkId list and severity/weights in sync with ../spam_checks.mdx and
+  ../engineering.mdx. This whole check stays FUTURE until the SMTP-probe subsystem (shared with
+  ./mx_routing.mdx reachability and ./tls_transport.mdx) ships; coordinate the port-25/587/465 egress gate.
+- Cross-links: ./mx_routing.mdx (host discovery), ./tls_transport.mdx (STARTTLS grading), ./reverse_dns.mdx
+  (banner/HELO ↔ PTR, infra.helo_match consumes this probe), ./blacklists.mdx (open relay => listing).
+  Update if those file names change.
+-->

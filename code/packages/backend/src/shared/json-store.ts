@@ -22,6 +22,19 @@ export function readJson<T>(path: string, fallback: T): T {
 
 export function writeJson(path: string, value: unknown): void {
   const tmp = `${path}.tmp`
-  writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8")
-  renameSync(tmp, path)
+  try {
+    writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8")
+    renameSync(tmp, path)
+  } catch (err) {
+    // A failed persist (disk full, permission denied, serialization failure) must never be
+    // swallowed: log it to error.err AND rethrow so the caller and the global exception filter
+    // both see it (pm/errors.mdx §3). Best-effort cleanup of the temp file first.
+    try {
+      if (existsSync(tmp)) renameSync(tmp, `${tmp}.failed`)
+    } catch {
+      /* ignore cleanup failure */
+    }
+    logError(`Failed to write JSON store ${path}`, err, "JsonStore")
+    throw err
+  }
 }

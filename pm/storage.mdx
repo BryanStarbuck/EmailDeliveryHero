@@ -1,0 +1,504 @@
+---
+title: EmailDeliveryHero — Local Storage, Config & Settings
+description: How EmailDeliveryHero persists state on disk — the no-database state root at ~/T/_emaildeliveryhero/, the hierarchical app-level config.yaml (settings), the per-logged-in-user config under users/<email>/config.yaml, the machine-written collection stores (domains.json, audits.json) that hold the domain list and each domain's sync on/off flag, the OpenAuthFederated session store + signing secret, the two log files (log.log + error.err), the browser localStorage conventions (theme mirror + oaf_edh session, never secrets), and the store module that fronts all of it. Works identically on a developer laptop and on a server; the only thing that changes is where the state root resolves and who is logged in.
+---
+
+# EmailDeliveryHero — Local Storage, Config & Settings
+
+This is the spec for how EmailDeliveryHero **stores things on disk**: configuration, per-user
+settings, the monitored-domains list and their sync flags, audit history, the auth session, and
+logs. There is **no database** — runtime state we control lives in small, hierarchical **YAML**
+files (config/settings) and machine-written **JSON** collection files (domains, audits), all under a
+single **state root** outside the repo.
+
+It applies in two deployment modes and is written so the **same code path works in both**:
+
+* **Local mode** — one person runs the app on their own machine (localhost). Usually one user.
+* **Server mode** — the app runs on a shared host and several teammates log in to it.
+
+The only things that change between the two are *where* the state root resolves and *who* is logged
+in. The layout, the file formats, and the read/write code are identical — a state dir made locally
+and one made on a server have the same shape and can be copied between machines.
+
+> **Learned from the house pattern.** The reference internal app (`~/BGit/all/app/`) specifies the
+> same idea in its `pm/local_storage.mdx`: an app-level `config.yaml` plus **per-logged-in-user**
+> config under `users/<email>/config.yaml`, all under one state root, fronted by a typed store
+> layer. EmailDeliveryHero follows that model, adapted to this app's state root
+> (`~/T/_emaildeliveryhero/`), its OpenAuthFederated auth, and its domain/audit collection stores.
+
+Related specs:
+
+* [Engineering](./engineering.mdx) — §7 "On-disk store (no database)" and §8 "Periodic checks"; the
+  NestJS module list and the `store` module this document details.
+* [Settings](./settings.mdx) — the Settings **page**: every field, which are admin-only, and the
+  REST contract. This document is the **storage** side of that page — where each field lands on disk.
+* [Domains](./domains.mdx) — the Monitored Domains CRUD and each domain's per-domain
+  `scheduleEnabled` ("on/off on sync") flag, persisted here in `domains.json`.
+* [Scheduled checks](./scheduled_checks.mdx) — the `schedule:` block of `config.yaml`.
+* [Authentication](./authentication.mdx) — the `oaf_edh` cookie, the out-of-repo credentials file,
+  and why secrets never live in the config store or in browser `localStorage`.
+* [Error handling & logging](./errors.mdx) — the behavior of the two log files this document lays
+  out on disk (`log.log`, `error.err`): the rolling writer, the global exception filter, and how
+  *everything that can go wrong* is captured into `error.err`.
+
+---
+
+## 1. The state root
+
+Everything the app persists lives under a single **state root directory**:
+
+```
+~/T/_emaildeliveryhero/
+```
+
+* Default `~/T/_emaildeliveryhero/`, overridable with the **`EDH_STATE_DIR`** environment variable
+  (server mode points it at a service-owned dir, e.g. `/var/lib/email_delivery_hero`).
+* The directory is created on first use (`mkdirSync(dir, { recursive: true })`, best-effort) — the
+  app never crashes because the folder is missing.
+* This is exactly what the backend already does in `code/packages/backend/src/shared/state-dir.ts`
+  (`resolveStateDir()` / `stateSubdir()`); this document specifies the layout under that root.
+
+### Resolution rule
+
+```
+stateDir =
+  process.env.EDH_STATE_DIR                          // explicit override (server mode)
+  ?? join(os.homedir(), "T", "_emaildeliveryhero")   // default (local mode)
+```
+
+Nothing under the state root is ever committed to the repo — it is the boundary between code and
+runtime data (`~/BGit/Bryan_git/EmailDeliveryHero/CLAUDE.md`).
+
+---
+
+## 2. Directory layout
+
+```
+~/T/_emaildeliveryhero/
+├── config.yaml              # APP-LEVEL settings — install-wide, hierarchical YAML (§3)
+├── domains.json             # the monitored-domains list + each domain's sync on/off flag (§5)
+├── audits.json              # latest audit result keyed by domain id (§6)
+├── .auth_session_secret     # stable HS256 signing secret (auto-created; never in .env) (§7)
+├── users/                   # PER-LOGGED-IN-USER settings, keyed by verified email (§4)
+│   └── <email>/
+│       └── config.yaml      # that user's personal settings (theme, notif prefs, last view)
+├── sessions/                # OpenAuthFederated FileSessionStore records (§7)
+├── log.log                  # INFO/DEBUG/VERBOSE — the normal event trail (§10, errors.mdx)
+└── error.err                # WARN/ERROR/FATAL — the fault trail (§10, errors.mdx)
+```
+
+Three tiers:
+
+* **App-level** (`config.yaml`) — one copy for the whole install; the global, mostly admin-owned
+  settings that drive every scheduled run and every domain's score. In local mode that is "this
+  machine"; in server mode "this server".
+* **User-level** (`users/<email>/config.yaml`) — one folder per person who has ever logged in,
+  created lazily on first write. Personal, cosmetic, per-user preferences.
+* **Machine-written collections & runtime** (`domains.json`, `audits.json`, `sessions/`,
+  `.auth_session_secret`, `log.log`, `error.err`) — not hand-edited; the app owns them.
+
+### Why YAML for config and JSON for collections
+
+The product rule is **"keep everything in `config.yaml` unless the data type makes that a bad fit."**
+
+| Need | Goes in | Why |
+| --- | --- | --- |
+| Settings, preferences, toggles, small key/values | `config.yaml` (app) / `users/<email>/config.yaml` | Human-readable, hot-editable, **hierarchical**. |
+| A keyed/collection record set (domains, latest audits) | `domains.json` / `audits.json` | Machine-written maps/arrays the store rewrites atomically; JSON matches the current code. |
+| Secrets (Google client id/secret) | `~/.credentials/email_delivery_hero.json` **or** env | Never in the state store, never in the repo (§7, [Authentication](./authentication.mdx)). |
+| Append-only logs | `log.log` / `error.err` | Flat append streams; appending to YAML/JSON is wrong. |
+
+---
+
+## 3. App-level `config.yaml` — the settings store (hierarchical)
+
+`~/T/_emaildeliveryhero/config.yaml` is the install-wide settings file that the
+[Settings page](./settings.mdx) reads and writes. It is **default-everything**: the app boots on
+sensible defaults and writes the file only when a value is set, so a fresh install runs with no file
+present. Every value is nested under a top-level group so the tree stays **hierarchical** and one
+concern is one block.
+
+```yaml
+# ~/T/_emaildeliveryhero/config.yaml — app-level settings (install-wide)
+schema_version: 1
+updated_at: 2026-07-01T14:32:15.123Z
+
+# Where the app is reachable (mirrors the ports in Engineering / overview)
+server:
+  frontend_port: 4444        # React 19 + Vite
+  backend_port: 9312         # NestJS REST API under /api
+  mode: local                # local | server
+
+# ── §2 Checks configuration (admin-only) — drives the audit engine ──
+checks:
+  enabled: [spf, dkim, dmarc, blacklists, dns_infra]   # subset of the six categories;
+                                                       # spam_content optional/off by default
+  spf:
+    maxLookups: 10           # RFC 7208 limit before SPF is flagged
+  dkim:
+    defaultSelectors: [google, selector1, selector2, k1]  # fallback when a domain sets none
+  dnsbl:
+    zones:                   # the blocklist zones the Blacklists category queries (ordered)
+      - zen.spamhaus.org
+      - b.barracudacentral.org
+      - bl.spamcop.net
+  thresholds:                # 0–100 audit score → colour
+    green: 90                # score >= green → green
+    amber: 70                # green > score >= amber → amber; below → red
+  weights:                   # points deducted per finding severity (feeds score derivation)
+    critical: 40
+    warning: 15
+    info: 0
+
+# ── §3 Scheduled checks (admin-only) — full model in scheduled_checks.mdx ──
+schedule:
+  enabled: true              # the dashboard on/off toggle (master switch)
+  cadence: daily             # interval | daily | weekly
+  everyHours: 6              # used only when cadence: interval
+  times: ["06:00", "18:00"]  # used by daily/weekly — supports multiple runs per day
+  weekdays: [mon, wed, fri]  # used only when cadence: weekly
+  timezone: America/Los_Angeles   # IANA tz; defaults to system tz
+  domains: all               # "all" | ["<domainId>", …] — subset to include
+  runner: in-process         # in-process | os — which scheduling layer is active
+  os:
+    kind: launchd            # launchd | cron | systemd | schtasks (detected)
+    installed: false         # whether the OS artifact is currently installed
+    label: com.emaildeliveryhero.scheduler
+
+# ── §4 Notifications — SHARED channels here (admin-only); per-user prefs in users/<email>/ ──
+notifications:
+  webhook:                   # admin-only: shared Slack-compatible incoming webhook
+    enabled: false
+    url: ""
+  smtp:                      # admin-only: shared relay used to send notification email (swaks)
+    host: ""
+    port: 587
+    from: "edh@whitehatengineering.com"
+
+# ── §5 Storage & data (admin-only) ──
+storage:
+  retentionDays: 90          # how long to keep audit history before pruning
+
+# ── §6 Tools & environment (admin-only) ──
+tools:
+  preferCli: false           # use dig/swaks instead of node:dns/promises when available
+  resolvers: []              # DNS resolver IPs; [] = system default
+  timeoutMs: 5000            # per-lookup timeout
+
+# ── §7 Access — DISPLAY of the OpenAuthFederated-enforced policy (admin-only) ──
+access:
+  allowedDomains: [whitehatengineering.com, act3ai.com]  # applied on the OAF side, shown here
+
+# ── Defaults applied to every user until their own users/<email>/config.yaml overrides them ──
+defaults:
+  theme: system              # system | light | dark
+  density: comfortable       # comfortable | compact
+  notifications:
+    desktop: true
+    email: false
+    minSeverity: warning     # info | warning | critical
+    mode: immediate          # immediate | daily
+```
+
+Secrets never go here — Google client credentials come from env or the out-of-repo credentials file
+([Authentication](./authentication.mdx) §credentials); the auth signing secret is its own file
+(§7). `config.yaml` holds only non-secret ports, flags, and PM/admin-editable settings.
+
+---
+
+## 4. Per-logged-in-user storage — the per-user requirement
+
+This is the piece that makes storage **based on the current logged-in user**. App-level `config.yaml`
+holds the shared, admin-owned settings; each person's **personal** preferences live in their own file:
+
+```
+~/T/_emaildeliveryhero/users/<email>/config.yaml
+```
+
+* `<email>` is the user's **verified** email from the OpenAuthFederated JWT (the Google Workspace
+  identity — [Authentication](./authentication.mdx)). Because the app is fully SSO-gated, every
+  request carries a trusted, verified email; we never guess it. (The stable `sub` claim is an
+  acceptable alternative key; email is chosen so the tree is human-browsable.)
+* In **server mode** this cleanly separates every teammate's settings on one shared install. In
+  **local mode** there is usually one user, but the same folder is used, so the shape is identical.
+* The folder is created **lazily** on the first write for that user. Reading a user who has no folder
+  yet returns the `defaults` block from the app `config.yaml` — never an error, never a first-run
+  write.
+
+### `users/<email>/config.yaml` shape
+
+```yaml
+# ~/T/_emaildeliveryhero/users/bryan@whitehatengineering.com/config.yaml
+schema_version: 1
+updated_at: 2026-07-01T14:32:15.123Z
+
+# §8 Appearance (per-user, cosmetic)
+ui:
+  theme: dark                # overrides defaults.theme
+  density: compact           # overrides defaults.density
+  last_route: /dashboard     # restore the user where they left off
+
+# §4 Notification preferences (per-user; the SHARED channels stay in app config.yaml)
+notifications:
+  desktop: true
+  email: true
+  minSeverity: warning       # info | warning | critical
+  mode: immediate            # immediate | daily
+
+# Remembered per-table sort/filter, keyed by table id (e.g. the domains table)
+tables:
+  views:
+    domains:
+      sort: { col: domain, dir: asc }
+      filters:
+        scheduleEnabled: { op: eq, value: true }
+```
+
+> **Relationship to [Settings](./settings.mdx).** Settings §4 and §8 describe a per-user block; on
+> disk that block is realized as these `users/<email>/config.yaml` files — one per user — rather than
+> a `users.<sub>` map inside the app config. The Settings REST contract is unchanged: `GET /api/settings`
+> merges `defaults` (app config) with the caller's own `users/<email>/config.yaml`; `PUT /api/settings`
+> writes only the caller's per-user file for all-users/per-user fields, while `PUT /api/settings/admin`
+> writes the admin-only blocks in the app `config.yaml`.
+
+### Email → directory policy
+
+* **Lowercase** the email.
+* Store it **verbatim as the folder name** (`bryan@whitehatengineering.com`) so the tree is
+  human-browsable.
+* **Sanitize defensively:** reject/strip any `/`, `\`, `..`, or NUL before using the value as a path
+  segment. It comes from a trusted JWT, but we never build a path from an unsanitized string.
+
+---
+
+## 5. `domains.json` — the domain list + each domain's sync on/off flag
+
+The monitored-domains list is the source of truth for the [Domains](./domains.mdx) CRUD and persists
+to **`~/T/_emaildeliveryhero/domains.json`** (already implemented in
+`code/packages/backend/src/modules/domains/domains.service.ts`). It is an array of domain records;
+**each record carries its own `scheduleEnabled` flag — this is "what was turned on or off on sync"**
+(whether the domain rides the recurring scheduled checks). The latest per-category status shown in
+the UI is not duplicated here; it is derived at read time from `audits.json` (§6).
+
+```json
+[
+  {
+    "id": "whitehatengineering-com",
+    "domain": "whitehatengineering.com",
+    "label": "Primary marketing domain",
+    "sendingIps": ["203.0.113.10", "203.0.113.11"],
+    "selectors": ["google", "selector1"],
+    "scheduleEnabled": true,
+    "lastAuditId": "2026-07-01T14-03-11-a1b2",
+    "lastAuditedAt": "2026-07-01T14:03:11.204Z"
+  },
+  {
+    "id": "act3ai-com",
+    "domain": "act3ai.com",
+    "label": "Product / transactional",
+    "sendingIps": ["198.51.100.20"],
+    "selectors": ["google"],
+    "scheduleEnabled": false
+  }
+]
+```
+
+* `scheduleEnabled` is toggled per domain in the Domains table/form ([Domains §6](./domains.mdx)); a
+  domain is on the recurring schedule only when the **global** `schedule.enabled` (§3) **and** its own
+  `scheduleEnabled` are both true.
+* Adding/removing a domain, editing its IPs/selectors/label, and flipping its sync toggle all rewrite
+  this file through the store (§8).
+
+---
+
+## 6. `audits.json` — audit history
+
+Audit runs persist under the state root (already implemented in
+`code/packages/backend/src/modules/audit/audit.service.ts`). The current shape is a single JSON map
+of **latest result keyed by domain id**:
+
+```json
+{
+  "whitehatengineering-com": {
+    "id": "2026-07-01T14-03-11-a1b2",
+    "domain": "whitehatengineering.com",
+    "startedAt": "2026-07-01T14:03:10.900Z",
+    "finishedAt": "2026-07-01T14:03:11.204Z",
+    "findings": [
+      { "checkId": "dmarc", "severity": "warning",
+        "title": "DMARC policy is p=none",
+        "detail": "_dmarc.whitehatengineering.com → v=DMARC1; p=none",
+        "remediation": "Strengthen to p=quarantine once reports look clean." }
+    ],
+    "score": 85,
+    "status": "warning"
+  }
+}
+```
+
+* **Retention.** `storage.retentionDays` (§3) governs how much history is kept. When history grows to
+  per-run files (`audits/<domainId>/<auditId>.json`, the fuller model in
+  [Engineering §7](./engineering.mdx)), the store prunes runs older than the retention window; the
+  keyed-latest map above is the first-round shape.
+* **Regression detection** ([Engineering §8](./engineering.mdx)) diffs each new run against the
+  previous one to surface newly-introduced/worsened problems on the [Dashboard](./dashboard.mdx).
+
+---
+
+## 7. Auth session & signing secret (runtime, not settings)
+
+Authentication state also lives under the state root, kept **separate** from settings so it is never
+hand-edited or exported with a config backup:
+
+| File / dir | What it is | Source |
+| --- | --- | --- |
+| `.auth_session_secret` | The stable HS256 signing secret, auto-created on first boot and reused every boot so sessions survive restarts with zero config. **Never** read from `.env`. | `auth-frontend.ts` (`loadOrCreateSecret`) |
+| `sessions/` | The OpenAuthFederated `FileSessionStore` records backing the rotating `oaf_edh` session cookie. | `auth-frontend.ts` (`getAppSessionStore`) |
+
+Google OAuth client credentials are **not** here — they come from env or the out-of-repo
+`~/.credentials/email_delivery_hero.json` ([Authentication](./authentication.mdx)). The rule: the
+state store holds sessions and a signing secret (operational auth state), **never** long-lived
+provider secrets.
+
+---
+
+## 8. The store layer (how code touches disk)
+
+All filesystem access for state goes through a thin **`store` module** so callers never deal with
+paths, parsing, atomic writes, or the local-vs-server difference ([Engineering §7](./engineering.mdx)).
+
+* **Atomic writes.** Serialize → write to `*.tmp` → `fsync` → `rename` over the real file, so a crash
+  mid-write never leaves a half-written `config.yaml`/`domains.json`.
+* **Per-file mutex.** Read-modify-write is serialized per file to avoid concurrent-write corruption
+  (matters in server mode); every write stamps `updated_at`.
+* **Defaults on absence.** Reading a missing file returns the typed defaults and logs nothing —
+  expected first-run absence is **not** an error and must not spam `error.log`.
+* **Schema validation on read.** Files are validated against the record/config schema on load;
+  malformed data is rejected loudly rather than silently trusted.
+* **Two scopes.** App-scoped (`config.yaml`, `domains.json`, `audits.json`) and user-scoped
+  (`users/<email>/config.yaml`, created lazily) — the user-scoped opener is what makes storage
+  per-logged-in-user (§4).
+
+The store is isolated behind an interface so a later move to a real database is a single-module
+change; services never touch the filesystem directly.
+
+---
+
+## 9. Browser `localStorage` conventions (frontend)
+
+The React frontend uses browser `localStorage` **only** as a fast, pre-network cache — the **server**
+(`users/<email>/config.yaml`) is always the source of truth. This mirrors the reference app's
+`theme.ts`, and it is bounded by two hard rules:
+
+* **Never store secrets or long-lived tokens** in `localStorage`
+  ([Authentication](./authentication.mdx) §security). Auth is the `HttpOnly` `oaf_edh` cookie plus a
+  server-side session (§7); the JWT is held in memory by `@auth/react`, not persisted to
+  `localStorage` by app code.
+* **`localStorage` is a mirror, not the record.** On sign-in the app hydrates from
+  `GET /api/settings`; on change it writes through to the server and updates the mirror. Clearing
+  `localStorage` loses nothing but the pre-boot hint.
+
+| Key | Value | Purpose |
+| --- | --- | --- |
+| `edh.theme` | `system` \| `light` \| `dark` | Apply the theme instantly at boot with no flash, before the session/network is ready. Reconciled with `users/<email>/config.yaml → ui.theme` after load. |
+| `oaf_edh…` (library-owned) | OpenAuthFederated session snapshot | Written and owned by `@auth/react`, namespaced with the `oaf_edh` prefix so it never collides with other OAF apps on localhost. App code does not read/write these directly. |
+
+Because per-user truth is server-side, a user gets the **same** settings on any browser they sign in
+from — `localStorage` only accelerates the first paint.
+
+---
+
+## 10. Logging
+
+Logs are two append-only flat files **directly at the state root** (no `logs/` subdirectory),
+implemented in `code/packages/backend/src/shared/logging.ts` +
+`code/packages/backend/src/shared/rolling-file-writer.ts`:
+
+```
+~/T/_emaildeliveryhero/log.log     # INFO/DEBUG/VERBOSE — the normal event trail
+~/T/_emaildeliveryhero/error.err   # WARN/ERROR/FATAL — the fault trail
+```
+
+* One line per event: `[ISO-8601 UTC] [LEVEL] [Context] message`. WARN/ERROR/FATAL are written to
+  **both** files (`error.err` is the complete fault list; `log.log` keeps them inline for context).
+* The log dir defaults to the state root; override with **`EDH_LOG_DIR`** to point logs elsewhere
+  without moving the rest of the state.
+* **Never let logging throw** — a failed write falls back to `stderr` and the request continues.
+* Rotation is **on**: each file is capped (5 MiB) with 5 rotated backups (`log.log.1`…, `error.err.1`…),
+  so neither grows unbounded; expected-absence and 4xx are logged as INFO/WARN, not errors.
+* The full behavior — the global exception filter, process handlers, per-checker capture, and the
+  frontend-error ingest that make *anything that can go wrong* land in `error.err` — is specified in
+  **[Error handling & logging](./errors.mdx)**. This section is only the on-disk (storage) view.
+
+---
+
+## 11. What gets stored — the complete inventory
+
+Everything EmailDeliveryHero persists, and where:
+
+| Data | Location | Tier |
+| --- | --- | --- |
+| Ports / run mode | `config.yaml → server` | app |
+| Enabled check categories, SPF lookup limit, default DKIM selectors | `config.yaml → checks` | app (admin) |
+| DNSBL zones to query | `config.yaml → checks.dnsbl.zones` | app (admin) |
+| Score thresholds & severity weights | `config.yaml → checks.thresholds` / `.weights` | app (admin) |
+| Schedule on/off, cadence, times, weekdays, timezone, domain subset, runner, OS artifact state | `config.yaml → schedule` | app (admin) |
+| Shared notification channels (webhook, SMTP relay) | `config.yaml → notifications` | app (admin) |
+| History retention window | `config.yaml → storage.retentionDays` | app (admin) |
+| DNS resolvers, query timeout, prefer-CLI | `config.yaml → tools` | app (admin) |
+| Allowed Workspace domains (display of OAF policy) | `config.yaml → access.allowedDomains` | app (admin) |
+| Per-user defaults | `config.yaml → defaults` | app |
+| **Theme / density** | `users/<email>/config.yaml → ui` (mirror: `localStorage edh.theme`) | **per-user** |
+| **My notification preferences** (desktop/email/minSeverity/mode) | `users/<email>/config.yaml → notifications` | **per-user** |
+| **Last route + remembered table sort/filter** | `users/<email>/config.yaml → ui.last_route`, `tables.views` | **per-user** |
+| **The monitored-domains list** (domain, IPs, selectors, label) | `domains.json` | collection |
+| **Each domain's sync on/off** (`scheduleEnabled`) | `domains.json[].scheduleEnabled` | collection |
+| Latest audit result per domain (findings, score, status, timestamps) | `audits.json` | collection |
+| Auth session records | `sessions/` | runtime |
+| Auth signing secret | `.auth_session_secret` | runtime |
+| Google client id/secret | `~/.credentials/email_delivery_hero.json` **or** env | out-of-repo secret |
+| Logs | `log.log`, `error.err` | runtime |
+
+---
+
+## 12. Acceptance criteria
+
+Storage is correct when **all** of the following hold:
+
+1. All persisted state lives under a single **state root** (`~/T/_emaildeliveryhero/`, override
+   `EDH_STATE_DIR`), created on first use, never committed to the repo.
+2. App-level settings live in a **hierarchical** `config.yaml` (one nested block per concern:
+   `server`, `checks`, `schedule`, `notifications`, `storage`, `tools`, `access`, `defaults`), which
+   is **default-everything** — a fresh install runs with no file present.
+3. Per-logged-in-user settings live in `users/<email>/config.yaml`, keyed by the **verified** email
+   from the OpenAuthFederated JWT, created **lazily** on first write; reading an unknown user returns
+   the app `defaults` block with no error and no write.
+4. `GET /api/settings` merges `defaults` with the caller's own `users/<email>/config.yaml`;
+   per-user/all-users writes go only to that user's file; admin-only writes go to the app `config.yaml`
+   (`PUT /api/settings/admin`, `403` without `role:admin`).
+5. The **domain list** and **each domain's `scheduleEnabled` (sync on/off)** persist in `domains.json`;
+   a domain is on the recurring schedule only when global `schedule.enabled` **and** the domain's
+   `scheduleEnabled` are both true.
+6. Audit history persists in `audits.json` and is pruned per `storage.retentionDays`.
+7. Auth session records (`sessions/`) and the signing secret (`.auth_session_secret`) live under the
+   state root, separate from settings; **no** provider secret is stored there or in `config.yaml`.
+8. Every read/write goes through the `store` layer: atomic write-temp-then-rename, per-file mutex,
+   defaults on absence, schema validation on read; services never touch the filesystem directly.
+9. The frontend uses `localStorage` only as a **mirror** (`edh.theme`) with the server as the source
+   of truth; **no secret or long-lived token** is ever placed in `localStorage`.
+10. Logs are appended to `log.log` (INFO/DEBUG/VERBOSE) and `error.err` (WARN/ERROR/FATAL) at the
+    state root, size-capped with rotation; logging never throws. Full behavior in [errors.mdx](./errors.mdx).
+11. The layout, formats, and code are **identical** in local and server mode — only the resolved
+    state root and the logged-in user differ; a state dir copies between machines unchanged.
+
+<!--
+  storage.mdx maintenance: keep consistent with engineering.mdx §7/§8 (file store, scheduler),
+  settings.mdx (every setting → a config.yaml/users key), domains.mdx (domains.json + scheduleEnabled),
+  scheduled_checks.mdx (the schedule: block), and authentication.mdx (oaf_edh cookie, out-of-repo
+  credentials, no secrets in localStorage). When a new setting is added, add its key to §3 (app) or §4
+  (per-user), add a row to the §11 inventory, and mark admin-only ones. Reflect the real code paths:
+  resolveStateDir() in shared/state-dir.ts, domains.json in domains.service.ts, audits.json in
+  audit.service.ts, the session store + .auth_session_secret in auth-frontend.ts, log.log/error.err in
+  logging.ts + rolling-file-writer.ts. The error-handling behavior lives in errors.mdx — keep the two in sync.
+  Remember to keep the TOC bullet in overview.mdx.
+-->

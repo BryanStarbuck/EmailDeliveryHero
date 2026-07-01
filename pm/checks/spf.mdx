@@ -1,0 +1,317 @@
+---
+title: EmailDeliveryHero — SPF Check
+description: Engineering specification for the SPF (Sender Policy Framework, RFC 7208) audit — how EmailDeliveryHero fetches and simulates a domain's v=spf1 TXT record, expands the include/a/mx/ptr/exists/redirect graph within the 10-lookup and 2-void limits, validates grammar/macros/CIDR/all-qualifier, confirms declared IPs cover real senders, and prescribes the exact record to publish.
+---
+
+# EmailDeliveryHero — SPF Check
+
+**SPF (Sender Policy Framework, [RFC 7208](https://www.rfc-editor.org/rfc/rfc7208))** is a DNS TXT
+record at a domain's apex that enumerates which hosts may send mail using that domain in the SMTP
+`MAIL FROM` (envelope-from / Return-Path). Receivers evaluate it to decide whether the envelope
+sender is authorized. SPF is also the **SPF half of DMARC alignment**: a broken or over-limit SPF
+record silently drops the domain's DMARC pass rate, and many receivers treat an SPF `PermError` /
+`TempError` as a soft fail — which pushes otherwise-legitimate mail to the spam folder. The single
+most common real-world failure is not "no SPF" but a record that **exceeds the 10-DNS-lookup limit**
+and therefore evaluates to `PermError`.
+
+This check belongs to the **SPF** dashboard category; all sub-check ids use the **`spf`** checkId
+prefix. It is implemented as `spf.checker.ts` (see [Engineering §6.3](../engineering.mdx)).
+
+**Read alongside**
+- [Overview](../overview.mdx) — product charter, personas, port list (4444 UI / 9312 API).
+- [Engineering](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
+- [Spam Checks catalog](../spam_checks.mdx) — §1 SPF is the summary slice this spec expands.
+- [Dashboard](../dashboard.mdx) — how the SPF cell rolls up per domain.
+- [DMARC check](./dmarc.mdx) and [DKIM check](./dkim.mdx) — SPF is one of the two authentication
+  inputs DMARC aligns; `spf.include_alignment` connects the two.
+- [MX routing](./mx_routing.mdx) — the `mx` mechanism resolves the same records that check audits.
+
+---
+
+## 1. What it checks
+
+SPF is defined by **RFC 7208** (obsoletes RFC 4408). A sender publishes one TXT record beginning
+`v=spf1`; a receiver, given the envelope-from domain and the connecting IP, walks the record's
+**mechanisms** (`ip4`, `ip6`, `a`, `mx`, `ptr`, `exists`, `include`, `all`) and **modifiers**
+(`redirect`, `exp`) left-to-right, returning the qualifier of the first matching mechanism: `+`
+pass, `-` fail, `~` softfail, `?` neutral. If evaluation hits a syntax error, more than one
+`v=spf1` record, or more than **10** DNS-querying mechanisms, the result is `PermError`; excessive
+timeouts/void answers yield `TempError` / `PermError`.
+
+**Why receivers care.** SPF `pass` with alignment is one of the two ways to satisfy DMARC (the
+other is aligned DKIM) and one of the 2024 Gmail/Yahoo bulk-sender requirements. `PermError`,
+`softfail`, or `none` all degrade reputation and inbox placement; `+all` makes the domain trivially
+spoofable.
+
+**Common failure modes.** (1) Record grew past 10 lookups as ESPs were added → `PermError`.
+(2) Two `v=spf1` records published (one by the registrar wizard, one by an ESP wizard) → `PermError`,
+SPF ignored entirely. (3) A stale `include:` to a decommissioned vendor produces void lookups.
+(4) `~all`/`?all`/no `all` leaves the domain effectively open. (5) The real sending IP is not
+actually covered by any `ip4`/`ip6`/`include`, so mail fails despite a "valid-looking" record.
+
+---
+
+## 2. Sub-checks
+
+Detection: `resolveTxt(domain)` via `node:dns/promises`, then a **recursive SPF simulator** expands
+the mechanism graph, counting DNS-querying terms and void answers as it goes.
+
+| Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `spf.present` | Exactly one `v=spf1` TXT record exists at the apex. | TXT lookup at `domain`. | **critical:** no `v=spf1` record found. | Publish a TXT record at the apex: `v=spf1 include:_spf.google.com ~all` (swap the include for your ESP). |
+| `spf.single` | Not more than one `v=spf1` record (multiple = hard `PermError`, §4.5). | Count `v=spf1` TXT strings. | **critical:** two or more `v=spf1` records → SPF ignored. | Merge into one record; delete the extra TXT so exactly one `v=spf1` remains. |
+| `spf.lookups` | Resolves within the **10 DNS-lookup limit** (`include`/`a`/`mx`/`ptr`/`exists`/`redirect` count; `ip4`/`ip6`/`all`/`exp` do not), §4.6.4. | Recursively expand and count DNS-querying mechanisms. | **critical:** > 10 → `PermError`; **warning:** 8–10 (near ceiling). | Replace `a`/`mx` with explicit `ip4:`/`ip6:` ranges, drop unused includes, or flatten (`spf.flatten`). |
+| `spf.void` | Not more than **2 void lookups** (mechanisms whose query returns NXDOMAIN/no-answer), §4.6.4. | Track empty/NXDOMAIN answers during expansion. | **critical:** ≥ 2 void; **warning:** exactly 1 (fragile). | Remove `include:`/`a`/`mx` entries pointing at domains with no records (usually a dead vendor). |
+| `spf.all` | Terminal `all` present with a sane qualifier: `-all` (fail) or `~all` (softfail); **never `+all`**. | Parse the last significant token. | **critical:** `+all` (authorizes the entire internet); **warning:** no `all` or `?all` (neutral). | Use `-all` once coverage is confirmed, `~all` during rollout. Remove any `+all`. |
+| `spf.all_terminal` | `all` is the **last** mechanism; nothing meaningful follows it (later mechanisms are unreachable/dead). | Check token position of `all`. | **warning:** mechanisms appear after `all` and never evaluate. | Move `all` to the end; delete or relocate any mechanism placed after it. |
+| `spf.ptr` | The deprecated `ptr` mechanism is not used (§5.5 deprecates it; slow, unreliable). | Scan mechanisms for `ptr`. | **warning:** `ptr` mechanism present. | Delete `ptr`; replace with explicit `ip4:`/`ip6:` or an `include:`. |
+| `spf.syntax` | Record parses against the RFC 7208 ABNF: valid terms, valid CIDR, no stray chars, one qualifier per term. | Tokenize + validate grammar. | **critical:** malformed term / bad CIDR → `PermError`. | Fix the offending term; validate the corrected record before publishing. |
+| `spf.macro` | Any macros (`%{s}`, `%{l}`, `%{d}`, `%{i}`, `%{o}`, `%{h}`, `%{v}`, delimiter/reverse/truncation forms) are well-formed; unknown macro letters rejected. | Parse `%{...}` sequences per §7. | **critical:** invalid macro letter/format → `PermError`; **warning:** unusual macro that may not evaluate as intended. | Correct the macro to a valid letter/modifier, or remove it if not needed. |
+| `spf.redirect` | `redirect=` modifier sanity: used only without a terminal `all`, target resolves to a valid `v=spf1`, no `redirect`+`all` conflict, lookups counted. | Resolve the redirect target and validate. | **critical:** `redirect` target has no SPF record → `PermError`; **warning:** both `redirect` and `all` present (`all` wins, `redirect` ignored). | Point `redirect=` at a domain that publishes a valid `v=spf1`, and remove `all` from the redirecting record. |
+| `spf.exp` | `exp=` explanation modifier (if present) targets a resolvable TXT; not counted toward the 10-lookup limit but must resolve when triggered. | Resolve `exp` target TXT. | **warning:** `exp=` target missing/unresolvable. | Publish the explanation TXT the `exp=` macro points at, or drop the `exp=` modifier. |
+| `spf.length` | No single TXT string exceeds 255 chars; the full record fits DNS message limits without pathological fragmentation. | Inspect each TXT chunk length + total. | **warning:** a chunk > 255 chars, or a very long record risking UDP truncation/`TempError`. | Split into correct 255-char strings (`"chunk1" "chunk2"`), or shorten via flattening. |
+| `spf.dns_type` | Record is published as **TXT**, not the obsolete DNS **SPF type-99** RR (§3.1 dropped SPF-type records). | Note if only a type-99 record answers. | **warning:** SPF published only as a type-99 SPF record (ignored by modern receivers). | Republish the policy as a `TXT` record; the SPF (type 99) RR is obsolete and can be removed. |
+| `spf.dup_mechanisms` | No duplicate/redundant mechanisms (same `ip4:`/`include:` repeated) wasting lookups or signalling copy-paste rot. | Deduplicate the expanded mechanism list. | **warning:** duplicate `include:`/`ip4:` entries. | Remove the redundant duplicates; each network/vendor should appear once. |
+| `spf.include_resolves` | Every `include:` target itself publishes a valid, single `v=spf1` (nested `PermError` propagates upward). | Recurse into each include and re-run `present`/`single`/`syntax`. | **critical:** an include resolves to a broken/absent SPF → parent `PermError`. | Fix or remove the failing include; contact the ESP if their `_spf.<vendor>` record is broken. |
+| `spf.recursion_depth` | Include/redirect nesting stays within a sane depth and has no cycles (an include loop is a `PermError`). | Track visited domains; detect cycles + max depth. | **critical:** include/redirect loop or excessive nesting. | Break the cycle; restructure so includes do not reference each other circularly. |
+| `spf.cidr_scope` | Declared `ip4`/`ip6` ranges are not absurdly broad (`ip4:0.0.0.0/0`, `ip6:::/0`, huge `/8`s). | Compute prefix size per range. | **critical:** `0.0.0.0/0`-style range (equivalent to `+all`); **warning:** an unexpectedly large block. | Narrow the CIDR to the actual sending ranges; never authorize a `/0`. |
+| `spf.ip_coverage` | The declared `ip4`/`ip6`/`include` set actually covers the real sending IPs from `ctx.sendingIps`. | Test each `sendingIps` entry against the expanded pass-set. | **critical:** a known sending IP is not covered → that mail fails SPF. | Add the missing IP/range: `ip4:203.0.113.10` (or the ESP `include:`) before `all`. |
+| `spf.include_alignment` | The SPF-authenticated (envelope-from) domain aligns with the visible `From:` domain for DMARC (relaxed = org-domain match; strict = exact). | Compare envelope-from org-domain vs `From:` org-domain. | **warning:** SPF authenticates a bounce/ESP domain that does not align with `From:` → SPF contributes nothing to DMARC. | Send with a Return-Path in (a subdomain of) the `From:` org-domain, e.g. `bounces.<domain>`, so SPF aligns. |
+| `spf.deprecated_terms` | Flags deprecated/discouraged constructs beyond `ptr` (bare `a`/`mx` without a domain when the apex is heavy, unnecessary `exists` macros). | Heuristic scan of term types. | **info/warning:** deprecated or lookup-costly construct. | Replace with explicit IP ranges where practical to cut lookups and fragility. |
+| `spf.ttl` | Record TTL is reasonable (not so long that fixes propagate slowly, not near-zero thrashing resolvers). | Read TTL from the DNS answer. | **info:** TTL > 24h (slow to fix) or < 300s (excessive churn). | Set the SPF TXT TTL to ~1h (3600s) so corrections propagate promptly without thrashing. |
+| `spf.flatten` *(advisory)* | Flags records that would benefit from flattening (many nested includes with volatile upstreams, near the limit). | Heuristic on lookup count + include depth + upstream volatility. | **info:** record is fragile / near the 10-lookup ceiling. | Adopt TTL-aware SPF flattening — **manual** first round; an **automated flattening service** is a future enhancement. |
+
+> **First-round note:** every SPF sub-check above is **pure `node:dns/promises`** and ships first
+> round, *except* `spf.flatten` **automation** (rewriting includes into pinned `ip4`/`ip6` sets on a
+> schedule), which needs a maintenance job / third-party API and is future. `spf.include_alignment`
+> and `spf.ip_coverage` use only DNS plus the domain's configured `sendingIps`.
+
+---
+
+## 3. How it is measured
+
+**Fetch.** `resolveTxt(domain)` returns an array of string-chunk arrays; each entry is joined
+(concatenating the 255-char chunks) and filtered to those starting `v=spf1` (case-insensitive on the
+`v=spf1` token per §4.5, but the version tag itself is compared exactly). Zero matches → `spf.present`
+critical. Two or more → `spf.single` critical (and evaluation stops; a multi-record domain has no
+usable SPF).
+
+**Tokenize + parse.** The single record is split on whitespace into terms. Each term is matched
+against the RFC 7208 ABNF: optional qualifier (`+`/`-`/`~`/`?`, default `+`), a mechanism name, and
+an optional value (domain-spec or CIDR). CIDR prefixes are range-checked (`ip4` 0–32, `ip6` 0–128).
+Macros inside domain-specs are parsed per §7. Any parse failure → `spf.syntax` / `spf.macro`
+critical.
+
+**Simulate + count (the core algorithm).** A recursive walker expands the mechanism graph:
+
+- Maintain `lookupCount`, `voidCount`, a `visited` set (domain+mechanism, for cycle detection), and
+  an accumulated **pass-set** of concrete `ip4`/`ip6` CIDRs.
+- `include:X` and `redirect=X` → `resolveTxt(X)`, recurse; each is **+1 lookup**.
+- `a`/`a:X` → `resolve4`/`resolve6`; `mx`/`mx:X` → `resolveMx` then resolve each host; each is
+  **+1 lookup** (RFC caps MX-expanded hosts at 10). `exists:X` → `resolve4(X)`, **+1 lookup**.
+- `ip4`/`ip6` add to the pass-set with **no** lookup. `all` and `exp` cost **no** lookup.
+- A query returning **NXDOMAIN or no answer** increments `voidCount`.
+- Abort with `PermError` if `lookupCount` exceeds **10** or `voidCount` exceeds **2**, or a cycle is
+  detected.
+
+**Map to severities.** `lookupCount > 10` → `spf.lookups` critical; `8–10` → warning. `voidCount ≥ 2`
+→ `spf.void` critical; `= 1` → warning. Terminal `all` = `+all` → `spf.all` critical; `?all`/absent →
+warning; `-all`/`~all` → ok. For `spf.ip_coverage`, each `ctx.sendingIps` entry is tested for
+membership in the pass-set — any miss is critical with the exact IP quoted and the exact `ip4:`/
+`ip6:` line to add. `spf.include_alignment` derives the org-domain (registrable domain via the public
+suffix list) of both the envelope-from and the `From:` and compares under relaxed/strict alignment.
+
+**Edge cases.** Case-insensitive mechanism names; `+`/implicit qualifier equivalence; CNAME chains
+under the SPF name (resolver follows them, still one lookup); multi-string TXT concatenation without
+inserted spaces; a record that is `v=spf1` with **no** mechanisms and no `all` (neutral for
+everything); dual A/AAAA where only IPv4 is covered. **Caching / rate-limits:** the resolver's cache
+plus each checker's own per-run memo (`visited`) prevents re-querying the same include twice within a
+run; a future `dig +trace` (Homebrew) fallback can bypass stale resolver caches for verification.
+
+---
+
+## 4. User interface
+
+SPF surfaces in the app through the **SPF dashboard column** and the **audit-detail view**, on the
+React 19 + Vite + Tailwind + shadcn/ui + lucide-react stack.
+
+**Dashboard cell.** One SPF status cell per domain in the six-column [Dashboard](../dashboard.mdx).
+Its color = the **worst severity** among all `spf.*` findings for the latest audit: dark green
+(all ok), amber (worst = warning), dark red (any critical), light gray (never run). Hovering shows a
+`Tooltip` (shadcn) summarizing e.g. "SPF PermError — 12/10 lookups". `info`-only findings
+(`spf.flatten`, `spf.ttl`) never turn the cell amber.
+
+**Audit-detail view.** Findings render as a shadcn `Accordion`/`Card` group titled **SPF**, one row
+per non-ok finding:
+
+```
+┌─ SPF ────────────────────────────────── [ CRITICAL ] ─┐
+│ spf.lookups   ⛔  Too many DNS lookups (12 > 10)       │
+│   Observed : include:_spf.google.com, include:sendgrid.net, mx, a … 12 lookups
+│   Fix      : Replace `a`,`mx` with ip4:203.0.113.0/24;   [ Copy fix ]
+│             drop include:old-vendor.com                  │
+├───────────────────────────────────────── [ WARNING ] ─┤
+│ spf.all       ⚠  Softfail only (~all)                   │
+│   Fix      : Switch ~all → -all once coverage confirmed  [ Copy fix ]
+└──────────────────────────────────────────────────────┘
+```
+
+Each row: severity `Badge` (lucide `ShieldAlert`/`ShieldCheck`), the `title`, the observed `detail`
+(the raw record + parsed mechanism list), the `remediation`, and a **Copy fix** button
+(`navigator.clipboard`) that copies the exact record/line to publish. An **"Expanded include tree"**
+disclosure renders the recursive lookup graph (indented list, each node showing its lookup cost and
+void status) so the operator sees precisely which include blew the budget.
+
+**Per-domain config inputs.** On the domain detail page, SPF reads `sendingIps` (managed on the
+Domains page) for `spf.ip_coverage`, and the `From:`/envelope-from org-domain for
+`spf.include_alignment`. No SPF-specific selectors are required (unlike DKIM). **Empty/never-run:**
+light-gray cell with "Run audit" CTA; **loading:** skeleton row; **all-ok:** a single green
+"SPF valid — `-all`, 4/10 lookups" summary line. **Admin-only settings** (Settings → Admin): the
+lookup warning threshold (default 8) and whether `spf.ttl` info findings are shown.
+
+---
+
+## 5. Information schema (database schema)
+
+SPF extends the **shared core tables** (owned by engineering — do not redefine): `domains`,
+`sending_ips`, `audit_runs`, and `findings`. Each SPF sub-check emits a row into the shared
+`findings` table (`category='spf'`, `check_id='spf.lookups'`, etc.). SPF adds one **result table** for
+the parsed structured observation, plus one **child table** for the expanded include tree.
+
+```sql
+-- One row per audit run: the parsed SPF observation for a domain.
+CREATE TABLE spf_check_results (
+  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  audit_run_id  BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+  domain_id     BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+  raw_record    TEXT,                 -- the exact v=spf1 string as served (NULL if absent)
+  record_count  INT     NOT NULL,     -- number of v=spf1 TXT records found (0, 1, 2+)
+  mechanisms    JSONB   NOT NULL,     -- parsed [{qualifier,type,value,cidr,lookup:bool,void:bool}]
+  lookup_count  INT     NOT NULL,     -- total DNS-querying mechanisms after recursion
+  void_count    INT     NOT NULL,     -- NXDOMAIN/empty answers seen during expansion
+  all_qualifier TEXT,                 -- '-all' | '~all' | '?all' | '+all' | NULL (none)
+  has_redirect  BOOLEAN NOT NULL DEFAULT FALSE,
+  byte_length   INT     NOT NULL,     -- total record length in bytes (for spf.length)
+  ttl_seconds   INT,                  -- TTL of the SPF TXT answer
+  eval_result   TEXT,                 -- 'pass-set-built' | 'permerror' | 'temperror' | 'none'
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (audit_run_id, domain_id)
+);
+CREATE INDEX idx_spf_results_domain ON spf_check_results(domain_id, created_at DESC);
+
+-- The recursively expanded include/a/mx/redirect graph, one row per resolved node.
+CREATE TABLE spf_include_tree (
+  id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  spf_result_id  BIGINT NOT NULL REFERENCES spf_check_results(id) ON DELETE CASCADE,
+  parent_id      BIGINT REFERENCES spf_include_tree(id) ON DELETE CASCADE,  -- NULL = apex record
+  depth          INT    NOT NULL,     -- nesting depth (0 = apex)
+  term           TEXT   NOT NULL,     -- e.g. 'include:_spf.google.com'
+  resolved_to    JSONB,               -- IPs/records this node resolved to
+  cost_lookups   INT    NOT NULL,     -- lookups this node contributed (0 or 1)
+  is_void        BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_spf_tree_result ON spf_include_tree(spf_result_id, depth);
+```
+
+**Mapping to today's JSON file store.** There is no database yet (see
+[Engineering §7](../engineering.mdx)). Today each audit run is a single file
+`~/.email_delivery_hero/audits/<domainId>/<auditId>.json`. The `findings[]` array in that file holds
+the SPF findings (the future `findings` table). The `spf_check_results` row and its
+`spf_include_tree` children live inside that same file under a per-check `results.spf` object:
+
+```jsonc
+// audits/<domainId>/<auditId>.json  →  results.spf
+{
+  "rawRecord": "v=spf1 include:_spf.google.com include:sendgrid.net mx a ~all",
+  "recordCount": 1, "lookupCount": 12, "voidCount": 1,
+  "allQualifier": "~all", "hasRedirect": false, "byteLength": 71, "ttlSeconds": 3600,
+  "evalResult": "permerror",
+  "mechanisms": [ { "qualifier": "+", "type": "include", "value": "_spf.google.com", "lookup": true, "void": false }, /* … */ ],
+  "includeTree": [ { "depth": 0, "term": "v=spf1", "costLookups": 0, "children": [ /* … */ ] } ]
+}
+```
+
+The `store` module is the only code that reads/writes this shape, so promoting `results.spf` into
+`spf_check_results` + `spf_include_tree` is a single-module change; the `UNIQUE(audit_run_id,
+domain_id)` maps to "one `results.spf` object per audit file".
+
+---
+
+## 6. When we run the check
+
+- **On-demand:** every manual audit (`POST /api/domains/:id/audit`) and the "run now"
+  (`POST /api/scheduler/run`) runs `spf.checker.ts` in full. It is a first-round checker, so it
+  always runs — no feature gate.
+- **Periodic:** the in-process scheduler re-runs the full engine per domain on the `config.yaml`
+  cadence (default every 6h). SPF is cheap (a handful of DNS queries), so it runs on every tick with
+  no throttling.
+- **First-round vs future:** all sub-checks are first-round pure DNS **except** `spf.flatten`
+  automation (future maintenance job). No probe, external tool, paid feed, or provider API is needed
+  for the audit itself.
+- **Cost / rate-limits / back-off:** worst case a record touches ~10–30 DNS queries (bounded by the
+  10-lookup rule plus MX host expansion). The per-run `visited` memo prevents duplicate queries;
+  transient resolver failures are retried once, then reported as a `TempError`-flavored warning
+  rather than a false critical. No third-party rate limits apply.
+- **Regression detection:** each run's SPF findings are diffed against the previous run
+  (Engineering §8). A newly-appearing or worsened SPF finding — e.g. lookups crossing 10, a new
+  second `v=spf1`, `-all` weakened to `~all`, or a sending IP falling out of coverage — is flagged as
+  a **new problem** on the Dashboard.
+
+---
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises`) | Future (probe / tool / feed / API) |
+| --- | --- | --- |
+| `spf.present`, `spf.single`, `spf.syntax`, `spf.macro` | ✅ TXT lookup + parse | — |
+| `spf.lookups`, `spf.void`, `spf.recursion_depth`, `spf.include_resolves` | ✅ recursive DNS expansion | — |
+| `spf.all`, `spf.all_terminal`, `spf.ptr`, `spf.dup_mechanisms`, `spf.deprecated_terms` | ✅ token analysis | — |
+| `spf.redirect`, `spf.exp`, `spf.length`, `spf.dns_type`, `spf.ttl`, `spf.cidr_scope` | ✅ DNS + record inspection | — |
+| `spf.ip_coverage`, `spf.include_alignment` | ✅ DNS + configured `sendingIps`/`From:` | — |
+| `spf.flatten` (advisory flag) | ✅ heuristic on lookup count/depth | — |
+| `spf.flatten` (**automation**: rewrite includes → pinned `ip4`/`ip6`, keep in sync) | — | ⏳ maintenance job / 3rd-party flattening API; `dig +trace` cache-bust verification |
+
+---
+
+## 8. Acceptance criteria
+
+1. A domain with **no** `v=spf1` TXT yields exactly one `spf.present` **critical** finding whose
+   remediation is a publishable `v=spf1 … ~all` record at the apex.
+2. A domain with **two** `v=spf1` records yields `spf.single` **critical** and the checker does not
+   emit false mechanism findings (SPF treated as unusable).
+3. A record whose recursive expansion needs **> 10** DNS lookups yields `spf.lookups` **critical**
+   with the exact lookup count; **8–10** yields **warning**. `ip4`/`ip6`/`all`/`exp` do **not** count.
+4. **≥ 2** void (NXDOMAIN/empty) lookups yields `spf.void` **critical**; exactly 1 yields warning.
+5. Terminal `+all` yields `spf.all` **critical**; `?all` or a missing `all` yields **warning**;
+   `-all`/`~all` yields **ok**.
+6. A `ptr` mechanism yields `spf.ptr` **warning** with a concrete replacement.
+7. Malformed terms, bad CIDR prefixes, and invalid macros each yield `spf.syntax`/`spf.macro`
+   **critical**; a valid record with macros parses without error.
+8. `spf.ip_coverage` marks **critical** any `ctx.sendingIps` entry not covered by the expanded
+   pass-set, quoting the IP and the exact `ip4:`/`ip6:` line to add.
+9. `spf.include_alignment` warns when the SPF-authenticated (envelope-from) org-domain does not align
+   with the visible `From:` org-domain.
+10. Include cycles and excessive nesting are detected (`spf.recursion_depth` critical) without
+    infinite recursion; each include is queried at most once per run.
+11. Every non-`ok` SPF finding carries a **concrete** remediation string (exact record/line/step),
+    never a generic "check your DNS".
+12. The parsed observation (`raw_record`, `mechanisms`, `lookup_count`, `void_count`,
+    `all_qualifier`, `record_count`, `byte_length`, include tree) is persisted to `results.spf` in
+    the audit JSON today and maps cleanly onto `spf_check_results` + `spf_include_tree`.
+13. The SPF dashboard cell color equals the worst SPF severity; `info`-only findings
+    (`spf.flatten`, `spf.ttl`) never turn it amber.
+14. The scheduler re-runs SPF each cadence and flags any newly-appearing or worsened SPF finding as a
+    new problem.
+
+<!--
+  Maintenance notes:
+  - Keep RFC references current: SPF = RFC 7208 (10-lookup limit §4.6.4; 2 void limit §4.6.4;
+    multiple-record PermError §4.5; ptr deprecation §5.5; macros §7; SPF type-99 RR dropped §3.1).
+  - SPF is the SPF half of DMARC alignment — keep spf.include_alignment in sync with ./dmarc.mdx and
+    the content.from_alignment sub-check in ../spam_checks.mdx.
+  - Keep this file's sub-check list and checkId prefix (spf) in sync with ../spam_checks.mdx §1 and
+    the checker table in ../engineering.mdx §6.3.
+  - If/when spf.flatten automation ships, move it from the "future" column and note the external
+    dependency in ../engineering.mdx.
+-->

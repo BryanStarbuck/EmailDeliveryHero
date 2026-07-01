@@ -5,8 +5,12 @@ import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 import { AuthBridge } from "@/api/AuthBridge"
 import { queryClient } from "@/api/queryClient"
+import { installGlobalErrorHandlers } from "@/lib/logger"
 import { router } from "@/router"
 import "@/index.css"
+
+// Forward uncaught errors / unhandled rejections to the backend fault trail (pm/errors.mdx §3).
+installGlobalErrorHandlers()
 
 const env = import.meta.env
 

@@ -1,0 +1,281 @@
+---
+title: EmailDeliveryHero — Message content spam scoring
+description: SpamAssassin-style content analysis for EmailDeliveryHero — scores a user-supplied sample message (headers + body) through the Homebrew spamassassin/spamc engine (default threshold 5.0, inbox-safe target 0–2), reports every rule that fired, and maps subject, MIME, HTML-hygiene, header-sanity, attachment, and encoding signals to concrete fixes.
+---
+
+# Message content spam scoring
+
+This check scores a **sample message** — the raw RFC 5322 source (headers + body) of a real,
+representative email the user actually sends from a domain — the same way a receiving mail server's
+content filter does. Authentication (SPF/DKIM/DMARC) and infrastructure can all be perfect and mail
+can still land in spam because the **message itself** looks spammy: an ALL-CAPS subject, HTML with no
+plain-text alternative, hidden white-on-white text, a base64-obfuscated body, trigger phrases, or a
+macro-laden attachment. Content scoring surfaces exactly which rules fire and what each costs, so the
+sender can rewrite the message before a campaign goes out.
+
+This belongs to the **Spam & Content** dashboard category; all sub-checks use the **`content`**
+`checkId` prefix, scoring sub-family. Because scoring requires a message sample **and** an external
+tool (Homebrew `spamassassin`/`spamc`), this whole check is a **future-round** addition — it is not
+pure `node:dns/promises` and cannot run without user-supplied input.
+
+Read alongside — do not duplicate:
+
+* [Spam & Content catalog](../spam_checks.mdx) — category §6, where `content.spamassassin` is seeded.
+* [Engineering](../engineering.mdx) — the `Checker`/`Finding` contract (§6), file store (§7), scheduler (§8).
+* [Dashboard](../dashboard.mdx) — how the Spam & Content cell is colored and rolled up.
+* [Scheduled checks](../scheduled_checks.mdx) — cadence + per-OS scheduling for re-scoring.
+* Peers: [./list_unsubscribe.mdx](./list_unsubscribe.mdx) (bulk-mail headers), [./link_url_reputation.mdx](./link_url_reputation.mdx) (link/URI reputation), [./inbox_placement.mdx](./inbox_placement.mdx) (seed-list placement), [./bimi.mdx](./bimi.mdx) (brand indicators).
+
+## 1. What it checks
+
+Content scoring runs the sample message through **SpamAssassin** — the de-facto open-source content
+classifier (a superset of the rule engine most self-hosted and many commercial filters derive from).
+SpamAssassin evaluates hundreds of **rules** (regex body/header tests, MIME-structure tests, Bayes,
+URIBL/network tests) and sums their weights into a **total score**. The canonical **spam threshold is
+5.0**: at or above it a message is tagged spam. Real inboxes are far less forgiving than that
+default, so EmailDeliveryHero treats **0–2 as safe**, **2–5 as a warning**, and **≥ 5 as critical**.
+
+There is no single RFC for "spam content," but the pieces it inspects are governed by standards:
+message format **RFC 5322** (headers, `Message-ID`, `Date`), MIME **RFC 2045–2049** (multipart,
+boundaries, `Content-Transfer-Encoding`), and the **2024 Gmail/Yahoo bulk-sender requirements** that
+pushed content hygiene (valid MIME, a text part, honest subjects, working unsubscribe) from
+"nice-to-have" to gating. Receivers care because content signals are the last discriminator after
+authentication: two authenticated senders with identical SPF/DKIM/DMARC are separated by how much
+their messages *look* like the spam corpus.
+
+The common real-world failure mode is a **marketing template**: an HTML-only email exported from a
+design tool, one big background image, a handful of trigger words ("FREE", "ACT NOW", "100%
+guaranteed"), a subject in ALL-CAPS with three exclamation points, no `text/plain` part, and a
+tracking link on a shortener. Each of those is individually survivable; together they push the score
+past 5 and the message is filtered even though the domain authenticates perfectly — which is why this
+check reports **each rule that fired with its individual score**, not just the total.
+
+## 2. Sub-checks
+
+Each sub-check maps to a SpamAssassin rule family where possible; scores below use SpamAssassin's
+default-ruleset ballpark and are illustrative (the runner reports the actual fired scores).
+
+| Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `content.spamassassin_score` | The message's **total** SpamAssassin score is below threshold; the full list of fired rules is reported. | `spamc`/`spamassassin -t` on the raw message; parse the score line + `X-Spam-Report`. | **critical:** total ≥ 5.0; **warning:** 2.0–5.0. | Address the highest-scoring fired rules first (each row below); re-score until total < 2.0. |
+| `content.subject` | Subject avoids spam signals: not ALL-CAPS, no excessive `!!!`, no misleading `RE:`/`FWD:` on a first-contact mail, no emoji stuffing. | SpamAssassin subject rules (`SUBJ_ALL_CAPS`, `SUBJECT_EXCESS_EXCLAIM`, `FAKE_REPLY_*`, `SUBJ_HAS_UNIQ_ID`) + heuristic. | **warning:** ALL-CAPS or ≥ 3 `!` or fake `RE:`; emoji-stuffed subject. | Use a concise honest subject in sentence case; ≤ 1 `!`; no `RE:`/`FWD:` unless a real thread; ≤ 1 emoji. |
+| `content.image_text_ratio` | Message is not image-heavy with little text (images should be < ~40% of body). | Parse MIME; sum image-part bytes vs text bytes; SpamAssassin `MIME_HTML_ONLY`, `HTML_IMAGE_ONLY_*`, `HTML_IMAGE_RATIO_*`. | **warning:** text-to-image ratio very low / image-only mail. | Add real body copy; keep images < 40% of body; never ship an image-only email — every image needs `alt` text and surrounding text. |
+| `content.multipart` | A `text/plain` alternative exists alongside `text/html` (`multipart/alternative`). | MIME tree walk; SpamAssassin `MIME_HTML_ONLY`, `MPART_ALT_DIFF`. | **warning:** HTML-only (no plain-text part) or the two parts differ wildly. | Send `multipart/alternative` with a genuine plain-text version that matches the HTML content. |
+| `content.mime_valid` | MIME is well-formed: matched boundaries, declared vs actual `Content-Type`, no truncated parts, correct charset. | MIME parse + SpamAssassin `MIME_BAD_BOUNDARY`, `MIME_QP_LONG_LINE`, `MISSING_MIME_HB_SEP`. | **critical:** broken/duplicate boundary or unparseable MIME; **warning:** mismatched declared charset. | Regenerate the message with a correct MIME library; ensure each part's boundary opens and closes and `Content-Type` matches the bytes. |
+| `content.spammy_phrases` | Body avoids trigger phrases, "gappy"/spaced-out text, and obfuscation designed to dodge filters. | SpamAssassin body rules (`FREE_*`, `GAPPY_SUBJECT`, `OBFUSCATING_COMMENT`, `URG_BIZ`, money/pharma rulesets). | **warning:** several trigger phrases; **critical:** heavy obfuscation (`V I A G R A`, HTML comment gaps). | Remove or rewrite the cited phrases; never space-out or HTML-comment-break words to evade filters — that itself scores. |
+| `content.header_sanity` | A valid `Message-ID` is present, `Date` is sane (not far future/past), and there are no forged or duplicated headers. | Header parse; SpamAssassin `MISSING_MID`, `INVALID_DATE`, `INVALID_MSGID`, `DUP_*`, `FORGED_*`. | **critical:** missing/invalid `Message-ID` or forged `From`/`Received`; **warning:** skewed `Date` or duplicate header. | Have the sending MTA generate a unique `Message-ID` and a correct RFC 5322 `Date`; remove hand-injected or duplicated headers. |
+| `content.attachment_risk` | No risky attachment types (executables, macro-enabled Office docs, script/archive payloads). | MIME part scan by filename/extension/`Content-Type`; SpamAssassin `MICROSOFT_EXECUTABLE`, `SUSPICIOUS_ATTACHMENT`. | **critical:** `.exe`/`.js`/`.scr`/macro `.docm`/`.xlsm` attached; **warning:** password-protected archive. | Do not attach executables or macro docs to bulk mail; link to a scanned download instead; use `.pdf`/`.docx` without macros. |
+| `content.html_hygiene` | HTML has no hidden text, no tiny/zero-size fonts, no white-on-white, no spammy inline CSS or off-screen positioning. | HTML/CSS parse; SpamAssassin `HTML_FONT_LOW_CONTRAST`, `HTML_FONT_SIZE_TINY`, `HTML_TINY_FONT`, `HIDDEN_TEXT`. | **critical:** hidden/invisible text; **warning:** tiny fonts or low-contrast filler. | Delete hidden/keyword-stuffing text; use readable font sizes (≥ 12px) and adequate contrast; keep inline CSS minimal and legitimate. |
+| `content.encoding` | Body is not needlessly base64/quoted-printable encoded to hide content from filters. | Read `Content-Transfer-Encoding` per part vs content; SpamAssassin `MIME_BASE64_TEXT`, `MIME_QP_...`. | **warning:** plain-text/HTML gratuitously base64-encoded. | Send ASCII/UTF-8 text as `7bit`/`8bit` or quoted-printable; reserve base64 for genuine binary parts (images/attachments). |
+| `content.charset` *(advisory)* | Declared charset matches the bytes; no mismatched/obscure charset used to smuggle content. | SpamAssassin `CHARSET_FARAWAY`, `UNWANTED_LANGUAGE_BODY`. | **info/warning:** declared charset differs from the audience's language. | Declare `UTF-8` and encode the body as UTF-8; do not declare a foreign/obscure charset. |
+| `content.bayes` *(advisory)* | The Bayesian classifier score, when trained, is low (`BAYES_00`..`BAYES_99`). | SpamAssassin Bayes rule fired in the report (untrained by default → skip). | **info:** `BAYES_99` on a trained corpus. | Rewrite content until Bayes drops; retrain the local corpus with known-good mail if scores are miscalibrated. |
+| `content.short_body` *(advisory)* | The message is not a tiny body wrapped around a single link/image (classic thin-content spam). | Body-length + link-density heuristic; SpamAssassin `BODY_SINGLE_WORD`, `TVD_SPACE_RATIO`. | **info/warning:** near-empty body with one link. | Include meaningful body copy; do not send one-line "click here" emails. |
+
+## 3. How it is measured
+
+The checker is a `Checker` implementation whose `run(ctx)` is a no-op unless a **sample message**
+exists for `ctx.domain` (see §5). When one does:
+
+1. **Locate the sample.** Read the stored raw message (`.eml`) for the domain from the file store
+   (`content_sample_messages`). If none exists, emit a single `info` finding "No sample message
+   uploaded" with remediation "Upload a representative `.eml` for this domain" and return — the
+   category cell shows an advisory, not a failure.
+2. **Invoke the engine.** Shell to Homebrew SpamAssassin. Preferred: pipe the raw message to
+   `spamc -R` (the client, talking to a running `spamd`) for speed; fallback: `spamassassin -t -R`
+   (test mode, standalone). `-t` prevents any network side-effects on the real message and disables
+   auto-learn. Run with `--timeout` and a bounded `maxBuffer`; the process is spawned via
+   `execFile` (never a shell string) with the raw bytes on stdin.
+3. **Parse the report.** SpamAssassin returns the score line (`X-Spam-Status: ... score=3.2
+   required=5.0 tests=RULE1,RULE2,...`) and a per-rule breakdown (`X-Spam-Report` / the `-R` verbose
+   report: `pts rule name description`). Parse each fired rule into `{ rule, score, description }` and
+   the total/threshold.
+4. **Derive findings.** Emit `content.spamassassin_score` from the total vs threshold. Then map fired
+   rules onto the sub-checks in §2 by rule-family prefix (e.g. any `SUBJ_*`/`SUBJECT_*` →
+   `content.subject`; any `MIME_*`/`MPART_*` → `content.mime_valid`/`content.multipart`; `HTML_*` →
+   `content.html_hygiene`; `*EXECUTABLE*`/`*ATTACH*` → `content.attachment_risk`). Each sub-check's
+   finding lists the concrete rules that drove it and their summed points, so remediation is specific.
+5. **Score → severity.** Total < 2.0 → `ok`; 2.0–4.99 → `warning`; ≥ 5.0 → `critical`. Individual
+   sub-checks inherit severity from the weight of their fired rules (a single high-weight rule such as
+   a forged header or hidden text is `critical` even if the total is moderate).
+
+**Edge cases & operational concerns.** A missing/stopped `spamd` → fall back to standalone
+`spamassassin` and, if the binary is absent, emit an `info` finding "SpamAssassin not installed
+(`brew install spamassassin`)" rather than an error. Very large samples are size-capped (reject > ~10
+MB). Network tests (URIBL/RBL/Razor/Pyzor/DCC) are **off by default** here (`-L` / local-only) so
+scoring is deterministic and does not double-count with [./link_url_reputation.mdx](./link_url_reputation.mdx)
+and [../spam_checks.mdx](../spam_checks.mdx) Blacklists — network content tests are a separate opt-in.
+Rule scores drift as SpamAssassin's ruleset (`sa-update`) updates, so results are timestamped and the
+engine version is recorded. There is no rate limit (local binary), but scoring is CPU-bound, so it
+runs after the pure-DNS checks and is skipped entirely when no sample is present.
+
+## 4. User interface
+
+**Dashboard contribution.** This check feeds the **Spam & Content** category cell. With no sample
+uploaded it contributes only an `info` advisory (cell stays driven by other content sub-checks, or
+shows "—" if nothing has run). With a sample: total ≥ 5 turns the cell **dark red**, 2–5 **amber**,
+< 2 keeps it **dark green** (worst-severity roll-up per [../dashboard.mdx](../dashboard.mdx)).
+
+**Audit-detail view.** Findings render as grouped rows under a "Spam & Content → Content scoring"
+section. The header row shows the headline score as a gauge (`3.2 / 5.0`, colored by band). Beneath
+it, one row per fired rule, sorted by points descending, each with a severity badge, the rule name +
+description (observed detail), its point contribution, and a copy-to-clipboard of the concrete fix.
+The `from_header`/`subject` of the scored sample are shown so the user knows exactly which message
+was graded.
+
+```
+Spam & Content ▸ Content scoring          Score  3.2 / 5.0  [AMBER]
+ sample: "Q3 SALE — 50% OFF!!!"  from noreply@shop.example.com  scored 2026-07-01 10:12
+┌────────┬──────────────────────────┬──────┬───────────────────────────────────────────┐
+│ sev    │ rule                     │ pts  │ fix                                    [⧉] │
+├────────┼──────────────────────────┼──────┼───────────────────────────────────────────┤
+│ ⚠ warn │ SUBJ_ALL_CAPS            │ +1.2 │ Sentence-case the subject; drop "!!!"      │
+│ ⚠ warn │ MIME_HTML_ONLY          │ +1.1 │ Add a text/plain alternative part          │
+│ ⚠ warn │ HTML_IMAGE_RATIO_02     │ +0.9 │ Add body copy; images < 40% of message     │
+│ ⓘ info │ MISSING_MID             │ +0.0 │ MTA should set a unique Message-ID         │
+└────────┴──────────────────────────┴──────┴───────────────────────────────────────────┘
+[ Re-score ]   [ Upload new sample ]   [ View raw .eml ]
+```
+
+**Per-domain config / sample upload.** A dedicated **"Sample message"** panel on the domain-detail
+page lets the user upload or paste the raw `.eml` (drag-drop `.eml`, or a textarea for pasted
+source). It records `from_header` and `subject` parsed from the sample and shows the store path. Only
+one active sample per domain is scored (history retained). Empty state: "No sample message — upload a
+representative email to enable content scoring." Loading state: a spinner on "Re-score" while `spamc`
+runs. Never-run: the row group shows "Not scored yet." Admin-only settings (Settings page): the spam
+threshold override (default 5.0), inbox-safe target (default 2.0), whether to enable network content
+tests, and the `spamassassin`/`spamc` binary path — all shadcn/ui `Input`/`Switch`/`Slider` controls.
+Built on the React 19 + shadcn/ui + lucide-react stack; data via the generated TanStack-Query client.
+
+## 5. Information schema (database schema)
+
+Reference the shared core tables from [../engineering.mdx](../engineering.mdx) — `domains`,
+`audit_runs`, `findings` — and add two check-specific tables. This check is unusual in that it stores
+**user-supplied input** (the sample) separately from the **per-run result**.
+
+```sql
+-- The stored sample message (input), one active per domain, history kept.
+CREATE TABLE content_sample_messages (
+  id            BIGSERIAL PRIMARY KEY,
+  domain_id     BIGINT      NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+  uploaded_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  raw_path      TEXT,                 -- path to the .eml in the file store (large bodies)
+  raw_text      TEXT,                 -- inline raw source (small samples); one of raw_path/raw_text set
+  from_header   TEXT,                 -- parsed From: for display
+  subject       TEXT,                 -- parsed Subject: for display
+  active        BOOLEAN     NOT NULL DEFAULT true,  -- the sample currently scored
+  byte_size     INTEGER,
+  CONSTRAINT content_sample_body_present CHECK (raw_path IS NOT NULL OR raw_text IS NOT NULL)
+);
+CREATE INDEX idx_content_sample_domain        ON content_sample_messages(domain_id);
+CREATE UNIQUE INDEX uq_content_sample_active  ON content_sample_messages(domain_id) WHERE active;
+
+-- The scoring result for one audit run (output).
+CREATE TABLE content_score_results (
+  id            BIGSERIAL PRIMARY KEY,
+  audit_run_id  BIGINT      NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+  domain_id     BIGINT      NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+  sample_id     BIGINT      REFERENCES content_sample_messages(id) ON DELETE SET NULL,
+  total_score   NUMERIC(6,2) NOT NULL,          -- summed SpamAssassin score
+  threshold     NUMERIC(6,2) NOT NULL DEFAULT 5.0,
+  passed        BOOLEAN      NOT NULL,           -- total_score < threshold
+  rules_fired   JSONB        NOT NULL DEFAULT '[]',  -- [{rule, score, description}]
+  sa_version    TEXT,                            -- SpamAssassin engine + ruleset version
+  checked_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_content_result_run    ON content_score_results(audit_run_id);
+CREATE INDEX idx_content_result_domain ON content_score_results(domain_id, checked_at DESC);
+CREATE INDEX idx_content_result_rules  ON content_score_results USING GIN (rules_fired);
+```
+
+**Mapping to today's file store.** No database ships first; both tables are JSON under
+`~/.email_delivery_hero/`:
+
+* The **sample** maps to the **file store** literally: the raw `.eml` is written to
+  `samples/<domainId>/<sampleId>.eml` (the `raw_path`), and a `samples/<domainId>/index.json` array
+  holds the metadata rows (`{id, uploadedAt, rawPath, fromHeader, subject, active, byteSize}`). Small
+  pasted samples may inline `rawText` instead of a file. This is the one check that owns files under
+  the state dir beyond audit JSON.
+* The **result** is embedded in each run's `audits/<domainId>/<auditId>.json` as a
+  `contentScore: { sampleId, totalScore, threshold, passed, rulesFired:[{rule,score,description}],
+  saVersion, checkedAt }` block, alongside the flat `findings[]`. `rules_fired` JSONB ⇄ the
+  `rulesFired` array; the GIN index becomes an in-memory filter today. The store module isolates this
+  so the move to Postgres is a single-module change.
+
+## 6. When we run the check
+
+* **On-demand.** Runs as part of a manual audit (`POST /api/domains/:id/audit`), but only when the
+  domain has an active sample; otherwise it emits the "no sample" advisory and returns instantly. A
+  dedicated **Re-score** action re-runs just this checker after a sample is uploaded/edited, without a
+  full re-audit.
+* **Periodic.** The scheduler (cadence from `config.yaml`, e.g. every 6–24h; see
+  [../scheduled_checks.mdx](../scheduled_checks.mdx)) re-scores the current sample so **ruleset
+  drift** (via `sa-update`) is caught — the same sample can start scoring higher as SpamAssassin
+  tightens. Content scoring is lower-frequency than DNS checks since the input only changes when the
+  user uploads a new sample.
+* **First vs future.** **Future-round**: requires a user-supplied sample *and* the Homebrew
+  `spamassassin`/`spamc` binary — it is not pure `node:dns/promises` and is skipped cleanly when
+  either is absent.
+* **Cost / rate-limit / back-off.** No external API cost or rate limit (local binary). It is
+  CPU-bound, so it runs after DNS checks and after a debounce (no re-score more than once per
+  minute per domain regardless of trigger). Network content tests (URIBL/Razor/Pyzor/DCC) stay off by
+  default to keep scoring deterministic and avoid duplicate work with the Blacklists category.
+* **Regression detection.** The scheduler diffs against the previous `content_score_results` row for
+  the domain: a total crossing 2.0 (green→amber) or 5.0 (amber→red), or a **newly fired high-weight
+  rule**, is flagged as a new problem — even when the sample bytes are unchanged.
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises`) | Future (sample + external tool / API) |
+| --- | --- | --- |
+| `content.spamassassin_score` | — | ✅ Homebrew `spamassassin`/`spamc` + sample `.eml` |
+| `content.subject` | — | ✅ SA subject rules (or standalone heuristic on the sample) |
+| `content.image_text_ratio` | — | ✅ MIME parse of the sample |
+| `content.multipart` | — | ✅ MIME parse of the sample |
+| `content.mime_valid` | — | ✅ MIME parse of the sample |
+| `content.spammy_phrases` | — | ✅ SA body rules |
+| `content.header_sanity` | — | ✅ SA header rules / RFC 5322 parse of the sample |
+| `content.attachment_risk` | — | ✅ MIME part scan of the sample |
+| `content.html_hygiene` | — | ✅ SA HTML rules / HTML+CSS parse |
+| `content.encoding` | — | ✅ MIME `Content-Transfer-Encoding` inspection |
+| `content.charset`, `content.bayes`, `content.short_body` *(advisory)* | — | ✅ SA rules (Bayes needs a trained corpus) |
+
+Every sub-check here is future-round: none is answerable from DNS. The gate is (1) a stored sample
+message and (2) the SpamAssassin binary. The lighter sub-checks (`content.subject`, MIME structure,
+header sanity, attachment risk, HTML hygiene, encoding) could ship as a **standalone parser** without
+SpamAssassin if a sample is present but the binary is missing — a useful degraded mode.
+
+## 8. Acceptance criteria
+
+1. With no sample uploaded for a domain, the checker emits exactly one `info` finding with
+   remediation to upload a sample and does **not** turn the Spam & Content cell amber or red.
+2. Uploading a `.eml` (drag-drop or paste) persists it to `samples/<domainId>/<sampleId>.eml`, marks
+   it `active`, deactivates any prior active sample, and records `from_header`/`subject`.
+3. Running an audit with a sample present shells to `spamc`/`spamassassin -t` with the raw bytes on
+   stdin via `execFile` (no shell string), honors the configured timeout, and never triggers auto-learn
+   or network tests unless network tests are explicitly enabled.
+4. The parser produces a `content_score_results` row with `total_score`, `threshold`, `passed`, and a
+   `rules_fired` array of `{rule, score, description}` for every fired rule.
+5. Severity mapping is exact: total < 2.0 → `ok`; 2.0–4.99 → `warning`; ≥ 5.0 → `critical`; and a
+   single high-weight rule (hidden text, forged header, executable attachment) yields a `critical`
+   sub-check finding regardless of total.
+6. Each non-`ok` finding carries a concrete remediation naming the fired rule(s) and the exact fix
+   (not "improve your content").
+7. If the SpamAssassin binary is absent, the check emits an `info` finding advising
+   `brew install spamassassin` and does not crash the audit run.
+8. The audit-detail view shows the score gauge, the sample's subject/from, one row per fired rule
+   sorted by points with a copy-to-clipboard fix, and Re-score / Upload-new-sample / View-raw actions.
+9. The scheduler diffs against the previous result and flags a green→amber, amber→red, or
+   newly-fired-high-weight-rule transition as a new problem, including when the sample is unchanged.
+10. The store module is the only code that knows sample files live under `~/.email_delivery_hero/` and
+    results live in the audit JSON, so a later move to Postgres touches one module.
+
+<!--
+  Maintenance: keep the threshold (5.0) and inbox-safe target (0–2) in sync with ../spam_checks.mdx §6
+  (content.spamassassin) and the Spam & Content roll-up in ../dashboard.mdx. Rule names above are
+  SpamAssassin default-ruleset examples — actual fired rules/scores are reported at runtime and drift
+  with sa-update, so record sa_version. Standards to keep current: RFC 5322 (message format /
+  Message-ID / Date), RFC 2045–2049 (MIME), 2024 Gmail/Yahoo bulk-sender requirements. Cross-links:
+  ./list_unsubscribe.mdx, ./link_url_reputation.mdx, ./inbox_placement.mdx, ./bimi.mdx. This is a
+  future-round check (needs a user sample + Homebrew spamassassin/spamc); keep it flagged as such in
+  ../spam_checks.mdx "First round vs future".
+-->

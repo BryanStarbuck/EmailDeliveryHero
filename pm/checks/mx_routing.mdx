@@ -1,0 +1,214 @@
+---
+title: MX Records & Mail Routing
+description: Audits a domain's MX resource records and inbound mail-routing topology — presence, priorities, hostname resolution, public routability, redundancy/ASN diversity, RFC 7505 null-MX correctness, CNAME violations, and SMTP reachability — and prescribes the exact records to publish.
+---
+
+# MX Records & Mail Routing
+
+MX (Mail eXchanger) records are the DNS records that tell every sending mail server *where* to deliver mail for a domain and *in what order* to try the candidate hosts. They are defined by **RFC 5321 §5.1** (with the RFC 1035 record format and the RFC 7505 "null MX" extension). While SPF/DKIM/DMARC govern how *your outbound* mail is authenticated, MX governs how *inbound* mail reaches you — and a broken, dangling, private, or non-redundant MX set silently drops mail, delays it for hours behind retry timers, or (for a sender-only domain that publishes a bogus MX) confuses receivers about your topology. MX health is therefore a foundational deliverability signal: receiving MTAs, greylisters, and some reputation systems treat a well-formed, redundant, publicly-reachable MX as a sign of a legitimately operated domain.
+
+This check belongs to the **DNS & Infrastructure** dashboard category. All sub-check ids use the **`infra`** prefix (MX sub-family, e.g. `infra.mx_present`).
+
+**Read alongside:**
+- [../overview.mdx](../overview.mdx) — product charter, personas, port list.
+- [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
+- [../spam_checks.mdx](../spam_checks.mdx) — master catalog; this spec is the MX slice of the DNS & Infrastructure category.
+- [../dashboard.mdx](../dashboard.mdx) — how the DNS & Infrastructure cell rolls up.
+- [./reverse_dns.mdx](./reverse_dns.mdx) — PTR / FCrDNS for the IPs behind these MX hosts.
+- [./tls_transport.mdx](./tls_transport.mdx) — STARTTLS on the MX hosts this check discovers.
+- [./dns_health.mdx](./dns_health.mdx) — NS/SOA/glue sanity that MX resolution depends on.
+- [./smtp_security.mdx](./smtp_security.mdx) — banner, open-relay, and SMTP-hardening posture of the MX hosts.
+
+## 1. What it checks
+
+An MX record set is a list of `(preference, exchange)` tuples returned for the domain's `MX` RRset. Lower `preference` (priority) is tried first; equal preferences are load-balanced. **RFC 5321** imposes several rules that this check enforces:
+
+- The `exchange` (target) **must be a host name that resolves to an address record (A/AAAA)** — it **must NOT point at a CNAME** (RFC 5321 §5.1, RFC 2181 §10.3). A CNAME target is a spec violation that many strict receivers refuse to follow.
+- The target must be **routable on the public Internet**. RFC 1918 private space (10/8, 172.16/12, 192.168/16), loopback (127/8, ::1), link-local (169.254/16, fe80::/10), CGNAT (100.64/10), and unspecified addresses are non-deliverable — a classic "works on my LAN, drops in production" failure.
+- A domain that **does not accept mail at all** should publish a single **null MX**: `example.com. IN MX 0 "."` (**RFC 7505**). This tells senders to fail fast with a permanent error instead of falling back to the A record. Null MX must be the *only* MX and is correct **only** for non-mail domains (parked, API-only, sender-only bounce domains that never receive).
+
+The common real-world failure modes: (a) a **dangling MX** whose target hostname no longer resolves (host decommissioned, typo) — every message queues and eventually bounces after the sender's retry window (hours to 5 days); (b) **single MX with no backup**, so any outage of that one host defers all inbound mail; (c) an MX **pointing at a CNAME** or at a **private/NAT IP**; (d) a **null MX misapplied** to a domain that actually needs to receive bounces/replies, silently rejecting all inbound mail; (e) **duplicate/zero-distinct priorities** that defeat the intended primary/backup ordering. Each of these degrades inbox placement indirectly (delayed or bounced mail, failed bounce processing, reputation harm from senders retrying) and directly (receiver heuristics penalise domains with malformed or unreachable mail topology).
+
+## 2. Sub-checks
+
+Every remediation is a concrete record or step. `example.com` is the audited domain; replace hostnames/IPs with the domain's real values.
+
+| Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+|---|---|---|---|---|
+| `infra.mx_present` | ≥1 MX RR exists with a valid preference (0–65535) | `resolveMx(domain)` | **critical** if empty AND domain is expected to receive mail | Publish `example.com. IN MX 10 mail.example.com.` (or your provider's host, e.g. `1 aspmx.l.google.com.`) |
+| `infra.mx_resolve` | Each MX target resolves to ≥1 A/AAAA (no dangling MX) | `resolve4`/`resolve6` on each `exchange` | **critical** if any target returns NXDOMAIN/empty | Fix the target hostname or publish the missing `A`/`AAAA` for it; remove decommissioned MX entries |
+| `infra.mx_not_cname` | MX target is a real A/AAAA host, not a CNAME (RFC 5321 §5.1) | `resolveCname(target)` returns nothing | **critical** if target is a CNAME | Repoint MX to the canonical hostname's own A/AAAA record (flatten the CNAME) |
+| `infra.mx_public_ip` | All MX target IPs are public/routable | Classify each resolved IP against RFC1918/loopback/link-local/CGNAT/`::1` | **critical** if any MX IP is private/loopback | Repoint MX at a public IP; do not expose internal relays via public MX |
+| `infra.mx_priority` | Priorities are sane and distinct enough to express ordering | Compare preference values across the RRset | **warning** if all identical (no primary/backup intent) or non-standard | Use tiered distinct values, e.g. `10 primary`, `20 backup` |
+| `infra.mx_redundancy` | ≥2 MX hosts for failover, on diverse networks/ASNs | Count distinct targets; group resolved IPs by /24 + ASN | **warning** if only 1 host, or all hosts share one ASN/subnet | Add a second MX on a different provider/network: `example.com. IN MX 20 mail2.example.com.` |
+| `infra.mx_a_consistency` | Each MX host's A/AAAA set is consistent and non-empty on both families | Compare `resolve4` vs `resolve6`; flag AAAA present but broken | **warning** if AAAA advertised but unroutable/empty | Fix or remove the broken AAAA; ensure v4 and v6 both point at working listeners |
+| `infra.mx_null` | Null MX (`.`) used correctly per RFC 7505 | Detect `exchange === "."` with preference 0 | **warning** if null MX present but domain should receive mail; **info** if correctly null for non-mail domain | For a sending-only domain, `example.com. IN MX 0 "."` is correct; if it must receive bounces, replace with a real MX |
+| `infra.mx_ttl` | MX RRset TTL is reasonable | Read RRset TTL (via `dig`, future; else provider) | **info** if TTL < 300s (fragile) or > 86400s (slow failover) | Set MX TTL to 3600s (1h); drop to 300s only during a planned migration |
+| `infra.mx_target_count` | Target count is neither zero-effective nor absurd | Count valid resolvable targets | **warning** if >10 MX (fan-out abuse / misconfig) or 0 effective | Trim to the hosts you actually operate (2–4 typical) |
+| `infra.mx_dup_targets` | No duplicate `exchange` hostnames in the RRset | Set-compare normalized (lowercased, FQDN) targets | **info** on exact duplicate targets | Remove the duplicate MX line; duplicates add no redundancy |
+| `infra.mx_trailing_dot` | Targets are FQDNs (fully qualified, not relative) | Detect un-terminated/relative names that expanded oddly | **warning** if a target looks like an accidental relative name (`mail.example.com.example.com`) | Republish the MX target as a fully-qualified name with trailing dot in zone file |
+| `infra.mx_localhost` | No MX target is `localhost`/`127.0.0.1`/`::1` | String + IP classification | **critical** if target is localhost | Repoint to a real public mail host |
+| `infra.mx_reachable` | Each MX accepts TCP/25 and returns a 220 SMTP banner *(FUTURE — probe)* | TCP connect port 25, read 220 greeting | **critical** if no MX answers on 25; **warning** if some do | Open port 25 inbound / start the MTA; ensure firewall/security group allows SMTP |
+| `infra.mx_banner` | MX banner is a valid FQDN 220 greeting, not a default/blank *(FUTURE — probe)* | Parse the 220 line hostname | **warning** if banner is `localhost.localdomain` or bare IP | Configure the MTA `smtpd_banner`/HELO name to the host's real FQDN |
+| `infra.mx_greylash` | Advisory: greylisting behavior likely to delay first-contact mail *(FUTURE — probe/heuristic)* | Heuristic on 4xx tempfail on first probe | **info** advisory only | None required; note expected first-delivery delay to senders |
+| `infra.backup_mx_hygiene` | Backup (higher-preference) MX is not an open relay / spamtrap magnet *(FUTURE — probe)* | Relay-test the backup MX; confirm it enforces the same anti-spam as primary | **warning** if backup accepts relay or lacks recipient validation | Configure backup MX to validate recipients and reject relay; or drop the backup if unmaintained |
+| `infra.mx_matches_a` | If no MX, does the domain fall back to its A record (RFC 5321 implicit MX)? | If MX empty, check `resolve4(domain)` | **info** that mail will implicit-route to the A host (fragile) | Publish an explicit MX rather than relying on implicit A fallback |
+
+## 3. How it is measured
+
+**First-round (pure `node:dns/promises`), deterministic:**
+
+1. `resolveMx(domain)` → array of `{ priority, exchange }`. Empty array or `ENODATA` ⇒ evaluate `infra.mx_present` (critical if the domain is flagged as mail-receiving; if the domain is a known sender-only, downgrade). Also run the implicit-A fallback probe (`resolve4(domain)`) for `infra.mx_matches_a`.
+2. Detect **null MX**: exactly one record with `exchange === "."` (some resolvers surface `""`) and `priority === 0`. Short-circuit into `infra.mx_null` and skip resolution/reachability sub-checks (a null MX has no target).
+3. For each `exchange`: run `resolveCname(exchange)` first — a non-empty answer means the target is a CNAME (`infra.mx_not_cname`, critical). Then `resolve4` + `resolve6` to collect `resolved_ips`; empty on both ⇒ dangling MX (`infra.mx_resolve`, critical).
+4. Classify every resolved IP with a small internal `ipClass(ip)` helper: `public | private | loopback | linklocal | cgnat | unspecified`. Any non-`public` ⇒ `infra.mx_public_ip` (critical) / `infra.mx_localhost`.
+5. Priority analysis: count distinct preference values (`infra.mx_priority`), duplicate targets (`infra.mx_dup_targets`), total count (`infra.mx_target_count`).
+6. Redundancy: number of distinct targets ≥2 for `infra.mx_redundancy`. ASN/network diversity requires mapping IPs to ASN. **First round** approximates diversity by distinct `/24` (v4) and `/48` (v6) prefixes; **true ASN diversity is FUTURE** (needs an ASN feed such as a local `pyasn`/Team-Cymru DNS lookup, or `dig +short` against `origin.asn.cymru.com`).
+7. TTL (`infra.mx_ttl`): `node:dns` does not expose RRset TTL. First round marks TTL "unknown/skipped"; the value is captured **FUTURE** by shelling to `dig +noall +answer MX example.com` and parsing column 2. (This is the one non-probe item still gated on an external tool.)
+
+**Future (needs a network probe / external tool):** `infra.mx_reachable`, `infra.mx_banner`, `infra.mx_greylash`, `infra.backup_mx_hygiene`, precise `infra.mx_ttl`, and real-ASN `infra.mx_redundancy`. These shell to `dig`/`swaks`/`openssl s_client` or open a raw TCP socket to port 25 — deferred behind the same "network egress on 25" gate as [./tls_transport.mdx](./tls_transport.mdx) and [./smtp_security.mdx](./smtp_security.mdx). Many residential ISPs and cloud egress rules block outbound 25, so probes must degrade gracefully to `info` ("could not test from this host") rather than false-critical.
+
+**Edge cases:** IDN/punycode domains are normalized to A-label before query; targets are lowercased and FQDN-normalized before set comparison; a mix of a real MX *and* a null MX is itself a misconfiguration (`infra.mx_null` warning). **Caching / rate-limits:** resolution is cheap and honors resolver TTL; the checker caches per-audit-run so a target referenced by two MX lines resolves once. Probes (future) are rate-limited to ≤1 connection per MX host with a 5s connect timeout and exponential back-off across scheduled runs.
+
+**Severity mapping:** unresolvable/absent/CNAME/private-IP MX ⇒ **critical** (mail cannot be delivered or violates the RFC). Single-host or single-ASN redundancy, odd priorities, misapplied null MX, broken AAAA ⇒ **warning**. TTL bounds, duplicates, implicit-A fallback, greylisting advisory ⇒ **info**.
+
+## 4. User interface
+
+**Dashboard contribution.** This check feeds the **DNS & Infrastructure** column (shared with reverse DNS, TLS transport, MTA-STS, DANE, DNSSEC, etc.). The cell color is the worst MX severity present for that domain, rolled up with its infra siblings: a dangling or private MX turns the whole DNS & Infrastructure cell **dark red**; a single-host/no-redundancy warning turns it **amber** (unless something else is already red); all-ok MX contributes **dark green**; info-only (TTL, greylist advisory) does not move the cell.
+
+**Audit-detail view.** Findings render in a collapsible "MX Records & Mail Routing" group (React 19 + shadcn/ui `Accordion` + `Card`, `lucide-react` icons). Header row shows the resolved MX topology as a compact table so the operator sees the whole routing picture at a glance; each finding below is a row with a severity `Badge`, observed `detail`, a `remediation` line, and a `Copy` button (shadcn `Button` + `useCopyToClipboard`) that yields a ready-to-paste zone-file line.
+
+```
+DNS & Infrastructure ▸ MX Records & Mail Routing            [ 1 critical · 1 warning ]
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Pref  Exchange                Resolved IPs          Public  CNAME  Reach(25)   │
+│  10   mail.example.com.       203.0.113.10          ✓       ✗      ⏳ future    │
+│  20   mail2.example.com.      —  (NXDOMAIN)          ✗       ✗      —           │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ ● critical  infra.mx_resolve   mail2.example.com does not resolve (dangling)   │
+│    remediation: publish A for mail2.example.com or remove the MX 20 line  [Copy]│
+│ ▲ warning   infra.mx_redundancy  both live MX hosts share ASN 64500            │
+│    remediation: add MX 30 on a second provider/network                   [Copy]│
+│ ○ info      infra.mx_ttl        TTL not evaluated in first round (needs dig)   │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Per-domain config inputs.** A small "Mail routing" panel on the domain settings page lets the operator declare intent so the checker can judge correctly: a toggle **"This domain receives mail"** (drives whether an empty or null MX is critical vs expected), an **expected-MX allow-list** (optional; flags drift if published MX differs), and a **skip-SMTP-probe** switch (for hosts whose egress blocks port 25). Fields map to `domains` config plus a small `mx_expectations` shape (see §5).
+
+**States.** *Never-run:* light-gray cell, "Not yet audited". *Loading:* skeleton rows while `resolveMx` runs. *Empty MX (mail-receiving):* single critical row. *Null MX (non-mail):* one green/info row "Null MX — domain correctly declares it accepts no mail (RFC 7505)". *Probe-gated rows:* rendered with a muted `⏳ future` chip so users know reachability is pending the network-probe round. **Admin-only settings:** global toggle to enable SMTP probing, connect-timeout, and the ASN-diversity data source — hidden behind the admin (OpenAuthFederated) role.
+
+## 5. Information schema (database schema)
+
+Reference the shared core tables — do **not** redefine: `domains`, `sending_ips`, `dkim_selectors`, `audit_runs`, `findings`. This check adds one parent result table (one row per audit run × domain) and one child table (one row per discovered MX host).
+
+```sql
+-- One summary row per (audit_run, domain): the topology-level verdict.
+CREATE TABLE mx_check_results (
+    id              BIGSERIAL PRIMARY KEY,
+    audit_run_id    BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id       BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    mx_count        INT     NOT NULL DEFAULT 0,   -- number of MX RRs returned
+    has_null_mx     BOOLEAN NOT NULL DEFAULT FALSE, -- RFC 7505 "." present
+    distinct_priorities INT NOT NULL DEFAULT 0,
+    redundant       BOOLEAN NOT NULL DEFAULT FALSE, -- >=2 resolvable hosts
+    asn_diverse     BOOLEAN,                        -- NULL until ASN feed (future)
+    implicit_a_fallback BOOLEAN NOT NULL DEFAULT FALSE, -- no MX, A exists
+    rrset_ttl       INT,                            -- NULL in first round (needs dig)
+    receives_mail   BOOLEAN,                        -- declared intent snapshot
+    worst_severity  TEXT NOT NULL DEFAULT 'ok',     -- ok|info|warning|critical
+    checked_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (audit_run_id, domain_id)
+);
+CREATE INDEX idx_mx_results_domain ON mx_check_results (domain_id);
+CREATE INDEX idx_mx_results_run    ON mx_check_results (audit_run_id);
+
+-- One row per discovered MX host (child of the summary above).
+CREATE TABLE mx_records (
+    id              BIGSERIAL PRIMARY KEY,
+    audit_run_id    BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id       BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    mx_result_id    BIGINT NOT NULL REFERENCES mx_check_results(id) ON DELETE CASCADE,
+    host            TEXT    NOT NULL,               -- the MX exchange (FQDN)
+    priority        INT     NOT NULL,               -- MX preference
+    resolved_ips    JSONB   NOT NULL DEFAULT '[]',  -- ["203.0.113.10","2001:db8::10"]
+    is_cname        BOOLEAN NOT NULL DEFAULT FALSE, -- RFC 5321 violation if true
+    is_public       BOOLEAN NOT NULL DEFAULT TRUE,  -- false if RFC1918/loopback/etc
+    reachable       BOOLEAN,                        -- NULL until SMTP probe (future)
+    banner          TEXT,                           -- 220 greeting (future)
+    asn             INT,                            -- resolved ASN (future)
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_mx_records_domain   ON mx_records (domain_id);
+CREATE INDEX idx_mx_records_result   ON mx_records (mx_result_id);
+CREATE INDEX idx_mx_records_host     ON mx_records (host);
+
+-- Optional per-domain expectation/config (drives receives_mail + drift detection).
+CREATE TABLE mx_expectations (
+    domain_id       BIGINT PRIMARY KEY REFERENCES domains(id) ON DELETE CASCADE,
+    receives_mail   BOOLEAN NOT NULL DEFAULT TRUE,
+    expected_hosts  JSONB   NOT NULL DEFAULT '[]',  -- optional allow-list of MX FQDNs
+    skip_smtp_probe BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+**Mapping to today's JSON file store.** There is no DB yet; the store module persists the same shapes as JSON under `~/.email_delivery_hero/`:
+- `mx_check_results` + `mx_records` are embedded in the per-audit file `audits/<domainId>/<auditId>.json` under `checks.infra_mx = { summary: {...}, hosts: [ {...} ] }` — the `summary` object is the `mx_check_results` row and `hosts[]` are `mx_records` rows (FKs are implicit from the file path: `<domainId>` and `<auditId>`).
+- The generic per-finding rows still land in the same file's `findings[]` array (matching the core `findings` table), so nothing here duplicates that.
+- `mx_expectations` maps to a per-domain block in `domains.json` under `domains[i].config.mx = { receivesMail, expectedHosts, skipSmtpProbe }`, and provider-wide probe toggles live in `config.yaml` under `infra.mx`.
+When the store moves to PostgreSQL, this is a single-module change: the store adapter writes the three tables above instead of the JSON blocks; column names deliberately mirror the JSON keys so reconciliation is a mechanical map.
+
+## 6. When we run the check
+
+- **On-demand:** runs on every manual audit (`POST /api/domains/:id/audit`) and whenever the domain is first added. First-round MX resolution is pure DNS and completes in tens of milliseconds, so it is always in the default audit path.
+- **Periodic:** the in-process scheduler re-runs the full engine per domain on the `config.yaml` cadence (default every 6h). MX is cheap enough to run every cycle with no gating.
+- **First-round vs future:** the pure-DNS sub-checks (presence, resolve, CNAME, public-IP, priority, redundancy-by-prefix, null-MX, duplicates, counts, implicit-A) ship first round. Reachability/banner/greylist/backup-relay/precise-TTL/real-ASN are **future**, gated behind the network-probe capability and (for probes) outbound port-25 egress. When probing is disabled or blocked, those sub-checks emit an `info` "not evaluated" finding rather than failing.
+- **Cost / rate-limit / back-off:** DNS honors resolver TTLs and dedupes targets within a run — negligible cost. Future SMTP probes are throttled to one connection per MX host per run with a 5s timeout, and back off (skip N cycles) after repeated connect failures to avoid hammering a down host or tripping the remote's rate limits.
+- **Regression detection:** the scheduler diffs each run against the previous audit for the domain. A newly-appearing critical (e.g. an MX that resolved yesterday now dangles, or a priority host that started answering with a private IP), or a worsened severity (redundant→single-host), is flagged as a **new problem** and surfaced in the "what changed" view. A previously-critical MX that now resolves clears the finding.
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises`) | Future (probe / external tool / feed) |
+|---|---|---|
+| `infra.mx_present` | ✅ `resolveMx` | |
+| `infra.mx_resolve` | ✅ `resolve4`/`resolve6` | |
+| `infra.mx_not_cname` | ✅ `resolveCname` | |
+| `infra.mx_public_ip` / `infra.mx_localhost` | ✅ IP classification | |
+| `infra.mx_priority` | ✅ preference analysis | |
+| `infra.mx_redundancy` | ✅ host-count + `/24`,`/48` prefix diversity | ⏳ true ASN diversity (Cymru/pyasn feed) |
+| `infra.mx_a_consistency` | ✅ v4/v6 compare | |
+| `infra.mx_null` | ✅ detect `.`/priority-0 | |
+| `infra.mx_target_count` / `infra.mx_dup_targets` / `infra.mx_trailing_dot` | ✅ RRset parsing | |
+| `infra.mx_matches_a` | ✅ implicit-A fallback probe (DNS) | |
+| `infra.mx_ttl` | ⏳ TTL not exposed by node:dns | ⏳ `dig +noall +answer MX` parse |
+| `infra.mx_reachable` | | ⏳ TCP/25 connect + 220 banner |
+| `infra.mx_banner` | | ⏳ parse SMTP 220 greeting |
+| `infra.mx_greylash` | | ⏳ tempfail heuristic probe |
+| `infra.backup_mx_hygiene` | | ⏳ relay/recipient-validation probe |
+
+## 8. Acceptance criteria
+
+1. Given a domain with no MX and `receivesMail=true`, the checker emits `infra.mx_present` **critical** with a concrete `example.com. IN MX 10 mail.example.com.` remediation.
+2. Given a domain whose sole MX target returns NXDOMAIN, `infra.mx_resolve` is **critical** and the `mx_records` row has `resolved_ips = []`.
+3. Given an MX target that is a CNAME, `infra.mx_not_cname` is **critical**, `mx_records.is_cname = true`, and the remediation says to flatten to the canonical A/AAAA.
+4. Given an MX resolving to an RFC1918/loopback address, `infra.mx_public_ip`/`infra.mx_localhost` is **critical** and `is_public = false`.
+5. Given exactly one MX host (or multiple hosts all in one `/24`/ASN), `infra.mx_redundancy` is **warning** with a concrete second-MX remediation; `mx_check_results.redundant`/`asn_diverse` reflect it.
+6. Given `example.com. IN MX 0 "."` on a domain marked non-mail, `infra.mx_null` is **info/ok** ("correct null MX"); on a mail-receiving domain it is **warning** with a remediation to publish a real MX.
+7. All resolution sub-checks run using only `node:dns/promises` with no network egress beyond DNS, and complete deterministically; probe-gated sub-checks emit `info` "not evaluated" when probing is disabled.
+8. Every non-ok finding carries a `remediation` string containing an exact record or step (never a generic "check your DNS").
+9. A full audit persists one `mx_check_results` summary row and one `mx_records` row per discovered host (JSON-store shape `checks.infra_mx` today), with `domain_id` indexed.
+10. The audit-detail UI renders the MX topology table plus per-finding rows with severity badges and a working copy-to-clipboard of each fix, and the DNS & Infrastructure dashboard cell rolls up to the worst MX severity.
+11. On a scheduled re-run, an MX that changes from resolvable to dangling (or ok→private-IP) is diffed and surfaced as a **new problem**; a fixed MX clears its prior finding.
+12. Null MX short-circuits target resolution/reachability sub-checks (no target to probe) without emitting false dangling-MX findings.
+
+<!--
+MAINTENANCE NOTES
+- Keep RFC references current: RFC 5321 (SMTP, implicit MX, target-must-be-A rule), RFC 7505 (null MX),
+  RFC 2181 §10.3 (MX must not be a CNAME), RFC 1918/4193/6598 (private/CGNAT ranges for public-IP check).
+- Keep sub-check ids and the DNS & Infrastructure category assignment in sync with ../spam_checks.mdx.
+- Keep the Checker/Finding contract and file-store shapes in sync with ../engineering.mdx; if the store
+  moves to PostgreSQL, mx_check_results/mx_records/mx_expectations column names mirror the JSON keys.
+- When the SMTP-probe round lands, move infra.mx_reachable/banner/greylash/backup_mx_hygiene/precise-TTL/
+  real-ASN from FUTURE to first-round and update §7; coordinate the port-25 egress gate with
+  ./tls_transport.mdx and ./smtp_security.mdx.
+-->

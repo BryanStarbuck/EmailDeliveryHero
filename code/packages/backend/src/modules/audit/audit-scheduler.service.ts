@@ -26,9 +26,13 @@ export class AuditSchedulerService implements OnModuleInit, OnModuleDestroy {
     const intervalMs = minutes * 60 * 1000
     logInfo(`Periodic audits enabled: every ${minutes} minute(s)`, "AuditScheduler")
     this.timer = setInterval(() => {
+      logInfo("Scheduled check run started", "AuditScheduler")
       this.audit
         .runForAll()
-        .catch((err) => logError("Periodic audit run failed", err, "AuditScheduler"))
+        .then((results) =>
+          logInfo(`Scheduled check run finished (${results.length} domain(s))`, "AuditScheduler"),
+        )
+        .catch((err) => logError("Scheduled check run failed", err, "AuditScheduler"))
     }, intervalMs)
     // Don't keep the event loop alive solely for the timer.
     this.timer.unref?.()

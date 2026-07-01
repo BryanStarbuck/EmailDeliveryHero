@@ -1,0 +1,202 @@
+---
+title: Blacklists (DNSBL / RHSBL / IP & Domain Reputation Blocklists)
+description: How EmailDeliveryHero queries DNS-based blocklists for a domain's sending IPs and domain names, interprets 127.0.0.x return codes and TXT reasons, weights per-zone impact, and hands the user the exact per-zone delisting URL and reason code for every listing.
+---
+
+# Blacklists (DNSBL / RHSBL / IP & Domain Reputation Blocklists)
+
+A DNS-based blocklist (DNSBL) is a list of IP addresses — and, for right-hand-side blocklists (RHSBL), of domain names — that a receiving mail server queries over ordinary DNS to decide whether to reject, quarantine, or score a message. If your sending IP or your domain (or a domain that appears in your message From/Return-Path/URLs) is listed on a zone a receiver honors, your mail is throttled, junked, or hard-bounced regardless of how perfect your SPF/DKIM/DMARC are. This is the single fastest way for a good sender to fall out of the inbox, and the single check that customers ask about first ("am I blacklisted?"). This spec is the flagship of the **Blacklists** dashboard category; every sub-check id uses the **`dnsbl`** prefix.
+
+**Read alongside:**
+- [../overview.mdx](../overview.mdx) — product charter, personas, port list.
+- [../engineering.mdx](../engineering.mdx) — Checker/Finding contract, file store, scheduler.
+- [../spam_checks.mdx](../spam_checks.mdx) — master catalog; Blacklists is one of its six categories.
+- [../dashboard.mdx](../dashboard.mdx) — the 6-column status dashboard (Blacklists is a column).
+- [../scheduled_checks.mdx](../scheduled_checks.mdx) — recurring-check config; blacklist status is time-varying, so cadence matters.
+- [../use_cases/domain_on_blacklist.mdx](../use_cases/domain_on_blacklist.mdx) — the end-to-end "you are listed, here is how to delist" user journey.
+- [./link_url_reputation.mdx](./link_url_reputation.mdx) — URI blocklists (SURBL, Spamhaus DBL, ivmURI) overlap with the domain-side zones here; that spec tests domains found *inside* message bodies, this one tests your sending domain and IPs.
+- [./reputation_metrics.mdx](./reputation_metrics.mdx) — Sender Score and continuous 0-100 reputation feeds that complement binary listings.
+
+This check belongs to exactly one of the six dashboard categories: **Blacklists** (`dnsbl`).
+
+## 1. What it checks
+
+DNSBLs have no single RFC that defines the *lists* themselves, but the query mechanism is standardized by **RFC 5782 (DNS Blacklists and Whitelists)**, which formalizes the two families:
+
+- **IPv4 DNSBL** — reverse the four octets of the target IP, append the zone host, and issue an `A` query. A listing is signaled by an answer in `127.0.0.0/8` (conventionally `127.0.0.2`–`127.0.0.255`); the specific low-order octet is the **return code** that tells you *why* it is listed. A `TXT` query at the same name returns a human-readable reason and usually a removal URL. RFC 5782 also mandates that a well-behaved zone answer `127.0.0.2` for the test address `127.0.0.2` and `NXDOMAIN` for `127.0.0.1`, which we use as a liveness probe.
+- **RHSBL / domain DNSBL** — the domain is queried **directly, with no reversal**: `<domain>.<zone>`, `A` lookup, same `127.0.0.x` semantics. Spamhaus DBL, SURBL, and ivmURI are of this kind.
+
+**Worked IP example.** To test `203.0.113.24` against `zen.spamhaus.org`:
+1. Reverse octets: `24.113.0.203`.
+2. Form the query name: `24.113.0.203.zen.spamhaus.org`.
+3. `A` lookup. `NXDOMAIN` → not listed. An answer such as `127.0.0.4` → listed (Zen packs SBL, CSS, XBL, and PBL sub-lists into distinct return codes: `127.0.0.2`/`.3` = SBL/CSS, `127.0.0.4`–`.7` = XBL, `127.0.0.10`/`.11` = PBL).
+4. `TXT` lookup at the same name → the reason string and delisting link.
+
+**Worked domain example.** To test `example.com` against `dbl.spamhaus.org`: query `example.com.dbl.spamhaus.org` directly (no reversal). `127.0.1.2` = spam domain, `127.0.1.4`–`.6` = phishing/malware/botnet C&C, `127.0.1.102`–`.106` = "abused legit" categories.
+
+Why receivers care: DNSBL lookups are cheap (one cached DNS round-trip) and catch the majority of botnet and snowshoe spam at connection time, so nearly every MTA and spam engine (Postfix `reject_rbl_client`, SpamAssassin `RCVD_IN_*`, Rspamd, commercial gateways) consults several. The common real-world failure mode is a **shared-IP or ASN-wide listing you did not cause** — a neighbor on your hosting provider's IP block, a compromised mailbox on your subnet, or a provider whose whole ASN got swept into UCEPROTECT L3. A single listing on a high-trust zone (Spamhaus SBL/XBL/Zen) can drop inbox placement to near zero at the large mailbox providers; a listing on a low-trust or ASN-wide zone (UCEPROTECT L2/L3, some SORBS sub-zones) may cost only a few percent, which is exactly why per-zone **weighting** is essential — a naive "you're on a list!" alarm produces false panic.
+
+## 2. Sub-checks
+
+Each row is a distinct zone or roll-up, tested per sending IP (IP zones) or per sending domain (RHSBL zones). "How measured" states the query; every remediation hands the user the concrete per-zone delisting path. `is_paid`/`requires_registration` flags are noted where they gate first-round use.
+
+| Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+|---|---|---|---|---|
+| `dnsbl.spamhaus_zen` | Combined Spamhaus IP list (SBL+CSS+XBL+PBL) for each sending IP | Reverse IP + `A`/`TXT` at `zen.spamhaus.org`; decode return code to sub-list | **critical**: `127.0.0.2/.3` (SBL/CSS) or `.4-.7` (XBL) on a sending IP | Open the reason URL from the TXT record, then request removal at https://www.spamhaus.org/lookup/ (Zen dedupes to SBL/XBL/PBL removal flows); fix the underlying cause (compromise, open relay) before requesting |
+| `dnsbl.spamhaus_sbl` | Manually curated Spamhaus Block List (known spam operations/snowshoe) | Reverse IP + `A` at `sbl.spamhaus.org` (`127.0.0.2`) | **critical**: listed — indicates a policy/abuse listing, not automated | Follow the SBLxxxxxx reference in the TXT record to https://check.spamhaus.org/ ; SBL removals require resolving the cited abuse and emailing Spamhaus |
+| `dnsbl.spamhaus_xbl` | Exploit/botnet infections (CBL data) on a sending IP | Reverse IP + `A` at `xbl.spamhaus.org` (`127.0.0.4-.7`) | **critical**: infected host / open proxy detected | Clean the infected host, close the open relay/proxy, then self-delist at https://check.spamhaus.org/ (XBL usually allows immediate self-removal once clean) |
+| `dnsbl.spamhaus_pbl` | Policy Block List — IPs that should not send direct-to-MX mail (dynamic/residential ranges) | Reverse IP + `A` at `pbl.spamhaus.org` (`127.0.0.10/.11`) | **warning**: a sending IP is in PBL space (send via a smarthost instead) | If this IP legitimately sends mail, request PBL exclusion at https://www.spamhaus.org/pbl/removal/ ; otherwise route outbound through your provider's authorized smarthost |
+| `dnsbl.spamhaus_dbl` | Spamhaus **Domain** Block List (RHSBL) for the sending domain | Direct `A`/`TXT` at `<domain>.dbl.spamhaus.org`; codes `127.0.1.2-.6`, `.102-.106` | **critical** on `.2-.6` (spam/phish/malware); **warning** on `.102-.106` (abused-legit) | Follow the DBL removal flow at https://www.spamhaus.org/dbl/removal/ ; if "abused legit", secure the compromised site/URL shortener and re-request |
+| `dnsbl.barracuda` | Barracuda Reputation Block List for sending IPs | Reverse IP + `A`/`TXT` at `b.barracudacentral.org` (`127.0.0.2`) | **warning/critical**: listed | Request removal at https://www.barracudacentral.org/rbl/removal-request . **Requires free DNS-resolver registration** with Barracuda before queries resolve — see §3 |
+| `dnsbl.spamcop` | SpamCop Blocking List (spam-trap driven, auto-expiring) | Reverse IP + `A`/`TXT` at `bl.spamcop.net` (`127.0.0.2`) | **warning**: listed (listings expire in ~24h after spam stops) | Look up at https://www.spamcop.net/bl.shtml ; stop the spam source — most SCBL entries auto-expire, so treat as warning unless persistent |
+| `dnsbl.sorbs` | SORBS aggregate + sub-zones (spam, dul, http/socks proxy, zombie, new/recent) | Reverse IP + `A`/`TXT` at `dnsbl.sorbs.net`; decode `127.0.0.2` (http) … `127.0.0.10` (dul) etc. | **warning**: listed on `spam.sorbs.net`/`dul.sorbs.net`; lower for proxy zones | Use the delisting form at https://www.sorbs.net/ (per-sub-list); DUL listings require confirming the IP is a static, authorized sender |
+| `dnsbl.uceprotect_l1` | UCEPROTECT Level 1 — single-IP listing | Reverse IP + `A` at `dnsbl-1.uceprotect.net` (`127.0.0.2`) | **warning**: single IP listed | Self-check at https://www.uceprotect.net/en/rblcheck.php ; free removal available (paid "express" delist is optional and not required) |
+| `dnsbl.uceprotect_l2` | UCEPROTECT Level 2 — /24-or-allocation-wide (ASN neighborhood) | Reverse IP + `A` at `dnsbl-2.uceprotect.net` | **info/warning only**: collateral listing of your netblock | **Weight low.** Report as informational collateral; the real fix is your hosting provider cleaning the block, or you moving to a cleaner IP range |
+| `dnsbl.uceprotect_l3` | UCEPROTECT Level 3 — whole-ASN listing | Reverse IP + `A` at `dnsbl-3.uceprotect.net` | **info only**: entire ASN swept in | **Weight lowest.** Never mark a domain critical on L3 alone; note it as ASN-wide collateral and advise IP/provider change if placement suffers |
+| `dnsbl.invaluement` | invaluement ivmSIP (IP) + ivmSIP/24 reputation | Reverse IP + `A`/`TXT` at `sip.invaluement.com` | **warning/critical**: listed on ivmSIP | Removal via https://www.invaluement.com/lookup/ . **Paid subscription** required to resolve queries — future-round, gated behind a licensed resolver/key |
+| `dnsbl.invaluement_uri` | invaluement ivmURI — sending domain as an RHSBL | Direct `A`/`TXT` at `<domain>.uri.invaluement.com` | **warning**: sending domain listed | Same removal portal; **paid**, future-round. Overlaps with [./link_url_reputation.mdx](./link_url_reputation.mdx) |
+| `dnsbl.surbl` | SURBL multi (phishing/malware/abuse) for the sending domain (RHSBL) | Direct `A`/`TXT` at `<domain>.multi.surbl.org`; bitmask return code | **critical**: phishing/malware bit set; **warning**: abuse/cracked bit | Request removal at https://www.surbl.org/surbl-analysis (identify the exact bit from the return code first) |
+| `dnsbl.senderscore` | Validity Sender Score — advisory 0-100 IP reputation | Reverse IP + `A` at `score.senderscore.com`; last octet of `127.0.4.<N>` answer = score N | **warning** if score < 70; **info** 70-89; **ok** ≥ 90 | Advisory, not a block: raise reputation via consistent volume, low complaints/bounces; see [./reputation_metrics.mdx](./reputation_metrics.mdx) |
+| `dnsbl.mailspike` | Mailspike reputation + blacklist (Z / BL) for sending IPs | Reverse IP + `A`/`TXT` at `rep.mailspike.net` and `bl.mailspike.net` | **warning**: `bl` listed; reputation zone `127.0.0.2-.9` (bad→neutral) | Delist at https://www.mailspike.org/ ; improve reputation via engagement/complaint reduction |
+| `dnsbl.spfbl` | SPFBL community reputation/blocklist for IP and domain | Reverse IP `A` at `dnsbl.spfbl.net`; also `<domain>.dnsbl.spfbl.net` | **warning**: listed | Self-service delist at https://spfbl.net/en/dnsbl/ |
+| `dnsbl.abusix` | Abusix Mail Intelligence (combined IP + domain zones) | Reverse IP / direct domain `A`/`TXT` at `<key>.combined.mail.abusix.zone` | **warning/critical** per sub-zone code | Removal via Abusix portal. **Requires a free API key** in the query name — future-round, gated behind key config |
+| `dnsbl.aggregate` | Roll-up across every enabled zone with per-zone weight | Sum of weighted listings across all sub-checks above | **critical** if any high-weight zone listed; **warning** if only low-weight/collateral | Produce a single prioritized action list: fix highest-weight listing first; link each zone's delisting URL |
+
+Notes: `dnsbl.spamhaus_zen` supersedes running SBL/XBL/PBL individually against the *same* query budget (one Zen query returns all three via distinct codes); we keep the individual sub-check ids so a finding can name the precise offending sub-list and so operators can enable them independently if they proxy Spamhaus. Domain-side zones (`dbl`, `surbl`, `invaluement_uri`) test the **sending domain**; the body-URL variants live in [./link_url_reputation.mdx](./link_url_reputation.mdx).
+
+## 3. How it is measured
+
+**Targets.** For IP zones the checker iterates `ctx.sendingIps` (from `sending_ips`); if empty, it derives candidate IPs by resolving the domain's MX hosts and SPF `a`/`mx`/`ip4`/`ip6` mechanisms and testing those (an unexpected listing on an SPF-authorized IP is still your deliverability problem). For RHSBL/domain zones the target is `ctx.domain` and any additional envelope domains (Return-Path, DKIM `d=`).
+
+**Query construction.**
+- IPv4: split the dotted quad, reverse, join with `.`, append `zone_host`. `203.0.113.24` + `zen.spamhaus.org` → `24.113.0.203.zen.spamhaus.org`.
+- IPv6: expand to the 32 nibbles, reverse them, dot-separate, append the zone (RFC 5782). Most zones only carry IPv4 data; IPv6 lookups usually `NXDOMAIN` and are skipped unless the zone documents IPv6 support.
+- Domain: `<domain>.<zone_host>` verbatim, lowercased, IDNA/punycode-encoded, no reversal.
+
+**Resolution.** First round uses `node:dns/promises` `resolve4()` for the `A` answer and `resolveTxt()` for the reason. `NXDOMAIN` (`ENOTFOUND`/`ENODATA`) = **not listed**. Any `127.0.0.0/8` (or documented `127.0.1.0/8`, `127.0.4.0/8`) answer = **listed**; the full answer set is stored as `return_code` (e.g. `127.0.0.4`) and decoded against the zone's code map to a sub-list label and severity. A `TXT` answer is stored verbatim as `reason_txt` and mined for a removal URL; if none is present we fall back to `dnsbl_zones.delisting_url`.
+
+**Zone liveness / test-point probe.** Before trusting an `NXDOMAIN` as "clean", the runner (once per zone per audit) issues RFC 5782 sanity queries: `2.0.0.127.<zone>` must return `127.0.0.2` and `1.0.0.127.<zone>` must return `NXDOMAIN`. If the test point fails (dead zone, blocked resolver, or — critically — a zone that returns `127.0.0.2` for *everything* because your resolver is being rate-limited/blocked), the sub-check yields **info** "zone unavailable / inconclusive", never a false listing.
+
+**Resolver policy & rate limits.** Public mirrors of Spamhaus, Barracuda, SORBS, and others **block queries from large open resolvers (Google 8.8.8.8, Cloudflare 1.1.1.1)** and from high-volume clients. Consequences the checker must handle: (1) **Barracuda requires free registration** of the querying resolver IP before `b.barracudacentral.org` resolves — until registered the sub-check is disabled/`info`. (2) **Abusix requires a free API key** embedded in the query name; (3) **invaluement is paid** and needs a licensed resolver/DNS feed. (4) Spamhaus public DNS is free only for low-volume, non-commercial use; commercial/high-volume users need the Spamhaus Data Query Service (DQS) key, which changes the zone host to `<dqs-key>.zen.dq.spamhaus.net` etc. The `dnsbl_zones` table carries `requires_registration` and `is_paid` so the engine skips or degrades a zone cleanly and the UI explains *why* a zone is inconclusive rather than silently omitting it. Queries are cached for the audit run and honor DNS TTL; a small concurrency cap (e.g. 8 in-flight) plus jittered retry avoids tripping rate limits.
+
+**Severity mapping.** Per-zone `weight` (0.0-1.0) in `dnsbl_zones` scales the finding: high-trust IP/domain zones (Spamhaus Zen/SBL/XBL/DBL, Barracuda, SURBL) map a positive listing to **critical**; PBL, SpamCop (auto-expiring), Mailspike-BL, SORBS sub-zones map to **warning**; UCEPROTECT L2/L3 and pure-reputation advisories (Sender Score, Mailspike-rep) map to **info** unless the score crosses a configured threshold. The category roll-up (`dnsbl.aggregate`) takes the worst *weighted* severity, so ASN-wide collateral alone cannot turn the Blacklists cell red.
+
+## 4. User interface
+
+**Dashboard contribution.** The **Blacklists** column cell for a domain is the roll-up of all `dnsbl.*` findings: dark green when every enabled zone returns clean, amber when the worst listing is a `warning` (e.g. SpamCop, PBL, UCEPROTECT collateral), dark red when any high-weight zone (Zen/SBL/XBL/DBL/Barracuda/SURBL) lists a sending IP or the domain, light gray when never run. The cell shows a compact count badge, e.g. `2/47 listed`, meaning 2 of 47 (zone × target) checks are positive.
+
+**Audit-detail view.** Findings render grouped under a "Blacklists" section, one row per positive/notable result, using shadcn/ui `Table` + `Badge` (React 19, lucide-react icons):
+
+```
+Blacklists (dnsbl)                                       2 listed · 45 clean
+┌───────────┬──────────────────────┬──────────┬────────────────────────────┬──────────┐
+│ Severity  │ Zone (checkId)       │ Target   │ Observed                   │ Fix      │
+├───────────┼──────────────────────┼──────────┼────────────────────────────┼──────────┤
+│ ● CRITICAL│ spamhaus_xbl         │ 203.0.   │ 127.0.0.4  "botnet CBL"    │ [Delist ↗]│
+│           │ (dnsbl.spamhaus_xbl) │ 113.24   │ TXT: cbl.abuseat.org/...   │ [Copy]   │
+├───────────┼──────────────────────┼──────────┼────────────────────────────┼──────────┤
+│ ● WARNING │ spamcop              │ 203.0.   │ 127.0.0.2 (auto-expires)   │ [Delist ↗]│
+│           │ (dnsbl.spamcop)      │ 113.24   │ TXT: see spamcop.net/bl    │ [Copy]   │
+├───────────┼──────────────────────┼──────────┼────────────────────────────┼──────────┤
+│ ○ INFO    │ uceprotect_l3        │ 203.0.   │ 127.0.0.2 ASN-wide         │ collateral│
+│           │ (dnsbl.uceprotect_l3)│ 113.24   │ neighbor listing           │          │
+└───────────┴──────────────────────┴──────────┴────────────────────────────┴──────────┘
+Clean zones (45) ▸ expand
+```
+
+Each row shows the severity badge, the zone label + `checkId`, the exact target (IP or domain), the observed `return_code` + decoded reason, and a **[Delist ↗]** button linking the per-zone `delisting_url` (deep-linked to the specific IP/domain where the zone supports it). A **[Copy]** action copies the full remediation string (reason code + delisting URL + underlying-cause guidance) to the clipboard. Clean zones are collapsed behind an expander so the operator sees problems first.
+
+**Dedicated panel.** A "Blocklist Zones" admin page lists every row of `dnsbl_zones` with columns: zone host, kind (IP/domain), weight slider, delisting URL, `requires_registration`/`is_paid` chips, and an enable/disable toggle — this is the UI over the config table so operators can add a zone, retune a weight, or disable a noisy zone without editing YAML. A per-zone "test point OK / unavailable" health dot reflects the RFC 5782 liveness probe.
+
+**Per-domain config inputs.** Sending IPs and extra envelope domains to test are inherited from the domain record; the panel lets an operator add IPs the checker should also probe (e.g. a new smarthost) and pin/ignore a known-collateral listing.
+
+**States.** *Never-run:* gray cell, "Run audit to check blacklists." *Loading:* skeleton rows + per-zone progress ("querying 47 zones…"). *Inconclusive:* amber-outline info row "zone unavailable — resolver blocked or registration required" with a link to fix (e.g. register resolver with Barracuda). *All clean:* green cell, single "No blacklist listings across 47 zones" line. Zone weights, paid-zone keys, and registered-resolver settings are **admin-only**.
+
+## 5. Information schema (database schema)
+
+Reference the shared core tables (owned by engineering, do **not** redefine): `domains`, `sending_ips`, `dkim_selectors`, `audit_runs`, `findings`. This check adds one **reference/config** table and one **result** table.
+
+```sql
+-- Reference/config: the configurable zone list (today lives in config.yaml).
+CREATE TABLE dnsbl_zones (
+    id                    SERIAL PRIMARY KEY,
+    zone_host             TEXT NOT NULL UNIQUE,          -- e.g. 'zen.spamhaus.org', 'dbl.spamhaus.org'
+    kind                  TEXT NOT NULL CHECK (kind IN ('ip','domain')),
+    weight                NUMERIC(3,2) NOT NULL DEFAULT 1.00 CHECK (weight BETWEEN 0 AND 1),
+    delisting_url         TEXT NOT NULL,                 -- per-zone removal portal
+    description           TEXT,
+    return_code_map       JSONB,                         -- { "127.0.0.2":"SBL", "127.0.0.4":"XBL", ... }
+    enabled               BOOLEAN NOT NULL DEFAULT TRUE,
+    requires_registration BOOLEAN NOT NULL DEFAULT FALSE, -- e.g. Barracuda resolver reg, Abusix key
+    is_paid               BOOLEAN NOT NULL DEFAULT FALSE, -- e.g. invaluement, Spamhaus DQS commercial
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_dnsbl_zones_enabled ON dnsbl_zones (enabled);
+CREATE INDEX idx_dnsbl_zones_kind    ON dnsbl_zones (kind);
+
+-- Result: one row per (audit_run, target, zone) tuple actually queried.
+CREATE TABLE dnsbl_check_results (
+    id            BIGSERIAL PRIMARY KEY,
+    audit_run_id  BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id     BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    zone_id       INTEGER NOT NULL REFERENCES dnsbl_zones(id),
+    target        TEXT NOT NULL,        -- the exact IP or domain tested
+    target_kind   TEXT NOT NULL CHECK (target_kind IN ('ip','domain')),
+    listed        BOOLEAN NOT NULL,
+    return_code   TEXT,                 -- '127.0.0.4' (null when not listed)
+    sub_list      TEXT,                 -- decoded label from return_code_map, e.g. 'XBL'
+    reason_txt    TEXT,                 -- raw TXT answer
+    inconclusive  BOOLEAN NOT NULL DEFAULT FALSE, -- zone unavailable / rate-limited / not registered
+    query_ms      INTEGER,              -- resolution latency for diagnostics
+    checked_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_dnsbl_results_domain_listed ON dnsbl_check_results (domain_id, listed);
+CREATE INDEX idx_dnsbl_results_zone          ON dnsbl_check_results (zone_id);
+CREATE INDEX idx_dnsbl_results_run           ON dnsbl_check_results (audit_run_id);
+```
+
+**Config.yaml → table mapping.** Today the zone catalog lives in `~/.email_delivery_hero/config.yaml` under a `dnsbl.zones` list; each entry (`zone_host`, `kind`, `weight`, `delisting_url`, `description`, `enabled`, `requires_registration`, `is_paid`, `return_code_map`) is exactly one future `dnsbl_zones` row — the DB migration is a straight load of that list, and until then the admin "Blocklist Zones" panel writes back to `config.yaml`. Paid/registration secrets (Spamhaus DQS key, Abusix key, Barracuda-registered resolver IP) live under `config.yaml`'s `secrets:`/`resolvers:` blocks, not in `dnsbl_zones`.
+
+**Result → file store mapping.** Each audit's structured results are written to `~/.email_delivery_hero/audits/<domainId>/<auditId>.json` under a `dnsbl` key: `{ "dnsbl": { "results": [ { "zone":"zen.spamhaus.org", "target":"203.0.113.24", "targetKind":"ip", "listed":true, "returnCode":"127.0.0.4", "subList":"XBL", "reasonTxt":"...", "inconclusive":false, "queryMs":42, "checkedAt":"..." } ], "summary": { "listedCount":2, "cleanCount":45, "inconclusiveCount":0, "weightedWorst":"critical" } } }`. Each array element becomes one `dnsbl_check_results` row (`audit_run_id`/`domain_id` from the enclosing audit); the derived `findings` still land in the shared `findings` table/`findings[]` array via the normal Checker→Finding contract. The `(domain_id, listed)` index backs the dashboard "any listing?" query; the `(zone_id)` index backs "which domains does zone X hit?" reporting.
+
+## 6. When we run the check
+
+**On-demand.** Runs on every manual audit (`POST /api/domains/:id/audit`) and category-scoped run. Because listings appear and clear on their own (SpamCop expires in ~24h, XBL clears minutes after cleanup), a fresh manual run is the primary "am I delisted yet?" tool after the user submits a removal request.
+
+**Periodic.** The in-process scheduler re-runs per domain at the `config.yaml` cadence (default every 6h for the Blacklists category — more frequent than static DNS checks because reputation is volatile). Each run **diffs against the previous audit**: a zone flipping `listed:false → true`, or a `warning → critical` sub-list escalation, is a **new problem** surfaced by regression detection and (per [../scheduled_checks.mdx](../scheduled_checks.mdx)) eligible for alerting; a `listed:true → false` transition is reported as a resolved/improved item. Inconclusive→listed and listed→inconclusive transitions are *not* treated as regressions to avoid resolver-blockage false alarms.
+
+**Cost / rate-limit / back-off.** Total queries per audit = (IP zones × sending IPs) + (domain zones × domains); with ~15 zones and a handful of IPs this is well under 100 DNS lookups. To stay inside free-tier limits: cap concurrency (~8), reuse a dedicated non-public resolver where zones block open resolvers, honor TTL caching within a run, apply exponential back-off with jitter on `SERVFAIL`/timeout, and **auto-disable** a zone for the run if its RFC 5782 test point indicates blocking (record `inconclusive=true`). Paid/registration-gated zones (`is_paid`/`requires_registration` without configured credentials) are skipped, not errored.
+
+## 7. First round vs future
+
+| Sub-check(s) | First round (pure `node:dns/promises`) | Future (probe / external tool / paid feed / provider API / registration) |
+|---|---|---|
+| `dnsbl.spamhaus_zen`, `_sbl`, `_xbl`, `_pbl`, `_dbl` | ✅ free public DNS, low volume | Spamhaus **DQS key** for commercial/high volume (different zone host) |
+| `dnsbl.spamcop`, `dnsbl.sorbs`, `dnsbl.uceprotect_l1/l2/l3`, `dnsbl.mailspike`, `dnsbl.spfbl`, `dnsbl.surbl`, `dnsbl.senderscore` | ✅ open public zones, `A`/`TXT` only | — (Sender Score/Mailspike-rep are advisory `info`) |
+| `dnsbl.barracuda` | ⚠️ query mechanics are pure DNS | needs **free resolver registration** with Barracuda before answers resolve |
+| `dnsbl.abusix` | — | needs **free API key** embedded in query name |
+| `dnsbl.invaluement`, `dnsbl.invaluement_uri` | — | **paid** ivmSIP/ivmURI subscription + licensed resolver |
+| `dnsbl.aggregate` | ✅ pure roll-up over whatever zones resolved | weights/thresholds refined as more feeds come online |
+
+## 8. Acceptance criteria
+
+1. For an IPv4 target the checker constructs the query name by reversing octets and appending `zone_host` (verified: `203.0.113.24` + `zen.spamhaus.org` → `24.113.0.203.zen.spamhaus.org`); for a domain/RHSBL zone it queries `<domain>.<zone_host>` with **no** reversal.
+2. An `A` answer inside `127.0.0.0/8` (or a zone's documented `127.0.1.x`/`127.0.4.x` space) sets `listed=true`, stores the exact `return_code`, and decodes it to `sub_list` via the zone's `return_code_map`; `NXDOMAIN` sets `listed=false`.
+3. A `TXT` answer at the same name is stored as `reason_txt`; when it contains a removal URL that is used, otherwise the finding falls back to `dnsbl_zones.delisting_url`.
+4. Every non-ok finding's `remediation` contains a concrete, correct per-zone delisting URL plus the reason/return code and the underlying-cause guidance — never a generic message.
+5. Per-zone `weight` maps listings to severity as specified: high-trust zones → critical, expiring/policy zones → warning, ASN-wide (UCEPROTECT L2/L3) and pure-reputation advisories → info; the category roll-up uses the worst **weighted** severity, and info/collateral alone does not turn the Blacklists cell amber or red.
+6. The RFC 5782 test-point probe (`2.0.0.127.<zone>`→`127.0.0.2`, `1.0.0.127.<zone>`→`NXDOMAIN`) runs once per zone per audit; on failure the zone's results are marked `inconclusive=true` (info), never false-listed.
+7. Zones flagged `requires_registration` or `is_paid` without configured credentials are skipped with an `inconclusive`/`info` note explaining why, and the UI links the fix.
+8. `dnsbl_zones` and `dnsbl_check_results` exist with the specified PKs, FKs (`audit_run_id`, `domain_id`, `zone_id`), and indexes on `(domain_id, listed)` and `(zone_id)`; the `config.yaml` `dnsbl.zones` list round-trips 1:1 to `dnsbl_zones`, and each result serializes into the audit JSON under the `dnsbl` key.
+9. The scheduler diff flags any clean→listed or warning→critical transition as a new problem and any listed→clean as resolved, while ignoring inconclusive transitions.
+10. The audit-detail view groups `dnsbl` findings with severity badge, target, observed return code + reason, a working [Delist ↗] link, and a copy-to-clipboard of the full fix; clean zones are collapsed; the admin Blocklist Zones panel edits weight/enabled/registration state.
+
+<!--
+MAINTENANCE NOTES
+- Keep zone hosts, return-code maps, and delisting URLs current: DNSBL operators change codes and portals (Spamhaus moved to check.spamhaus.org / DQS; SORBS ownership/status has churned; verify each zone is still live via its RFC 5782 test point before shipping).
+- RFC refs: DNSBL query mechanics = RFC 5782. Keep aligned with SMTP RFC 5321 for how receivers apply listings.
+- Keep the sub-check list and checkId prefixes in sync with ../spam_checks.mdx (Blacklists category) and the Checker/Finding contract in ../engineering.mdx.
+- Domain/URI zones overlap ./link_url_reputation.mdx — keep the split clear: this spec = sending domain + sending IPs; that spec = domains found inside message bodies.
+- Revisit per-zone weights as real-world placement data accrues; weights are config, not code.
+-->

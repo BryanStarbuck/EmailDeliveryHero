@@ -1,0 +1,365 @@
+---
+title: EmailDeliveryHero — DMARC Check
+description: Engineering spec for the DMARC category — how EmailDeliveryHero discovers, parses, and validates the _dmarc TXT record (presence, single-record, policy enforcement, subdomain policy, alignment, reporting, external-report authorization, org-domain boundary), which sub-checks are first-round pure DNS vs future rua-ingestion, the UI surface, and the check-specific database schema.
+---
+
+# EmailDeliveryHero — DMARC Check
+
+**DMARC** (Domain-based Message Authentication, Reporting & Conformance) is the policy layer that
+sits on top of SPF and DKIM. A DMARC record published at `_dmarc.<domain>` tells receivers (a) what
+to do with mail that fails **both** SPF-and-DKIM **alignment** (`p=` / `sp=`), and (b) where to send
+**aggregate** (`rua`) and **failure** (`ruf`) reports so the domain owner gets visibility into who
+is sending as them. Without DMARC at an enforcing policy, anyone can spoof your exact domain in the
+`From:` header and receivers have no owner-published instruction to reject it — the single largest
+lever against direct-domain phishing, and, since the **2024 Gmail/Yahoo bulk-sender rules**, an
+effectively mandatory record for any sender pushing volume.
+
+This check belongs to the **DMARC** dashboard category; all sub-check ids use the **`dmarc`**
+checkId prefix.
+
+**Read alongside**
+- [../overview.mdx](../overview.mdx) — product charter, personas, port list.
+- [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
+- [../spam_checks.mdx](../spam_checks.mdx) — master catalog; DMARC is category 3 of 6.
+- [../dashboard.mdx](../dashboard.mdx) — the 6-column status dashboard and cell roll-up.
+- [../scheduled_checks.mdx](../scheduled_checks.mdx) — recurring-check cadence and regression diffing.
+- [./spf.mdx](./spf.mdx) — SPF is one half of DMARC alignment (`aspf`).
+- [./dkim.mdx](./dkim.mdx) — DKIM is the more robust half of DMARC alignment (`adkim`).
+- [./arc.mdx](./arc.mdx) — ARC preserves prior authentication across forwarders/mailing lists so
+  legitimate indirect mail still passes DMARC.
+
+---
+
+## 1. What it checks
+
+**The standard.** DMARC was defined in **RFC 7489** (informational, 2015) and is being superseded by
+the **DMARCbis** set — **RFC 9989** (the core spec), **RFC 9990** (aggregate reporting), and
+**RFC 9991** (failure reporting). DMARCbis is backward-compatible with `v=DMARC1` records but changes
+several rules this checker must honor:
+
+- **`pct=` is deprecated** — receivers may ignore it; owners should remove it. Percentage-based
+  staged rollout is no longer part of the model.
+- The **organizational-domain / public-suffix** lookup is formalized: a receiver walks up from the
+  `From:` domain to find the DMARC record, and `sp=` (subdomain policy) governs any subdomain that
+  has no record of its own.
+- **`np=`** (non-existent-subdomain policy) is a first-class tag for domains that never send from
+  subdomains.
+
+**Why receivers care.** SPF and DKIM each answer a narrow question ("is this IP allowed?" / "is this
+signature intact?") but neither ties the authenticated identity to the **`From:` header the human
+sees**. DMARC closes that gap: it passes only if SPF **or** DKIM passes **and** the passing identity
+is **aligned** with the `From:` domain. A published, enforcing DMARC policy is what lets Gmail, Yahoo,
+Microsoft, and others reject or quarantine look-alike/spoofed mail on the owner's behalf.
+
+**Common real-world failure mode.** The domain publishes `p=none` and never moves off it — DMARC is
+in "monitor-only" mode, so spoofed mail is still delivered; the owner gets reports but the policy
+provides **zero protection**. The second most common failure: a strong `p=reject` at the org domain
+but `sp=none` (or an implicit weak subdomain policy), leaving every subdomain wide open to spoofing.
+Third: `rua` pointing at a third-party analytics provider **without** the required
+`<report-domain>._report._dmarc` authorization record, so the provider silently receives nothing.
+
+**How a failure degrades inbox placement.** No DMARC (or `p=none`) means receivers apply only their
+own heuristics; spoofed and even legitimate mail rides on weaker signals and is more likely to land
+in spam. Under the 2024 Gmail/Yahoo rules, bulk senders **without** any DMARC record can be rate-
+limited or rejected outright. Conversely, a broken/malformed record is treated as **no policy** — a
+silent regression that removes protection the owner believes they still have.
+
+---
+
+## 2. Sub-checks
+
+Comprehensive set for the `dmarc` category. Each remediation is the exact record/tag/step to apply.
+
+| Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `dmarc.present` | A TXT record exists at `_dmarc.<domain>` and begins with `v=DMARC1`. | `resolveTxt('_dmarc.<domain>')`; join multi-string chunks; test prefix. | **critical:** no DMARC record found. | Publish TXT at `_dmarc.<domain>`: `v=DMARC1; p=none; rua=mailto:dmarc@<domain>` to start, then tighten. |
+| `dmarc.single` | Exactly one `v=DMARC1` record (multiple = whole domain treated as no-policy by receivers). | Count TXT strings whose joined value starts with `v=DMARC1`. | **critical:** two or more DMARC records. | Delete the extra TXT record so exactly one `v=DMARC1` string remains. |
+| `dmarc.syntax` | Record parses: known tags, valid values, `v=DMARC1` first and `p=` immediately second. | Tokenize on `;`, split `tag=value`, validate against tag grammar and order. | **critical:** malformed/unknown-first-tag record → ignored by receivers. | Fix the malformed tag; ensure `v=DMARC1;` is first and `p=` is the second tag. |
+| `dmarc.policy` | A valid `p=` is present and **enforcing** (`quarantine` or `reject`). | Read `p=`; classify `none` / `quarantine` / `reject`. | **warning:** `p=none` (monitor-only, no protection); **critical:** missing/invalid `p=`. | Move to `p=quarantine`, then `p=reject` once `rua` confirms legit mail passes aligned. |
+| `dmarc.subdomain` | `sp=` covers subdomains (or intentionally inherits `p=`). | Read `sp=`; compare against `p=`. | **warning:** enforcing `p=` but `sp=none` leaves subdomains spoofable. | Add `sp=reject` (or `sp=quarantine`) to the org-domain record to cover all subdomains. |
+| `dmarc.np` | `np=` (non-existent-subdomain policy, DMARCbis) set for domains that never send from subdomains. | Read `np=`. | **info/warning:** enforcing `p=` but no `np=` → spoofed random subdomains not explicitly rejected. | Add `np=reject` if you never send from subdomains. |
+| `dmarc.alignment` | Alignment modes understood: `adkim`/`aspf` relaxed (`r`, default) vs strict (`s`). | Read `adkim`/`aspf`; default to `r` when absent. | **warning:** strict alignment (`s`) with subdomain/ESP senders → legit mail fails alignment. | Use relaxed `adkim=r; aspf=r` unless exact-domain matching is required; then fix senders to align. |
+| `dmarc.pct` | `pct=` handling — **deprecated in DMARCbis**; should be removed. | Read `pct=`; flag presence and value. | **info:** `pct` present at all (DMARCbis); **warning:** `pct<100` masking a partial rollout. | Remove `pct`. (Legacy staged rollout only: raise toward `pct=100`, then delete.) |
+| `dmarc.rua` | Aggregate reporting enabled (`rua=mailto:...`, valid URIs). | Parse `rua=` into a URI list; validate `mailto:`/scheme. | **warning:** no `rua` → flying blind on auth failures. | Add `rua=mailto:dmarc@<domain>` (or your analytics mailbox). |
+| `dmarc.ruf` | Failure/forensic reporting `ruf=` considered, ideally with `fo=1`. | Parse `ruf=` and `fo=`. | **info:** no `ruf` (optional, privacy-sensitive). | Optionally add `ruf=mailto:...; fo=1` to receive per-failure samples (redacted at most receivers). |
+| `dmarc.fo` | `fo=` failure-reporting options are valid (`0`/`1`/`d`/`s`). | Read `fo=`; validate token set. | **info:** `fo` absent or `0` while `ruf` set → only all-fail reports. | Set `fo=1` to report when **either** SPF or DKIM fails alignment (most useful). |
+| `dmarc.ri` | Report interval `ri=` is sane (seconds; default 86400). | Read `ri=`; range-check. | **info:** `ri` far below 86400 (many receivers cap at daily anyway). | Set `ri=86400` (daily) unless you have a reason for finer granularity. |
+| `dmarc.rf` | Report format `rf=` (if present) is `afrf`. | Read `rf=`. | **info:** non-standard `rf` value. | Remove `rf` (default `afrf`) or set `rf=afrf`. |
+| `dmarc.external_report_auth` | When `rua`/`ruf` point at a **different** domain, that domain publishes the authorization record. | For each external report URI at `report.example` while checking `sender.com`, `resolveTxt('sender.com._report._dmarc.report.example')` and require `v=DMARC1`. | **critical:** external `rua`/`ruf` with **no** matching `_report._dmarc` authorization → reports are dropped. | At the report-receiver domain publish TXT `<your-domain>._report._dmarc.<report-domain>` = `v=DMARC1`. |
+| `dmarc.report_uri_size` | Optional per-URI size limits (`!<size>` suffix, e.g. `mailto:x@y!10m`) are well-formed. | Parse the `!size` suffix on each URI. | **info:** malformed size suffix. | Fix or drop the `!<size>` suffix; use plain `mailto:` if unsure. |
+| `dmarc.org_domain` | The record is found at the correct **org-domain** boundary via public-suffix walk-up. | Compute the org domain (PSL) and confirm the record is published there, not on an unreachable label. | **warning:** record only on a deep subdomain while the org domain has none → most `From:` domains uncovered. | Publish the DMARC record at the **organizational** domain (`_dmarc.<org-domain>`), then override per-subdomain as needed. |
+| `dmarc.enforcement_readiness` *(advisory)* | Cross-check: are SPF and DKIM already aligned enough to safely move `p=none` → `reject`? | Combine this run's `spf.*` and `dkim.*` findings for the domain; if both are healthy and aligned, advise promotion. | **info:** SPF+DKIM aligned but still `p=none` → safe to enforce. | Move to `p=quarantine` then `p=reject`; monitor `rua` for one full `ri` cycle at each step. |
+| `dmarc.deprecated_tags` | No obsolete/unknown tags lingering (`pct`, `rf` misuse, vendor tags). | Diff observed tags against the DMARCbis-valid set. | **info:** deprecated tags present. | Remove deprecated tags at next DNS edit; keep the record minimal. |
+| `dmarc.real_pass_rate` *(future)* | Actual SPF/DKIM/DMARC pass rates measured from ingested `rua` XML. | Ingest aggregate reports from a mailbox/HTTPS endpoint, parse per-source-IP dispositions. | **warning:** high volume from unaligned sources before enforcing → will break mail if you `reject` now. | Fix or authorize the failing sources (add to SPF `include:`, add DKIM selector) **before** raising policy. |
+
+---
+
+## 3. How it is measured
+
+**First-round detection (pure `node:dns/promises`).**
+
+1. **Lookup.** `resolveTxt('_dmarc.<domain>')`. `resolveTxt` returns `string[][]` (an array of
+   records, each an array of character-strings that must be **concatenated without a separator**
+   before parsing). Filter to records whose joined value starts with `v=DMARC1`.
+2. **Single-record guard.** If zero `v=DMARC1` records → `dmarc.present` critical. If ≥2 →
+   `dmarc.single` critical (per spec, receivers discard **all** of them; the domain is effectively
+   unprotected).
+3. **Tokenize.** Split the joined record on `;`, trim, split each token on the first `=` into
+   `tag=value`. Build a tag map. Enforce ordering: `v` must be the first tag and equal `DMARC1`;
+   `p` must be the second tag (`dmarc.syntax`).
+4. **Classify policy.** `p ∈ {none, quarantine, reject}`; anything else → invalid (`dmarc.policy`
+   critical). `none` → warning (monitor-only). `sp` defaults to `p` when absent; `np` defaults to
+   `sp` (`dmarc.subdomain`, `dmarc.np`).
+5. **Alignment.** `adkim`/`aspf` default to `r`; value `s` recorded and flagged if senders are known
+   to be subdomains/ESPs (`dmarc.alignment`).
+6. **Reporting tags.** Parse `rua`/`ruf` into URI lists (comma-separated, each often `mailto:` or an
+   `https:` collector, optional `!<size>` suffix). Validate `fo` ∈ {`0`,`1`,`d`,`s`}, `ri` numeric,
+   `rf` = `afrf`, and flag `pct` presence (deprecated).
+7. **Org-domain boundary.** Compute the organizational domain using a **bundled public-suffix list**
+   (PSL snapshot shipped with the app; no network call). Confirm the record lives at the org domain;
+   note if only a deeper label carries it (`dmarc.org_domain`).
+8. **External report authorization.** For every `rua`/`ruf` URI whose mail domain differs from the
+   audited domain, issue `resolveTxt('<audited-domain>._report._dmarc.<report-domain>')` and require a
+   `v=DMARC1` value (`dmarc.external_report_auth`). This is the most commonly missed control and is a
+   **critical** finding when absent because reports are silently discarded by the report receiver.
+
+**Edge cases.**
+- **CNAME'd `_dmarc`.** Resolvers follow the CNAME transparently; `resolveTxt` still returns the
+  target's TXT. Record the CNAME in `detail` for operator clarity.
+- **Multi-string TXT (>255 bytes).** Always join the character-strings before prefix-matching, or a
+  long `rua` list splits the record and the prefix test fails spuriously.
+- **Case-insensitivity.** Tag **names** and `p`/`sp` **values** are case-insensitive per spec;
+  lower-case before comparing. Preserve original case in `raw_record`.
+- **Whitespace / trailing semicolons.** Tolerate them; don't fail `dmarc.syntax` on cosmetic spacing.
+- **`NXDOMAIN` vs `NODATA`.** Both mean "no DMARC" → `dmarc.present` critical; distinguish in
+  `detail` (`no _dmarc name` vs `_dmarc exists but no TXT`).
+
+**Caching / rate limits.** Pure DNS; negligible cost. The runner may share a short-lived resolver
+cache across sub-checks within one audit so `_dmarc` is resolved once. `_report._dmarc` probes are
+one lookup **per distinct external report domain**, deduped. No third-party quotas in the first round.
+
+**Severity mapping.** Missing/duplicate/malformed record and missing external-report auth →
+**critical**. `p=none`, strict-alignment-with-subdomain-senders, `sp=none` under enforcing `p`,
+`pct<100`, missing `rua` → **warning**. Deprecated/cosmetic/advisory items and readiness hints →
+**info**. `info` alone never turns the DMARC cell amber.
+
+---
+
+## 4. User interface
+
+**Dashboard contribution.** DMARC is one of the six category columns. The DMARC cell for a domain is
+the **worst severity** among all `dmarc.*` findings in the latest run: dark green (all ok), amber
+(worst = warning, e.g. `p=none`), dark red (any critical, e.g. no record / duplicate / missing
+external-report auth), light gray (never run). `info`-only findings keep the cell green. React 19 +
+shadcn/ui `Badge` renders the cell; hover shows the top open problem.
+
+**Audit-detail view.** Under the audit for a domain, findings are grouped by category. The **DMARC**
+group lists one row per `dmarc.*` finding:
+
+```
+DMARC  ──────────────────────────────────────────────────────────────────
+ [critical] No DMARC record                         checkId: dmarc.present
+   observed:  _dmarc.example.com → NXDOMAIN
+   fix:       Publish TXT at _dmarc.example.com:                  [ copy ]
+              v=DMARC1; p=none; rua=mailto:dmarc@example.com
+ ──────────────────────────────────────────────────────────────────────
+ [warning]  Policy is monitor-only (p=none)          checkId: dmarc.policy
+   observed:  v=DMARC1; p=none; rua=mailto:dmarc@example.com
+   fix:       Raise to p=quarantine, then p=reject after rua       [ copy ]
+              confirms aligned mail passes.
+ ──────────────────────────────────────────────────────────────────────
+ [warning]  Subdomains unprotected (sp=none)      checkId: dmarc.subdomain
+   observed:  p=reject; sp=none
+   fix:       Add sp=reject to _dmarc.example.com                  [ copy ]
+```
+
+Each row is a shadcn `Card`/`Accordion` item with: a severity `Badge` (lucide `ShieldAlert` /
+`ShieldCheck` / `Info`), the `title`, an **observed** block (the parsed `detail`), the **remediation**
+string, and a **copy-to-clipboard** button that copies the exact record/value. A "**Parsed record**"
+sub-panel renders the tag map as a small table (`v`, `p`, `sp`, `np`, `adkim`, `aspf`, `pct`, `rua`,
+`ruf`, `fo`, `ri`) so the operator sees the whole record decoded.
+
+**Per-domain config inputs.** DMARC needs **no** extra per-domain input beyond the domain itself
+(unlike DKIM selectors). The domain detail page offers an optional **"Suggested record" builder**: a
+small form (desired `p`, include `rua` mailbox, cover subdomains?) that emits a ready-to-publish TXT
+string — advisory only, never auto-published.
+
+**Empty / never-run / loading states.** Never-run → gray cell, "No audit yet — run one" CTA.
+Loading → skeleton rows (shadcn `Skeleton`). No-record result is **not** empty — it renders the
+`dmarc.present` critical with the concrete publish-this remediation.
+
+**Admin-only settings.** Under **Settings → Admin** (gated by `role:admin`): toggle the future
+**`rua` ingestion** feature, set the ingestion mailbox/endpoint, and pin/refresh the bundled
+public-suffix-list snapshot used for org-domain computation.
+
+---
+
+## 5. Information schema (database schema)
+
+Reference the shared core tables (owned by engineering, **not** redefined here): `domains`,
+`sending_ips`, `dkim_selectors`, `audit_runs`, `findings`. Human-readable DMARC findings land in the
+shared `findings` table with `category='dmarc'` and `check_id` = the sub-check id. The structured,
+machine-parsed observation for each run lives in the check-specific table below.
+
+```sql
+-- One row per audit run per domain: the parsed DMARC record and derived flags.
+CREATE TABLE dmarc_check_results (
+    id               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    audit_run_id     BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id        BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    record_found     BOOLEAN NOT NULL,
+    record_count     INT     NOT NULL DEFAULT 0,   -- >1 => dmarc.single critical
+    raw_record       TEXT,                          -- exact joined TXT string as observed
+    parsed           JSONB,                         -- full tag map { v,p,sp,np,adkim,aspf,pct,rua,ruf,fo,ri,rf }
+    policy           TEXT,                          -- p=  : none | quarantine | reject | null
+    subdomain_policy TEXT,                          -- sp= (effective; defaults to policy)
+    np_policy        TEXT,                          -- np= (DMARCbis)
+    pct              INT,                            -- pct= (deprecated) or null
+    adkim            CHAR(1),                        -- 'r' | 's'
+    aspf             CHAR(1),                        -- 'r' | 's'
+    rua_uris         JSONB,                          -- ["mailto:dmarc@example.com", ...]
+    ruf_uris         JSONB,                          -- ["mailto:forensics@example.com", ...]
+    fo               TEXT,                           -- fo= tokens, e.g. '1'
+    ri               INT,                            -- report interval seconds
+    is_enforcing     BOOLEAN NOT NULL DEFAULT FALSE, -- policy in (quarantine, reject)
+    org_domain       TEXT,                           -- computed via PSL
+    external_reports_authorized BOOLEAN,             -- all external rua/ruf have _report._dmarc auth
+    checked_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_dmarc_results_run_domain ON dmarc_check_results(audit_run_id, domain_id);
+CREATE INDEX ix_dmarc_results_domain            ON dmarc_check_results(domain_id);
+CREATE INDEX ix_dmarc_results_enforcing         ON dmarc_check_results(is_enforcing);
+
+-- One row per external report URI observed, tracking its _report._dmarc authorization state.
+CREATE TABLE dmarc_external_report_auth (
+    id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    result_id      BIGINT NOT NULL REFERENCES dmarc_check_results(id) ON DELETE CASCADE,
+    report_kind    TEXT   NOT NULL,   -- 'rua' | 'ruf'
+    report_uri     TEXT   NOT NULL,   -- e.g. mailto:d@thirdparty.example
+    report_domain  TEXT   NOT NULL,   -- thirdparty.example
+    auth_name      TEXT   NOT NULL,   -- <audited>._report._dmarc.thirdparty.example
+    authorized     BOOLEAN NOT NULL,  -- v=DMARC1 present at auth_name?
+    checked_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_dmarc_ext_auth_result ON dmarc_external_report_auth(result_id);
+
+-- FUTURE (rua XML ingestion; not first round): parsed aggregate-report rows.
+CREATE TABLE dmarc_aggregate_reports (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    audit_run_id  BIGINT REFERENCES audit_runs(id) ON DELETE CASCADE, -- nullable: reports arrive async
+    domain_id     BIGINT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+    report_org    TEXT,              -- reporting receiver (e.g. google.com)
+    date_begin    TIMESTAMPTZ,
+    date_end      TIMESTAMPTZ,
+    source_ip     INET   NOT NULL,
+    message_count INT    NOT NULL,
+    disposition   TEXT,              -- none | quarantine | reject (applied)
+    spf_result    TEXT,              -- pass | fail | ...
+    dkim_result   TEXT,              -- pass | fail | ...
+    spf_aligned   BOOLEAN,
+    dkim_aligned  BOOLEAN,
+    ingested_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_dmarc_agg_domain_ip ON dmarc_aggregate_reports(domain_id, source_ip);
+```
+
+**Mapping onto today's JSON file store.** There is **no database in the first round**. The parsed
+result is embedded in the per-run audit file at
+`~/.email_delivery_hero/audits/<domainId>/<auditId>.json`. Within that file, `findings[]` already
+holds the human-readable DMARC findings (`category:"dmarc"`); a sibling `results.dmarc` object holds
+the structured payload that maps 1:1 to `dmarc_check_results` (same field names: `raw_record`,
+`parsed`, `policy`, `subdomain_policy`, `pct`, `adkim`, `aspf`, `rua_uris`, `ruf_uris`,
+`is_enforcing`, `org_domain`, `external_reports_authorized`), with the per-URI authorization list
+under `results.dmarc.externalReportAuth[]` (maps to `dmarc_external_report_auth`). The bundled
+public-suffix-list snapshot lives at `~/.email_delivery_hero/psl.dat` (a config asset, not per-run).
+Future `rua` ingestion, when built, writes `~/.email_delivery_hero/dmarc_reports/<domainId>/*.json`,
+mapping to `dmarc_aggregate_reports`. Because the `store` module fronts all of this, the file→DB move
+is a single-module change.
+
+---
+
+## 6. When we run the check
+
+- **On-demand.** Runs on every manual audit (`POST /api/domains/:id/audit`) and on
+  `POST /api/scheduler/run`. DMARC is cheap (one TXT lookup + deduped `_report._dmarc` probes), so it
+  always runs inline with the rest of the engine.
+- **Periodic.** The in-process scheduler re-audits each monitored domain on the `config.yaml` cadence
+  (default every 6 h). Each run's `dmarc.*` findings are diffed against the previous run; any newly
+  appearing or worsened finding is a **new problem** surfaced on the Dashboard. High-value
+  regressions to catch: a record silently dropped (→ `dmarc.present` critical), a policy walked back
+  from `reject` to `none`, a duplicate record appearing, or an external `rua` losing its
+  authorization record.
+- **First-round vs future.** All sub-checks in §2 **except** `dmarc.real_pass_rate` are first-round
+  pure DNS. `dmarc.real_pass_rate` is gated behind a future `rua` XML ingestion pipeline (mailbox or
+  HTTPS endpoint + parser + the `dmarc_aggregate_reports` table).
+- **Cost / rate-limit / back-off.** No paid feeds or provider APIs in the first round; DNS lookups
+  only. Respect `node:dns` resolver failures with a short bounded retry (2 attempts, 250 ms back-off)
+  and record `SERVFAIL`/`timeout` as an `info` "could not resolve" rather than a false critical.
+- **Regression detection** applies exactly as in [../scheduled_checks.mdx](../scheduled_checks.mdx):
+  compare the latest `results.dmarc` and `findings[]` to the prior run by `check_id` + `severity`.
+
+---
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises`, deterministic) | Future (probe / ingestion / feed / API) |
+| --- | --- | --- |
+| `dmarc.present` | ✅ TXT lookup at `_dmarc.<domain>` | — |
+| `dmarc.single` | ✅ count records | — |
+| `dmarc.syntax` | ✅ tokenize + order/grammar | — |
+| `dmarc.policy` | ✅ read `p=` | — |
+| `dmarc.subdomain` | ✅ read `sp=` | — |
+| `dmarc.np` | ✅ read `np=` | — |
+| `dmarc.alignment` | ✅ read `adkim`/`aspf` | — |
+| `dmarc.pct` | ✅ flag deprecated `pct=` | — |
+| `dmarc.rua` / `dmarc.ruf` / `dmarc.fo` / `dmarc.ri` / `dmarc.rf` | ✅ parse tags | — |
+| `dmarc.report_uri_size` | ✅ parse `!size` suffix | — |
+| `dmarc.org_domain` | ✅ PSL walk-up (bundled snapshot) | Auto-refresh PSL from publicsuffix.org |
+| `dmarc.external_report_auth` | ✅ `_report._dmarc` TXT probe | — |
+| `dmarc.enforcement_readiness` | ✅ cross-reads this run's `spf.*` + `dkim.*` findings | Stronger signal once real pass rates exist |
+| `dmarc.deprecated_tags` | ✅ diff vs DMARCbis tag set | — |
+| `dmarc.real_pass_rate` | — | ⛔ `rua` XML ingestion (mailbox/HTTPS endpoint) + parser + `dmarc_aggregate_reports` |
+
+---
+
+## 8. Acceptance criteria
+
+1. Resolving `_dmarc.<domain>` correctly joins multi-string TXT chunks and identifies a `v=DMARC1`
+   record; absence yields a `dmarc.present` **critical** with a concrete publish-this remediation.
+2. Two or more `v=DMARC1` records yield a `dmarc.single` **critical**.
+3. A record whose first tag is not `v=DMARC1` or whose second tag is not `p=`, or that has an invalid
+   `p=` value, yields a `dmarc.syntax` / `dmarc.policy` **critical**.
+4. `p=none` yields a `dmarc.policy` **warning**; `p=quarantine`/`p=reject` sets `is_enforcing=true`
+   and yields **ok**.
+5. Enforcing `p=` with `sp=none` yields a `dmarc.subdomain` **warning**; `sp`/`np` correctly default
+   from `p`/`sp` when absent.
+6. `adkim=s`/`aspf=s` are recorded; `pct=` presence yields a deprecation **info** (and `pct<100` a
+   **warning**).
+7. Missing `rua` yields a `dmarc.rua` **warning**; an external `rua`/`ruf` domain with **no** matching
+   `<domain>._report._dmarc.<report-domain>` `v=DMARC1` record yields `dmarc.external_report_auth`
+   **critical**; a present one clears it.
+8. The org-domain boundary is computed from the **bundled** PSL with no network call, and a record
+   published only on a deep subdomain (org domain bare) yields `dmarc.org_domain` **warning**.
+9. `dmarc.enforcement_readiness` emits an **info** to promote policy only when this run's SPF and DKIM
+   findings are both healthy/aligned and current `p=none`.
+10. Every non-`ok` finding carries a concrete `remediation` (the exact TXT record or tag edit), never
+    a generic "check your DNS."
+11. The parsed result is persisted (file store `results.dmarc`, DB `dmarc_check_results`) with all
+    listed fields; the DMARC dashboard cell reflects the worst severity and `info`-only never turns it
+    amber.
+12. A second scheduled run that sees a dropped record, a policy downgrade, a new duplicate, or a lost
+    external-report authorization flags each as a **new problem** via the regression diff.
+13. `dmarc.real_pass_rate` is absent in the first round and clearly gated behind future `rua`
+    ingestion.
+
+<!--
+  Maintenance notes:
+  * Keep RFC refs current: DMARC 7489 -> DMARCbis RFC 9989 (core) / 9990 (aggregate) / 9991 (failure).
+    pct is DEPRECATED in DMARCbis; np= is first-class; org-domain/PSL walk-up is formalized.
+  * Keep sub-check ids and severities in sync with ../spam_checks.mdx (category 3, dmarc prefix) and
+    the Checker/Finding contract in ../engineering.mdx.
+  * DMARC alignment depends on ./spf.mdx (aspf) and ./dkim.mdx (adkim); ./arc.mdx explains how
+    forwarded mail can still pass. Update cross-links if those files move.
+  * dmarc.real_pass_rate stays FUTURE until the rua XML ingestion pipeline + dmarc_aggregate_reports
+    table are built.
+-->

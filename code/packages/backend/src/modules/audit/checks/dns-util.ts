@@ -71,3 +71,90 @@ export function reverseIpv4(ip: string): string | null {
   if (parts.length !== 4 || parts.some((p) => !/^\d{1,3}$/.test(p) || Number(p) > 255)) return null
   return parts.reverse().join(".")
 }
+
+/** Resolve AAAA (IPv6) records. */
+export async function resolve6(name: string): Promise<DnsLookup<string>> {
+  try {
+    const records = await dns.resolve6(name)
+    return { records, empty: records.length === 0 }
+  } catch (err) {
+    return { records: [], ...classify(err) }
+  }
+}
+
+/** Resolve CNAME records for a name. */
+export async function resolveCname(name: string): Promise<DnsLookup<string>> {
+  try {
+    const records = await dns.resolveCname(name)
+    return { records, empty: records.length === 0 }
+  } catch (err) {
+    return { records: [], ...classify(err) }
+  }
+}
+
+/** Resolve NS records for a zone. */
+export async function resolveNs(name: string): Promise<DnsLookup<string>> {
+  try {
+    const records = await dns.resolveNs(name)
+    return { records, empty: records.length === 0 }
+  } catch (err) {
+    return { records: [], ...classify(err) }
+  }
+}
+
+/** Resolve CAA records for a name. */
+export async function resolveCaa(name: string): Promise<DnsLookup<import("node:dns").CaaRecord>> {
+  try {
+    const records = await dns.resolveCaa(name)
+    return { records, empty: records.length === 0 }
+  } catch (err) {
+    return { records: [], ...classify(err) }
+  }
+}
+
+/** Resolve the SOA record for a zone (single record, or null when absent/error). */
+export async function resolveSoa(
+  name: string,
+): Promise<{ record: import("node:dns").SoaRecord | null; empty: boolean; error?: string }> {
+  try {
+    const record = await dns.resolveSoa(name)
+    return { record, empty: false }
+  } catch (err) {
+    return { record: null, ...classify(err) }
+  }
+}
+
+/**
+ * Shell out to the Brew-installed `dig` for record types node:dns cannot query directly (TLSA, DS,
+ * DNSKEY, RRSIG, SVCB, SMIMEA, etc.). Returns the `+short` answer lines. Never throws: on a missing
+ * `dig` binary, timeout, or NXDOMAIN it returns an empty record set with `empty: true` so callers can
+ * emit a graceful finding rather than crash. First-round checkers should degrade to an `info`
+ * finding when `error` is set (transient) and treat `empty` as "no such record".
+ */
+export async function dig(name: string, type: string): Promise<DnsLookup<string>> {
+  const { execFile } = await import("node:child_process")
+  return await new Promise<DnsLookup<string>>((resolve) => {
+    execFile(
+      "dig",
+      // Tight budget: healthy resolvers answer in well under a second; a query that stalls past ~3s
+      // is treated as transient (error set) so a single slow/hung lookup can't blow the audit budget.
+      ["+short", "+time=3", "+tries=1", type, name],
+      { timeout: 4000 },
+      (err, stdout) => {
+        if (err) {
+          // ENOENT = dig not installed; treat as transient/unknown, not "no record".
+          const code = (err as NodeJS.ErrnoException).code
+          resolve({ records: [], empty: false, error: code ?? err.message })
+          return
+        }
+        const records = stdout
+          .split("\n")
+          .map((l) => l.trim())
+          .filter(Boolean)
+          // dig may emit CNAME chase lines; keep everything, callers parse per type.
+          .filter((l) => !l.startsWith(";"))
+        resolve({ records, empty: records.length === 0 })
+      },
+    )
+  })
+}

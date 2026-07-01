@@ -1,0 +1,220 @@
+---
+title: Domain Registration Reputation (WHOIS/RDAP)
+description: Audits a sending domain's registration record — WHOIS/RDAP age, expiry, registrar lock, DNSSEC-at-registrar, privacy, parked/abuse and lookalike signals — to catch freshly-registered, soon-expiring, or poorly-locked domains that raise spam scores or silently break all mail.
+---
+
+# Domain Registration Reputation (WHOIS/RDAP)
+
+Email receivers and reputation systems increasingly weigh *who registered the domain, when, and how well it is protected*. A domain registered three days ago has almost no sending history and is treated by Gmail/Yahoo/Spamhaus heuristics as high-risk; a domain that expires next week is one silent lapse away from losing all DNS (SPF, DKIM, DMARC, MX) at once and having its mail hard-fail. This check reads the registration record for each audited domain via **RDAP** (Registration Data Access Protocol, the modern structured replacement for WHOIS) — falling back to WHOIS text where RDAP is unavailable — and reports registration age, expiry runway, registrar transfer lock, DNSSEC delegation at the registrar, registrant privacy, parked/for-sale state, registrar abuse reputation, auto-renew, and brand-lookalike risk. Because registration data changes slowly (days to years, not minutes), this check is cached and scheduled far less often than DNS checks.
+
+**Category:** DNS & Infrastructure. **checkId prefix:** `infra` (sub-family `domain-reputation`, e.g. `infra.domain_expiry`).
+
+**Read alongside:**
+- [../overview.mdx](../overview.mdx) — product charter, personas, port list.
+- [../engineering.mdx](../engineering.mdx) — Checker/Finding contract, file store, scheduler.
+- [../spam_checks.mdx](../spam_checks.mdx) — master catalog; this spec expands the DNS & Infrastructure slice.
+- [../dashboard.mdx](../dashboard.mdx) — the 6-column status dashboard (this feeds the **DNS & Infrastructure** cell).
+- [../scheduled_checks.mdx](../scheduled_checks.mdx) — recurring-check cadence and per-OS scheduling.
+- Peer checks: [./dnssec.mdx](./dnssec.mdx) (DS-at-registrar cross-ref), [./dns_health.mdx](./dns_health.mdx) (delegation/NS health), [./blacklists.mdx](./blacklists.mdx) (domain/URI reputation blocklists).
+
+## 1. What it checks
+
+A domain's registration record is the root of trust for everything below it. The relevant standards and facts:
+
+- **RDAP** — Registration Data Access Protocol (RFC 9082 query format, RFC 9083 JSON response, RFC 7484 bootstrap). RDAP returns structured JSON: `events` (registration / expiration / last-changed dates), `status` (EPP status codes), `entities` (registrar, registrant), `secureDNS` (DNSSEC delegation), and `nameservers`. It is served over HTTPS from the responsible registry/registrar, discovered via the IANA bootstrap file (`https://data.iana.org/rdap/dns.json`). RDAP is ICANN-mandated for gTLDs and is the source we prefer.
+- **WHOIS** (RFC 3912) — the legacy port-43 text protocol. Unstructured, per-registrar formatting, being deprecated by ICANN (gTLD WHOIS sunset in 2025) but still the only source for many ccTLDs. Used only as a fallback and parsed heuristically.
+- **EPP status codes** (RFC 5730/5731) — the `status` values that express registrar/registry locks: `clientTransferProhibited`, `clientDeleteProhibited`, `clientUpdateProhibited`, `clientHold`, `serverHold`, `pendingDelete`, `redemptionPeriod`, `autoRenewPeriod`, `inactive`. These reveal both hijack protection and danger states.
+- **DNSSEC delegation** — `secureDNS.delegationSigned` / DS records held at the registrar (see [./dnssec.mdx](./dnssec.mdx)).
+
+**Why receivers care.** Domain age and registration hygiene are strong spam priors. Spammers burn through cheap, freshly-registered "snowshoe" domains; brand-impersonation and phishing rely on newly-registered cousin domains. Reputation feeds (Spamhaus DBL, receiver internal models, 2024 Gmail/Yahoo bulk-sender risk scoring) penalize domains with no age, no history, or registrar/TLDs known for abuse tolerance.
+
+**Common real-world failure mode.** The silent expiry: an admin forgets to renew, auto-renew is off, the domain enters `redemptionPeriod`, NS records are pulled, and 100% of the org's mail begins to hard-bounce (or worse, the domain is re-registered by an attacker who now controls SPF/DKIM/DMARC). A second common failure is a business-critical domain left *without* `clientTransferProhibited`, making an unauthorized transfer (hijack) trivial once registrar credentials leak.
+
+**How a failure degrades inbox placement.** New/very-young domains get throttled or spam-foldered until they build history; expired or `clientHold` domains lose DNS and thus fail SPF/DKIM/DMARC alignment entirely (all mail rejected); parked/for-sale landing pages and abuse-tolerant registrars raise the domain's spam prior; lookalike domains poison the *brand's* reputation and get the legitimate domain caught in impersonation dragnets.
+
+## 2. Sub-checks
+
+Prefix every checkId with `infra.`. Comprehensive set:
+
+| Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+|---|---|---|---|---|
+| `infra.domain_expiry` | Registration not expired and not expiring soon | RDAP `events[eventAction=expiration].eventDate` vs now | **critical:** expired / past expiry date. **warning:** expires in < 30 days | "Renew example.com now at your registrar (current expiry 2026-07-20). All mail stops if the domain lapses." |
+| `infra.domain_age` | Domain not suspiciously newly-registered | now − RDAP `registration` event date | **warning:** age < 30 days (spam prior). **info:** age < 90 days | "example.com was registered 6 days ago; warm up sending slowly and expect throttling until ~30-day age. If unexpected, verify no one hijacked/re-registered the name." |
+| `infra.registrar_lock` | `clientTransferProhibited` transfer lock set | RDAP `status` array contains `client transfer prohibited` | **warning:** transfer lock absent | "Enable Registrar Lock (clientTransferProhibited) in your registrar control panel to block unauthorized transfers." |
+| `infra.delete_lock` | `clientDeleteProhibited` set on critical domains | RDAP `status` contains `client delete prohibited` | **info:** delete lock absent | "Enable clientDeleteProhibited at your registrar to prevent accidental/malicious deletion of the mail domain." |
+| `infra.update_lock` | `clientUpdateProhibited` (registry/server locks for high-value) | RDAP `status` contains update/server locks | **info:** high-value domain lacks update lock | "For a brand-critical mail domain, request Registry Lock (serverTransferProhibited/serverUpdateProhibited) from your registrar." |
+| `infra.hold_status` | Domain not in `clientHold`/`serverHold` (DNS suppressed) | RDAP `status` contains hold codes | **critical:** `serverHold`/`clientHold` present | "Domain is on HOLD (DNS removed by registrar/registry). Contact your registrar immediately — mail and DNS are down." |
+| `infra.pending_delete` | Domain not in `pendingDelete`/`redemptionPeriod` | RDAP `status` contains lifecycle-end codes | **critical:** `pendingDelete`/`redemptionPeriod` | "example.com is in redemptionPeriod — restore it via your registrar before it drops. This is the last window before total loss." |
+| `infra.auto_renew` | Auto-renew enabled (advisory) | RDAP `autoRenewPeriod` status / registrar API where available; else advisory | **info:** auto-renew cannot be confirmed / is off | "Turn on auto-renew and ensure the billing card on file is valid so example.com cannot silently lapse." |
+| `infra.registrant_privacy` | WHOIS/RDAP privacy present or intentional | Registrant entity redacted / privacy-service vCard | **info:** registrant PII exposed (or privacy unexpectedly off) | "Enable WHOIS privacy/redaction at your registrar to reduce spear-phishing of the registrant contact, unless public contact is a deliberate policy." |
+| `infra.dnssec_ds_at_registrar` | DS record / signed delegation present at registrar | RDAP `secureDNS.delegationSigned` + `dsData` | **info:** delegation unsigned (cross-ref) | "Publish a DS record at your registrar to complete DNSSEC. See ./dnssec.mdx for the zone-signing side." |
+| `infra.registrar_reputation` | Registrar not on abuse-tolerant watchlist (advisory) | Registrar IANA ID / name matched against curated abuse-reputation list | **info:** registrar flagged for abuse tolerance | "Your registrar (IANA ID 1234) appears on abuse-reputation lists; consider transferring brand-critical mail domains to a reputable registrar." |
+| `infra.parked` | Domain not a parked / for-sale landing page | Apex A/AAAA + HTTP(S) fetch classified against parking-nameserver and landing signatures | **warning:** domain resolves to a parking/for-sale page | "example.com serves a parking/for-sale page. Point it at real infrastructure; parked mail domains raise spam scores and imply an inactive sender." |
+| `infra.parking_nameservers` | NS not delegated to a known parking service | RDAP/`resolveNs` NS hostnames matched vs parking-NS list (sedoparking, bodis, above.com…) | **warning:** NS owned by a parking provider | "Your NS records point to a domain-parking service. Move DNS to your real provider so SPF/DKIM/DMARC are authoritative." |
+| `infra.name_similarity` | Domain not a risky lookalike of the org brand (and no obvious cousins) | Edit-distance / homoglyph / TLD-swap comparison to configured brand + optional cousin scan | **info:** lookalike/cousin risk to brand | "example-mail.co is a cousin of your brand example.com; register defensive lookalikes or monitor them, and publish DMARC p=reject on the real domain." |
+| `infra.idn_homograph` | Domain (or its cousins) not using deceptive IDN/punycode homoglyphs | Punycode (`xn--`) decode + confusable-script detection | **info:** homograph/mixed-script risk | "Domain uses mixed-script/confusable characters (punycode xn--…). Confirm intent; homograph domains trigger phishing filters." |
+| `infra.registrar_abuse_contact` | Registrar abuse contact is published (RFC 9083 abuse entity) | RDAP registrar entity with `abuse` role vCard | **info:** no abuse contact exposed | "Registrar lacks a published abuse contact — advisory only; relevant for reporting hijacks." |
+| `infra.tld_risk` | TLD not on a high-abuse-rate list (advisory) | Apex TLD matched vs curated high-abuse-TLD list (Spamhaus TLD stats) | **info:** high-abuse TLD | "example.top uses a TLD with elevated abuse rates; expect stricter receiver filtering — no fix beyond building strong SPF/DKIM/DMARC + history." |
+| `infra.recent_transfer` | Domain not transferred/re-registered very recently | RDAP `transfer`/`last changed` events vs now | **info:** ownership/registrar changed < 30 days ago | "example.com changed registrar/owner recently; reputation may reset — warm up and monitor bounce rates." |
+| `infra.record_available` | A registration record was actually retrievable | RDAP HTTP 200 with parseable body, or WHOIS parse success | **warning:** no RDAP/WHOIS data obtainable | "Could not read registration data for example.com (RDAP/WHOIS unavailable). Verify the domain exists and is registered; some ccTLDs restrict lookups." |
+
+## 3. How it is measured
+
+**Primary path — RDAP over HTTPS.**
+1. Determine the apex/registrable domain from `ctx.domain` (strip subdomains using the Public Suffix List).
+2. Resolve the RDAP base URL from the IANA DNS bootstrap file (`https://data.iana.org/rdap/dns.json`), cached locally; match the TLD to its RDAP service base.
+3. `GET {base}/domain/{apex}` with `Accept: application/rdap+json`, follow the registry→registrar `related` link when present for authoritative registrar data.
+4. Parse: `events[]` → registration/expiration/last-changed/transfer dates; `status[]` → EPP codes (normalize the RDAP space-separated spellings, e.g. `client transfer prohibited`, back to camelCase EPP codes); `secureDNS.delegationSigned`/`dsData`; `entities[]` → registrar (name + IANA ID + abuse vCard) and registrant (redaction state); `nameservers[]`.
+
+**Fallback — WHOIS (RFC 3912).** When RDAP has no bootstrap entry (many ccTLDs) or returns 404/errors, shell to a Brew `whois` client (future round) or a Node WHOIS library, and heuristically parse `Creation Date`/`Registry Expiry Date`/`Domain Status`/`Registrar`/`DNSSEC`. Record `source = 'whois'` and mark parsed fields lower-confidence; per-registrar text format variance means some sub-checks degrade to `info`/`record_available` warnings.
+
+**Parked/nameserver classification.**
+- NS check: compare `nameservers[]` (or `dns.resolveNs`) hostnames against a curated `parking_nameservers` reference list.
+- Landing check (future/probe): resolve apex A/AAAA and `GET` the site over HTTPS; classify the response against parking signatures (Sedo/Bodis/Afternic markers, `for sale` / `buy this domain` copy, single-page redirect to a marketplace).
+
+**Lookalike / homograph.** Compare apex to the configured brand string(s) using Damerau-Levenshtein distance (flag ≤ 2 with different TLD/registrant), homoglyph/confusable-script mapping (Unicode confusables), and punycode decode for `xn--` labels. Optional active cousin-domain scan (future, generates permutations and RDAP-checks them) is off by default for cost.
+
+**Edge cases:** gTLD WHOIS redaction/GDPR means registrant fields are legitimately blank — treat as privacy present, not missing data; ccTLDs with no RDAP and rate-limited WHOIS → emit `infra.record_available` info, not a hard failure; registry-vs-registrar expiry-date disagreement → prefer registry `expiration` event; grace/redemption windows are lifecycle states, not mere expiry, so map them explicitly to `pending_delete`/`hold` sub-checks.
+
+**Caching & rate limits.** RDAP endpoints and WHOIS servers rate-limit aggressively (HTTP 429 / port-43 throttling). Registration data changes on the order of days, so results are cached with a long TTL (default 24h, configurable) and this check is **skipped** on the frequent DNS cadence — only refreshed on the slow cadence or on manual run. Respect `Retry-After`, exponential back-off, and a per-run RDAP request budget.
+
+**Severity mapping.** Expired / `serverHold`/`clientHold` / `pendingDelete`/`redemptionPeriod` → **critical** (mail is or will be down). Expiring < 30 days, missing transfer lock, parked/parking-NS, age < 30 days → **warning**. Age < 90 days, missing DS, privacy exposure, registrar/TLD reputation, lookalike/homograph, auto-renew unconfirmed, recent transfer → **info** (context, does not turn the cell amber alone).
+
+## 4. User interface
+
+This check contributes to the **DNS & Infrastructure** dashboard cell (shared with DNSSEC, DNS health, reverse DNS, etc.). The cell color = worst severity across all `infra.*` findings; a domain expired or on hold makes it dark red, an expiry-soon or missing-lock makes it amber, `info`-only registration notes keep it green.
+
+**Audit-detail view.** Findings render as a grouped card "Domain Registration Reputation" under the DNS & Infrastructure section. Each row: severity badge (shadcn `Badge`, lucide `ShieldAlert`/`Clock`/`Lock` icons), the sub-check title, an **observed detail** (e.g. `Expires 2026-07-20 (19 days)`, `Registered 2026-06-25 (6 days ago)`, `Status: clientTransferProhibited ✓`), the **remediation** string, and a copy-to-clipboard button for the actionable value (renewal deadline, registrar name, DS record).
+
+**Registration summary panel.** A small key/value card at the top of the group so the operator sees the record at a glance (React 19 + shadcn/ui `Card`/`Table`, TanStack Query data):
+
+```
+┌ Domain Registration ─────────────────────────────────┐
+│ Registrar     Cloudflare, Inc. (IANA 1910)   source RDAP │
+│ Registered    2019-03-11   Age 6y 3m         🟢          │
+│ Expires       2026-07-20   in 19 days        🟡 renew   │
+│ Auto-renew    unknown                        🔵          │
+│ Status        clientTransferProhibited        🟢 locked │
+│               clientDeleteProhibited          🟢        │
+│ DNSSEC (reg)  delegationSigned = true         🟢        │
+│ Privacy       redacted (GDPR)                 🟢        │
+│ Parked        no                              🟢        │
+│ [ Copy record ]  [ Re-check now ]                        │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Per-domain config inputs** (admin-only, on the domain settings page): the org **brand string(s)** for `infra.name_similarity`; an **expiry warning threshold** (default 30 days) and **age threshold** (default 30 days); a toggle "registrant is intentionally public" to silence `infra.registrant_privacy`; an "enable active cousin-domain scan" toggle (default off). Global admin settings: curated `parking_nameservers`, `high_abuse_tld`, and `registrar_reputation` reference lists (editable), and the RDAP request budget / cache TTL.
+
+**States.** *Never-run:* the panel shows "Registration not yet checked — runs on the slow cadence." *Loading:* skeleton rows (RDAP can be slow/rate-limited). *No record:* an amber `infra.record_available` row explaining RDAP/WHOIS was unavailable for that TLD. *Cached:* a subtle "as of <timestamp>" caption since this data is intentionally stale-tolerant.
+
+## 5. Information schema (database schema)
+
+Reference the shared core tables (do **not** redefine): `domains`, `sending_ips`, `dkim_selectors`, `audit_runs`, and `findings` (each `infra.*` finding is one `findings` row with `category='infra'`). This check adds one structured result table plus small reference/config tables.
+
+```sql
+-- One row per audit run per domain: the parsed registration snapshot.
+CREATE TABLE domain_registration (
+  id              BIGSERIAL PRIMARY KEY,
+  audit_run_id    BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+  domain_id       BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+  registrar          TEXT,           -- registrar org name
+  registrar_iana_id  INTEGER,        -- IANA registrar ID
+  created_date       DATE,           -- registration/creation event
+  expiry_date        DATE,           -- registry expiration event
+  updated_date       DATE,           -- last-changed event
+  transfer_date      DATE,           -- most recent transfer event, if any
+  statuses           JSONB NOT NULL DEFAULT '[]', -- normalized EPP status codes, e.g. ["clientTransferProhibited","clientDeleteProhibited"]
+  privacy_enabled       BOOLEAN,     -- registrant redacted / privacy service
+  dnssec_at_registrar   BOOLEAN,     -- secureDNS.delegationSigned
+  auto_renew            BOOLEAN,     -- null = unknown
+  parked                BOOLEAN,     -- classified parked/for-sale
+  parking_nameservers   BOOLEAN,     -- NS delegated to a parking provider
+  nameservers        JSONB NOT NULL DEFAULT '[]', -- observed NS hostnames
+  age_days           INTEGER,        -- derived: now - created_date
+  days_to_expiry     INTEGER,        -- derived: expiry_date - now
+  source             TEXT NOT NULL CHECK (source IN ('rdap','whois')),
+  raw_record         JSONB,          -- full RDAP JSON (or parsed WHOIS map) for audit trail
+  checked_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_domreg_run    ON domain_registration(audit_run_id);
+CREATE INDEX idx_domreg_domain ON domain_registration(domain_id, checked_at DESC);
+CREATE INDEX idx_domreg_expiry ON domain_registration(expiry_date);
+CREATE INDEX idx_domreg_status ON domain_registration USING GIN (statuses);
+
+-- Reference: nameserver hostnames/patterns known to be domain-parking providers.
+CREATE TABLE parking_nameservers (
+  id          SERIAL PRIMARY KEY,
+  ns_pattern  TEXT NOT NULL UNIQUE,   -- e.g. '%.sedoparking.com', '%.bodis.com'
+  provider    TEXT,
+  enabled     BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+-- Reference: registrars/TLDs flagged for elevated abuse tolerance (advisory).
+CREATE TABLE registrar_reputation (
+  id           SERIAL PRIMARY KEY,
+  match_type   TEXT NOT NULL CHECK (match_type IN ('registrar_iana_id','registrar_name','tld')),
+  match_value  TEXT NOT NULL,         -- IANA id, name substring, or tld like 'top'
+  note         TEXT,
+  enabled      BOOLEAN NOT NULL DEFAULT TRUE,
+  UNIQUE (match_type, match_value)
+);
+```
+
+**Mapping to today's JSON file store.** No database yet — everything lives under `~/.email_delivery_hero/`, behind the store module:
+- `domain_registration` rows → the registration slice of each audit file `audits/<domainId>/<auditId>.json`, under `checks.infra.domain_registration` holding one object with exactly the columns above (dates as ISO strings, `statuses`/`nameservers`/`raw_record` as nested JSON). The `findings[]` array in the same file holds the derived `infra.*` findings.
+- `parking_nameservers` and `registrar_reputation` reference tables → static arrays in `config.yaml` (`domain_reputation.parking_nameservers`, `domain_reputation.registrar_reputation`, `domain_reputation.high_abuse_tlds`), admin-editable via settings.
+- The long-TTL cache → because registration is stale-tolerant, the runner reuses the most recent `domain_registration` object from the previous audit file if `checked_at` is within the configured TTL, rather than re-querying RDAP. The move to Postgres is a single store-module swap; column names above are the target shape.
+
+## 6. When we run the check
+
+- **On-demand:** included in a manual full audit (`POST /api/domains/:id/audit`) and a manual "re-check now" button on the registration panel. A manual run always bypasses the cache.
+- **Periodic:** driven by the in-process scheduler, but on a **slow cadence** distinct from DNS checks. Registration data changes over days/years, so default cadence is once per **24 hours** (configurable in `config.yaml`, e.g. `domain_reputation.cadence: 24h`), versus the 6h DNS cadence. Between slow runs the cached snapshot is reused so frequent audits don't hammer RDAP.
+- **First-round vs future:** partly first-round. RDAP-over-HTTPS parsing (age, expiry, statuses, locks, DNSSEC-at-registrar, privacy, nameserver-based parking, lookalike/homograph string analysis) is implementable now with an HTTPS client (no DB, deterministic). WHOIS fallback (Brew `whois`), the HTTP landing-page parked/for-sale probe, and any registrar-provider API for authoritative auto-renew are **future** (external tool / network probe / provider API).
+- **Cost / rate-limit / back-off:** RDAP and WHOIS rate-limit hard. Cache aggressively (24h TTL), honor `Retry-After` and 429s with exponential back-off, cap RDAP requests per run, and share the IANA bootstrap cache across domains. The optional active cousin-domain scan multiplies RDAP calls and is off by default.
+- **Regression detection:** the scheduler diffs each run against the previous. Newly-appearing or worsened findings are "new problems" and alerted: e.g. `days_to_expiry` crossing below 30 (new `warning`) or below 0 (new `critical`), a transfer lock disappearing, a `serverHold`/`pendingDelete` status appearing, a registrar change (possible hijack), or the domain newly classified as parked. These are exactly the high-value alerts this check exists to raise.
+
+## 7. First round vs future
+
+| Sub-check | Round | Why |
+|---|---|---|
+| `infra.domain_expiry` | First | RDAP `expiration` event, deterministic date math |
+| `infra.domain_age` | First | RDAP `registration` event |
+| `infra.registrar_lock` / `delete_lock` / `update_lock` | First | RDAP `status` EPP codes |
+| `infra.hold_status` / `pending_delete` | First | RDAP `status` lifecycle codes |
+| `infra.registrant_privacy` | First | RDAP entity redaction state |
+| `infra.dnssec_ds_at_registrar` | First | RDAP `secureDNS.delegationSigned` |
+| `infra.parking_nameservers` | First | NS hostnames vs reference list (RDAP/`resolveNs`) |
+| `infra.name_similarity` / `idn_homograph` | First | String/edit-distance/punycode analysis, no network beyond RDAP |
+| `infra.registrar_reputation` / `tld_risk` | First | Match against local reference lists |
+| `infra.recent_transfer` | First | RDAP transfer/last-changed events |
+| `infra.record_available` | First | RDAP HTTP status / parse success |
+| `infra.registrar_abuse_contact` | First | RDAP registrar abuse vCard |
+| `infra.auto_renew` | Future | Confirmed only via registrar API; RDAP `autoRenewPeriod` is partial |
+| `infra.parked` (landing page) | Future | Needs HTTP(S) fetch + content classification |
+| WHOIS fallback parsing | Future | Needs Brew `whois` / port-43 client and heuristic parser |
+| Active cousin-domain scan | Future | Generates + RDAP-checks permutations (cost/rate-limit) |
+
+## 8. Acceptance criteria
+
+1. Given a domain with an expiration date in the past, the checker emits `infra.domain_expiry` **critical** with a remediation naming the exact expiry date and the "all mail stops" consequence.
+2. Given an expiration date 10–29 days out, `infra.domain_expiry` is **warning**; ≥ 30 days is **ok**.
+3. Given a `registration` date < 30 days ago, `infra.domain_age` is **warning**; 30–89 days is **info**; ≥ 90 days is **ok**.
+4. `infra.registrar_lock` is **ok** only when the normalized `statuses` include `clientTransferProhibited`; otherwise **warning** with the enable-Registrar-Lock remediation.
+5. `serverHold`, `clientHold`, `pendingDelete`, or `redemptionPeriod` in `statuses` each yield a **critical** finding (`infra.hold_status` / `infra.pending_delete`) with a registrar-contact remediation.
+6. The checker prefers RDAP, records `source='rdap'`, and only falls back to WHOIS (`source='whois'`) on RDAP unavailability; when neither is available it emits `infra.record_available` (**warning**) and does not crash.
+7. EPP status strings from RDAP (space-separated) are normalized to camelCase codes before matching and before storage in `statuses` JSONB.
+8. `infra.dnssec_ds_at_registrar` reflects RDAP `secureDNS.delegationSigned` and cross-links `./dnssec.mdx` in its remediation.
+9. `infra.name_similarity` flags a configured brand cousin within Damerau-Levenshtein distance ≤ 2, and `infra.idn_homograph` flags `xn--`/mixed-script apexes.
+10. Results are cached with the configured TTL (default 24h); a scheduled run within TTL reuses the cached `domain_registration` snapshot instead of re-querying RDAP; a manual run-now bypasses the cache.
+11. RDAP 429/`Retry-After` responses trigger exponential back-off and never exceed the per-run request budget.
+12. Every non-ok finding includes a concrete remediation string (exact date, registrar name, status code, or DS instruction) — never a generic "check your DNS".
+13. Each run persists one `domain_registration` object (all columns above) into the audit JSON file, and its findings appear in the DNS & Infrastructure dashboard cell with correct roll-up (critical→dark red, warning→amber, info-only→green).
+14. The scheduler's diff flags a newly-expired domain, a disappeared transfer lock, a new hold/pendingDelete status, or a registrar change as a "new problem" versus the prior run.
+
+<!--
+MAINTENANCE NOTES
+- Keep RFC refs current: RDAP RFC 7480/7481/7482/7483/7484 (bootstrap) + RFC 9082 (query) / 9083 (JSON response); WHOIS RFC 3912; EPP RFC 5730/5731; DNSSEC RFC 4033-4035. Track ICANN gTLD WHOIS sunset / RDAP mandate updates.
+- Refresh the IANA RDAP bootstrap cache (https://data.iana.org/rdap/dns.json) periodically.
+- Keep parking_nameservers, registrar_reputation, and high_abuse_tlds reference lists current (Spamhaus TLD abuse stats).
+- Keep in sync with ../spam_checks.mdx (DNS & Infrastructure category catalog) and ../engineering.mdx (Checker/Finding contract, file store, scheduler cadence). Cross-check DS-at-registrar semantics against ./dnssec.mdx.
+-->

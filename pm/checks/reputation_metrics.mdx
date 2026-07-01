@@ -1,0 +1,376 @@
+---
+title: EmailDeliveryHero — Sender Reputation Metrics Check
+description: Engineering specification for the sender-reputation audit — how EmailDeliveryHero ingests complaint rate, bounce rate, provider feedback loops (FBLs), Google Postmaster Tools domain/IP reputation and user-reported-spam rate, engagement, and warmup/volume-consistency signals, enforces the 2024 Gmail/Yahoo bulk-sender thresholds (spam complaints < 0.3%, ideally < 0.1%), and prescribes the exact operational fix — nearly all of it gated behind future third-party integrations.
+---
+
+# EmailDeliveryHero — Sender Reputation Metrics Check
+
+**Sender reputation** is the receiver-side scorecard that mailbox providers (Gmail, Yahoo,
+Microsoft) keep on a sending **domain** and **IP**: how many recipients hit "Report spam", how much
+mail hard-bounces, whether recipients open/reply (wanted) or delete-unread (unwanted), and how
+steadily volume ramps. Unlike SPF/DKIM/DMARC — which are deterministic DNS facts this app can read
+directly — reputation is **behavioral telemetry owned by the receivers and your ESP**. The 2024
+[Gmail](https://support.google.com/mail/answer/81126) and
+[Yahoo](https://senders.yahooinc.com/) bulk-sender requirements make it a hard gate: a bulk sender
+(≥ 5,000 messages/day to Gmail) **must keep its Google-Postmaster-reported spam rate below 0.3% and
+should stay under 0.1%**; sustained breaches throttle or reject the domain's mail regardless of
+perfect authentication. This check surfaces those numbers, trends them over time, and tells the
+operator exactly which lever to pull.
+
+This check belongs to the **Spam & Content** dashboard category (reputation sub-family); all
+sub-check ids use the **`content`** checkId prefix. It is implemented as
+`reputation-metrics.checker.ts` (see [Engineering §6.3](../engineering.mdx)). Because its inputs are
+third-party telemetry, **almost every sub-check is FUTURE-round, gated behind an integration** (Google
+Postmaster Tools API, provider FBLs, ESP metrics) — the first round ships only the config/enrollment
+advisories and the DNSBL cross-reference.
+
+**Read alongside**
+- [Overview](../overview.mdx) — product charter, personas, port list (4444 UI / 9312 API).
+- [Engineering](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler, and the
+  integration-credential store this check depends on.
+- [Spam Checks catalog](../spam_checks.mdx) — the Spam & Content category; this spec expands the
+  reputation slice.
+- [Dashboard](../dashboard.mdx) — how the Spam & Content cell rolls up per domain.
+- [Blacklists / DNSBL check](./blacklists.mdx) — `content.blocklist_history` trends the same listings
+  that check probes point-in-time; recurring listings are a reputation signal.
+- [Inbox placement](./inbox_placement.mdx) — seed-list placement is the outcome that reputation
+  predicts; the two are read together.
+- [List-Unsubscribe / one-click](./list_unsubscribe.mdx) — a working RFC 8058 unsubscribe is the
+  direct lever that drives `content.complaint_rate` down.
+
+---
+
+## 1. What it checks
+
+Mailbox providers score every sender on signals recipients generate. The 2024 Gmail/Yahoo bulk-sender
+rules codified previously-informal norms into pass/fail thresholds:
+
+- **Spam-complaint rate** — the fraction of *delivered* mail that recipients mark as spam, as
+  reported by **Google Postmaster Tools (GPT)**. Gmail's rule: **stay below 0.3%, target below
+  0.1%**. Above 0.3% sustained, Gmail throttles and spam-folders the domain.
+- **Domain & IP reputation** — GPT publishes a **High / Medium / Low / Bad** band per domain and per
+  IP. "Low"/"Bad" means most mail lands in spam; recovery takes weeks of clean sending.
+- **Hard-bounce rate** — invalid-recipient rejections (SMTP 5.1.1). High bounce rates signal a
+  purchased/stale list and directly damage reputation; providers expect list hygiene.
+- **Authentication pass rate** — GPT reports SPF/DKIM/DMARC pass percentages; the bulk rules require
+  DMARC alignment. (This check *reports* GPT's view; the record correctness lives in
+  [`spf`](./spf.mdx)/[`dkim`](./dkim.mdx)/`dmarc`.)
+- **Engagement** — providers weight opens, replies, "not spam" recoveries, and folder placement.
+  A sender whose mail is read and replied to looks *wanted*; one that is deleted-unread or
+  spam-marked looks unwanted.
+- **Warmup / volume consistency** — a brand-new IP or domain that suddenly blasts high volume ("cold
+  start") is treated as a spammer. Reputation is earned by ramping volume gradually and sending
+  **steady** daily volume.
+- **Feedback loops (FBLs)** — provider programs (Yahoo CFL, Microsoft SNDS/JMRP, Comcast, etc.) that
+  email the sender a copy of each complaint so the sender can suppress that recipient. If you are not
+  **enrolled**, complaints happen invisibly and you cannot suppress the complainers.
+
+**Why receivers care.** Authentication proves *who* sent the mail; reputation decides *whether they
+want it*. A perfectly-authenticated domain with a 0.5% complaint rate will still be spam-foldered.
+
+**Common failure modes.** (1) Complaint rate creeps over 0.3% after a bad campaign or a
+re-permission blast → Gmail throttling. (2) New IP warmed too fast → "Bad" IP reputation for weeks.
+(3) Never enrolled in FBLs → complaints invisible, same recipients complain repeatedly. (4) Hard-bounce
+spike from an imported stale list → domain reputation drops. (5) Erratic volume (0 one day, 200k the
+next) reads as a compromised/rented sender. (6) Recurring DNSBL listings that the operator keeps
+"fixing" without addressing the root cause.
+
+---
+
+## 2. Sub-checks
+
+Detection is mostly **ingestion**: the checker reads cached third-party metrics from the
+`reputation_integrations`-backed connectors (GPT API, FBL mailbox parser, ESP metrics API) and
+compares against thresholds. The **first round** ships only the sub-checks that need no external
+data — enrollment/config advisories and the DNSBL history cross-reference.
+
+| Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `content.complaint_rate` | Spam-complaint rate stays **< 0.3%** (Gmail hard limit) and ideally **< 0.1%**. | GPT `spamRate` (and FBL complaint count ÷ delivered) for the domain. | **critical:** ≥ 0.3% (Gmail throttle line); **warning:** 0.1%–0.3%. | Pause the offending campaign/segment; suppress recent complainers from FBL data; add [RFC 8058 one-click unsubscribe](./list_unsubscribe.mdx); re-permission or drop cold segments until rate < 0.1%. |
+| `content.bounce_rate` | Hard-bounce rate is low (target **< 2%**, alarm ≥ 5%). | ESP hard-bounce count ÷ sent, per rolling window. | **critical:** ≥ 5% hard bounces; **warning:** 2%–5%. | Remove all hard-bounced addresses immediately; run list validation (verify MX/SMTP) before the next send; stop importing unverified lists. |
+| `content.gpt_spam_rate` | GPT **User-reported spam rate** trend is flat/low, not climbing. | GPT `TrafficStats.spamRate` timeseries. | **critical:** spam rate ≥ 0.3% or a sharp upward slope; **warning:** 0.1%–0.3% or rising trend. | Identify the campaign/day the spike started (join to send logs); suppress that segment; slow volume until GPT rate recovers below 0.1%. |
+| `content.gpt_domain_reputation` | GPT **domain reputation** band is **High** (or at least Medium). | GPT `TrafficStats.domainReputation` enum. | **critical:** `BAD` or `LOW`; **warning:** `MEDIUM`. | Cut volume to your most-engaged recipients only, fix complaint/bounce drivers, and hold steady 2–4 weeks; reputation is earned back slowly, not with a config change. |
+| `content.gpt_ip_reputation` | GPT **IP reputation** band per sending IP is High/Medium. | GPT `TrafficStats.ipReputations[]` per IP. | **critical:** an IP is `BAD`/`LOW`; **warning:** `MEDIUM`. | For a shared-IP pool, ask the ESP to move you or investigate co-tenants; for a dedicated IP, re-warm gradually and reduce complaint sources. |
+| `content.gpt_auth_rate` | GPT-reported SPF/DKIM/DMARC **pass percentages** are ~100% (aligned). | GPT `TrafficStats` `spfSuccessRatio` / `dkimSuccessRatio` / `dmarcSuccessRatio`. | **warning:** any ratio materially < 100% (some streams unauthenticated). | Trace the unaligned stream (forwarder, sub-mailer) and fix its SPF/DKIM alignment; cross-check [`./spf.mdx`](./spf.mdx), [`./dkim.mdx`](./dkim.mdx). |
+| `content.fbl_enrollment` | Sending domain/IP is **enrolled in the relevant provider FBLs** so complaints are captured & suppressible. | Config presence in `reputation_integrations` + advisory list of programs for the sending IPs' networks. | **warning:** not enrolled in Yahoo CFL / Microsoft SNDS-JMRP / etc. | Enroll: Yahoo Complaint Feedback Loop, Microsoft SNDS + JMRP, Comcast/other FBLs; wire the FBL mailbox into your suppression pipeline. |
+| `content.fbl_processing` | FBL complaints are actually **ingested and suppressed** (not just received). | FBL connector: complaints parsed in window vs suppressions applied. | **critical:** complaints received but recipients not suppressed (repeat complaints); **warning:** processing lag. | Automate: parse each FBL/ARF report, add the recipient to the global suppression list within 24h, never mail them again. |
+| `content.engagement` | Positive-engagement signals (opens/clicks/replies, "not spam") dominate over deletes/spam-marks. | ESP engagement metrics + GPT complaint ratio proxy. | **warning:** low open/high delete-unread, or engagement declining over time. | Segment by engagement; suppress 90-day+ non-openers; send wanted content/cadence; sunset dormant subscribers. |
+| `content.warmup` | New IP/domain **ramps volume gradually** — no cold-start spike. | Volume timeseries vs a warmup schedule (e.g. doubling daily cap) for domains flagged `is_new`/first-seen. | **critical:** brand-new IP/domain sent a large blast day one; **warning:** ramp faster than schedule. | Follow a warmup ramp (day 1: ~50/mailbox-provider, roughly double daily, prioritize most-engaged recipients) over 4–8 weeks; hold at each step if complaints rise. |
+| `content.volume_consistency` | Day-to-day volume is **steady**, no wild spikes/troughs. | Coefficient of variation / day-over-day ratio on the send-volume series. | **warning:** volume swings > 5× day-over-day or long gaps then a blast. | Smooth sends across days; avoid "big Monday blast, silent all week"; spread large campaigns over a ramp. |
+| `content.blocklist_history` *(advisory)* | Recurring DNSBL listings **over time** (a reputation pattern, not a point check). | Trend the per-run [`./blacklists.mdx`](./blacklists.mdx) results stored across audit runs. | **warning:** the domain/IP has been listed on the same DNSBL ≥ 2 times in the trailing window (recurring, not one-off). | Fix the *root cause* (complaint source / compromised account / open relay), not just the delisting request; cross-ref the current listing in [`./blacklists.mdx`](./blacklists.mdx). |
+| `content.reputation_data_available` | At least one reputation source is **connected & fresh** so the other sub-checks are meaningful. | Check `reputation_integrations.enabled` + last-sync freshness. | **info:** no reputation integration connected → reputation sub-checks are "unknown"; **warning:** connected but data stale (> 3 days). | Connect Google Postmaster Tools (verify the domain in GPT, add the API credential) and/or your ESP metrics API in Settings → Integrations. |
+| `content.postmaster_verified` | The domain is **verified in Google Postmaster Tools** (prerequisite for any GPT data). | GPT API returns data (not 403/empty) for the domain. | **warning:** domain not verified in GPT → no Gmail reputation visibility. | Add the domain in postmaster.google.com and publish the GPT TXT verification record (or reuse existing Search Console verification). |
+| `content.delivery_errors` | GPT **delivery-error** categories (rate-limited, spam-rejected, policy) are low. | GPT `DeliveryErrors` breakdown. | **warning:** notable `RATE_LIMITED` / `SUSPECTED_SPAM` / `REJECTED_DUE_TO_...` share. | Address the specific error class Gmail reports (slow down for rate-limits; fix content/auth for spam rejects). |
+
+> **First-round note:** only `content.fbl_enrollment`, `content.reputation_data_available`,
+> `content.postmaster_verified` (config/advisory), and `content.blocklist_history` (trends data this
+> app already stores from [`./blacklists.mdx`](./blacklists.mdx)) ship **first round**. Everything
+> that consumes GPT, FBL, or ESP metrics is **future**, gated behind the corresponding integration.
+
+---
+
+## 3. How it is measured
+
+Reputation is **not measured by DNS**; it is **ingested** from three connector types, each behind a
+`reputation_integrations` config row, and compared to thresholds. The checker never blocks the audit
+run: if a source is not connected, its sub-checks emit an `info` "unknown" finding rather than a false
+negative.
+
+**Connector A — Google Postmaster Tools (future).** The GPT API
+(`gmailpostmastertools.googleapis.com/v1`) exposes per-domain `trafficStats` days:
+`spamRate` (0–1 float), `domainReputation`/`ipReputations[].reputation`
+(`HIGH|MEDIUM|LOW|BAD|REPUTATION_CATEGORY_UNSPECIFIED`), `spf/dkim/dmarcSuccessRatio`,
+`deliveryErrors[]`, and `userReportedSpamRatio`. Auth is OAuth2 (service account or user consent)
+stored via the credential store referenced in [Engineering](../engineering.mdx). The connector
+**caches** the timeseries locally so a 6h audit does not re-pull the full history; GPT itself lags
+~2–3 days and has daily granularity, so a nightly sync is sufficient and well within quota. Threshold
+map: `spamRate ≥ 0.003` → `content.complaint_rate`/`content.gpt_spam_rate` **critical**;
+`0.001–0.003` → **warning**. `domainReputation`/`ipReputation` `BAD|LOW` → **critical**, `MEDIUM` →
+**warning**, `HIGH` → **ok**.
+
+**Connector B — Feedback loops (future).** An FBL mailbox (or provider portal/API) receives ARF
+(RFC 5965) complaint reports. The connector IMAP-polls the mailbox, parses ARF, counts complaints per
+domain/IP per window, and cross-checks that each complained recipient was added to suppression.
+`content.fbl_enrollment` is **config-only** (are we enrolled for the networks our `sendingIps`
+belong to?) and therefore ships first round as an advisory; `content.fbl_processing` needs the live
+mailbox and is future. Complaint rate from FBL is a fallback when GPT is absent
+(`complaints ÷ delivered`).
+
+**Connector C — ESP metrics (future).** Most ESPs (SendGrid, Mailgun, Postmark, SES, etc.) expose
+sent/delivered/bounce/complaint/open/click counts via API. The connector normalizes these into the
+same `reputation_metrics` shape, driving `content.bounce_rate`, `content.engagement`,
+`content.warmup`, and `content.volume_consistency`. Warmup/volume use the **send-volume timeseries**:
+`content.warmup` compares a domain first-seen within N days against an expected ramp (flag a large day-1
+blast); `content.volume_consistency` computes day-over-day ratio / coefficient of variation and warns
+on > 5× swings or long silence then a spike.
+
+**Timeseries / trend nature.** Reputation is inherently **many rows over time**, unlike the
+single-record DNS checks. The checker's job each run is to (a) pull/refresh the timeseries into
+`reputation_metrics` (many `measured_at` rows), and (b) evaluate the *latest window* plus the *slope*
+into findings. `content.blocklist_history` is the pure-trend example that needs **no** external feed:
+it reads the app's own prior `blacklists` results across `audit_runs` and flags recurrence.
+
+**Map to severities.** Latest-window value vs threshold sets severity; a worsening slope escalates a
+warning toward critical (e.g. spam rate 0.12% but doubling week-over-week → warning with an upward-trend
+note). Missing data → `info` "unknown", never critical. All non-ok findings quote the **observed
+number** and the concrete operational lever (pause segment, suppress, warm slower, enroll FBL).
+
+---
+
+## 4. User interface
+
+Reputation surfaces through the **Spam & Content dashboard column**, the **audit-detail view**, and a
+dedicated **Reputation panel** with trend sparklines, on the React 19 + Vite + Tailwind + shadcn/ui +
+lucide-react stack.
+
+**Dashboard cell.** Reputation findings feed the shared **Spam & Content** cell (with
+`content_scoring`, `list_unsubscribe`, etc.). Color = worst `content.*` severity for the latest audit.
+A `BAD` GPT reputation or ≥ 0.3% complaint rate turns it **dark red**; `info` "unknown" (no integration)
+never turns it amber — a small "not connected" dot indicates missing data instead.
+
+**Audit-detail view.** Findings render as a shadcn `Accordion`/`Card` group titled **Sender
+Reputation**, one row per non-ok finding, with an inline **sparkline** (last 30 days) since these are
+timeseries:
+
+```
+┌─ Sender Reputation ─────────────────────── [ CRITICAL ] ─┐
+│ content.complaint_rate ⛔ Spam complaints 0.41% (>0.30%) │
+│   Observed : GPT spamRate 0.0041, ▁▂▃▅█ rising 7d         │
+│   Fix      : Pause "reactivation" segment; suppress FBL   │
+│             complainers; enforce one-click unsub  [ Copy ]│
+├───────────────────────────────────────────── [ WARNING ]─┤
+│ content.warmup        ⚠ New IP ramped too fast (day 2)   │
+│   Fix      : Cap ~2x/day over 6 wks, engaged-first [ Copy ]│
+├─ content.reputation_data_available  ℹ Not connected ─────┤
+│   Fix      : Connect Google Postmaster Tools     [ Copy ] │
+└──────────────────────────────────────────────────────────┘
+```
+
+Each row: severity `Badge` (lucide `TrendingDown`/`ShieldAlert`/`Activity`), the `title`, the observed
+`detail` (number + `Sparkline`), the `remediation`, and a **Copy fix** button. A dedicated
+**Reputation panel** on the domain detail page charts `spamRate`, `bounce_rate`, `domainReputation`
+band, and daily volume over time (shadcn `Chart`/`recharts`), with the 0.3%/0.1% threshold lines drawn.
+
+**Per-domain config inputs.** Settings → **Integrations** holds the per-domain integration rows: a
+**Google Postmaster Tools** connector (OAuth), an **ESP metrics** connector (provider + API key), and
+an **FBL** connector (mailbox IMAP or portal). Each shows connected/last-synced status. **Empty/never-run:**
+light-gray cell + "Connect a reputation source" CTA. **Loading:** skeleton sparkline. **All-ok:** a
+single green "Reputation High — complaints 0.04%, bounces 0.6%" summary. **Admin-only settings**
+(Settings → Admin): complaint-rate warning/critical thresholds (defaults 0.1% / 0.3%), bounce
+thresholds (2% / 5%), warmup schedule, and integration credentials (admin-only).
+
+---
+
+## 5. Information schema (database schema)
+
+Reputation extends the **shared core tables** (owned by engineering — do not redefine): `domains`,
+`sending_ips`, `audit_runs`, and `findings`. Each sub-check emits a row into shared `findings`
+(`category='content'`, `check_id='content.complaint_rate'`, etc.). Reputation adds a **timeseries
+result table** (`reputation_metrics`, many rows over time — the crux of this check) and an
+**integration config table** (`reputation_integrations`).
+
+```sql
+-- Timeseries of ingested reputation metrics. MANY rows over time (per day / per source),
+-- not one row per audit run — this is the trend/timeseries table.
+CREATE TABLE reputation_metrics (
+  id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  audit_run_id   BIGINT REFERENCES audit_runs(id) ON DELETE SET NULL,  -- run that ingested/observed it (nullable: nightly sync may precede an audit)
+  domain_id      BIGINT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+  sending_ip_id  BIGINT REFERENCES sending_ips(id) ON DELETE CASCADE,  -- NULL = domain-level metric
+  complaint_rate NUMERIC(6,5),          -- 0.00000–1.00000 (e.g. 0.00300 = 0.3%)
+  bounce_rate    NUMERIC(6,5),          -- hard-bounce fraction
+  spam_rate      NUMERIC(6,5),          -- GPT user-reported spam rate
+  gpt_domain_rep TEXT,                  -- 'HIGH' | 'MEDIUM' | 'LOW' | 'BAD' | NULL
+  gpt_ip_rep     TEXT,                  -- per-IP band when sending_ip_id set
+  spf_pass_rate  NUMERIC(6,5),          -- GPT auth success ratios
+  dkim_pass_rate NUMERIC(6,5),
+  dmarc_pass_rate NUMERIC(6,5),
+  volume         BIGINT,                -- messages sent that day (for warmup/consistency)
+  open_rate      NUMERIC(6,5),          -- engagement proxies (ESP)
+  click_rate     NUMERIC(6,5),
+  source         TEXT NOT NULL,         -- 'google_postmaster' | 'fbl' | 'esp'
+  measured_at    TIMESTAMPTZ NOT NULL,  -- the day/window the metric applies to (provider's date)
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (domain_id, sending_ip_id, source, measured_at)  -- idempotent re-sync
+);
+CREATE INDEX idx_repmetrics_domain_time ON reputation_metrics(domain_id, measured_at DESC);
+CREATE INDEX idx_repmetrics_run         ON reputation_metrics(audit_run_id);
+CREATE INDEX idx_repmetrics_source      ON reputation_metrics(domain_id, source, measured_at DESC);
+
+-- Per-domain reputation integration configuration + sync state.
+CREATE TABLE reputation_integrations (
+  id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  domain_id       BIGINT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+  provider        TEXT   NOT NULL,      -- 'google_postmaster' | 'fbl' | 'esp'
+  credentials_ref TEXT,                 -- opaque handle into the secret store (never the secret itself)
+  config          JSONB,               -- provider specifics (ESP name, FBL mailbox, GPT project)
+  enabled         BOOLEAN NOT NULL DEFAULT FALSE,
+  last_synced_at  TIMESTAMPTZ,          -- freshness for content.reputation_data_available
+  last_sync_error TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (domain_id, provider)
+);
+CREATE INDEX idx_repintegrations_domain ON reputation_integrations(domain_id, enabled);
+```
+
+**Mapping to today's JSON file store.** There is no database yet (see
+[Engineering §7](../engineering.mdx)). This check's **timeseries nature clashes with the per-run audit
+file**, so it maps in two places:
+
+- **Config** lives in the global `~/.email_delivery_hero/config.yaml` (or a sibling
+  `integrations.yaml`) under `reputationIntegrations[]` — the future `reputation_integrations` table.
+  Secrets are referenced by handle, stored in the OS keychain / secret store, not in the YAML.
+- **Metrics** are **not** naturally one-per-audit. Today they are appended to a per-domain rolling file
+  `~/.email_delivery_hero/reputation/<domainId>.jsonl` (one JSON line per `(source, measured_at)`),
+  which *is* the `reputation_metrics` table row-for-row (the JSONL append maps to the
+  `UNIQUE(domain_id, sending_ip_id, source, measured_at)` upsert). Each audit run then reads the
+  latest window from that file and writes only the **derived findings** into
+  `audits/<domainId>/<auditId>.json` under `results.reputation` (latest values + slope + the finding
+  set):
+
+```jsonc
+// audits/<domainId>/<auditId>.json  →  results.reputation  (derived snapshot; full series is in reputation/<domainId>.jsonl)
+{
+  "window": "2026-06-24..2026-06-30",
+  "complaintRate": 0.0041, "bounceRate": 0.006, "spamRate": 0.0041,
+  "gptDomainRep": "LOW", "gptIpRep": { "203.0.113.10": "MEDIUM" },
+  "trend": { "spamRate": "rising", "volumeCv": 0.9 },
+  "sources": ["google_postmaster"], "dataFresh": true
+}
+```
+
+The `store` module is the only code touching these shapes, so promoting the JSONL series into
+`reputation_metrics` and the YAML config into `reputation_integrations` is a single-module change.
+
+---
+
+## 6. When we run the check
+
+- **On-demand:** every manual audit (`POST /api/domains/:id/audit`) and "run now"
+  (`POST /api/scheduler/run`) runs `reputation-metrics.checker.ts`. First round it only evaluates the
+  config/advisory + `content.blocklist_history` sub-checks; the metric sub-checks emit `info`
+  "not connected" until an integration is configured.
+- **Periodic:** the in-process scheduler re-runs the engine per domain on the `config.yaml` cadence
+  (default 6h). Reputation **ingestion**, however, is decoupled: a separate **nightly sync** job pulls
+  GPT/FBL/ESP data into the timeseries (GPT lags 2–3 days and is daily-granular, so hourly polling is
+  wasteful). The 6h audit reads whatever the last sync stored — it does not itself call third-party APIs.
+- **First-round vs future:** `content.fbl_enrollment`, `content.reputation_data_available`,
+  `content.postmaster_verified`, and `content.blocklist_history` are **first round**. All GPT/FBL/ESP
+  metric sub-checks are **future**, each gated behind its `reputation_integrations` row being
+  `enabled`.
+- **Cost / rate-limits / back-off:** GPT has generous quotas but should be pulled once/day per domain;
+  the connector caches and only fetches new `measured_at` days (incremental). ESP/FBL polling respects
+  provider limits with exponential back-off; a failed sync sets `last_sync_error` and the audit reports
+  stale-data (`content.reputation_data_available` warning) rather than failing.
+- **Regression detection:** each run's reputation findings are diffed against the previous run
+  (Engineering §8). A newly-appearing or worsened finding — complaint rate crossing 0.1% then 0.3%, a
+  GPT band dropping High→Medium→Low, a bounce spike, a warmup violation, or a recurring DNSBL listing —
+  is flagged as a **new problem** on the Dashboard. Because these are trends, the diff also captures
+  *slope* changes, not just threshold crossings.
+
+---
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises` / app-local data) | Future (probe / tool / feed / API) |
+| --- | --- | --- |
+| `content.fbl_enrollment` | ✅ config advisory: are we enrolled for the `sendingIps`' networks? | — |
+| `content.reputation_data_available`, `content.postmaster_verified` | ✅ config/verification state | — |
+| `content.blocklist_history` | ✅ trend the app's own stored `./blacklists.mdx` results across runs | — |
+| `content.complaint_rate`, `content.gpt_spam_rate`, `content.gpt_domain_reputation`, `content.gpt_ip_reputation`, `content.gpt_auth_rate`, `content.delivery_errors` | — | ⏳ **Google Postmaster Tools API** (OAuth2, daily sync) |
+| `content.fbl_processing` | — | ⏳ **FBL mailbox** (IMAP + ARF parsing) + suppression pipeline |
+| `content.bounce_rate`, `content.engagement`, `content.warmup`, `content.volume_consistency` | — | ⏳ **ESP metrics API** (sent/bounce/complaint/open/volume timeseries) |
+
+---
+
+## 8. Acceptance criteria
+
+1. A domain with **no reputation integration connected** yields `content.reputation_data_available`
+   **info** ("unknown"), and every metric sub-check emits `info` "not connected" — never a false
+   critical, and the Spam & Content cell is not turned amber by these `info` findings.
+2. With **Google Postmaster Tools** connected, a domain whose GPT `spamRate` ≥ **0.003** yields
+   `content.complaint_rate` / `content.gpt_spam_rate` **critical** quoting the observed percentage;
+   **0.001–0.003** yields **warning**; < 0.001 yields **ok**.
+3. GPT `domainReputation` of `BAD`/`LOW` yields `content.gpt_domain_reputation` **critical**, `MEDIUM`
+   **warning**, `HIGH` **ok**; per-IP bands drive `content.gpt_ip_reputation` identically.
+4. With ESP metrics connected, a hard-bounce rate ≥ **5%** yields `content.bounce_rate` **critical**,
+   2–5% **warning**, and the remediation names list validation + immediate hard-bounce suppression.
+5. A brand-new IP/domain (first-seen within the warmup window) that sent a large day-one blast yields
+   `content.warmup` **critical** with a concrete ramp schedule; day-over-day volume swings > 5× yield
+   `content.volume_consistency` **warning**.
+6. `content.fbl_enrollment` warns when the domain/IP is not enrolled in the relevant provider FBLs and
+   names the exact programs to join (Yahoo CFL, Microsoft SNDS/JMRP, etc.); `content.fbl_processing`
+   flags complaints received but recipients not suppressed.
+7. `content.blocklist_history` warns when the same DNSBL has listed the domain/IP **≥ 2 times** in the
+   trailing window, cross-referencing the current state in [`./blacklists.mdx`](./blacklists.mdx), and
+   requires **no** external integration.
+8. Every non-`ok` reputation finding carries a **concrete operational** remediation (pause segment,
+   suppress complainers, warm slower, enroll FBL, connect GPT) — never a generic "improve reputation".
+9. Ingested metrics are persisted as a **timeseries** (`reputation_metrics` / `reputation/<domainId>.jsonl`)
+   with a unique `(domain_id, sending_ip_id, source, measured_at)` key so re-syncs are idempotent, and
+   the derived snapshot maps cleanly onto `results.reputation` in the audit JSON.
+10. Integration config (provider, enabled, credentials_ref, last_synced_at) is persisted in
+    `reputation_integrations` / `config.yaml`, with secrets held by reference only (never in plaintext
+    YAML).
+11. The nightly sync pulls only new `measured_at` days (incremental), applies exponential back-off on
+    provider errors, and on failure sets `content.reputation_data_available` to a stale-data **warning**
+    rather than failing the audit.
+12. The scheduler re-runs reputation each cadence and flags any newly-appearing or worsened finding —
+    including **trend/slope** changes, not just threshold crossings — as a new problem.
+
+<!--
+  Maintenance notes:
+  - Keep the 2024 Gmail/Yahoo bulk-sender thresholds current: Gmail spam-complaint rate must stay
+    < 0.3% and ideally < 0.1% (Google Postmaster Tools spamRate); DMARC alignment + one-click
+    List-Unsubscribe (RFC 8058) are companion requirements — keep in sync with ./list_unsubscribe.mdx.
+  - Google Postmaster Tools API: gmailpostmastertools.googleapis.com/v1 trafficStats
+    (spamRate, domain/ipReputation HIGH|MEDIUM|LOW|BAD, spf/dkim/dmarcSuccessRatio, deliveryErrors).
+    Update field names if Google revises the API.
+  - This is a TIMESERSIES check (many rows over time); keep the reputation_metrics table + the
+    reputation/<domainId>.jsonl file store and the derived results.reputation snapshot reconciled.
+  - Nearly all sub-checks are FUTURE, gated behind reputation_integrations; keep the first-round vs
+    future split (§7) in sync with ../spam_checks.mdx (Spam & Content) and ../engineering.mdx §6.3.
+  - content.blocklist_history depends on stored ./blacklists.mdx results — keep the cross-reference and
+    the trailing-window logic aligned with that check.
+-->

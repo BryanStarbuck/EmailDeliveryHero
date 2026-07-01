@@ -1,0 +1,335 @@
+---
+title: EmailDeliveryHero — DNSSEC Check
+description: Engineering spec for the DNSSEC (DNS Security Extensions) check — verifying a mail domain's zone is signed (DNSKEY + DS chain of trust), that a validating resolver returns AD=1, that signing algorithms are modern and RRSIGs unexpired, plus NSEC3 and rollover hygiene; the tamper-evidence prerequisite for trustworthy DANE/TLSA.
+---
+
+# EmailDeliveryHero — DNSSEC Check
+
+**DNSSEC (DNS Security Extensions, RFC 4033/4034/4035, clarified by RFC 6840)** cryptographically
+signs DNS data so a resolver can prove that the answer it received is the exact answer the zone owner
+published — no on-path tampering, cache poisoning, or spoofed NXDOMAIN. For email this matters two
+ways. First, every other DNS-based control we audit (SPF, DKIM keys, DMARC, MTA-STS TXT, MX records)
+is only as trustworthy as the DNS that served it; without DNSSEC an attacker who can forge DNS can
+rewrite your SPF `all` qualifier or swap a DKIM public key. Second, **DNSSEC is a hard prerequisite
+for DANE/TLSA** — a TLSA record is only meaningful when its zone is signed and validated, because
+DANE replaces the public CA trust model with the zone's own signed data. This check answers: *is this
+zone signed, does the chain of trust reach the root, and does a validating resolver actually accept
+it?*
+
+This check belongs to the **DNS & Infrastructure** dashboard category; all sub-check ids use the
+**`infra`** prefix, DNSSEC sub-family (`infra.dnssec_*`). It supersedes the single coarse
+`infra.dnssec` row catalogued in [`../spam_checks.mdx`](../spam_checks.mdx) with a full sub-check set.
+
+**Read alongside:**
+* [`../overview.mdx`](../overview.mdx) — product charter, personas, port list.
+* [`../engineering.mdx`](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
+* [`../spam_checks.mdx`](../spam_checks.mdx) — master catalog; DNS & Infrastructure category (row `infra.dnssec`).
+* [`../dashboard.mdx`](../dashboard.mdx) — the 6-column status dashboard this feeds.
+* [`../scheduled_checks.mdx`](../scheduled_checks.mdx) — recurring-check cadence and per-OS scheduling.
+* [`./dane_tlsa.mdx`](./dane_tlsa.mdx) — **the primary consumer**: DANE is only trustworthy when this check is green.
+* [`./dns_health.mdx`](./dns_health.mdx) — nameserver sanity, delegation, and dangling-record checks that sit next to DNSSEC.
+
+---
+
+## 1. What it checks
+
+DNSSEC adds four record types to a zone: **DNSKEY** (the zone's public keys — a Key-Signing Key/KSK
+and usually a Zone-Signing Key/ZSK), **RRSIG** (a signature over each RRset), **DS** (a Delegation
+Signer digest of the KSK, published in the *parent* zone at the registrar to link the chain of
+trust), and **NSEC/NSEC3** (authenticated denial of existence, so a forged "no such name" can be
+detected). A resolver that validates walks the chain root → TLD → your zone: it fetches the DS from
+the parent, confirms it hashes your DNSKEY, verifies the DNSKEY signs the RRSIG, and only then sets
+the **AD (Authenticated Data)** flag in its answer.
+
+**Why receivers care:** a signed, validated zone means the MX, SPF, DKIM, DMARC and MTA-STS records a
+receiving MTA reads are provably authentic. It is also the on-ramp to **DANE** (RFC 6698/7671): a
+receiving MTA that supports DANE will look up TLSA only for DNSSEC-signed zones and will treat a
+downgrade as a hard failure. Google/Yahoo bulk-sender rules don't yet mandate DNSSEC, but it is
+increasingly expected for high-trust senders and government/regulated domains.
+
+**Common real-world failure modes:** (a) zone not signed at all — the default for most domains; (b)
+zone signed internally but **no DS at the registrar**, so no resolver on Earth can validate it (an
+"island of security" that provides zero protection); (c) **expired RRSIGs** — signatures have an
+explicit expiration; a broken re-signing job takes the whole domain *dark* (SERVFAIL everywhere) far
+harder than any un-signed outage; (d) **deprecated algorithms** (RSASHA1 / algorithm 5 or 7) that
+modern validators are phasing out; (e) a botched **key rollover** where the DS no longer matches the
+live DNSKEY. Any of these either provides false assurance or, worse (expired RRSIG / DS mismatch),
+makes the entire domain unresolvable to validating resolvers — a total mail outage.
+
+**How failure degrades inbox placement:** an un-signed zone is not itself a spam signal, but it leaves
+every deliverability record forgeable and blocks DANE. A *broken* DNSSEC chain is catastrophic — mail
+to and from the domain stops because validating resolvers (including ~⅓ of the internet and most
+large mailbox providers' resolver paths) return SERVFAIL rather than the record.
+
+---
+
+## 2. Sub-checks
+
+Severity philosophy: an **un-signed** zone is `info` (advisory — you're missing an upgrade, not
+broken). A **broken** signed zone (bogus, expired, DS mismatch) is `critical` — it takes the domain
+down. Weak-but-working (deprecated algorithm, near-expiry, missing DS on a signed zone) is `warning`.
+
+| Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `infra.dnssec_signed` | The zone is signed: at least one **DNSKEY** RRset exists at the apex and RRSIGs cover the zone's records. | `dig +dnssec DNSKEY <domain>` / `resolve(domain, 'DNSKEY')`; presence of DNSKEY + RRSIG. | **info:** no DNSKEY — zone is unsigned (no tamper-evidence, DANE impossible). | Enable DNSSEC at your DNS provider/registrar (one-click at most: Cloudflare, Route 53, Google Domains, etc.). |
+| `infra.dnssec_ds_present` | A **DS** record for this zone is published in the *parent* zone (registrar), establishing the chain of trust. | `dig DS <domain>` at the parent / `resolve(domain, 'DS')`. | **warning:** zone has DNSKEY but no DS at parent — "island of security", validation impossible. | Copy the DS/DNSKEY digest from your DNS provider into your registrar's DNSSEC panel so the parent publishes the DS. |
+| `infra.dnssec_validates` | A **validating resolver** accepts the chain: answer carries **AD=1** and RRSIGs verify (not "bogus"). | `dig +dnssec` against a validating resolver (e.g. `1.1.1.1`/`8.8.8.8`) and read the `ad` flag / `AUTHENTICATED DATA`; SERVFAIL with CD=0 but success with CD=1 ⇒ bogus. | **critical:** resolver returns **SERVFAIL / bogus** (broken chain — domain dark to validating resolvers). | Fix the signing chain: re-sign the zone, correct the DS to match the live KSK, or roll back the broken key. |
+| `infra.dnssec_algorithm` | Signing algorithm is modern. Prefer **ECDSAP256SHA256 (13)** or **RSASHA256 (8)**; flag deprecated **RSASHA1 (5)** and **RSASHA1-NSEC3-SHA1 (7)**. | Parse the `algorithm` field of each DNSKEY / RRSIG. | **warning:** DNSKEY uses algorithm 5/7 (RSASHA1) — deprecated, being removed from validators. | Roll to a modern algorithm: ECDSAP256SHA256 (13) is compact and fast; RSASHA256 (8) is the RSA fallback. Update the DS after the roll. |
+| `infra.dnssec_rrsig_expiry` | RRSIGs are not expired and not near expiry (typical signatures last ~2–4 weeks and auto-refresh). | Parse `Signature Expiration` of the apex RRSIGs; compare to now with a lead-time threshold (e.g. 72h). | **critical:** an RRSIG is already expired (validators return bogus). **warning:** expires within threshold. | Restore automatic re-signing on your signer; if manual, re-sign immediately. Investigate why the re-sign job stalled. |
+| `infra.dnssec_nsec3` | Authenticated denial mode is sane: NSEC3 params are reasonable (SHA-1, iterations **≤ 0** per RFC 9276 / low), opt-out flag understood. | `dig +dnssec <nonexistent>.<domain>` → inspect NSEC3PARAM / NSEC3 records; read iterations, salt, opt-out flag. | **warning:** NSEC3 iterations > 0 (excess CPU, some resolvers treat high counts as insecure per RFC 9276); opt-out set on a zone that shouldn't. | Set NSEC3 iterations to **0** and an empty/short salt (RFC 9276); disable opt-out unless you run a large delegation-heavy zone. |
+| `infra.dnssec_ds_algo_match` | The **DS digest algorithm** and key tag match a live DNSKEY — the DS actually references the current KSK. | Compute the DS digest (SHA-256, algo 2) of each apex DNSKEY and compare key tag + digest to the published DS. | **critical:** no published DS matches any live DNSKEY (chain broken after a key change). **warning:** DS uses SHA-1 (digest algo 1) — deprecated. | Republish the DS at the registrar so it matches the current KSK; use **SHA-256 (digest type 2)**, never SHA-1 (type 1). |
+| `infra.dnssec_key_rollover` *(advisory)* | KSK/ZSK rollover hygiene: reasonable key sizes (RSA ≥ 2048), KSK ≠ ZSK where separated, no stale keys lingering. | Inspect DNSKEY flags (257=KSK, 256=ZSK), key length, count; flag many stale keys or undersized RSA. | **warning:** RSA KSK < 2048 bits; a dozen stale DNSKEYs left in the set (bloats responses, signals abandoned rollover). | Use ≥ 2048-bit RSA or ECDSA P-256; prune retired keys after the rollover completes; follow RFC 6781 rollover timing. |
+| `infra.dnssec_chain_complete` | The full chain root → TLD → zone is present and consistent (no missing link between DS at parent and DNSKEY at child). | Walk DS (parent) → DNSKEY (child) → RRSIG; confirm every hop links. | **critical:** DS present but references a key tag absent from the child DNSKEY set. | Re-align the parent DS with the child KSK; the DS key tag must exist in the apex DNSKEY RRset. |
+| `infra.dnssec_soa_signed` | Core mail-relevant RRsets (SOA, MX, TXT for SPF/DMARC/MTA-STS) are actually covered by an RRSIG, not just the apex. | For each queried type, confirm an accompanying RRSIG with `+dnssec`. | **warning:** MX/TXT returned without an RRSIG on a "signed" zone (partial signing). | Ensure the signer covers all RRsets, not only the apex; re-sign the full zone. |
+| `infra.dnssec_dane_ready` *(advisory)* | Signals to the DANE check whether this zone can host trustworthy TLSA (signed **and** validates). | Boolean AND of `dnssec_signed` + `dnssec_validates`. | **info:** zone unsigned ⇒ DANE not possible (see `./dane_tlsa.mdx`). | Complete DNSSEC first; then publish TLSA records per [`./dane_tlsa.mdx`](./dane_tlsa.mdx). |
+
+---
+
+## 3. How it is measured
+
+**First round (pure `node:dns/promises`, presence only).** Node's resolver can fetch the records but
+**does not validate** — `node:dns/promises` returns cached answers from the OS/upstream resolver and
+does **not** expose the AD flag or verify signatures. So the first round observes *presence* only:
+
+* `dnsPromises.resolve(domain, 'DNSKEY')` → drives `infra.dnssec_signed` (any DNSKEY ⇒ signed).
+* `dnsPromises.resolve(domain, 'DS')` → drives `infra.dnssec_ds_present`.
+* `dnsPromises.resolve(domain, 'RRSIG')` where supported, and `resolveSoa` presence → `infra.dnssec_soa_signed` (partial; presence heuristic).
+* From the DNSKEY answers we can read `algorithm` and `flags` (KSK 257 / ZSK 256) and key length ⇒ `infra.dnssec_algorithm`, `infra.dnssec_key_rollover` (advisory, static parse — no validation needed).
+
+Everything requiring **validation or signature contents** is **FUTURE** and needs shelling to `dig`
+(Brew-installed) or a validating-resolver library, because the AD flag and RRSIG expiry/verification
+are not available through Node's default DNS:
+
+* **`infra.dnssec_validates`** — shell `dig +dnssec @1.1.1.1 <domain> SOA` and parse the header `flags:` for `ad`. Cross-check with a **CD (Checking Disabled)** probe: if `@1.1.1.1 <domain>` is SERVFAIL but `@1.1.1.1 +cd <domain>` succeeds, the data exists but is **bogus** (broken signatures) → `critical`. If both fail it's an ordinary NXDOMAIN/outage, not a DNSSEC verdict.
+* **`infra.dnssec_rrsig_expiry`** — `dig +dnssec <domain> DNSKEY` and parse each RRSIG's `Signature Expiration` (format `YYYYMMDDHHMMSS`), compare to now.
+* **`infra.dnssec_nsec3`** — `dig +dnssec <random-nonexistent-label>.<domain>` and read NSEC3PARAM (hash, flags/opt-out, iterations, salt).
+* **`infra.dnssec_ds_algo_match` / `infra.dnssec_chain_complete`** — recompute the DS digest (SHA-256) locally from the DNSKEY (RFC 4034 §5.1.4: `digest = SHA256(owner_name | DNSKEY_RDATA)`) and compare key tag + digest to the published DS; or use `dig +dnssec +multi` and a validator library (e.g. `dns-packet` + a DNSSEC verifier) to walk the chain.
+
+**Edge cases & operational concerns:**
+* **Resolver caching hides the truth.** Node reads a cached upstream answer; to see the authoritative,
+  un-cached state we must query the domain's authoritative NS directly (`dig +dnssec @<authNS>`) or a
+  known validating resolver. Prefer explicit resolvers over the host default.
+* **CD-flag disambiguation** (above) is essential — never report "bogus" from a bare SERVFAIL.
+* **Time skew** breaks RRSIG-expiry math: use a trusted clock; a wrong local clock can false-flag
+  expiry.
+* **Multiple keys** during a rollover are normal — `ds_algo_match` must match *any* live KSK, and
+  `key_rollover` must tolerate a transient extra key without flagging.
+* **Rate limits / cost:** DNS is cheap; validation via public resolvers (1.1.1.1 / 8.8.8.8) should be
+  gently rate-limited and cached per audit run. No paid feed or API is required.
+
+**Severity mapping summary:** unsigned → `info`; signed-but-no-DS or deprecated algo or near-expiry or
+SHA-1 DS → `warning`; SERVFAIL/bogus, expired RRSIG, or DS-does-not-match-live-key → `critical`; a
+fully signed, validating, modern-algorithm zone → `ok`.
+
+---
+
+## 4. User interface
+
+DNSSEC contributes to the **DNS & Infrastructure** dashboard cell (column 5). Per the roll-up rule in
+[`../dashboard.mdx`](../dashboard.mdx), the cell's color is the worst severity across *all* `infra.*`
+findings for that domain; DNSSEC `info` (unsigned) alone does **not** turn the cell amber, but a
+broken-chain `critical` turns it dark red. Because a broken DNSSEC chain is a domain-wide outage, when
+`infra.dnssec_validates` is `critical` the audit-detail view pins it to the top of the DNS &
+Infrastructure group with a "Domain may be unresolvable" banner.
+
+**Audit-detail rendering (React 19 + shadcn/ui).** Findings render as grouped rows under a **"DNS &
+Infrastructure › DNSSEC"** collapsible section (shadcn `Accordion`), each row:
+
+* a severity **`Badge`** (green `ok` / blue `info` / amber `warning` / red `critical`) + lucide icon
+  (`ShieldCheck`, `ShieldAlert`, `ShieldOff`);
+* the **observed detail** (e.g. `DNSKEY: alg 13 (ECDSAP256SHA256), KSK 257 + ZSK 256; DS at parent: yes (SHA-256); AD flag: 1`);
+* the **remediation** string with a **copy-to-clipboard** button (shadcn `Button` + `Clipboard`
+  icon) that copies the exact registrar step or the DS digest to publish;
+* for `dnssec_validates` bogus, a "Why is my domain down?" link into
+  [`../spam_checks.mdx`](../spam_checks.mdx).
+
+**Per-domain config inputs (Domains detail page).** DNSSEC needs no per-domain input beyond the domain
+itself, but an **admin-only Settings** panel exposes: the **validating resolver(s)** to query
+(default `1.1.1.1`, `8.8.8.8`), the **RRSIG near-expiry lead time** (default 72h), and a toggle for
+**"validate via `dig` (future)"** vs presence-only first round.
+
+**States.** *Never-run:* the DNSSEC rows show "Never checked" (gray). *Loading:* shadcn `Skeleton`
+rows while the query is in flight. *Unsigned (info):* a single blue row — "Zone is not DNSSEC-signed
+— optional, but required for DANE" with a link to [`./dane_tlsa.mdx`](./dane_tlsa.mdx). *Future-gated
+sub-checks* (validation) render with a small "Deep check" tag until the `dig` path ships.
+
+```
+┌ DNS & Infrastructure ─ DNSSEC ─────────────────────────────────────────────┐
+│ ● critical  RRSIG expired          apex RRSIG expired 2026-06-28 12:00 UTC  │
+│             Re-sign the zone now; restore the automatic re-signing job. [⧉] │
+│ ● warning   Deprecated algorithm   DNSKEY alg 7 (RSASHA1-NSEC3-SHA1)        │
+│             Roll to ECDSAP256SHA256 (13); update the DS after rollover.  [⧉]│
+│ ● ok        Chain validates        AD=1 via 1.1.1.1; DS SHA-256 matches KSK │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 5. Information schema (database schema)
+
+DNSSEC references the **shared core tables** owned by engineering — do **not** redefine these:
+`domains`, `sending_ips`, `dkim_selectors`, `audit_runs`, and `findings`. Each DNSSEC sub-check emits
+a row into the generic **`findings`** table (`category='infra'`, `check_id='infra.dnssec_*'`). The
+table below adds the **structured, parsed** DNSSEC observation for one domain in one audit run.
+
+```sql
+-- Check-specific structured result. One row per (audit_run, domain).
+CREATE TABLE dnssec_check_results (
+    id                    BIGSERIAL   PRIMARY KEY,
+    audit_run_id          BIGINT      NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id             BIGINT      NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    signed                BOOLEAN     NOT NULL,             -- DNSKEY present at apex
+    ds_present            BOOLEAN     NOT NULL,             -- DS at parent/registrar
+    validates             BOOLEAN     NULL,                 -- AD=1 (NULL until validating resolver ships)
+    bogus                 BOOLEAN     NOT NULL DEFAULT FALSE, -- SERVFAIL w/ CD=1 success ⇒ broken chain
+    dnskey_algos          JSONB       NOT NULL DEFAULT '[]', -- [{keyTag,flags,alg,algName,bits}]
+    ds_digest_type        SMALLINT    NULL,                 -- 1=SHA1, 2=SHA256
+    ds_algo_match         BOOLEAN     NULL,                 -- published DS matches a live KSK
+    nsec3                 BOOLEAN     NOT NULL DEFAULT FALSE,
+    nsec3_iterations      INTEGER     NULL,
+    nsec3_optout          BOOLEAN     NULL,
+    rrsig_earliest_expiry TIMESTAMPTZ NULL,                 -- soonest apex RRSIG expiration
+    resolver_used         TEXT        NULL,                 -- e.g. '1.1.1.1'
+    checked_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_dnssec_result UNIQUE (audit_run_id, domain_id)
+);
+
+CREATE INDEX idx_dnssec_domain_time  ON dnssec_check_results (domain_id, checked_at DESC);
+CREATE INDEX idx_dnssec_expiry       ON dnssec_check_results (rrsig_earliest_expiry)
+    WHERE rrsig_earliest_expiry IS NOT NULL;                -- fast "expiring soon" scans
+CREATE INDEX idx_dnssec_broken       ON dnssec_check_results (domain_id)
+    WHERE bogus = TRUE OR (signed = TRUE AND ds_present = FALSE);
+CREATE INDEX idx_dnssec_algos_gin    ON dnssec_check_results USING GIN (dnskey_algos);
+```
+
+Optional small **reference table** for algorithm/digest naming and deprecation policy, so the UI and
+severity logic don't hard-code magic numbers:
+
+```sql
+CREATE TABLE dnssec_algorithms (           -- seeded config, rarely changes (IANA registry)
+    algo_num   SMALLINT PRIMARY KEY,        -- 5,7,8,13,14,15,16 ...
+    name       TEXT NOT NULL,               -- 'RSASHA1','ECDSAP256SHA256', ...
+    deprecated BOOLEAN NOT NULL DEFAULT FALSE,
+    notes      TEXT
+);
+```
+
+**Mapping to TODAY's JSON file store** (per [`../engineering.mdx`](../engineering.mdx) §7). There is
+no database in the first round; the audit run is one file
+`~/.email_delivery_hero/audits/<domainId>/<auditId>.json`. Within that file:
+
+* the generic findings live in the run's `findings[]` array (each `{checkId, severity, title, detail,
+  remediation}`) exactly as every other check;
+* the **`dnssec_check_results`** row maps to a `results.dnssec` object embedded in the same run file,
+  e.g.:
+
+```jsonc
+// audits/<domainId>/<auditId>.json  →  results.dnssec
+{
+  "signed": true, "dsPresent": true, "validates": null, "bogus": false,
+  "dnskeyAlgos": [ { "keyTag": 20326, "flags": 257, "alg": 13, "algName": "ECDSAP256SHA256", "bits": 256 } ],
+  "dsDigestType": 2, "dsAlgoMatch": true,
+  "nsec3": true, "nsec3Iterations": 0, "nsec3Optout": false,
+  "rrsigEarliestExpiry": "2026-07-14T00:00:00Z",
+  "resolverUsed": "1.1.1.1", "checkedAt": "2026-07-01T10:05:00Z"
+}
+```
+
+* `dnssec_algorithms` maps to a static seed under `config.yaml` (`dnssec.algorithms:`) — the same
+  place DNSBL zones live — read-only reference data.
+
+When storage graduates to PostgreSQL the reconciliation is mechanical: `results.dnssec` → one
+`dnssec_check_results` row keyed by `(audit_run_id, domain_id)`; the `config.yaml` seed → the
+`dnssec_algorithms` table. No shape change to `findings`.
+
+---
+
+## 6. When we run the check
+
+* **On-demand:** every manual audit (`POST /api/domains/:id/audit`) runs the DNSSEC checker as part of
+  the DNS & Infrastructure pass. Presence sub-checks always run; validation sub-checks run when the
+  `dig`/validating-resolver path is enabled (future).
+* **Periodic:** the in-process scheduler ([`../scheduled_checks.mdx`](../scheduled_checks.mdx)) re-runs
+  it on the config cadence (default every 6h). **RRSIG expiry makes DNSSEC a high-value scheduled
+  check** — a stalled re-signing job silently marches signatures toward expiry, and the periodic run
+  catches `infra.dnssec_rrsig_expiry` at `warning` (within lead time) *before* it becomes a `critical`
+  domain-wide outage. Consider a tighter cadence (e.g. hourly) for zones flagged near-expiry.
+* **First-round vs future:** presence sub-checks (`dnssec_signed`, `dnssec_ds_present`,
+  `dnssec_algorithm`, `dnssec_key_rollover`) are **first round** on `node:dns/promises`. Validation,
+  RRSIG-expiry, NSEC3 params, and full chain verification are **future**, gated behind shelling to
+  `dig +dnssec` / a validating-resolver library — Node does not expose the AD flag or verify
+  signatures.
+* **Cost / rate-limit / back-off:** DNS queries are cheap and free; the only external touch is public
+  validating resolvers (1.1.1.1 / 8.8.8.8). Cache one validation per domain per audit run, gently
+  rate-limit, and back off on resolver timeouts (report `info`: "validation unavailable" rather than a
+  false `critical`).
+* **Regression detection:** the scheduler diffs each run against the previous. A newly-appearing or
+  worsened DNSSEC finding is a "new problem" surfaced on the Dashboard — most importantly a transition
+  to **bogus/SERVFAIL** (outage) or a **DS-mismatch after a key change** (botched rollover), both of
+  which warrant immediate operator attention.
+
+---
+
+## 7. First round vs future
+
+| Sub-check (checkId) | First round (pure `node:dns/promises`) | Future (probe / external tool) |
+| --- | --- | --- |
+| `infra.dnssec_signed` | ✅ `resolve(domain,'DNSKEY')` presence | — |
+| `infra.dnssec_ds_present` | ✅ `resolve(domain,'DS')` presence | — |
+| `infra.dnssec_algorithm` | ✅ parse DNSKEY `algorithm`/`flags`/bits | — |
+| `infra.dnssec_key_rollover` | ✅ static parse of DNSKEY set | — |
+| `infra.dnssec_validates` | — | 🔻 `dig +dnssec` AD flag + CD-flag bogus probe / validating resolver |
+| `infra.dnssec_rrsig_expiry` | — | 🔻 `dig +dnssec` parse RRSIG `Signature Expiration` |
+| `infra.dnssec_nsec3` | — | 🔻 `dig +dnssec <nxdomain>` NSEC3PARAM parse |
+| `infra.dnssec_ds_algo_match` | ⚠️ partial (recompute DS digest locally) | 🔻 full chain via validator library |
+| `infra.dnssec_chain_complete` | — | 🔻 walk DS→DNSKEY→RRSIG via `dig`/validator |
+| `infra.dnssec_soa_signed` | ⚠️ presence heuristic | 🔻 confirm RRSIG covers each RRset |
+| `infra.dnssec_dane_ready` | ⚠️ derived (signed only) | 🔻 signed **AND** validates |
+
+---
+
+## 8. Acceptance criteria
+
+1. The checker implements the `Checker` interface (`id: 'infra.dnssec'`, a display `label`) and
+   returns `Finding[]` with `checkId` values in the `infra.dnssec_*` namespace.
+2. For an **unsigned** zone it emits exactly one `info` finding (`infra.dnssec_signed`) whose
+   remediation names enabling DNSSEC at the DNS provider/registrar — and does **not** turn the DNS &
+   Infrastructure cell amber.
+3. For a **signed zone with no DS at the parent** it emits `infra.dnssec_ds_present` at `warning` with
+   a remediation instructing the operator to publish the DS/DNSKEY digest at the registrar.
+4. First-round presence sub-checks use only `node:dns/promises` and are deterministic against recorded
+   DNS fixtures in CI.
+5. Validation-dependent sub-checks (`dnssec_validates`, `dnssec_rrsig_expiry`, `dnssec_nsec3`,
+   `dnssec_chain_complete`) are clearly gated as future and **degrade gracefully** to `info`
+   ("validation unavailable") when the `dig`/validating-resolver path is disabled — never a false
+   `critical`.
+6. A **bogus** chain is reported `critical` only after the CD-flag disambiguation (SERVFAIL with CD=0
+   but success with CD=1); a plain NXDOMAIN/outage is never mislabeled as a DNSSEC failure.
+7. An **expired** apex RRSIG yields `infra.dnssec_rrsig_expiry` = `critical`; one expiring within the
+   configured lead time (default 72h) yields `warning`.
+8. `infra.dnssec_algorithm` flags algorithm 5 and 7 (RSASHA1) as `warning`; algorithm 13
+   (ECDSAP256SHA256) and 8 (RSASHA256) pass.
+9. `infra.dnssec_ds_algo_match` recomputes the DS SHA-256 digest locally and flags `critical` when no
+   published DS matches any live KSK; a SHA-1 (digest type 1) DS is `warning`.
+10. Every non-`ok` finding carries a **concrete** remediation string (exact registrar step, exact DS
+    digest to publish, or exact record to re-sign) — never a generic "check your DNS".
+11. Each run writes one `dnssec_check_results`-shaped object to `results.dnssec` in the audit run JSON
+    file, matching the documented field names, so the future file-store-to-Postgres migration is a
+    direct mapping.
+12. The scheduler diffs successive runs; a transition to bogus/expired/DS-mismatch is surfaced as a
+    new problem on the Dashboard.
+13. `infra.dnssec_dane_ready` correctly signals to [`./dane_tlsa.mdx`](./dane_tlsa.mdx) that TLSA is
+    trustworthy only when the zone is both signed and validates.
+
+<!--
+  Maintenance notes:
+  - Keep RFC refs current: DNSSEC core RFC 4033/4034/4035, clarifications RFC 6840; NSEC3 params
+    guidance RFC 9276 (iterations 0); operational practices RFC 6781; algorithm/digest numbers track
+    the IANA DNSSEC registries (keep the dnssec_algorithms seed in sync). DS digest computation per
+    RFC 4034 §5.1.4.
+  - Keep in sync with ../spam_checks.mdx (this file expands the single `infra.dnssec` row into the
+    infra.dnssec_* sub-family) and ../engineering.mdx (Checker/Finding contract, file store §7,
+    scheduler §8). If a validating-resolver path other than `dig` is chosen, update §3 and §7.
+  - Primary consumer is ./dane_tlsa.mdx — when DANE severity logic changes, re-check
+    infra.dnssec_dane_ready here.
+-->
