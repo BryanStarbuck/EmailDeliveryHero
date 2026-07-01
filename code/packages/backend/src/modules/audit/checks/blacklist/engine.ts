@@ -106,7 +106,9 @@ export function classifyAnswer(zone: BlocklistZone, addresses: string[]): Answer
         }
       }
       if (hits.length > 0) {
-        const worst = hits.reduce((a, b) => (SEVERITY_RANK[b.severity] > SEVERITY_RANK[a.severity] ? b : a))
+        const worst = hits.reduce((a, b) =>
+          SEVERITY_RANK[b.severity] > SEVERITY_RANK[a.severity] ? b : a,
+        )
         return classified(code, { ...worst, label: labels.join(" + ") })
       }
     }
@@ -137,7 +139,11 @@ export function worstSeverity(severities: Array<Severity | null | undefined>): S
 }
 
 /** Decode DNSWL 127.0.x.y — x = category, y = trust 0-3. */
-export function decodeDnswl(addresses: string[]): { listed: boolean; category: string | null; trust: number | null } {
+export function decodeDnswl(addresses: string[]): {
+  listed: boolean
+  category: string | null
+  trust: number | null
+} {
   const DNSWL_CATEGORIES: Record<number, string> = {
     2: "financial",
     3: "email service provider",
@@ -156,14 +162,21 @@ export function decodeDnswl(addresses: string[]): { listed: boolean; category: s
   for (const a of addresses) {
     const parts = a.split(".").map(Number)
     if (parts.length === 4 && parts[0] === 127 && parts[1] === 0) {
-      return { listed: true, category: DNSWL_CATEGORIES[parts[2]] ?? `category ${parts[2]}`, trust: parts[3] }
+      return {
+        listed: true,
+        category: DNSWL_CATEGORIES[parts[2]] ?? `category ${parts[2]}`,
+        trust: parts[3],
+      }
     }
   }
   return { listed: false, category: null, trust: null }
 }
 
 /** Decode Validity Sender Score 127.0.4.<score> (0-100; higher is better). */
-export function decodeSenderScore(addresses: string[]): { score: number | null; severity: Severity } {
+export function decodeSenderScore(addresses: string[]): {
+  score: number | null
+  severity: Severity
+} {
   for (const a of addresses) {
     const parts = a.split(".").map(Number)
     if (parts.length === 4 && parts[0] === 127) {
@@ -177,7 +190,10 @@ export function decodeSenderScore(addresses: string[]): { score: number | null; 
 }
 
 /** Decode Mailspike rep.mailspike.net 127.0.0.10 (worst) … 127.0.0.20 (best). */
-export function decodeMailspikeRep(addresses: string[]): { code: string | null; label: string | null } {
+export function decodeMailspikeRep(addresses: string[]): {
+  code: string | null
+  label: string | null
+} {
   const LABELS: Record<number, string> = {
     10: "worst reputation",
     11: "very bad",
@@ -249,14 +265,17 @@ export function detectProblemStates(args: {
     }
     // No explicit mapping from the code map — infer from zone traits.
     if (r.kind === "domain") states.add("PS-4")
-    else if (r.tier === "low" && (r.zone.includes("uceprotect") || r.zone.startsWith("netbl."))) states.add("PS-6")
+    else if (r.tier === "low" && (r.zone.includes("uceprotect") || r.zone.startsWith("netbl.")))
+      states.add("PS-6")
     else if (r.auto_expires) states.add("PS-5")
     else if (r.tier === "high") states.add("PS-1")
     else states.add("PS-5")
   }
 
   // Collateral: allocation/ASN-wide zones.
-  if (listings.some((r) => /dnsbl-[23]\.uceprotect\.net|netbl\.spameatingmonkey\.net/.test(r.zone))) {
+  if (
+    listings.some((r) => /dnsbl-[23]\.uceprotect\.net|netbl\.spameatingmonkey\.net/.test(r.zone))
+  ) {
     states.add("PS-6")
   }
 
@@ -312,7 +331,12 @@ export function diffRuns(prev: BlacklistRunResults | null, curr: ZoneResult[]): 
       diff.new_listings.push({ zone: r.zone, target: r.target, sub_list: r.sub_list })
     } else if (r.listed && before?.listed && before.severity && r.severity) {
       if (SEVERITY_RANK[r.severity] > SEVERITY_RANK[before.severity]) {
-        diff.escalated.push({ zone: r.zone, target: r.target, from: before.severity, to: r.severity })
+        diff.escalated.push({
+          zone: r.zone,
+          target: r.target,
+          from: before.severity,
+          to: r.severity,
+        })
       }
     }
   }

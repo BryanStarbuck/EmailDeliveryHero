@@ -34,7 +34,10 @@ function SummaryCard({ run }: { run: BlacklistRunResults }) {
     <Link
       to="/blacklists/$domain"
       params={{ domain: run.domain }}
-      className={cn("block rounded-xl p-4 shadow-sm transition-transform hover:scale-[1.01]", color)}
+      className={cn(
+        "block rounded-xl p-4 shadow-sm transition-transform hover:scale-[1.01]",
+        color,
+      )}
     >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 font-semibold">
@@ -50,7 +53,8 @@ function SummaryCard({ run }: { run: BlacklistRunResults }) {
         {" · "}
         {run.summary.inconclusive} unknown
         <span className="ml-2 text-xs opacity-75">
-          as of {new Date(run.ran_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+          as of{" "}
+          {new Date(run.ran_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
         </span>
       </p>
       {worst ? (
@@ -59,7 +63,9 @@ function SummaryCard({ run }: { run: BlacklistRunResults }) {
           {worst.sub_list ? ` (${worst.sub_list})` : ""}
         </p>
       ) : (
-        <p className="mt-1 text-sm opacity-90">No listings across {run.summary.zones_enabled} zones</p>
+        <p className="mt-1 text-sm opacity-90">
+          No listings across {run.summary.zones_enabled} zones
+        </p>
       )}
       {hasNew && (
         <p className="mt-1 flex items-center gap-1 text-sm font-semibold">

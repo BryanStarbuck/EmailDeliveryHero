@@ -79,7 +79,12 @@ export const PROBLEM_STATES: Record<ProblemStateId, ProblemStateInfo> = {
       "lsof -i -nP | grep -E ':25|:1080|:6667'          # unexpected outbound SMTP/SOCKS/IRC on the host",
       "nmap -p25,465,587 --script smtp-open-relay <ip>  # open relay test",
     ],
-    tools: ["dig", "nmap (dns-blacklist, smtp-open-relay scripts)", "host AV/EDR", "provider flow logs"],
+    tools: [
+      "dig",
+      "nmap (dns-blacklist, smtp-open-relay scripts)",
+      "host AV/EDR",
+      "provider flow logs",
+    ],
     furtherHealth: [
       "Re-scan all exploit-class zones after cleanup.",
       "Watch z.mailspike.net (zero-hour) for recurrence.",
@@ -103,7 +108,10 @@ export const PROBLEM_STATES: Record<ProblemStateId, ProblemStateInfo> = {
       "dig +short -x <ip>          # a generic PTR (ip-…provider.net) confirms policy space",
     ],
     tools: ["dig", "whois / mmdblookup (ASN owner)"],
-    furtherHealth: ["The full reverse-DNS (FCrDNS) check.", "A swaks send test through the proper smarthost."],
+    furtherHealth: [
+      "The full reverse-DNS (FCrDNS) check.",
+      "A swaks send test through the proper smarthost.",
+    ],
     progress: [
       "Decide the fork: (a) if this IP shouldn't send mail, route outbound through your provider's smarthost or an ESP — the listing is then correct and harmless.",
       "(b) If this is a legitimate static MTA: get a proper PTR from the provider, then request PBL self-exclusion at check.spamhaus.org (ISP-maintained entries may also need the ISP's own form).",
@@ -143,7 +151,12 @@ export const PROBLEM_STATES: Record<ProblemStateId, ProblemStateInfo> = {
       "dig +short <reversed-ip>.bl.spamcop.net",
       "# SpamCop's lookup page shows report ages — correlate with your send logs",
     ],
-    tools: ["dig", "SpamCop bl.shtml lookup", "your ESP's suppression/bounce logs", "ingested DMARC reports"],
+    tools: [
+      "dig",
+      "SpamCop bl.shtml lookup",
+      "your ESP's suppression/bounce logs",
+      "ingested DMARC reports",
+    ],
     furtherHealth: [
       "Bounce-rate trend and list-acquisition audit.",
       "Confirm no exploit-zone co-listing (trap + exploit together = infection, not hygiene).",
@@ -320,7 +333,9 @@ export const PROBLEM_STATES: Record<ProblemStateId, ProblemStateInfo> = {
       "dig +short <reversed-ip>.dnsbl-1.uceprotect.net",
     ],
     tools: ["dig", "the operator lookup pages", "the HIGH-tier zone matrix"],
-    furtherHealth: ["Real placement evidence — ask for actual NDRs naming these lists before caring."],
+    furtherHealth: [
+      "Real placement evidence — ask for actual NDRs naming these lists before caring.",
+    ],
     progress: [
       "Do not pay — listings auto-expire and funding the practice is discouraged (RFC 6471).",
       "Fix any genuine cause (backscatter → stop bounce-after-accept on the MTA).",

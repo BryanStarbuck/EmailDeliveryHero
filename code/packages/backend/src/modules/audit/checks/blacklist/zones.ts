@@ -1,6 +1,6 @@
+import { join } from "node:path"
 import { resolveStateDir } from "@shared/state-dir"
 import { readYaml } from "@shared/yaml-store"
-import { join } from "node:path"
 import type { BlocklistZone, ProviderPortal } from "./blacklist-types"
 
 /**
@@ -27,14 +27,26 @@ export const DEFAULT_ZONES: BlocklistZone[] = [
     enabled: true,
     severity: critical,
     codes: {
-      "127.0.0.2": { label: "SBL (manual spam listing)", severity: critical, problem_state: "PS-1" },
+      "127.0.0.2": {
+        label: "SBL (manual spam listing)",
+        severity: critical,
+        problem_state: "PS-1",
+      },
       "127.0.0.3": { label: "CSS (snowshoe spam)", severity: critical, problem_state: "PS-1" },
       "127.0.0.4": { label: "XBL (compromised host)", severity: critical, problem_state: "PS-2" },
       "127.0.0.5": { label: "XBL (compromised host)", severity: critical, problem_state: "PS-2" },
       "127.0.0.6": { label: "XBL (compromised host)", severity: critical, problem_state: "PS-2" },
       "127.0.0.7": { label: "XBL (compromised host)", severity: critical, problem_state: "PS-2" },
-      "127.0.0.10": { label: "PBL (ISP policy: dynamic range)", severity: warning, problem_state: "PS-3" },
-      "127.0.0.11": { label: "PBL (Spamhaus policy: dynamic range)", severity: warning, problem_state: "PS-3" },
+      "127.0.0.10": {
+        label: "PBL (ISP policy: dynamic range)",
+        severity: warning,
+        problem_state: "PS-3",
+      },
+      "127.0.0.11": {
+        label: "PBL (Spamhaus policy: dynamic range)",
+        severity: warning,
+        problem_state: "PS-3",
+      },
     },
   },
   {
@@ -61,7 +73,9 @@ export const DEFAULT_ZONES: BlocklistZone[] = [
     enabled: true,
     severity: warning,
     auto_expires: "~24h after reports stop",
-    codes: { "127.0.0.2": { label: "SCBL (spam-trap reports)", severity: warning, problem_state: "PS-5" } },
+    codes: {
+      "127.0.0.2": { label: "SCBL (spam-trap reports)", severity: warning, problem_state: "PS-5" },
+    },
   },
   {
     zone: "psbl.surriel.com",
@@ -74,7 +88,9 @@ export const DEFAULT_ZONES: BlocklistZone[] = [
     enabled: true,
     severity: warning,
     auto_expires: "2–4 weeks; instant self-removal",
-    codes: { "127.0.0.2": { label: "PSBL (passive spam trap)", severity: warning, problem_state: "PS-5" } },
+    codes: {
+      "127.0.0.2": { label: "PSBL (passive spam trap)", severity: warning, problem_state: "PS-5" },
+    },
   },
   {
     zone: "dnsbl.dronebl.org",
@@ -113,7 +129,11 @@ export const DEFAULT_ZONES: BlocklistZone[] = [
       "127.0.1.5": { label: "malware domain", severity: critical, problem_state: "PS-4" },
       "127.0.1.6": { label: "botnet C&C domain", severity: critical, problem_state: "PS-4" },
       "127.0.1.102": { label: "abused-legit: spam", severity: warning, problem_state: "PS-4" },
-      "127.0.1.103": { label: "abused-legit: redirector", severity: warning, problem_state: "PS-4" },
+      "127.0.1.103": {
+        label: "abused-legit: redirector",
+        severity: warning,
+        problem_state: "PS-4",
+      },
       "127.0.1.104": { label: "abused-legit: phish", severity: warning, problem_state: "PS-4" },
       "127.0.1.105": { label: "abused-legit: malware", severity: warning, problem_state: "PS-4" },
       "127.0.1.106": { label: "abused-legit: botnet", severity: warning, problem_state: "PS-4" },
@@ -166,7 +186,11 @@ export const DEFAULT_ZONES: BlocklistZone[] = [
     enabled: true,
     severity: warning,
     codes: {
-      "127.0.0.36": { label: "RATS-Dyna (dynamic-looking PTR)", severity: warning, problem_state: "PS-7" },
+      "127.0.0.36": {
+        label: "RATS-Dyna (dynamic-looking PTR)",
+        severity: warning,
+        problem_state: "PS-7",
+      },
       "127.0.0.37": { label: "RATS-NoPtr (missing PTR)", severity: warning, problem_state: "PS-7" },
       "127.0.0.38": { label: "RATS-Spam", severity: warning, problem_state: "PS-5" },
       "127.0.0.43": { label: "RATS-Auth (auth attacks)", severity: warning, problem_state: "PS-2" },
@@ -182,7 +206,9 @@ export const DEFAULT_ZONES: BlocklistZone[] = [
     delist_url: "https://mailspike.io/ip_verify",
     enabled: true,
     severity: warning,
-    codes: { "127.0.0.2": { label: "Mailspike blacklist", severity: warning, problem_state: "PS-5" } },
+    codes: {
+      "127.0.0.2": { label: "Mailspike blacklist", severity: warning, problem_state: "PS-5" },
+    },
   },
   {
     zone: "z.mailspike.net",
@@ -206,7 +232,9 @@ export const DEFAULT_ZONES: BlocklistZone[] = [
     delist_url: "https://blacklist.lashback.com",
     enabled: true,
     severity: warning,
-    codes: { "127.0.0.2": { label: "unsubscribe-abuse trap", severity: warning, problem_state: "PS-5" } },
+    codes: {
+      "127.0.0.2": { label: "unsubscribe-abuse trap", severity: warning, problem_state: "PS-5" },
+    },
   },
   {
     zone: "db.wpbl.info",
@@ -219,7 +247,13 @@ export const DEFAULT_ZONES: BlocklistZone[] = [
     enabled: true,
     severity: warning,
     auto_expires: "~10 days after spam stops",
-    codes: { "127.0.0.2": { label: "WPBL (private trap network)", severity: warning, problem_state: "PS-5" } },
+    codes: {
+      "127.0.0.2": {
+        label: "WPBL (private trap network)",
+        severity: warning,
+        problem_state: "PS-5",
+      },
+    },
   },
   {
     zone: "bl.0spam.org",
@@ -309,7 +343,8 @@ export const DEFAULT_ZONES: BlocklistZone[] = [
     delist_url: "https://www.nordspam.com",
     enabled: true,
     severity: warning,
-    notes: "Delist by emailing delist@nordspam.com from the affected domain with evidence of the fix.",
+    notes:
+      "Delist by emailing delist@nordspam.com from the affected domain with evidence of the fix.",
   },
   {
     zone: "dbl.nordspam.com",
@@ -399,7 +434,8 @@ export const DEFAULT_ZONES: BlocklistZone[] = [
     severity: info,
     paid_delist_offered: true,
     auto_expires: "4 weeks after last event",
-    notes: "Only matters when a receiver runs it in SAFE mode; caused by bounce-after-accept backscatter.",
+    notes:
+      "Only matters when a receiver runs it in SAFE mode; caused by bounce-after-accept backscatter.",
   },
   {
     zone: "bl.spameatingmonkey.net",
@@ -566,7 +602,12 @@ export function loadZones(): BlocklistZone[] {
     const existing = byZone.get(raw.zone)
     if (existing) byZone.set(raw.zone, { ...existing, ...raw })
     else if (raw.name && raw.kind && raw.lookup_url && raw.delist_url) {
-      const defaults = { tier: "low" as const, weight: 0.2, enabled: true, severity: "warning" as const }
+      const defaults = {
+        tier: "low" as const,
+        weight: 0.2,
+        enabled: true,
+        severity: "warning" as const,
+      }
       byZone.set(raw.zone, { ...defaults, ...(raw as BlocklistZone) })
     }
   }

@@ -1,5 +1,5 @@
-import { mapLimit } from "@shared/concurrency"
 import { Resolver } from "node:dns/promises"
+import { mapLimit } from "@shared/concurrency"
 import type {
   BlacklistRunResults,
   BlocklistZone,
@@ -22,7 +22,12 @@ import {
   spfLiteralIps,
   worstSeverity,
 } from "./blacklist/engine"
-import { applyPortalStates, readLatestBlacklistRun, readPortalStates, saveBlacklistRun } from "./blacklist/store"
+import {
+  applyPortalStates,
+  readLatestBlacklistRun,
+  readPortalStates,
+  saveBlacklistRun,
+} from "./blacklist/store"
 import { loadZones, PROVIDER_PORTALS } from "./blacklist/zones"
 import { resolveMx, resolveTxt, resolve4 as utilResolve4 } from "./dns-util"
 import type { Checker, CheckOutcome, Finding, Severity } from "./types"
@@ -106,7 +111,11 @@ async function queryAsn(resolver: Resolver, ip: string): Promise<IpTarget["asn"]
 }
 
 /** §11.1 target discovery: configured sending IPs, else MX-derived, plus SPF ip4 literals. */
-async function discoverIpTargets(resolver: Resolver, domain: string, configured: string[]): Promise<IpTarget[]> {
+async function discoverIpTargets(
+  resolver: Resolver,
+  domain: string,
+  configured: string[],
+): Promise<IpTarget[]> {
   const sources = new Map<string, IpTarget["source"]>()
   for (const ip of configured) {
     if (reverseIpv4(ip)) sources.set(ip, "sending_ips")
@@ -163,7 +172,11 @@ function queryNameFor(r: ZoneResult): string {
   return `${r.target.toLowerCase()}.${r.zone}`
 }
 
-async function queryPair(resolver: Resolver, zone: BlocklistZone, target: string): Promise<ZoneResult> {
+async function queryPair(
+  resolver: Resolver,
+  zone: BlocklistZone,
+  target: string,
+): Promise<ZoneResult> {
   const base: ZoneResult = {
     zone: zone.zone,
     name: zone.name,
@@ -206,7 +219,10 @@ async function queryPair(resolver: Resolver, zone: BlocklistZone, target: string
 }
 
 /** §11.6 positive-reputation probes: DNSWL, Sender Score, Mailspike reputation. */
-async function probePositiveReputation(resolver: Resolver, ips: IpTarget[]): Promise<PositiveReputation> {
+async function probePositiveReputation(
+  resolver: Resolver,
+  ips: IpTarget[],
+): Promise<PositiveReputation> {
   const out: PositiveReputation = {
     dnswl: { listed: false, category: null, trust: null },
     senderscore: { score: null, severity: "info" },
@@ -228,12 +244,15 @@ async function probePositiveReputation(resolver: Resolver, ips: IpTarget[]): Pro
 
 function delistRemediation(r: ZoneResult): string {
   const parts: string[] = []
-  parts.push(`Fix the root cause first — a delist request while the cause is live gets re-listed. ${causeHint(r)}`)
+  parts.push(
+    `Fix the root cause first — a delist request while the cause is live gets re-listed. ${causeHint(r)}`,
+  )
   const url = r.reason_txt?.match(/https?:\/\/\S+/)?.[0] ?? r.delist_url
   parts.push(
     `Then request removal at ${url} (reason code ${r.return_code ?? "n/a"}${r.sub_list ? ` = ${r.sub_list}` : ""}).`,
   )
-  if (r.auto_expires) parts.push(`This list auto-expires (${r.auto_expires}) — waiting is a valid option.`)
+  if (r.auto_expires)
+    parts.push(`This list auto-expires (${r.auto_expires}) — waiting is a valid option.`)
   if (r.paid_delist_offered) {
     parts.push(
       "NEVER pay for delisting: paid 'express' removal is unnecessary (listings auto-expire) and the industry considers pay-to-delist abusive (RFC 6471).",
@@ -278,7 +297,9 @@ export const blacklistCheck: Checker = {
     const domainTargets: DomainTarget[] = [{ domain: ctx.domain, source: "primary", created: null }]
 
     // §11.2 preflight — dead/wildcarding zones are excluded from the sweep (PS-10).
-    const zoneHealth = await mapLimit(sweepZones, QUERY_CONCURRENCY, (z) => probeZoneHealth(resolver, z))
+    const zoneHealth = await mapLimit(sweepZones, QUERY_CONCURRENCY, (z) =>
+      probeZoneHealth(resolver, z),
+    )
     const healthByZone = new Map(zoneHealth.map((h) => [h.zone, h]))
     const usableZones = sweepZones.filter((z) => {
       const h = healthByZone.get(z.zone)
@@ -294,7 +315,9 @@ export const blacklistCheck: Checker = {
         for (const t of domainTargets) pairs.push({ zone, target: t.domain })
       }
     }
-    const results = await mapLimit(pairs, QUERY_CONCURRENCY, (p) => queryPair(resolver, p.zone, p.target))
+    const results = await mapLimit(pairs, QUERY_CONCURRENCY, (p) =>
+      queryPair(resolver, p.zone, p.target),
+    )
 
     const positive = await probePositiveReputation(resolver, ipTargets)
 

@@ -1,7 +1,7 @@
-import { stateSubdir } from "@shared/state-dir"
-import { readYaml, writeYaml } from "@shared/yaml-store"
 import { existsSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
+import { stateSubdir } from "@shared/state-dir"
+import { readYaml, writeYaml } from "@shared/yaml-store"
 import type {
   BlacklistHistoryEntry,
   BlacklistRunResults,
@@ -62,7 +62,9 @@ export function readBlacklistHistory(domainId: string): BlacklistHistoryEntry[] 
   const runsDir = join(domainDir(domainId), "runs")
   if (!existsSync(runsDir)) return []
   const entries: BlacklistHistoryEntry[] = []
-  for (const file of readdirSync(runsDir).filter((f) => f.endsWith(".yaml")).sort()) {
+  for (const file of readdirSync(runsDir)
+    .filter((f) => f.endsWith(".yaml"))
+    .sort()) {
     const run = readYaml<BlacklistRunResults | null>(join(runsDir, file), null)
     if (!run) continue
     entries.push({
@@ -92,7 +94,11 @@ export function readPortalStates(domainId: string): PortalStateFile {
   return readYaml<PortalStateFile>(join(domainDir(domainId), "portals.yaml"), {})
 }
 
-export function writePortalState(domainId: string, provider: string, state: PortalUserState): PortalStateFile {
+export function writePortalState(
+  domainId: string,
+  provider: string,
+  state: PortalUserState,
+): PortalStateFile {
   const states = readPortalStates(domainId)
   states[provider] = state
   writeYaml(join(domainDir(domainId), "portals.yaml"), states)

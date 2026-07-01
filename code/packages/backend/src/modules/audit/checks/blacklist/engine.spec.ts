@@ -1,4 +1,9 @@
-import type { BlacklistRunResults, BlocklistZone, PositiveReputation, ZoneResult } from "./blacklist-types"
+import type {
+  BlacklistRunResults,
+  BlocklistZone,
+  PositiveReputation,
+  ZoneResult,
+} from "./blacklist-types"
 import {
   buildQueryName,
   classifyAnswer,
@@ -135,7 +140,12 @@ describe("classifyAnswer", () => {
 
 describe("classifyZoneHealth (RFC 5782, spec §8 acceptance 6)", () => {
   it("ok when 127.0.0.2 is listed and 127.0.0.1 is not", () => {
-    const h = classifyZoneHealth({ zone: "z", positiveAnswers: ["127.0.0.2"], negativeAnswers: [], probeMs: 40 })
+    const h = classifyZoneHealth({
+      zone: "z",
+      positiveAnswers: ["127.0.0.2"],
+      negativeAnswers: [],
+      probeMs: 40,
+    })
     expect(h.status).toBe("ok")
   })
 
@@ -150,7 +160,12 @@ describe("classifyZoneHealth (RFC 5782, spec §8 acceptance 6)", () => {
   })
 
   it("dead when the test point is silent", () => {
-    const h = classifyZoneHealth({ zone: "z", positiveAnswers: [], negativeAnswers: [], probeMs: 40 })
+    const h = classifyZoneHealth({
+      zone: "z",
+      positiveAnswers: [],
+      negativeAnswers: [],
+      probeMs: 40,
+    })
     expect(h.status).toBe("dead")
   })
 
@@ -165,7 +180,12 @@ describe("classifyZoneHealth (RFC 5782, spec §8 acceptance 6)", () => {
   })
 
   it("slow when the probe exceeds the threshold", () => {
-    const h = classifyZoneHealth({ zone: "z", positiveAnswers: ["127.0.0.2"], negativeAnswers: [], probeMs: 9000 })
+    const h = classifyZoneHealth({
+      zone: "z",
+      positiveAnswers: ["127.0.0.2"],
+      negativeAnswers: [],
+      probeMs: 9000,
+    })
     expect(h.status).toBe("slow")
   })
 })
@@ -217,7 +237,13 @@ describe("detectProblemStates (spec §16)", () => {
     const states = detectProblemStates({
       results: [result({ refusal_code: "127.255.255.254", inconclusive: true })],
       zoneHealth: [
-        { zone: "dead.example", status: "dead", positive_probe: "NXDOMAIN", negative_probe: "NXDOMAIN", probe_ms: 5 },
+        {
+          zone: "dead.example",
+          status: "dead",
+          positive_probe: "NXDOMAIN",
+          negative_probe: "NXDOMAIN",
+          probe_ms: 5,
+        },
       ],
       positive: CLEAN_POSITIVE,
       zones: DEFAULT_ZONES,
@@ -245,7 +271,12 @@ describe("detectProblemStates (spec §16)", () => {
     const withReal = detectProblemStates({
       ...base,
       results: [
-        result({ zone: "dnsbl-1.uceprotect.net", listed: true, severity: "warning", paid_delist_offered: true }),
+        result({
+          zone: "dnsbl-1.uceprotect.net",
+          listed: true,
+          severity: "warning",
+          paid_delist_offered: true,
+        }),
         result({ listed: true, severity: "critical", problem_state: "PS-2" }),
       ],
       positive: CLEAN_POSITIVE,
@@ -256,7 +287,14 @@ describe("detectProblemStates (spec §16)", () => {
   it("PS-6 for allocation/ASN collateral zones", () => {
     const states = detectProblemStates({
       ...base,
-      results: [result({ zone: "dnsbl-2.uceprotect.net", listed: true, severity: "info", paid_delist_offered: true })],
+      results: [
+        result({
+          zone: "dnsbl-2.uceprotect.net",
+          listed: true,
+          severity: "info",
+          paid_delist_offered: true,
+        }),
+      ],
       positive: CLEAN_POSITIVE,
     })
     expect(states).toContain("PS-6")
@@ -297,7 +335,10 @@ describe("diffRuns (spec §8 acceptance 9)", () => {
   })
 
   it("flags clean→listed as new and listed→clean as cleared", () => {
-    const prev = runWith([result({ zone: "a", listed: false }), result({ zone: "b", listed: true, severity: "warning" })])
+    const prev = runWith([
+      result({ zone: "a", listed: false }),
+      result({ zone: "b", listed: true, severity: "warning" }),
+    ])
     const diff = diffRuns(prev, [
       result({ zone: "a", listed: true, severity: "critical", sub_list: "XBL" }),
       result({ zone: "b", listed: false }),
@@ -310,11 +351,15 @@ describe("diffRuns (spec §8 acceptance 9)", () => {
   it("flags warning→critical as escalated", () => {
     const prev = runWith([result({ zone: "a", listed: true, severity: "warning" })])
     const diff = diffRuns(prev, [result({ zone: "a", listed: true, severity: "critical" })])
-    expect(diff.escalated).toEqual([{ zone: "a", target: "203.0.113.24", from: "warning", to: "critical" }])
+    expect(diff.escalated).toEqual([
+      { zone: "a", target: "203.0.113.24", from: "warning", to: "critical" },
+    ])
   })
 
   it("ignores inconclusive transitions (no resolver-blockage false alarms)", () => {
-    const prev = runWith([result({ zone: "a", listed: false, inconclusive: true, refusal_code: "127.0.0.1" })])
+    const prev = runWith([
+      result({ zone: "a", listed: false, inconclusive: true, refusal_code: "127.0.0.1" }),
+    ])
     const diff = diffRuns(prev, [result({ zone: "a", listed: true, severity: "critical" })])
     expect(diff.new_listings).toHaveLength(0)
   })
@@ -340,8 +385,8 @@ describe("zone catalog", () => {
   })
 
   it("extracts single-host ip4 literals from SPF", () => {
-    expect(spfLiteralIps("v=spf1 ip4:203.0.113.24 ip4:198.51.100.0/24 include:_spf.google.com ~all")).toEqual([
-      "203.0.113.24",
-    ])
+    expect(
+      spfLiteralIps("v=spf1 ip4:203.0.113.24 ip4:198.51.100.0/24 include:_spf.google.com ~all"),
+    ).toEqual(["203.0.113.24"])
   })
 })

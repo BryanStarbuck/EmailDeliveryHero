@@ -32,11 +32,18 @@ export function BlacklistStatePage() {
     cmd
       .replaceAll("<domain>", domain)
       .replaceAll("<ip>", firstIp ?? "<ip>")
-      .replaceAll("<reversed-ip>", firstIp ? firstIp.split(".").reverse().join(".") : "<reversed-ip>")
+      .replaceAll(
+        "<reversed-ip>",
+        firstIp ? firstIp.split(".").reverse().join(".") : "<reversed-ip>",
+      )
 
   return (
     <div className="mx-auto max-w-3xl">
-      <Link to="/blacklists/$domain" params={{ domain }} className="text-sm text-[var(--edh-primary)]">
+      <Link
+        to="/blacklists/$domain"
+        params={{ domain }}
+        className="text-sm text-[var(--edh-primary)]"
+      >
         ← Blacklists for {domain}
       </Link>
 
@@ -50,7 +57,9 @@ export function BlacklistStatePage() {
         Trigger: {ps.trigger}
         {run && (
           <span className={detected ? " font-semibold text-red-700" : " text-emerald-700"}>
-            {detected ? " — detected on this domain's latest run." : " — not currently detected on this domain."}
+            {detected
+              ? " — detected on this domain's latest run."
+              : " — not currently detected on this domain."}
           </span>
         )}
       </p>

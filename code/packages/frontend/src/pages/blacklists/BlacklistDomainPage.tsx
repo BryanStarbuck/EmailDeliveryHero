@@ -7,8 +7,8 @@ import { useBlacklistHistory, useBlacklistRun, useSetPortalState } from "@/api/b
 import { useDomains } from "@/api/domains"
 import type { BlacklistRunResults, BlacklistZoneResult, PortalUserState } from "@/api/types"
 import { SeverityBadge } from "@/components/Badges"
-import { cn } from "@/lib/utils"
 import { problemState } from "@/lib/problemStates"
+import { cn } from "@/lib/utils"
 
 /**
  * The full Blacklists technology page (pm/checks/blacklists.mdx §13.2, layout §14): verdict band →
@@ -28,7 +28,9 @@ const BAND: Record<string, string> = {
 
 function TierChip({ tier }: { tier: string }) {
   return (
-    <span className="rounded border border-current px-1 text-[10px] uppercase opacity-60">{tier}</span>
+    <span className="rounded border border-current px-1 text-[10px] uppercase opacity-60">
+      {tier}
+    </span>
   )
 }
 
@@ -40,13 +42,25 @@ function DebugDrawer({ run, row }: { run: BlacklistRunResults; row: BlacklistZon
       : `${row.target}.${row.zone}`
   const rows: Array<[string, string | null]> = [
     ["Query", query],
-    ["Answer", row.return_code ?? (row.refusal_code ? `refused: ${row.refusal_code}` : "NXDOMAIN (clean)")],
+    [
+      "Answer",
+      row.return_code ?? (row.refusal_code ? `refused: ${row.refusal_code}` : "NXDOMAIN (clean)"),
+    ],
     ["Sub-list", row.sub_list],
     ["TXT", row.reason_txt],
     ["Resolver", run.resolver.server ?? "system default"],
     ["Latency", `${row.query_ms} ms`],
     ["PTR", ipTarget ? (ipTarget.ptr ?? "none") : null],
-    ["FCrDNS", ipTarget ? (ipTarget.fcrdns_ok === null ? "unknown" : ipTarget.fcrdns_ok ? "ok" : "FAILS") : null],
+    [
+      "FCrDNS",
+      ipTarget
+        ? ipTarget.fcrdns_ok === null
+          ? "unknown"
+          : ipTarget.fcrdns_ok
+            ? "ok"
+            : "FAILS"
+        : null,
+    ],
     ["ASN", ipTarget?.asn ? `AS${ipTarget.asn.number} — ${ipTarget.asn.org ?? "?"}` : null],
     ["Auto-expires", row.auto_expires],
   ]
@@ -87,7 +101,8 @@ function ProblemsTable({ run }: { run: BlacklistRunResults }) {
   const problems = useMemo(
     () =>
       [...run.results.filter((r) => r.listed)].sort(
-        (a, b) => RANK[b.severity ?? "info"] - RANK[a.severity ?? "info"] || a.zone.localeCompare(b.zone),
+        (a, b) =>
+          RANK[b.severity ?? "info"] - RANK[a.severity ?? "info"] || a.zone.localeCompare(b.zone),
       ),
     [run.results],
   )
@@ -113,9 +128,13 @@ function ProblemsTable({ run }: { run: BlacklistRunResults }) {
                   <span className="font-medium">{r.name}</span>
                   <TierChip tier={r.tier} />
                   <span className="truncate font-mono text-xs text-slate-600">{r.target}</span>
-                  {r.sub_list && <span className="truncate text-xs text-slate-500">{r.sub_list}</span>}
+                  {r.sub_list && (
+                    <span className="truncate text-xs text-slate-500">{r.sub_list}</span>
+                  )}
                   {newKeys.has(key) && (
-                    <span className="rounded bg-red-100 px-1.5 text-xs font-semibold text-red-800">NEW</span>
+                    <span className="rounded bg-red-100 px-1.5 text-xs font-semibold text-red-800">
+                      NEW
+                    </span>
                   )}
                 </span>
                 <a
@@ -127,7 +146,11 @@ function ProblemsTable({ run }: { run: BlacklistRunResults }) {
                 >
                   Delist <ExternalLink className="h-3 w-3" />
                 </a>
-                {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                {expanded ? (
+                  <ChevronDown className="h-4 w-4" />
+                ) : (
+                  <ChevronRight className="h-4 w-4" />
+                )}
               </button>
               {expanded && (
                 <div className="px-3 pb-3">
@@ -175,14 +198,24 @@ function FixPanel({ run }: { run: BlacklistRunResults }) {
               {r.name} ({r.target})
             </span>
             : fix the root cause first, then request removal at{" "}
-            <a href={r.delist_url} target="_blank" rel="noreferrer" className="text-[var(--edh-primary)] underline">
+            <a
+              href={r.delist_url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[var(--edh-primary)] underline"
+            >
               {r.delist_url}
             </a>
             {r.auto_expires && <> — or wait it out (auto-expires {r.auto_expires})</>}
             {r.paid_delist_offered && (
-              <span className="font-semibold text-red-700"> Never pay for "express" delisting (RFC 6471).</span>
+              <span className="font-semibold text-red-700">
+                {" "}
+                Never pay for "express" delisting (RFC 6471).
+              </span>
             )}
-            {r.tier === "low" && <span className="text-slate-500"> Low real-world impact at Gmail/Outlook/Yahoo.</span>}
+            {r.tier === "low" && (
+              <span className="text-slate-500"> Low real-world impact at Gmail/Outlook/Yahoo.</span>
+            )}
           </li>
         ))}
       </ol>
@@ -190,11 +223,16 @@ function FixPanel({ run }: { run: BlacklistRunResults }) {
   )
 }
 
-const PORTAL_PILL: Record<PortalUserState, { label: string; cls: string; next: PortalUserState }> = {
-  unverified: { label: "Unverified", cls: "bg-gray-100 text-gray-600", next: "verified_clean" },
-  verified_clean: { label: "Clean", cls: "bg-emerald-100 text-emerald-800", next: "problem_reported" },
-  problem_reported: { label: "Problem", cls: "bg-red-100 text-red-800", next: "unverified" },
-}
+const PORTAL_PILL: Record<PortalUserState, { label: string; cls: string; next: PortalUserState }> =
+  {
+    unverified: { label: "Unverified", cls: "bg-gray-100 text-gray-600", next: "verified_clean" },
+    verified_clean: {
+      label: "Clean",
+      cls: "bg-emerald-100 text-emerald-800",
+      next: "problem_reported",
+    },
+    problem_reported: { label: "Problem", cls: "bg-red-100 text-red-800", next: "unverified" },
+  }
 
 function PortalsChecklist({ run }: { run: BlacklistRunResults }) {
   const setState = useSetPortalState(run.domain)
@@ -202,8 +240,8 @@ function PortalsChecklist({ run }: { run: BlacklistRunResults }) {
     <section className="mt-6 rounded-lg border border-[var(--edh-border)] bg-white p-4">
       <h2 className="mb-1 font-semibold">Provider reputation portals</h2>
       <p className="mb-3 text-xs text-[var(--edh-muted)]">
-        The "invisible blacklists" — clean public zones ≠ clean at Gmail/Microsoft. Check each portal
-        and mark its state (click the pill to cycle).
+        The "invisible blacklists" — clean public zones ≠ clean at Gmail/Microsoft. Check each
+        portal and mark its state (click the pill to cycle).
       </p>
       <ul className="space-y-1">
         {run.provider_portals.map((p) => {
@@ -320,7 +358,9 @@ function HistoryStrip({ domain }: { domain: string }) {
   const max = Math.max(1, ...history.map((h) => h.listed))
   return (
     <section className="mt-6">
-      <h2 className="mb-2 text-sm font-semibold text-slate-600">Listed count — last {history.length} runs</h2>
+      <h2 className="mb-2 text-sm font-semibold text-slate-600">
+        Listed count — last {history.length} runs
+      </h2>
       <div className="flex h-12 items-end gap-1">
         {history.map((h) => (
           <div
@@ -387,8 +427,9 @@ export function BlacklistDomainPage() {
           <div>
             <h1 className="text-xl font-bold">Blacklists — {run.domain}</h1>
             <p className="mt-1 text-sm">
-              <span className="font-semibold">{run.summary.listed} listed</span> · {run.summary.clean} clean ·{" "}
-              {run.summary.inconclusive} unknown across {run.summary.zones_enabled} zones
+              <span className="font-semibold">{run.summary.listed} listed</span> ·{" "}
+              {run.summary.clean} clean · {run.summary.inconclusive} unknown across{" "}
+              {run.summary.zones_enabled} zones
               <span className="ml-2 opacity-75">{new Date(run.ran_at).toLocaleString()}</span>
             </p>
             {(run.diff.new_listings.length > 0 || run.diff.cleared.length > 0) && (

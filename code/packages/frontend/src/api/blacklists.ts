@@ -1,6 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "./axios"
-import type { BlacklistHistoryEntry, BlacklistRunResults, PortalUserState, ProviderPortal } from "./types"
+import type {
+  BlacklistHistoryEntry,
+  BlacklistRunResults,
+  PortalUserState,
+  ProviderPortal,
+} from "./types"
 
 /** The Blacklists technology API (pm/checks/blacklists.mdx §13) — latest runs, history, portals. */
 
@@ -19,7 +24,8 @@ export function useBlacklistRun(domain: string) {
   return useQuery({
     queryKey: [...RUNS_KEY, domain],
     queryFn: async () =>
-      (await api.get<BlacklistRunResults>(`/blacklists/results/${encodeURIComponent(domain)}`)).data,
+      (await api.get<BlacklistRunResults>(`/blacklists/results/${encodeURIComponent(domain)}`))
+        .data,
     retry: false,
   })
 }
@@ -29,7 +35,11 @@ export function useBlacklistHistory(domain: string) {
   return useQuery({
     queryKey: ["blacklists", "history", domain],
     queryFn: async () =>
-      (await api.get<BlacklistHistoryEntry[]>(`/blacklists/results/${encodeURIComponent(domain)}/history`)).data,
+      (
+        await api.get<BlacklistHistoryEntry[]>(
+          `/blacklists/results/${encodeURIComponent(domain)}/history`,
+        )
+      ).data,
   })
 }
 
