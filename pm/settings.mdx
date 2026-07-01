@@ -1,0 +1,423 @@
+---
+title: EmailDeliveryHero — Settings
+description: The Settings page for EmailDeliveryHero — a sectioned settings surface (Monitored domains, Checks configuration, Scheduled checks, Notifications, Storage & data, Tools & environment, Account & access, Appearance) that reads/writes the file-based config.yaml and domains.json under ~/.email_delivery_hero/. Documents each group's fields, where each persists, which fields are admin-only (role:admin), the REST contract (GET/PUT /api/settings), and the permission matrix.
+---
+
+# EmailDeliveryHero — Settings
+
+This document specifies the **Settings page** for EmailDeliveryHero. Settings is where the
+signed-in user tunes *how* the deliverability auditor behaves — which checks run, which DNS
+blocklists to query, how periodic re-audits are scheduled, how the user is alerted to new problems,
+where state lives on disk, and which company domains may sign in.
+
+Settings sits behind the same gate as the rest of the app: every route requires a signed-in
+Google Workspace user (see [Authentication](./authentication.mdx)). Some settings are **all-users**
+(they change the current user's own experience or trigger read-only actions); others are
+**admin-only**, gated by the `role:admin` claim, because they change global behavior that affects
+every user and every scheduled run.
+
+Related specs:
+
+* [Overview](./overview.mdx) — the charter, personas, the left nav, and where Settings fits.
+* [Engineering](./engineering.mdx) — the file store (`~/.email_delivery_hero/config.yaml`,
+  `domains.json`), the NestJS module list, and the audit engine these settings drive.
+* [Authentication](./authentication.mdx) — how `role:admin` gates the Admin sub-section.
+* [Dashboard](./dashboard.mdx) — where notifications about *new* problems ultimately surface.
+* [Scheduled checks](./scheduled_checks.mdx) — the full periodic-re-audit config that Settings
+  summarizes and links out to.
+* [Spam & deliverability checks](./spam_checks.mdx) — the full catalog of the six check categories
+  that "Checks configuration" below enables/disables.
+
+> **Two homes for domains.** The **Domains** left-bar area (see [Overview](./overview.mdx)) is the
+> primary CRUD surface for the domains under audit and their per-domain detail. Settings hosts the
+> **global defaults** (default DKIM selectors to probe, default enabled checks, default DNSBL zones)
+> and a compact management view of the same domain list. Editing a domain in either place writes the
+> same `domains.json`.
+
+---
+
+## Layout
+
+Settings uses a **left sub-nav of setting groups** with a **right content pane**. The sub-nav is
+data-driven from `pm/left_bar.yaml` (the `settings` left bar); the groups below expand that list.
+The **Admin** group is rendered only when the user's token carries `role:admin`; the backend
+rejects writes to admin-only fields regardless of what the UI shows.
+
+```
+┌───────────────────────────────────────────────────────────────────────────────┐
+│  ← Settings                                                    bryan@…  (admin)  │
+├──────────────────────────┬────────────────────────────────────────────────────┤
+│  GENERAL                 │  Checks configuration                                │
+│   • Account & access     │  ────────────────────────────────────────────────   │
+│   • Appearance           │                                                      │
+│                          │  Enabled check categories            (admin-only) 🔒 │
+│  AUDITING                │   [x] SPF        [x] DKIM      [x] DMARC              │
+│   • Monitored domains    │   [x] Blacklists [x] DNS & Infra  [ ] Spam & Content │
+│   • Checks configuration │                                                      │
+│   • Scheduled checks  →  │  DNSBL zones to query                (admin-only) 🔒 │
+│                          │   zen.spamhaus.org           [remove]                │
+│  ALERTS                  │   b.barracudacentral.org     [remove]                │
+│   • Notifications        │   bl.spamcop.net             [remove]                │
+│                          │   [ + add zone ]                                     │
+│  SYSTEM                  │                                                      │
+│   • Storage & data       │  Default DKIM selectors to probe                     │
+│   • Tools & environment  │   google, selector1, selector2, k1   [edit]          │
+│                          │                                                      │
+│  ADMINISTRATION   🔒     │  Severity thresholds (green / amber / red)  (admin) 🔒│
+│   • Admin (role:admin)   │   green ≥ 90   amber 70–89   red < 70   [edit]        │
+│                          │                                                      │
+│                          │                              [ Cancel ]  [ Save ]    │
+└──────────────────────────┴────────────────────────────────────────────────────┘
+  🔒 = admin-only (visible to all, editable only with role:admin; backend is authoritative)
+  →  = links out to a full page (Scheduled checks lives in ./scheduled_checks.mdx)
+```
+
+All settings groups persist to the file store described in [Engineering](./engineering.mdx) — the
+user-tunable, global config lives in `~/.email_delivery_hero/config.yaml`; per-domain data lives in
+`~/.email_delivery_hero/domains.json`. There is **no database**.
+
+---
+
+## 1. Monitored domains
+
+Manage the set of sending domains under audit and the per-domain facts the checkers need. This is a
+compact mirror of the **Domains** left-bar area; Settings additionally holds the **global defaults**
+applied to newly added domains.
+
+| Field | Type | Meaning | Persists to |
+| --- | --- | --- | --- |
+| Domain | string (FQDN) | The sending domain, e.g. `whitehatengineering.com`. Unique. | `domains.json[].domain` |
+| Sending IPs | string[] (IPv4/IPv6) | The IPs mail is sent from — used by the PTR and DNSBL checkers. | `domains.json[].sendingIps` |
+| DKIM selectors | string[] | Per-domain selectors to probe (e.g. `google`, `s1`). Overrides the global default. | `domains.json[].selectors` |
+| Enabled | boolean | Whether this domain is included in scheduled runs. | `domains.json[].enabled` |
+| Notes | string | Free-text operator note. | `domains.json[].notes` |
+| **Default DKIM selectors** | string[] | Global fallback probed when a domain has no selectors of its own. | `config.yaml checks.dkim.defaultSelectors` |
+
+Actions: **Add domain**, **Edit**, **Remove**, and **Audit now** (fires
+`POST /api/domains/:id/audit`, the same on-demand path as the Domains area). Adding or removing a
+domain is available to **all users**; editing the **global default selectors** is **admin-only**
+(it changes behavior for every domain that relies on the fallback).
+
+---
+
+## 2. Checks configuration
+
+Controls the audit engine: which of the six **check categories** run, which DNS blocklists the
+blacklist checker queries, the default DKIM selectors, and the scoring thresholds that map an audit
+score to green/amber/red. The full behavior of each category is specified in
+[Spam & deliverability checks](./spam_checks.mdx); this group only toggles and parameterizes them.
+
+| Field | Type | Meaning | Persists to |
+| --- | --- | --- | --- |
+| Enabled categories | multi-select | Which of the six categories run: **SPF**, **DKIM**, **DMARC**, **Blacklists**, **DNS & Infrastructure** (MX/PTR), **Spam & Content**. | `config.yaml checks.enabled[]` **(admin-only)** |
+| DNSBL zones | string[] | The blocklist zones the Blacklists category queries — e.g. `zen.spamhaus.org`, `b.barracudacentral.org`, `bl.spamcop.net`. Add/remove/reorder. | `config.yaml checks.dnsbl.zones[]` **(admin-only)** |
+| Default DKIM selectors | string[] | Selectors probed when a domain defines none of its own. | `config.yaml checks.dkim.defaultSelectors[]` **(admin-only)** |
+| Score thresholds | numbers | Green/amber/red cutoffs applied to the 0–100 audit score. | `config.yaml checks.thresholds` **(admin-only)** |
+| Severity weights | numbers | Points deducted per finding severity (`critical`/`warning`/`info`) — feeds score derivation. | `config.yaml checks.weights` **(admin-only)** |
+| SPF lookup limit | number | Max DNS lookups before SPF is flagged (RFC limit is 10). | `config.yaml checks.spf.maxLookups` **(admin-only)** |
+
+Everything in this group is **admin-only** — it changes what every scheduled run does and how every
+domain is scored. Non-admins see the values (read-only) so they understand how their domains are
+judged, but cannot save changes.
+
+---
+
+## 3. Scheduled checks
+
+A **summary + link out**. The authoritative scheduling config (on/off, cadence, per-domain
+overrides, run history) lives in [Scheduled checks](./scheduled_checks.mdx) and is backed by the
+`scheduler` module (see [Engineering](./engineering.mdx)). Settings surfaces the essentials and a
+button to open the full page.
+
+| Field | Type | Meaning | Persists to |
+| --- | --- | --- | --- |
+| Periodic checks on/off | boolean | Master switch for scheduled re-audits. | `config.yaml schedule.enabled` **(admin-only)** |
+| Cadence | enum/cron | How often re-audits run (e.g. every 6h). | `config.yaml schedule.cadence` **(admin-only)** |
+| Last run / next run | read-only | Status surfaced from `GET /api/scheduler`. | (runtime, not persisted here) |
+| Run now | action | Triggers `POST /api/scheduler/run` immediately. | (action) |
+
+Toggling scheduling and cadence is **admin-only**. "Run now" is available to **all users** (it is a
+manual, read-only-in-effect re-audit).
+
+---
+
+## 4. Notifications
+
+How the user learns about **new** problems found by periodic runs — findings that newly appear or
+worsen in severity since the domain's previous audit (the regression detection in
+[Engineering](./engineering.mdx) §8). Notification *preferences* are **per-user**; the delivery
+*channels* (webhook/SMTP) are **admin-only** because they are shared infrastructure.
+
+| Field | Type | Meaning | Persists to |
+| --- | --- | --- | --- |
+| Desktop notifications | boolean | Browser/desktop notification when a new problem appears. Per-user. | `config.yaml notifications.users[<sub>].desktop` |
+| Email me | boolean | Email this user on new problems (sent via the configured SMTP relay / `swaks`). Per-user. | `config.yaml notifications.users[<sub>].email` |
+| Minimum severity | enum | Only notify at/above this severity: `info` / `warning` / `critical`. Per-user. | `config.yaml notifications.users[<sub>].minSeverity` |
+| Digest vs. immediate | enum | `immediate` per run, or a `daily` roll-up. Per-user. | `config.yaml notifications.users[<sub>].mode` |
+| Webhook / Slack URL | string (URL) | Incoming-webhook URL posted to on new problems (Slack-compatible payload). | `config.yaml notifications.webhook.url` **(admin-only)** |
+| Webhook enabled | boolean | Master switch for the shared webhook channel. | `config.yaml notifications.webhook.enabled` **(admin-only)** |
+| SMTP relay | object | Host/port/from used to send notification email. | `config.yaml notifications.smtp` **(admin-only)** |
+| Send test notification | action | Fires a sample notification on the selected channels. | (action) |
+
+Each user edits their **own** desktop/email/severity/mode preferences. The **webhook** and **SMTP**
+settings are **admin-only**.
+
+---
+
+## 5. Storage & data
+
+Where state lives, how long audit history is kept, and the import/export/reset controls over the
+file store (`~/.email_delivery_hero/`, overridable via `EDH_STATE_DIR`).
+
+| Field | Type | Meaning | Persists to |
+| --- | --- | --- | --- |
+| State directory | read-only path | The active state dir (default `~/.email_delivery_hero/`, or `EDH_STATE_DIR`). | (resolved at boot from env) |
+| Open state dir | action | Reveal the state dir in Finder. | (action) |
+| History retention | number (days) or count | How long/many audit run files per domain to keep before pruning `audits/<domainId>/`. | `config.yaml storage.retentionDays` **(admin-only)** |
+| Export | action | Download a zip of `config.yaml` + `domains.json` + `audits/` for backup/migration. | (action) |
+| Import | action | Restore from a previously exported archive (validated on read). | (action) **(admin-only)** |
+| Reset audit history | action | Delete all `audits/**` run files (keeps domains + config). | (action) **(admin-only)** |
+| Reset app | action | Clear the entire state dir back to defaults. | (action) **(admin-only)** |
+
+Viewing the path and **Export**/**Open state dir** are available to **all users**. Retention,
+**Import**, and the destructive **Reset** actions are **admin-only**.
+
+---
+
+## 6. Tools & environment
+
+The Brew-installed CLI tools the app may shell out to, their detected status, and DNS resolver
+settings. First round, DNS checks use Node's native `node:dns/promises`; shelling out to `dig`/`swaks`
+is a noted enhancement (see [Engineering](./engineering.mdx) §6.3). This group makes tool
+availability visible and lets an admin point checks at a specific resolver.
+
+| Field | Type | Meaning | Persists to |
+| --- | --- | --- | --- |
+| `dig` status | read-only | Detected/version of `dig` (DNS lookups). | (probed at runtime) |
+| `swaks` status | read-only | Detected/version of `swaks` (SMTP test/notification email). | (probed at runtime) |
+| Prefer CLI tools | boolean | When available, use `dig` instead of `node:dns/promises` for richer output. | `config.yaml tools.preferCli` **(admin-only)** |
+| DNS resolvers | string[] (IP) | Resolver(s) checkers query; empty = system default. | `config.yaml tools.resolvers[]` **(admin-only)** |
+| Query timeout | number (ms) | Per-lookup timeout. | `config.yaml tools.timeoutMs` **(admin-only)** |
+| Re-detect tools | action | Re-probe the environment for the tools above. | (action) |
+
+Status is visible to **all users**; changing resolver/timeout/CLI preference is **admin-only**.
+
+---
+
+## 7. Account & access
+
+The signed-in identity (from OpenAuthFederated) and the company access policy. Per
+[Authentication](./authentication.mdx), the app never stores passwords; identity is asserted by
+Google Workspace SSO.
+
+| Field | Type | Meaning | Persists to |
+| --- | --- | --- | --- |
+| Signed-in user | read-only | Name, email, avatar, and `role` claims from the current session. | (from token; not persisted) |
+| Sign out | action | Ends the session (`@auth/react`). | (action) |
+| Allowed Workspace domains | string[] | The company domains permitted to sign in (`whitehatengineering.com`, `act3ai.com`). | OpenAuthFederated allowlist (`AUTH_ALLOWED_DOMAINS`) **(admin-only)** |
+| Session policy | read-only | Token TTL / cookie prefix (`oaf_edh`) surfaced for transparency. | (from Authentication config) |
+
+> The **allowed-domains** value is enforced by OpenAuthFederated, not this app (see
+> [Authentication](./authentication.mdx) §2). The Settings UI *displays* it and lets an admin edit
+> it, but the edit is applied on the OpenAuthFederated side (allowlist + SSO connection), never as a
+> code change here. Non-admins see it read-only.
+
+### Admin (gated by `role:admin`)
+
+The **Admin** sub-section (route `/settings/admin`, the `Administration` group in `left_bar.yaml`)
+is rendered only when the token carries `role:admin`, and the backend rejects writes to any
+admin-only field regardless of UI state. It aggregates the admin-only controls listed throughout
+this page: enabled check categories, DNSBL zones, thresholds/weights, scheduling on/off + cadence,
+the shared webhook/SMTP channels, retention, import/reset, resolver settings, and the allowed
+Workspace domains.
+
+---
+
+## 8. Appearance
+
+Per-user, cosmetic only.
+
+| Field | Type | Meaning | Persists to |
+| --- | --- | --- | --- |
+| Theme | enum | `system` / `light` / `dark`. | `config.yaml appearance.users[<sub>].theme` |
+| Density | enum | `comfortable` / `compact` table density. | `config.yaml appearance.users[<sub>].density` |
+
+All **all-users** — appearance never affects audits or other users.
+
+---
+
+## Settings config model
+
+Settings read and write the same on-disk files described in [Engineering](./engineering.mdx) §7 —
+no database. Global and admin-owned settings live in `config.yaml`; per-domain facts live in
+`domains.json`; per-user preferences are namespaced by the user's OpenAuthFederated `sub` inside
+`config.yaml`.
+
+```yaml
+# ~/.email_delivery_hero/config.yaml  (read/written by the settings module)
+stateDir: ~/.email_delivery_hero        # display only; real value resolved from EDH_STATE_DIR
+
+checks:                                  # §2 — admin-only
+  enabled: [spf, dkim, dmarc, dnsbl, dns_infra]   # subset of the six categories
+  spf:
+    maxLookups: 10
+  dkim:
+    defaultSelectors: [google, selector1, selector2, k1]
+  dnsbl:
+    zones:
+      - zen.spamhaus.org
+      - b.barracudacentral.org
+      - bl.spamcop.net
+  thresholds:                            # 0–100 score → colour
+    green: 90                            # score >= green  → green
+    amber: 70                            # green > score >= amber → amber; below → red
+  weights:                               # points deducted per finding
+    critical: 40
+    warning: 15
+    info: 0
+
+schedule:                                # §3 — summary here; full config in scheduled_checks.mdx
+  enabled: true                          # admin-only
+  cadence: "0 */6 * * *"                 # admin-only (every 6h)
+
+notifications:                           # §4
+  webhook:                               # admin-only (shared channel)
+    enabled: false
+    url: ""
+  smtp:                                  # admin-only (shared channel; used via swaks)
+    host: ""
+    port: 587
+    from: "edh@whitehatengineering.com"
+  users:                                 # per-user preferences, keyed by OAF sub
+    "user_abc123":
+      desktop: true
+      email: true
+      minSeverity: warning               # info | warning | critical
+      mode: immediate                    # immediate | daily
+
+storage:                                 # §5
+  retentionDays: 90                      # admin-only
+
+tools:                                   # §6
+  preferCli: false                       # admin-only
+  resolvers: []                          # admin-only; [] = system default
+  timeoutMs: 5000                        # admin-only
+
+access:                                  # §7 — display of the OAF-enforced policy
+  allowedDomains: [whitehatengineering.com, act3ai.com]   # admin-only; applied on OAF side
+
+appearance:                              # §8 — per-user
+  users:
+    "user_abc123":
+      theme: system                      # system | light | dark
+      density: comfortable               # comfortable | compact
+```
+
+```yaml
+# ~/.email_delivery_hero/domains.json  (§1 — per-domain facts; also owned by the Domains area)
+# [
+#   {
+#     "id": "dom_whitehat",
+#     "domain": "whitehatengineering.com",
+#     "sendingIps": ["203.0.113.10", "203.0.113.11"],
+#     "selectors": ["google", "s1"],        // overrides checks.dkim.defaultSelectors
+#     "enabled": true,
+#     "notes": "primary marketing sender"
+#   }
+# ]
+```
+
+### REST contract
+
+The `settings` concern is served by the NestJS backend under `/api` (all routes behind the global
+`JwtAuthGuard`; admin-only writes additionally behind the `role:admin` permissions guard). The
+frontend calls the generated TanStack-Query hooks (see [Engineering](./engineering.mdx) §4).
+
+| Method + route | Purpose | Guard |
+| --- | --- | --- |
+| `GET /api/settings` | Return the effective settings the current user may see (global + this user's per-user block + resolved tool status). | signed-in |
+| `PUT /api/settings` | Update **all-users / per-user** fields for the current user (notifications prefs, appearance). | signed-in |
+| `PUT /api/settings/admin` | Update **admin-only** global fields (checks, dnsbl zones, thresholds, schedule, shared channels, retention, tools, access). Rejected `403` without `role:admin`. | `role:admin` |
+| `POST /api/settings/notifications/test` | Send a test notification on the selected channels. | signed-in (webhook/SMTP config edits still admin-only) |
+| `POST /api/settings/tools/detect` | Re-probe the environment for `dig`/`swaks` and return status. | signed-in |
+| `GET /api/settings/export` | Stream a zip of `config.yaml` + `domains.json` + `audits/`. | signed-in |
+| `POST /api/settings/import` | Restore from an exported archive (validated on read). | `role:admin` |
+| `POST /api/settings/reset` | Reset audit history or the whole app (body selects scope). | `role:admin` |
+
+`GET/PUT` operate on the file store transactionally via the `store` module (atomic
+write-temp-then-rename, per-file mutex, schema validation on read) — see
+[Engineering](./engineering.mdx) §7.
+
+---
+
+## Permissions
+
+Which settings are editable by all signed-in users vs. only `role:admin`. All users can *view* every
+setting (read-only where they cannot edit); only writes are gated.
+
+| Setting | All users | `role:admin` only |
+| --- | --- | --- |
+| Add / edit / remove a monitored domain (§1) | ✅ | |
+| Global default DKIM selectors (§1/§2) | | 🔒 |
+| Enabled check categories (§2) | | 🔒 |
+| DNSBL zones (§2) | | 🔒 |
+| Score thresholds / severity weights / SPF lookup limit (§2) | | 🔒 |
+| Scheduling on/off + cadence (§3) | | 🔒 |
+| "Audit now" / "Run now" (§1/§3) | ✅ | |
+| My notification preferences: desktop, email, severity, mode (§4) | ✅ | |
+| Shared webhook URL + SMTP relay (§4) | | 🔒 |
+| Send test notification (§4) | ✅ | |
+| View state dir / Open state dir / Export (§5) | ✅ | |
+| History retention (§5) | | 🔒 |
+| Import / Reset audit history / Reset app (§5) | | 🔒 |
+| View tool status / Re-detect tools (§6) | ✅ | |
+| Prefer CLI tools / DNS resolvers / query timeout (§6) | | 🔒 |
+| Sign out / view my identity (§7) | ✅ | |
+| Allowed Workspace domains (§7) | | 🔒 |
+| Theme / density (§8) | ✅ | |
+
+The backend is authoritative: the UI hides or disables admin-only controls for non-admins as UX
+only, and `PUT /api/settings/admin` (and the admin actions) return `403` without the `role:admin`
+claim.
+
+---
+
+## Acceptance criteria
+
+The Settings page is correct when **all** of the following hold:
+
+1. Settings renders a **left sub-nav of setting groups** and a **right content pane**, driven by the
+   `settings` left bar in `pm/left_bar.yaml`, and every route is reachable only by a signed-in user.
+2. **Monitored domains** (§1) lists the domains from `domains.json` and can add/edit/remove them and
+   trigger "Audit now"; edits write the same `domains.json` the Domains area uses.
+3. **Checks configuration** (§2) enables/disables the six check categories, edits the DNSBL zone
+   list, default DKIM selectors, and score thresholds/weights, persisting to `config.yaml`; all of
+   §2 is **admin-only** and non-admins see it read-only.
+4. **Scheduled checks** (§3) shows the on/off + cadence summary and last/next run, links to
+   [Scheduled checks](./scheduled_checks.mdx), and "Run now" fires `POST /api/scheduler/run`.
+5. **Notifications** (§4) lets each user set their own desktop/email/severity/mode preferences
+   (per-user block keyed by OAF `sub`), while the shared webhook and SMTP channels are admin-only;
+   "Send test notification" works.
+6. **Storage & data** (§5) shows the resolved state dir (honoring `EDH_STATE_DIR`), offers Open/
+   Export to all users, and gates retention, Import, and the destructive Reset actions to admins.
+7. **Tools & environment** (§6) reports detected `dig`/`swaks` status, and admin-only resolver/
+   timeout/CLI-preference edits persist to `config.yaml`.
+8. **Account & access** (§7) shows the signed-in identity and role, allows Sign out, and displays the
+   allowed Workspace domains (editable only by admins, applied on the OpenAuthFederated side); the
+   **Admin** sub-section at `/settings/admin` renders only with `role:admin`.
+9. **Appearance** (§8) applies theme/density per-user and never affects audits or other users.
+10. Reads use `GET /api/settings`; all-users/per-user writes use `PUT /api/settings`; admin-only
+    writes use `PUT /api/settings/admin` (and the admin actions) and return `403` without
+    `role:admin`. All persistence goes through the file store — `config.yaml` + `domains.json` under
+    `~/.email_delivery_hero/` — with **no database**.
+11. No setting is enforced by the frontend alone: for every admin-only field, the backend rejects an
+    unauthorized write even if the UI would have allowed it.
+
+<!--
+  This file is meant to grow. Keep it consistent with the siblings: file store only
+  (config.yaml + domains.json under ~/.email_delivery_hero/, no DB), NestJS 9312 / React+Vite 9311,
+  auth via OpenAuthFederated with role:admin gating the Admin section. When a new setting is added,
+  add its row to the relevant §, its key to the config model, and its line to the Permissions table
+  (mark admin-only fields). Scheduling detail stays in ./scheduled_checks.mdx; the six check
+  categories stay catalogued in ./spam_checks.mdx — Settings only toggles/parameterizes them.
+-->

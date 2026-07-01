@@ -135,10 +135,16 @@ EmailDeliveryHero/
 │   ├── overview.mdx         # this file
 │   ├── authentication.mdx
 │   ├── engineering.mdx
+│   ├── spam_checks.mdx      # full catalog of every deliverability health check
+│   ├── dashboard.mdx        # the TanStack table dashboard (6 columns, status cells)
+│   ├── domains.mdx          # Monitored Domains CRUD + per-domain schedule toggle
+│   ├── scheduled_checks.mdx # recurring checks: config page + per-OS scheduling
+│   ├── settings.mdx         # the Settings page
 │   ├── left_bar.yaml        # nav source of truth (written by a separate process)
 │   └── use_cases/
 │       ├── audit_a_domain.mdx
-│       └── domain_on_blacklist.mdx
+│       ├── domain_on_blacklist.mdx
+│       └── view_health_check_run.mdx
 └── CLAUDE.md                # project charter
 ```
 
@@ -155,11 +161,28 @@ All MDX specifications in this directory and its subdirectories:
 * [Engineering](./engineering.mdx) — architecture: the pnpm monorepo layout, the NestJS module
   list, the frontend structure, ports 9311/9312, the pluggable audit-engine design, the on-disk
   JSON/YAML store, and how periodic checks run.
+* [Spam & deliverability checks](./spam_checks.mdx) — the full catalog of every health check the
+  app performs, grouped into the six dashboard categories (SPF, DKIM, DMARC, Blacklists, DNS &
+  Infrastructure, Spam & Content): what each sub-check measures, how it is measured, and the
+  concrete remediation.
+* [Dashboard](./dashboard.mdx) — the main screen: the big "Email Delivery Hero" brand header, the
+  TanStack table (one run per day × six color-coded category columns), the metric cell text, and
+  the top-right **Run checks** button + scheduled-checks toggle/chevron.
+* [Domains](./domains.mdx) — the Monitored Domains CRUD UI and, per domain, its sending IPs, DKIM
+  selectors, and its own **scheduled on/off** toggle (e.g. 10 domains but only 3 on the recurring
+  schedule).
+* [Scheduled checks](./scheduled_checks.mdx) — recurring checks: the configuration page (frequency,
+  time-of-day, multiple times per day) and the OS-appropriate scheduler for each platform (macOS
+  launchd plist, Linux cron/systemd timer, Windows Task Scheduler).
+* [Settings](./settings.mdx) — the Settings page: checks configuration, DNSBL zones, notifications,
+  storage & data, tools & environment, and the `role:admin`-gated Admin sub-section.
 * Use cases:
   * [Audit a domain](./use_cases/audit_a_domain.mdx) — a user adds a domain, runs an audit, and
     sees the findings plus the exact fixes.
   * [Domain on a blacklist](./use_cases/domain_on_blacklist.mdx) — an audit finds the domain's IP
     on a DNSBL and shows the delisting remediation.
+  * [View a health-check run](./use_cases/view_health_check_run.mdx) — clicking a dashboard row
+    opens one run in full: the summary header and every finding grouped by the six categories.
 
 <!--
   TOC maintenance: when a new .mdx file is added anywhere under this directory, add a bullet here

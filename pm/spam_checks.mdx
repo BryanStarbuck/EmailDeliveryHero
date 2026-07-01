@@ -1,0 +1,320 @@
+---
+title: EmailDeliveryHero — Deliverability checks catalog
+description: The reference catalog of every health check EmailDeliveryHero performs to measure email deliverability, grouped into the six dashboard categories (SPF, DKIM, DMARC, Blacklists, DNS & Infrastructure, Spam & Content). For each category: what it measures, the individual sub-checks (what each verifies, how it is measured, typical critical/warning finding, concrete remediation), how sub-checks roll up into one dashboard cell, and which sub-checks ship first vs later.
+---
+
+# EmailDeliveryHero — Deliverability checks catalog
+
+This is the **master catalog of every health check** EmailDeliveryHero runs against a monitored
+domain to measure email deliverability — whether mail authenticates, whether the domain or its
+sending IPs are on blacklists, whether the sending infrastructure is sane, and whether message
+content and sending patterns look like a legitimate sender. It is the product's core reference: the
+app's whole promise is that every problem it finds comes with the **exact fix**.
+
+Read this alongside the sibling specs and do not duplicate them:
+
+* [Overview](./overview.mdx) — the charter, the personas, and the first-round check list.
+* [Engineering](./engineering.mdx) — the pluggable `Checker`/`Finding` contract, the registry +
+  runner, the file store, and the periodic scheduler that every check below plugs into.
+* [Dashboard](./dashboard.mdx) — how the six category cells are rendered, colored, and sorted
+  (the scoring roll-up summarized here is specified there in full).
+* [Domain on a blacklist](./use_cases/domain_on_blacklist.mdx) — the end-to-end walkthrough of a
+  DNSBL finding and its delisting remediation.
+
+Every check in this catalog is one implementation of the `Checker` interface from
+[Engineering §6.1](./engineering.mdx): it returns zero or more `Finding` objects, each with a
+`severity` of `ok | info | warning | critical` and — for anything that is not `ok` — a concrete
+`remediation` string (the exact record to publish or the step to take). Adding a check is adding one
+file.
+
+## The six categories (the dashboard columns)
+
+Every sub-check in this document belongs to **exactly one** of six categories. These are the six
+columns of the Dashboard, and each is a group of many sub-checks that collapses into a single cell
+(e.g. "2 of 7 fail"):
+
+| # | Category | `checkId` prefix | What it answers |
+| --- | --- | --- | --- |
+| 1 | **SPF** | `spf` | Is Sender Policy Framework published correctly and within limits? |
+| 2 | **DKIM** | `dkim` | Are DKIM keys published, parseable, and strong? |
+| 3 | **DMARC** | `dmarc` | Is a DMARC policy published, enforcing, aligned, and reporting? |
+| 4 | **Blacklists** | `dnsbl` | Are the domain or its sending IPs listed on any DNSBL? |
+| 5 | **DNS & Infrastructure** | `infra` | Is the mail-serving DNS/transport layer resolvable, reachable, and secure? |
+| 6 | **Spam & Content** | `content` | Do the messages, headers, and sending patterns look like a legitimate sender? |
+
+Relevant standards referenced throughout: **SPF — RFC 7208**; **DKIM — RFC 6376** (key strength
+**RFC 8301**); **DMARC — RFC 7489**, now obsoleted by the **DMARCbis** set **RFC 9989/9990/9991**
+(published May 2026, backward-compatible with `v=DMARC1`); **ARC — RFC 8617**; **MTA-STS —
+RFC 8461**; **SMTP TLS Reporting (TLS-RPT) — RFC 8460**; **DANE/TLSA — RFC 6698 / RFC 7671**;
+**List-Unsubscribe one-click — RFC 8058** (with the older List-Unsubscribe header from RFC 2369);
+**BIMI** (IETF draft; VMC/CMC issued by Mark Verifying Authorities).
+
+---
+
+## 1. SPF — Sender Policy Framework
+
+**What it measures.** SPF (RFC 7208) is a DNS TXT record that lists which hosts are authorized to
+send mail using the domain in the SMTP `MAIL FROM` (envelope-from). Receivers check it to decide
+whether a message's envelope sender is legitimate. SPF is also the SPF half of DMARC alignment, so a
+broken SPF record silently degrades DMARC pass rates and pushes mail to spam. The most common
+real-world failure is not "no SPF" but a record that **exceeds the 10-DNS-lookup limit** and
+therefore evaluates to `PermError` — which many receivers treat as a fail.
+
+**How measured.** First round: `resolveTxt(domain)` via `node:dns/promises`, then parse and simulate
+the record's mechanism graph, recursively resolving `include`/`a`/`mx`/`redirect` to count lookups.
+A `dig txt` fallback (Homebrew) is a future enhancement for cache-busting.
+
+| Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `spf.present` | Exactly one `v=spf1` TXT record exists at the apex. | TXT lookup at domain. | **critical:** no `v=spf1` record found. | Publish a TXT record at the apex: `v=spf1 include:_spf.google.com ~all` (adjust the include for your ESP). |
+| `spf.single` | Not more than one SPF record (multiple SPF records is a hard `PermError` per RFC 7208 §4.5). | Count `v=spf1` TXT records. | **critical:** two or more `v=spf1` records → invalid, SPF ignored. | Merge into one record; delete the extra TXT so exactly one `v=spf1` remains. |
+| `spf.lookups` | The record resolves within the **10 DNS-lookup limit** (`include`, `a`, `mx`, `ptr`, `exists`, `redirect` count; `ip4`, `ip6`, `all` do not). | Recursively expand and count DNS-querying mechanisms. | **critical:** > 10 lookups → `PermError`; **warning:** 8–10 (near the ceiling). | Reduce lookups: replace `a`/`mx` with explicit `ip4:`/`ip6:` ranges, drop unused ESP includes, or flatten the record (see `spf.flatten`). |
+| `spf.void` | Not more than **2 void lookups** (mechanisms whose DNS query returns NXDOMAIN/empty), per RFC 7208 §4.6.4. | Track empty/NXDOMAIN answers while expanding. | **warning/critical:** ≥ 2 void lookups (stale include to a decommissioned ESP). | Remove `include:`/`a`/`mx` entries that point at domains with no SPF/records. |
+| `spf.all` | The record ends with a single `all` mechanism and its qualifier is sane: `-all` (fail) or `~all` (softfail); **never `+all`**. | Parse the terminal `all` token. | **critical:** `+all` (authorizes the whole internet); **warning:** no `all`, or `?all` (neutral). | Use `-all` once coverage is confirmed, or `~all` during rollout. Remove any `+all`. |
+| `spf.ptr` | The deprecated `ptr` mechanism is not used (RFC 7208 §5.5 deprecates it; it is slow and unreliable). | Scan mechanisms for `ptr`. | **warning:** `ptr` mechanism present. | Delete the `ptr` mechanism; replace with explicit `ip4:`/`ip6:` or `include:`. |
+| `spf.syntax` | The record parses: valid terms, valid CIDR, no stray characters, correct macro syntax (`%{...}`). | Tokenize and validate against the RFC 7208 grammar. | **critical:** malformed term or bad macro → `PermError`. | Fix the offending term; validate the corrected record before publishing. |
+| `spf.length` | No single TXT string exceeds 255 chars and the record is served without needing excessive concatenation. | Inspect TXT chunk lengths. | **warning:** record split awkwardly / near DNS UDP limits. | Split long records into 255-char strings correctly, or flatten to shorten. |
+| `spf.flatten` *(advisory)* | Flags records that would benefit from flattening (many nested includes with volatile upstreams). | Heuristic on lookup count + include depth. | **info:** record is fragile / near the limit. | Adopt TTL-aware SPF flattening (manual first round; automated flattening service is a future enhancement). |
+
+> External tooling note: all SPF sub-checks are **pure DNS** and ship first round. Flattening
+> automation, if added later, is the only piece that may need a third-party API.
+
+---
+
+## 2. DKIM — DomainKeys Identified Mail
+
+**What it measures.** DKIM (RFC 6376) attaches a cryptographic signature to outbound mail; the
+public key lives in DNS at `<selector>._domainkey.<domain>` and receivers use it to verify the
+message was not altered and really came from the domain. DKIM is the more robust half of DMARC
+alignment (it survives forwarding, unlike SPF). A missing, unparseable, or weak key means messages
+fail DKIM, weakening DMARC and reputation.
+
+**How measured.** First round: `resolveTxt('<selector>._domainkey.<domain>')` for each selector in
+`CheckContext.selectors`, then parse the key record (`v=DKIM1; k=rsa; p=<base64>`) and inspect the
+decoded public key's modulus length. Selector discovery beyond the configured list (probing common
+selectors like `google`, `default`, `selector1`, `k1`, `s1`) is a future enhancement.
+
+| Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `dkim.present` | For each configured selector, a `<selector>._domainkey.<domain>` TXT record exists. | TXT lookup per selector. | **critical:** no DKIM record for a selector known to sign mail. | Publish the public key your ESP/MTA generated at `<selector>._domainkey.<domain>` as a TXT record. |
+| `dkim.parses` | The record is a valid DKIM key: has `v=DKIM1` (or defaulted), a `k=` type, and a non-empty `p=` public key that base64-decodes. | Parse tags; base64-decode `p=`. | **critical:** `p=` empty (revoked key) or record does not parse. | Republish the correct public key from the signing system; an empty `p=` means the key is revoked. |
+| `dkim.keylength` | RSA key modulus is **≥ 1024 bits (required)** and **≥ 2048 bits (recommended)** per RFC 8301. | Decode the public key and read the modulus size. | **critical:** < 1024-bit; **warning:** exactly 1024-bit (upgrade advised). | Generate a **2048-bit** key, publish the new selector, re-sign, then retire the old selector. |
+| `dkim.testflag` | The record is **not** in test mode (`t=y` tells receivers to ignore DKIM results). | Read the `t=` flag. | **warning:** `t=y` present in production. | Remove `t=y` from the DKIM TXT record once testing is complete. |
+| `dkim.algorithm` | The key/hash algorithm is modern (`k=rsa`; avoid SHA-1; `ed25519` allowed alongside RSA). | Read `k=` and `h=` tags. | **warning:** deprecated/weak algorithm advertised. | Reissue with RSA-SHA256 (or add an ed25519 selector alongside RSA for compatibility). |
+| `dkim.multi` *(advisory)* | At least one working selector exists and, ideally, a second is staged for rotation. | Count valid selectors. | **info:** only one selector (no rotation headroom). | Stage a second selector so keys can be rotated without an outage (M3AAWG: rotate at least every 6 months). |
+| `dkim.rotation` *(advisory)* | Key age / rotation cadence, when the selector's publish date is known. | Metadata heuristic (config-tracked). | **info:** key older than the rotation window. | Rotate the DKIM key on schedule; keep the old selector live briefly during cutover. |
+
+> External tooling note: presence/parse/keylength are **pure DNS** and ship first round. True
+> per-message signature verification (did a real message actually pass DKIM?) requires capturing a
+> sent message — a future enhancement using `swaks` to send a probe plus a validating receiver.
+
+---
+
+## 3. DMARC — Domain-based Message Authentication, Reporting & Conformance
+
+**What it measures.** DMARC (RFC 7489, now DMARCbis RFC 9989) ties SPF and DKIM together with
+**alignment** and tells receivers what to do with mail that fails (`none` / `quarantine` /
+`reject`), plus where to send **aggregate (`rua`) and failure (`ruf`) reports**. It is the single
+most load-bearing record for both anti-spoofing and inbox placement, and — since the 2024
+Gmail/Yahoo bulk-sender rules — a published DMARC record is effectively mandatory for senders.
+
+**How measured.** First round: `resolveTxt('_dmarc.<domain>')`, parse the tag list, and evaluate the
+policy, alignment, and reporting tags. Ingesting the `rua` aggregate XML reports to measure real
+pass rates is a future enhancement (needs a mailbox/endpoint + parser).
+
+| Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `dmarc.present` | A `_dmarc.<domain>` TXT record exists and starts with `v=DMARC1`. | TXT lookup at `_dmarc.<domain>`. | **critical:** no DMARC record. | Publish `v=DMARC1; p=none; rua=mailto:dmarc@<domain>` to start, then tighten. |
+| `dmarc.single` | Exactly one DMARC record (multiple = ignored by receivers). | Count `v=DMARC1` records. | **critical:** two or more DMARC records. | Delete the extra TXT so exactly one `v=DMARC1` record remains. |
+| `dmarc.policy` | A valid `p=` policy is present and is **enforcing** (`quarantine` or `reject`). | Read the `p=` tag. | **warning:** `p=none` (monitor-only, no protection); **critical:** missing/invalid `p=`. | Move to `p=quarantine` then `p=reject` after confirming legitimate mail passes in `rua` reports. |
+| `dmarc.subdomain` | Subdomain policy `sp=` is set (or intentionally inherits `p=`) so subdomains are covered. | Read the `sp=` tag. | **warning:** enforcing `p=` but `sp=none` leaves subdomains spoofable. | Add `sp=reject` (or `sp=quarantine`) to cover subdomains. |
+| `dmarc.pct` | `pct=` (if present) is sane; note `pct` is **deprecated in DMARCbis** and should be removed at the next edit. | Read the `pct=` tag. | **info/warning:** `pct` < 100 during rollout, or lingering `pct` after DMARCbis. | Remove `pct` (DMARCbis) or, during a legacy staged rollout, raise it toward 100. |
+| `dmarc.rua` | Aggregate reporting is enabled (`rua=mailto:...`) so the owner gets visibility. | Read/parse the `rua=` tag. | **warning:** no `rua` → flying blind on auth failures. | Add `rua=mailto:dmarc@<domain>`; authorize external report receivers with the `<report-domain>._report._dmarc` record if using a third party. |
+| `dmarc.ruf` *(advisory)* | Failure/forensic reporting `ruf=` is considered (privacy-sensitive; adoption is limited). | Read the `ruf=` tag. | **info:** no `ruf` (optional). | Optionally add `ruf=mailto:...` with `fo=1` if you want per-failure samples. |
+| `dmarc.alignment` | Alignment mode is understood: `adkim`/`aspf` = relaxed (`r`, default) vs strict (`s`); strict can break otherwise-passing mail. | Read `adkim`/`aspf` tags. | **warning:** strict alignment with subdomain senders → alignment failures. | Use relaxed alignment (`adkim=r; aspf=r`) unless you require exact-domain matching. |
+| `dmarc.syntax` | The record parses: known tags, valid values, correct ordering of `v=`/`p=`. | Tokenize and validate tags. | **critical:** malformed record ignored by receivers. | Fix the malformed tag; `v=DMARC1` and `p=` must come first and be valid. |
+| `arc.present` *(advisory)* | Note whether ARC (RFC 8617) chains are in use for forwarded mail (informational; ARC is applied by intermediaries, not published in a simple DNS record). | Advisory metadata. | **info:** forwarding paths may break DMARC without ARC. | For mailing lists/forwarders, ensure the forwarder applies ARC so downstream receivers can honor prior authentication. |
+
+> External tooling note: policy/alignment/reporting-tag checks are **pure DNS** and ship first
+> round. Measuring actual DMARC pass rates from `rua` XML is a future enhancement (report-ingestion
+> endpoint or paid DMARC-analytics API).
+
+---
+
+## 4. Blacklists — DNSBL / IP & domain reputation
+
+**What it measures.** Whether the domain's **sending IPs** (IP-based DNSBLs) or the **domain itself
+and the domains in message links** (domain-based RHSBLs) appear on well-known blocklists. A listing
+on a widely-consumed list like Spamhaus ZEN can cause outright rejection at many receivers, so this
+is frequently the direct cause of "email suddenly started bouncing." See the full walkthrough in
+[Domain on a blacklist](./use_cases/domain_on_blacklist.mdx).
+
+**How measured.** For an **IP** listing, reverse the octets and do an `A` lookup of
+`<reversed-ip>.<zone>`; a `127.0.0.x` answer means listed, and a `TXT` lookup at the same name
+usually returns the reason. Example: to test `203.0.113.24` against `zen.spamhaus.org`, look up
+`24.113.0.203.zen.spamhaus.org`. For a **domain** listing (RHSBL), query `<domain>.<zone>` directly
+(no octet reversal). All of this is **pure DNS** via `node:dns/promises` and ships first round; the
+zone list lives in `config.yaml`.
+
+| Sub-check (`checkId`) | What it verifies | How measured (zone) | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `dnsbl.spamhaus_zen` | Sending IPs not on Spamhaus **ZEN** (the combined SBL + CSS + XBL + PBL IP list — the single most impactful zone). | Reversed-IP `A` lookup at `zen.spamhaus.org`; TXT for reason. | **critical:** IP returns `127.0.0.2–11` (listed). | Fix the root cause, then use the **Spamhaus IP/Blocklist Removal Center** to request delisting for that IP. |
+| `dnsbl.spamhaus_sbl` | IPs not on the **SBL** (manually confirmed spam sources) — surfaced separately for a precise reason code. | `A` lookup at `sbl.spamhaus.org`. | **critical:** SBL listing. | Stop the confirmed spam source; request SBL removal via Spamhaus with attestation. |
+| `dnsbl.spamhaus_xbl` | IPs not on the **XBL** (compromised/exploited hosts, botnets, open proxies). | `A` lookup at `xbl.spamhaus.org`. | **critical:** XBL listing (likely a compromised host). | Find and clean the compromised host/open relay, then request removal. |
+| `dnsbl.spamhaus_pbl` | IPs not on the **PBL** (policy list of ranges that should not send direct-to-MX, e.g. dynamic/residential). | `A` lookup at `pbl.spamhaus.org`. | **warning:** PBL listing (sending from an inappropriate range). | Send through a proper smarthost/relay, or, if it is legitimately a static mail server, self-remove via the PBL removal process. |
+| `dnsbl.spamhaus_dbl` | The **domain** (and link domains) not on the Spamhaus **DBL** (domain reputation / RHSBL). | Direct `A` lookup of `<domain>.dbl.spamhaus.org`. | **critical:** domain listed on DBL. | Remediate the abused domain (compromised site, spammy links), then request DBL removal. |
+| `dnsbl.barracuda` | IPs not on the **Barracuda Reputation Block List (BRBL)**. | `A` lookup at `b.barracudacentral.org` (requires free registration of the resolver). | **critical:** Barracuda listing. | Fix the cause, then submit the **Barracuda IP removal request** form. |
+| `dnsbl.spamcop` | IPs not on the **SpamCop Blocking List (SCBL)** (spamtrap/complaint-driven; auto-expires). | `A` lookup at `bl.spamcop.net`. | **critical/warning:** SpamCop listing. | Stop the offending sends; SCBL entries expire automatically once activity stops — confirm via the SpamCop lookup. |
+| `dnsbl.sorbs` | IPs not on **SORBS** zones (spam, open relays, dynamic ranges). | `A` lookup at `dnsbl.sorbs.net`. | **warning/critical:** SORBS listing. | Use the SORBS delisting process for the specific sub-zone that listed the IP. |
+| `dnsbl.uceprotect` | IPs not on **UCEPROTECT** levels 1–3 (note: L2/L3 are aggressive whole-ASN listings; weight low). | `A` lookup at `dnsbl-1/2/3.uceprotect.net`. | **warning:** UCEPROTECT listing (often collateral, ASN-wide). | Address L1 (your IP) directly; L2/L3 usually require the upstream/ASN to act — weight this lower than Spamhaus. |
+| `dnsbl.invaluement` | IPs/domains not on **Invaluement** (ivmSIP / ivmURI) — a respected paid list. | Query the Invaluement zones (subscription/data-feed). | **critical:** Invaluement listing. | Follow Invaluement's removal process; requires a subscription/API for automated checks. |
+| `dnsbl.aggregate` | Roll-up across all configured zones: how many zones list any of the domain's IPs/domain. | Combine the per-zone results. | **critical:** listed on ≥ 1 high-impact zone; **warning:** listed only on low-weight zones. | Prioritize delisting from high-impact lists (Spamhaus, Barracuda, SpamCop) first. |
+
+> External tooling note: Spamhaus/SpamCop/SORBS/UCEPROTECT public zones are **pure DNS** and ship
+> first round (Barracuda needs the resolving IP registered; high-volume Spamhaus use needs a Data
+> Query Service). **Invaluement** and other commercial lists need a paid subscription/API and are a
+> later addition. Per-list delisting URLs and reason codes are stored as zone metadata in
+> `config.yaml` so each finding hands the user the correct removal tool.
+
+---
+
+## 5. DNS & Infrastructure
+
+**What it measures.** The transport and DNS plumbing that has to be correct before authentication
+even matters: can receivers find your mail servers (MX), does your sending IP have matching forward
+and reverse DNS (FCrDNS — a strong reputation signal), is transport encrypted and enforceable
+(STARTTLS, MTA-STS, DANE), is there TLS reporting, and are there no dangling or inconsistent
+records. Weak infrastructure here quietly caps deliverability and blocks branding features.
+
+**How measured.** Mostly `node:dns/promises` (`resolveMx`, `reverse`, `resolve4/6`, `resolveTxt`,
+`resolveNs`, `resolveCname`) plus, for reachability/TLS, a TCP/STARTTLS probe. The MTA-STS policy
+file itself requires an **HTTPS fetch** (`https://mta-sts.<domain>/.well-known/mta-sts.txt`), and
+DANE/TLSA validation is strongest with **DNSSEC**; both are noted below.
+
+| Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `infra.mx_present` | The domain publishes ≥ 1 MX record with valid priorities. | `resolveMx(domain)`. | **critical:** no MX records (cannot receive mail; bounces & reputation harm). | Publish MX records pointing at your mail host(s) with correct priorities. |
+| `infra.mx_resolve` | Each MX hostname resolves to an A/AAAA address (no dangling MX). | Resolve each MX target. | **critical:** MX points at a name with no address. | Fix or remove the MX target so every MX host resolves. |
+| `infra.mx_reachable` | Each MX host accepts SMTP on port 25 (and offers a banner). | TCP connect + SMTP banner probe. | **warning:** MX unreachable / connection refused. | Open port 25 / fix the listener so the MX host accepts SMTP. |
+| `infra.ptr_present` | Each sending IP has a PTR (reverse DNS) record. | `reverse(ip)`. | **critical:** no PTR (many receivers reject IPs with no reverse DNS). | Ask the IP owner/host to set a PTR for the sending IP. |
+| `infra.fcrdns` | **Forward-Confirmed reverse DNS**: the PTR hostname forward-resolves back to the same IP. | `reverse(ip)` then `resolve4/6(ptrHost)`. | **critical/warning:** PTR does not match forward DNS. | Set the PTR to a hostname whose A/AAAA record points back to the same IP. |
+| `infra.helo_match` *(advisory)* | The sending host's HELO/EHLO name is an FQDN that matches its PTR/forward DNS. | SMTP banner/EHLO inspection (probe). | **warning:** HELO is a bare/mismatched name. | Configure the MTA to HELO with its real FQDN that matches PTR + A record. |
+| `infra.a_aaaa` | The apex/mail hostnames have consistent A and, if used, AAAA records (IPv4/IPv6 consistency). | `resolve4`/`resolve6`. | **warning:** AAAA present but that IPv6 host is unauthenticated/unlisted in SPF. | Either add the IPv6 host to SPF/rDNS or remove the AAAA to avoid unauthenticated IPv6 sends. |
+| `infra.starttls` | MX hosts advertise **STARTTLS** and present a valid, non-expired certificate. | SMTP `EHLO` + `STARTTLS` probe + cert inspection. | **warning:** no STARTTLS, or expired/mismatched cert. | Enable STARTTLS with a valid CA certificate whose name matches the MX host. |
+| `infra.mta_sts` | An MTA-STS policy exists: `_mta-sts.<domain>` TXT (`v=STSv1; id=...`) **and** the policy file at `https://mta-sts.<domain>/.well-known/mta-sts.txt` (RFC 8461); ideally `mode: enforce`. | TXT lookup + HTTPS fetch of the policy file. | **warning:** no MTA-STS, or `mode: testing` left in place, or TXT/policy mismatch. | Publish the `_mta-sts` TXT and the policy file listing your MX hosts; start in `testing`, then move to `mode: enforce`. |
+| `infra.tls_rpt` | A TLS-RPT record exists at `_smtp._tls.<domain>` TXT (`v=TLSRPTv1; rua=...`) per RFC 8460, so TLS-negotiation failures are reported. | `resolveTxt('_smtp._tls.<domain>')`. | **warning:** no TLS-RPT (no visibility into TLS failures). | Publish `_smtp._tls.<domain>` TXT: `v=TLSRPTv1; rua=mailto:tlsrpt@<domain>`. |
+| `infra.dane_tlsa` | For DNSSEC-signed domains, TLSA records exist at `_25._tcp.<mx-host>` (DANE, RFC 6698/7671) to bind the MX cert. | `resolveTlsa`/TXT + DNSSEC (AD flag) check. | **info/warning:** DNSSEC present but no TLSA (DANE not deployed); TLSA present without DNSSEC (ineffective). | With DNSSEC enabled, publish TLSA records matching your MX certificates; DANE requires a signed zone. |
+| `infra.dnssec` | Whether the zone is DNSSEC-signed (prerequisite for trustworthy DANE and general tamper-resistance). | Check for DS/RRSIG and the resolver AD flag. | **info:** zone not DNSSEC-signed. | Enable DNSSEC at the registrar/DNS provider (publish DS records). |
+| `infra.ns_sanity` | Nameservers resolve, are diverse/reachable, and there are no lame delegations. | `resolveNs(domain)` + resolve each NS. | **warning:** single NS, or an NS that does not answer (lame delegation). | Use ≥ 2 reachable nameservers on diverse networks; fix lame delegations. |
+| `infra.dangling` | No dangling/obsolete records: CNAMEs to deprovisioned hosts, MX/SPF includes to dead services (subdomain-takeover / spoofing risk). | Resolve referenced targets; flag NXDOMAIN. | **warning/critical:** CNAME or include resolves to an unclaimed/dead target. | Remove the dangling record or reclaim the target; dangling CNAMEs enable subdomain takeover. |
+| `infra.autoconfig` *(advisory)* | Client autoconfig/autodiscover hints (`autoconfig.<domain>`, `_autodiscover._tcp` SRV) are present or intentionally absent. | SRV/CNAME/A lookups. | **info:** no autoconfig (mail clients can't auto-set up). | Optionally publish autoconfig/autodiscover records for smoother client setup. |
+
+> External tooling note: MX/PTR/FCrDNS/TXT/NS checks are **pure DNS** and ship first round. The
+> **MTA-STS policy fetch (HTTPS)**, **STARTTLS/cert probe (SMTP)**, and **DANE + DNSSEC validation**
+> need network probes beyond `node:dns/promises` (an HTTPS client, a TLS-aware SMTP probe, and a
+> DNSSEC-validating resolver such as shelling to `dig +dnssec`/`openssl s_client`/`swaks`) — these
+> are second-round.
+
+---
+
+## 6. Spam & Content
+
+**What it measures.** Everything about the **message itself and the sending behavior** that
+influences the spam-vs-inbox decision beyond DNS authentication: content/structure scoring
+(SpamAssassin-style), required list-management headers, link reputation, brand-indicator (BIMI),
+and reputation signals like complaint rate, bounce rate, and sending patterns. This is the category
+most aligned with the 2024 Gmail/Yahoo bulk-sender rules and the one most dependent on external
+tools and data.
+
+**How measured.** Some sub-checks are **pure DNS/config** (BIMI record, sending-cadence heuristics
+from audit history). Content scoring needs a message sample run through **SpamAssassin** (Homebrew
+`spamassassin` / `spamc`) or a scoring API; inbox-placement needs a **seed-list** service;
+complaint/bounce rates need **feedback loops (FBLs)** and postmaster data. These are flagged as
+later additions.
+
+| Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `content.spamassassin` | A sample message scores below the spam threshold. SpamAssassin default is **5.0**; for real inbox safety aim for **0–2**. | Run the message body/headers through `spamassassin`/`spamc` (Homebrew) or a scoring API. | **critical:** score ≥ 5.0; **warning:** score 2–5. | Rewrite the triggering content: fix the rules SpamAssassin cites (spammy phrases, ALL-CAPS subject, broken MIME, missing text part). |
+| `content.subject` | Subject line avoids spam signals: no excessive caps, no leading `RE:`/`FWD:` spoofing, no risky punctuation/emoji stuffing. | Heuristic + SpamAssassin subject rules. | **warning:** subject triggers content rules. | Use a concise, honest subject; avoid ALL-CAPS, excessive `!`, and misleading `RE:`. |
+| `content.image_text_ratio` | The message is not image-heavy with little text (image-only mail is a classic spam pattern). | Parse MIME; compute text vs image bytes/area. | **warning:** very low text-to-image ratio (images > ~40% of body). | Add a meaningful plain-text portion; keep images well under ~40% of the message and always include a `text/plain` alternative. |
+| `content.multipart` | The message provides a `text/plain` alternative alongside `text/html` and valid MIME structure. | MIME inspection. | **warning:** HTML-only, or malformed MIME. | Send `multipart/alternative` with both plain-text and HTML parts. |
+| `content.url_reputation` | Links in the message do not point at domains with poor reputation (RHSBL/URI blocklists such as Spamhaus DBL, Invaluement ivmURI, SURBL). | Extract URLs; query URI blocklists. | **critical:** a linked domain is on a URI blocklist. | Remove/replace the flagged link; if it is your domain, remediate the abuse then request delisting. |
+| `content.list_unsubscribe` | Bulk mail includes a `List-Unsubscribe` header (RFC 2369) **and** one-click support via `List-Unsubscribe-Post: List-Unsubscribe=One-Click` (RFC 8058). | Inspect message headers. | **critical:** bulk sender with no one-click unsubscribe (fails Gmail/Yahoo rules). | Add both headers: `List-Unsubscribe: <https://...>, <mailto:...>` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`, and honor requests within 2 days. |
+| `content.precedence` | Bulk/automated mail sets appropriate headers (`Precedence: bulk` where applicable) and does not misuse priority headers. | Header inspection. | **info/warning:** missing/misused precedence or spoofed high-priority flags. | Set `Precedence: bulk` for bulk mail; do not force `X-Priority: 1` on routine mail. |
+| `content.from_alignment` | The visible `From:` domain aligns with an authenticated domain (SPF or DKIM) — a Gmail/Yahoo bulk requirement. | Compare `From:` domain vs SPF/DKIM identifiers. | **warning:** `From:` domain does not align with SPF/DKIM. | Send from a `From:` domain that aligns with your DKIM `d=` (or SPF envelope) domain. |
+| `content.bimi` | A BIMI record exists at `default._bimi.<domain>` TXT (`v=BIMI1; l=<svg-url>; a=<vmc-url>`); requires DMARC at enforcement. | `resolveTxt('default._bimi.<domain>')` + fetch the SVG/VMC. | **info/warning:** no BIMI, or BIMI without a VMC/CMC (Gmail won't show the logo), or BIMI without `p=quarantine/reject`. | Publish a square SVG Tiny-PS logo and a **VMC/CMC** from a Mark Verifying Authority; BIMI requires DMARC at `p=quarantine` or `p=reject`. |
+| `content.seedlist` | Real inbox placement across major providers (Gmail, Outlook, Yahoo) via seed accounts. | Send to a **seed-list** service and read placement (inbox/spam/missing). | **critical:** landing in spam at major providers; **warning:** promotions-tab/mixed. | Address the deliverability factors the seed test exposes (auth, content score, reputation, list hygiene). |
+| `content.complaint_rate` | Spam-complaint rate is under the bulk-sender ceiling: keep **< 0.3%**, target **< 0.1%** (Gmail/Yahoo 2024). | Feedback loops (FBLs) + Google Postmaster Tools data. | **critical:** ≥ 0.3%; **warning:** 0.1–0.3%. | Improve list hygiene and consent; remove unengaged recipients; make unsubscribe effortless. |
+| `content.bounce_rate` | Hard-bounce rate is low (invalid-address sending damages reputation). | Bounce log / ESP metrics. | **warning/critical:** elevated hard-bounce rate. | Use double opt-in and list validation; remove hard bounces immediately. |
+| `content.engagement` *(advisory)* | Engagement signals (opens/clicks, low spam-marks) look like a wanted sender. | ESP/postmaster analytics. | **info:** low engagement / high spam-marks. | Send to engaged recipients; sunset chronically unengaged addresses. |
+| `content.warmup` *(advisory)* | Sending volume ramps gradually and stays consistent (no sudden spikes from a cold IP/domain). | Volume/cadence heuristic over audit history + ESP data. | **warning:** sudden volume spike on a cold IP/domain. | Warm up new IPs/domains gradually; keep volume steady day-to-day. |
+| `content.feedback_loops` *(advisory)* | The sender is enrolled in provider FBLs so complaints are captured. | Config/attestation check. | **info:** not enrolled in FBLs. | Enroll in provider feedback loops (and Google Postmaster Tools) to receive complaint data. |
+
+> External tooling note: only `content.bimi` and the history-based cadence heuristics are close to
+> pure DNS/config first round. **SpamAssassin scoring** needs the Homebrew `spamassassin`/`spamc`
+> binary plus a sample message; **seed-list placement**, **complaint/bounce rates**, and **FBLs**
+> need third-party services and provider data (Google Postmaster Tools, ESP metrics). Treat this
+> whole category as mostly second-round, gated behind those integrations.
+
+---
+
+## Scoring & how categories roll up to a cell
+
+The Dashboard shows **one cell per category per domain** — six cells across. Each category above
+contains many sub-checks, so the runner must collapse a list of `Finding`s into a single **value**
+and a single **color**. This mirrors the score/status derivation in
+[Engineering §6.2](./engineering.mdx); the full rendering rules live in [Dashboard](./dashboard.mdx),
+summarized here so this catalog is self-consistent:
+
+* **Cell value** is the worst-plus-count summary of that category's sub-checks:
+  * All sub-checks `ok` → **"Healthy"**.
+  * Some fail → a **"N of M fail"** / **"N problems"** summary (e.g. "2 of 7 fail"), optionally as a
+    percentage-passing figure for sortability.
+  * Never run yet → **"—"** / "Not run".
+* **Cell color** is driven by the **worst severity** present in the category:
+  * **dark green** — all `ok`.
+  * **amber** — worst finding is `warning` (and no `critical`).
+  * **dark red** — at least one `critical`.
+  * **light gray** — the category has never been run for this domain.
+  * (`info` findings do not by themselves turn a cell amber; they surface as advisories.)
+* **Domain-level roll-up.** The domain's overall `status` is the worst category color, and its
+  numeric `score` (0–100) deducts weighted points per finding (`critical` > `warning` > `info`), so
+  the Dashboard is sortable and the periodic scheduler can detect regressions (a category going from
+  green to red between runs is a new problem).
+
+Weighting note: not all sub-checks are equal — e.g. a Spamhaus ZEN listing or a missing SPF record
+weighs far more than a UCEPROTECT L3 (ASN-wide) listing or a missing `autoconfig` record. The
+per-check weights are configuration in the audit engine so the roll-up reflects real-world impact.
+
+---
+
+## First round vs future
+
+Which sub-checks ship in the first round (pure `node:dns/promises`, deterministic, no external
+dependencies) versus which require external tools, network probes, or paid data:
+
+| Category | First round (pure DNS / `node:dns/promises`) | Future (external tool / probe / API / paid data) |
+| --- | --- | --- |
+| **SPF** | `spf.present`, `spf.single`, `spf.lookups`, `spf.void`, `spf.all`, `spf.ptr`, `spf.syntax`, `spf.length` | `spf.flatten` automation (flattening service) |
+| **DKIM** | `dkim.present`, `dkim.parses`, `dkim.keylength`, `dkim.testflag`, `dkim.algorithm`, `dkim.multi` | Per-message signature verification (`swaks` probe + validator), selector auto-discovery, `dkim.rotation` age tracking |
+| **DMARC** | `dmarc.present`, `dmarc.single`, `dmarc.policy`, `dmarc.subdomain`, `dmarc.pct`, `dmarc.rua`, `dmarc.ruf`, `dmarc.alignment`, `dmarc.syntax` | `arc.present` reality (report-derived), real pass-rate measurement from `rua` XML ingestion / DMARC-analytics API |
+| **Blacklists** | `dnsbl.spamhaus_*`, `dnsbl.spamcop`, `dnsbl.sorbs`, `dnsbl.uceprotect`, `dnsbl.aggregate` (public DNS zones) | `dnsbl.barracuda` (resolver registration), `dnsbl.invaluement` (paid feed), high-volume Spamhaus via Data Query Service |
+| **DNS & Infrastructure** | `infra.mx_present`, `infra.mx_resolve`, `infra.ptr_present`, `infra.fcrdns`, `infra.a_aaaa`, `infra.tls_rpt`, `infra.ns_sanity`, `infra.dangling` | `infra.mx_reachable` + `infra.starttls` (SMTP probe), `infra.mta_sts` (HTTPS policy fetch), `infra.dane_tlsa` + `infra.dnssec` (DNSSEC resolver), `infra.helo_match`, `infra.autoconfig` |
+| **Spam & Content** | `content.bimi`, history-based `content.warmup`/cadence heuristics | `content.spamassassin` (`spamassassin`/`spamc`), `content.subject`/`image_text_ratio`/`multipart` (needs a message sample), `content.url_reputation` (URI blocklists), `content.list_unsubscribe`/`precedence`/`from_alignment` (message headers), `content.seedlist`, `content.complaint_rate`/`bounce_rate`/`engagement`/`feedback_loops` (FBLs, Postmaster Tools, ESP metrics) |
+
+The rule of thumb: **anything answerable from DNS ships first**; anything that needs to send or
+inspect a real message, open an SMTP/HTTPS connection, validate DNSSEC, or read a third-party
+reputation feed is a later round. In all rounds the `Checker`/`Finding` contract is unchanged — only
+a checker's internals differ — so the Dashboard, store, and scheduler never change as checks are
+added.
+
+<!--
+  Maintenance: this is the canonical list of deliverability checks. Every sub-check belongs to
+  exactly ONE of the six categories (SPF, DKIM, DMARC, Blacklists, DNS & Infrastructure, Spam &
+  Content) — those are the six Dashboard columns; do not add a seventh category. When a new checker
+  is added in ../engineering.mdx §6.3, add its row here under the right category and slot it into the
+  "First round vs future" table. Keep the roll-up rules in sync with ./dashboard.mdx (that file is
+  authoritative for cell rendering/color). Keep RFC references current: SPF 7208, DKIM 6376 (key
+  strength 8301), DMARC 7489 -> DMARCbis 9989/9990/9991 (pct deprecated), ARC 8617, MTA-STS 8461,
+  TLS-RPT 8460, DANE 6698/7671, List-Unsubscribe one-click 8058.
+-->
