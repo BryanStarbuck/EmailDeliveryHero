@@ -1,5 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger"
-import { ArrayMaxSize, IsArray, IsOptional, IsString, Matches, MaxLength } from "class-validator"
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsBoolean,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+} from "class-validator"
 
 // A permissive but real domain-name shape: labels of letters/digits/hyphens separated by dots.
 const DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i
