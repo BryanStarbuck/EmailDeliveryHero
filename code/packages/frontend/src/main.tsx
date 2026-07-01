@@ -7,6 +7,7 @@ import { AuthBridge } from "@/api/AuthBridge"
 import { queryClient } from "@/api/queryClient"
 import { installGlobalErrorHandlers } from "@/lib/logger"
 import { router } from "@/router"
+import { ScanProgressProvider } from "@/scan/ScanProgressContext"
 import "@/index.css"
 
 // Forward uncaught errors / unhandled rejections to the backend fault trail (pm/errors.mdx §3).
@@ -39,7 +40,9 @@ createRoot(rootElement).render(
       {/* Registers useAuth().getToken/reloadSession for the axios layer. */}
       <AuthBridge />
       <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
+        <ScanProgressProvider>
+          <RouterProvider router={router} />
+        </ScanProgressProvider>
       </QueryClientProvider>
     </FederatedProvider>
   </StrictMode>,

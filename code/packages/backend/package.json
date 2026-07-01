@@ -50,6 +50,9 @@
       "^@module/(.*)$": "<rootDir>/modules/$1",
       "^@shared/(.*)$": "<rootDir>/shared/$1"
     },
+    "setupFiles": [
+      "<rootDir>/../test/jest-setup-env.ts"
+    ],
     "testEnvironment": "node"
   }
 }

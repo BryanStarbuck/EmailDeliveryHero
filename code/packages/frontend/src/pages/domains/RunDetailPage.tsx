@@ -1,13 +1,13 @@
 import { useNavigate, useParams } from "@tanstack/react-router"
 import { ArrowLeft, RefreshCw, Wrench } from "lucide-react"
-import { toast } from "sonner"
-import { useAuditResults, useRunAudit } from "@/api/audit"
+import { useAuditResults } from "@/api/audit"
 import { useDomains } from "@/api/domains"
 import type { Finding } from "@/api/types"
 import { ScoreBadge, SeverityBadge } from "@/components/Badges"
 import { CopyFixButton } from "@/components/CopyFixButton"
 import { StatusCell } from "@/components/StatusCell"
 import { CATEGORIES, categoryOf, NEVER_CELL, rollupCategories } from "@/lib/categories"
+import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext"
 
 const ORDER = { critical: 0, warning: 1, info: 2, ok: 3 } as const
 
@@ -21,18 +21,16 @@ export function RunDetailPage() {
   const { id = "" } = useParams({ strict: false }) as { id?: string }
   const { data: domains } = useDomains()
   const { data: results } = useAuditResults()
-  const run = useRunAudit()
+  const runDomains = useScanRunner()
+  const scanning = useScanProgress().some((s) => s.domainId === id)
   const navigate = useNavigate()
 
   const domain = (domains ?? []).find((d) => d.id === id)
   const result = (results ?? []).find((r) => r.domainId === id)
   const cells = rollupCategories(result?.findings)
 
-  const onRunAgain = () =>
-    run.mutate(id, {
-      onSuccess: () => toast.success(`Audited ${domain?.name ?? "domain"}`),
-      onError: () => toast.error("Audit failed"),
-    })
+  // Runs through the shared scan runner so a "Running <domain>" card shows in the dock.
+  const onRunAgain = () => runDomains([{ id, name: domain?.name ?? id }])
 
   const openProblems = result ? result.counts.warning + result.counts.critical : 0
 
@@ -49,10 +47,10 @@ export function RunDetailPage() {
         <button
           type="button"
           onClick={onRunAgain}
-          disabled={run.isPending}
+          disabled={scanning}
           className="inline-flex items-center gap-2 rounded-md bg-[var(--edh-primary)] px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
         >
-          <RefreshCw className={run.isPending ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+          <RefreshCw className={scanning ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
           Run checks again
         </button>
       </div>

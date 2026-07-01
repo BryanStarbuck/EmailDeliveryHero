@@ -1,12 +1,12 @@
 import { Link, useNavigate } from "@tanstack/react-router"
 import { ChevronRight, RefreshCw } from "lucide-react"
 import { useEffect, useState } from "react"
-import { toast } from "sonner"
-import { useAuditResults, useRunAllAudits } from "@/api/audit"
+import { useAuditResults } from "@/api/audit"
 import { useDomains } from "@/api/domains"
 import { BrandHeader } from "@/components/BrandHeader"
 import { StatusCell } from "@/components/StatusCell"
 import { CATEGORIES, NEVER_CELL, rollupCategories } from "@/lib/categories"
+import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext"
 
 /**
  * The Dashboard (pm/ui.mdx §4) — the fleet health grid. A big brand header over one row per
@@ -17,17 +17,16 @@ import { CATEGORIES, NEVER_CELL, rollupCategories } from "@/lib/categories"
 export function DashboardPage() {
   const { data: domains, isLoading } = useDomains()
   const { data: results } = useAuditResults()
-  const runAll = useRunAllAudits()
+  const runDomains = useScanRunner()
+  const scanning = useScanProgress().length > 0
   const navigate = useNavigate()
 
   const byId = new Map((results ?? []).map((r) => [r.domainId, r]))
   const list = domains ?? []
 
-  const onRunChecks = () =>
-    runAll.mutate(undefined, {
-      onSuccess: () => toast.success("Checks complete"),
-      onError: () => toast.error("Run failed"),
-    })
+  // Fan out one scan per domain so they run in parallel and each shows its own progress card
+  // (pm/progress_ui.mdx §4.1); the dock drains card-by-card as domains finish.
+  const onRunChecks = () => runDomains(list.map((d) => ({ id: d.id, name: d.name })))
 
   return (
     <div className="mx-auto max-w-6xl">
@@ -37,11 +36,11 @@ export function DashboardPage() {
           <button
             type="button"
             onClick={onRunChecks}
-            disabled={runAll.isPending || list.length === 0}
+            disabled={scanning || list.length === 0}
             className="inline-flex items-center gap-2 rounded-md bg-[var(--edh-primary)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
-            <RefreshCw className={runAll.isPending ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-            {runAll.isPending ? "Running…" : "Run checks"}
+            <RefreshCw className={scanning ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+            {scanning ? "Running…" : "Run checks"}
           </button>
           <ScheduledToggle />
         </div>

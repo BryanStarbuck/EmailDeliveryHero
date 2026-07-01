@@ -66,25 +66,24 @@ export class AuditService {
     const domain = this.domains.get(domainId)
     logInfo(`Manual check started for ${domain.name}`, "AuditService")
     const result = await this.auditDomain(domain)
-    const map = this.loadAll()
-    map[domainId] = result
-    this.saveAll(map)
+    await this.persistResult(result)
     logInfo(`Audited ${domain.name}: score ${result.score} (${result.status})`, "AuditService")
     return result
   }
 
-  /** Run audits for every monitored domain (used by the scheduler and the "audit all" button). */
+  /**
+   * Run audits for every monitored domain (used by the scheduler and programmatic callers). Domains
+   * are audited in parallel with a small concurrency cap (pm/progress_ui.mdx §4.2); each result is
+   * persisted through the write-lock so concurrent scans never clobber one another.
+   */
   async runForAll(): Promise<AuditResult[]> {
     const domains = this.domains.list()
     logInfo(`Check run started (${domains.length} domain(s))`, "AuditService")
-    const map = this.loadAll()
-    const results: AuditResult[] = []
-    for (const domain of domains) {
+    const results = await mapLimit(domains, AUDIT_CONCURRENCY, async (domain) => {
       const result = await this.auditDomain(domain)
-      map[domain.id] = result
-      results.push(result)
-    }
-    this.saveAll(map)
+      await this.persistResult(result)
+      return result
+    })
     logInfo(`Audited all ${domains.length} domain(s)`, "AuditService")
     return results
   }

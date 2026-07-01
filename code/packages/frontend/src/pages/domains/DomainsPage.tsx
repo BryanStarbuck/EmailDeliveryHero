@@ -1,8 +1,8 @@
 import { useNavigate } from "@tanstack/react-router"
-import { ArrowUpRight, ChevronRight, Pencil, Play, Plus, Trash2, X } from "lucide-react"
+import { ArrowUpRight, ChevronRight, Pencil, Play, Plus, RefreshCw, Trash2, X } from "lucide-react"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
-import { useAuditResults, useRunAudit } from "@/api/audit"
+import { useAuditResults } from "@/api/audit"
 import {
   type CreateDomainInput,
   useCreateDomain,
@@ -13,6 +13,7 @@ import {
 import type { MonitoredDomain } from "@/api/types"
 import { StatusCell } from "@/components/StatusCell"
 import { CATEGORIES, NEVER_CELL, rollupCategories } from "@/lib/categories"
+import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext"
 
 /**
  * The Domains CRUD surface (pm/ui.mdx §6). A table of monitored domains, each row showing its six
@@ -23,7 +24,8 @@ export function DomainsPage() {
   const { data: domains } = useDomains()
   const { data: results } = useAuditResults()
   const del = useDeleteDomain()
-  const run = useRunAudit()
+  const runDomains = useScanRunner()
+  const activeScans = useScanProgress()
   const navigate = useNavigate()
 
   const [dialog, setDialog] = useState<
@@ -32,6 +34,7 @@ export function DomainsPage() {
 
   const byId = new Map((results ?? []).map((r) => [r.domainId, r]))
   const list = domains ?? []
+  const scanning = activeScans.length > 0
 
   const onRemove = (d: MonitoredDomain) => {
     if (!window.confirm(`Remove ${d.name}? This also removes its audit history.`)) return
@@ -41,11 +44,8 @@ export function DomainsPage() {
     })
   }
 
-  const onRunNow = (d: MonitoredDomain) =>
-    run.mutate(d.id, {
-      onSuccess: () => toast.success(`Audited ${d.name}`),
-      onError: () => toast.error(`Audit failed for ${d.name}`),
-    })
+  // One card in the scan dock; the shared runner toasts and refreshes cells when it finishes.
+  const onRunNow = (d: MonitoredDomain) => runDomains([{ id: d.id, name: d.name }])
 
   return (
     <div className="mx-auto max-w-6xl">
@@ -56,13 +56,25 @@ export function DomainsPage() {
             The email-sending domains you monitor for deliverability.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setDialog({ mode: "add" })}
-          className="inline-flex items-center gap-2 rounded-md bg-[var(--edh-primary)] px-3 py-2 text-sm font-medium text-white"
-        >
-          <Plus className="h-4 w-4" /> Add domain
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => runDomains(list.map((d) => ({ id: d.id, name: d.name })))}
+            disabled={scanning || list.length === 0}
+            title="Run a fresh audit for every domain"
+            className="inline-flex items-center gap-2 rounded-md border border-[var(--edh-border)] px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"
+          >
+            <RefreshCw className={scanning ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+            {scanning ? "Running…" : "Run all"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setDialog({ mode: "add" })}
+            className="inline-flex items-center gap-2 rounded-md bg-[var(--edh-primary)] px-3 py-2 text-sm font-medium text-white"
+          >
+            <Plus className="h-4 w-4" /> Add domain
+          </button>
+        </div>
       </header>
 
       <div className="overflow-hidden rounded-lg border border-[var(--edh-border)] bg-white">
@@ -81,7 +93,7 @@ export function DomainsPage() {
           <tbody>
             {list.map((d) => {
               const cells = rollupCategories(byId.get(d.id)?.findings)
-              const running = run.isPending && run.variables === d.id
+              const running = activeScans.some((s) => s.domainId === d.id)
               return (
                 <tr key={d.id} className="border-t border-[var(--edh-border)]">
                   <td className="px-4 py-3 font-medium">

@@ -1,5 +1,7 @@
 import { createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/react-router"
+import type { CSSProperties } from "react"
 import { Toaster } from "sonner"
+import { ScanProgressDock } from "@/components/ScanProgressDock"
 import { AppShell } from "@/pages/app/AppShell"
 import { DashboardPage } from "@/pages/app/DashboardPage"
 import { AuditsPage } from "@/pages/audits/AuditsPage"
@@ -11,15 +13,29 @@ import { SignInPage } from "@/pages/sign-in/SignInPage"
 import { SsoCallbackPage } from "@/pages/sso-callback/SsoCallbackPage"
 
 /**
- * Code-based TanStack Router. Auth is enforced inside <AppShell> (which wraps content in
- * <RequireAuth>). The sign-in and SSO-callback routes are public; everything under the app layout
- * requires an active session. Static paths outrank any future dynamic routes.
+ * Code-based TanStack Router. Login is OPTIONAL (pm/security.mdx §1/§3.4): <AppShell> wraps content
+ * in <AppReady>, which renders for everyone — signed in or logged out as the `default` user — and
+ * never forces a sign-in. The sign-in and SSO-callback routes are public; the few genuinely
+ * admin-only surfaces opt in with <RequireAuth>. Static paths outrank any future dynamic routes.
  */
 const rootRoute = createRootRoute({
   component: () => (
     <>
       <Outlet />
-      <Toaster richColors position="top-right" />
+      {/* Live per-domain scan cards, bottom-left, above the toast stack (pm/progress_ui.mdx §3). */}
+      <ScanProgressDock />
+      {/*
+        Toasts (pm/progress_ui.mdx §2): bottom-left, ~2× size, and pushed past the 256px left bar so
+        one never sits over the nav. `!left-[272px]` beats sonner's inline `left`; `--width` + the
+        toastOptions enlarge the card.
+      */}
+      <Toaster
+        richColors
+        position="bottom-left"
+        className="!left-[272px]"
+        style={{ "--width": "440px" } as CSSProperties}
+        toastOptions={{ className: "text-base", style: { padding: "1rem 1.25rem" } }}
+      />
     </>
   ),
 })
