@@ -1,0 +1,358 @@
+---
+title: EmailDeliveryHero — Scheduled Checks
+description: How scheduled (recurring) deliverability audits work in EmailDeliveryHero — the dashboard on/off toggle and its chevron, the configuration page (frequency, times of day, multiple times per day, domain selection), the schedule config model in config.yaml, the REST endpoints, and the two scheduling layers (in-process interval scheduler while the app runs, and OS-level launchd/cron/systemd/Task Scheduler that runs even when the UI is closed).
+---
+
+# EmailDeliveryHero — Scheduled Checks
+
+EmailDeliveryHero can audit your domains **two ways**: you can **manually kick off a run** (the
+**Run checks** button on the [Dashboard](./dashboard.mdx)), or you can have it **run on a
+schedule**. This spec covers the schedule half — the recurring health checks and the page that
+configures them.
+
+The audit itself is unchanged: a scheduled run reuses the exact same pluggable audit engine as a
+manual run (see [Engineering §6](./engineering.mdx)). This document builds on
+[Engineering §8 "Periodic checks"](./engineering.mdx) — the in-process scheduler described there is
+one of the two scheduling layers below; here we add the **OS-level** layer and the configuration UI
+that drives both.
+
+Related specs: [Overview](./overview.mdx) · [Engineering](./engineering.mdx) ·
+[Dashboard](./dashboard.mdx) · [Settings](./settings.mdx).
+
+> **How you get here.** This configuration page is opened from the **Dashboard**. The dashboard has
+> a top-right **on/off toggle for scheduled checks**, and a **chevron** immediately to its right.
+> Clicking the chevron opens this page. See [Dashboard](./dashboard.mdx).
+
+---
+
+## Enabling scheduled checks
+
+The dashboard toggle is the single on/off switch for the whole scheduling feature.
+
+* **Toggle ON** → sets `schedule.enabled: true` in the file-store config
+  (`~/.email_delivery_hero/config.yaml`, per [Engineering §7](./engineering.mdx)) and starts the
+  active scheduling layer (in-process by default; see below). The chevron's tooltip shows the next
+  scheduled run time.
+* **Toggle OFF** → sets `schedule.enabled: false` and stops firing scheduled runs. Manual **Run
+  checks** still works — turning the schedule off never disables on-demand audits.
+* The toggle writes through `PUT /api/scheduler/config`; the backend persists the flag and
+  (re)starts or stops the in-process job accordingly.
+
+The chevron does not change any state — it only navigates to this configuration page, where the rest
+of the schedule (`cadence`, `times`, domains, and the OS-level option) is set.
+
+---
+
+## The configuration page
+
+Reached from the dashboard chevron. It edits the `schedule:` block of `config.yaml` and, optionally,
+generates and installs an OS-level schedule.
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  ← Dashboard        Scheduled Checks — Configuration          [ Save ]      │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│  Scheduled checks           ( ●====  ON )      Next run: today 18:00 PST   │
+│                                                                            │
+│  ── Frequency ───────────────────────────────────────────────────────     │
+│   ( ) Every N hours     Every [  6 ] hours                                 │
+│   (•) Daily             at the time(s) below                               │
+│   ( ) Weekly            on [ Mon ][ Tue ][ ✓Wed ][ Thu ][ ✓Fri ][ … ]      │
+│                                                                            │
+│  ── Time(s) of day ──────────────────────────────────────────────────     │
+│   [ 06:00 ]  (–)                                                           │
+│   [ 18:00 ]  (–)                                                           │
+│   [ + Add another time ]                                                   │
+│   Timezone: [ America/Los_Angeles ▾ ]   (default: system tz)              │
+│                                                                            │
+│  ── Domains to include ──────────────────────────────────────────────     │
+│   (•) All monitored domains                                               │
+│   ( ) Only selected:  [✓] whitehatengineering.com                         │
+│                       [✓] act3ai.com                                       │
+│                       [ ] example.com                                     │
+│                                                                            │
+│  ── Run even when the app is closed ─────────────────────────────────     │
+│   Detected OS: macOS (launchd)                                            │
+│   ( ) In-process only (runs while EmailDeliveryHero is open)              │
+│   (•) Install OS-level schedule (launchd LaunchAgent)                     │
+│       [ Preview plist ]   [ Install / Update ]   [ Uninstall ]            │
+│       Status: installed ✓  (com.emaildeliveryhero.scheduler)             │
+│                                                                            │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                        [ Cancel ]   [ Save ]               │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+Controls, top to bottom:
+
+* **Scheduled checks (ON/OFF).** The same flag as the dashboard toggle (`schedule.enabled`), mirrored
+  here for convenience. Shows the computed **Next run**.
+* **Frequency.** Choose the cadence model:
+  * **Every N hours** — a simple interval (e.g. every 6 hours). No time-of-day picker needed.
+  * **Daily** — runs at each configured **time of day** (supports multiple; see below).
+  * **Weekly** — runs on the selected weekdays at each configured time of day.
+* **Time(s) of day.** One or more `HH:MM` pickers. Used by **Daily** and **Weekly**. The **+ Add
+  another time** button appends a row so the audit can run **multiple times per day** (e.g. 06:00 and
+  18:00). Each row has a remove (–) control; at least one time is required for Daily/Weekly.
+* **Timezone.** The tz the times are interpreted in (IANA name, e.g. `America/Los_Angeles`). Defaults
+  to the machine's system timezone.
+* **Domains to include.** Either **all** monitored domains, or an explicit **selected** subset
+  (checkbox list sourced from the Monitored Domains store). Empty selection is treated as "all".
+* **Run even when the app is closed.** Chooses the scheduling **layer** (see the next two sections):
+  * **In-process only** — the [Engineering §8](./engineering.mdx) interval scheduler; fires only
+    while EmailDeliveryHero is running.
+  * **Install OS-level schedule** — generate and install a native schedule (launchd / cron / systemd
+    / Task Scheduler) that invokes the run even when the UI is closed. The card shows the
+    **detected OS** and offers **Preview**, **Install / Update**, and **Uninstall** actions.
+* **Save.** Persists the `schedule:` block via `PUT /api/scheduler/config`. If an OS-level schedule
+  is selected, Save also regenerates the artifact so the installed schedule matches the config.
+
+---
+
+## Schedule config model
+
+The schedule lives as one block in the on-disk config
+(`~/.email_delivery_hero/config.yaml`, per [Engineering §7](./engineering.mdx)):
+
+```yaml
+# ~/.email_delivery_hero/config.yaml
+schedule:
+  enabled: true              # the dashboard toggle / on-off switch
+  cadence: daily             # "interval" | "daily" | "weekly"
+  everyHours: 6              # used only when cadence: interval
+  times:                     # used by daily/weekly — supports multiple per day
+    - "06:00"
+    - "18:00"
+  weekdays: [mon, wed, fri]  # used only when cadence: weekly
+  timezone: America/Los_Angeles   # IANA tz; defaults to system tz
+  domains: all               # "all" | ["<domainId>", "<domainId>", …]
+  runner: os                 # "in-process" | "os"  — which scheduling layer is active
+  os:
+    kind: launchd            # detected: "launchd" | "cron" | "systemd" | "schtasks"
+    installed: true          # whether the OS artifact is currently installed
+    label: com.emaildeliveryhero.scheduler
+```
+
+REST endpoints (backend `scheduler` module, under `/api`, NestJS on port **9312**):
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/scheduler/config` | Read the current `schedule:` block (backs the config page). |
+| `PUT /api/scheduler/config` | Write the `schedule:` block; (re)starts or stops the in-process job and, if `runner: os`, regenerates the OS artifact. |
+| `GET /api/scheduler` | Scheduler status: `enabled`, active `runner`, `nextRunAt`, `lastRunAt`, and OS-install status. |
+| `POST /api/scheduler/run` | Manually trigger a full scheduled run **now** (all-domains or the configured subset). This is the endpoint the OS-level schedulers call, and it also backs the dashboard **Run checks** button. |
+
+> The three endpoints from [Engineering §8](./engineering.mdx) (`GET /api/scheduler`,
+> `POST /api/scheduler/run`) are extended here with the two `/config` endpoints; the module and
+> contracts are otherwise unchanged.
+
+---
+
+## Two ways it runs: in-process vs OS-level
+
+There are two scheduling **layers**. Exactly one is the active `runner` at a time.
+
+| | **In-process scheduler** | **OS-level scheduler** |
+| --- | --- | --- |
+| Where it runs | Inside the NestJS backend (port 9312), per [Engineering §8](./engineering.mdx) | The operating system's native scheduler (launchd / cron / systemd / Task Scheduler) |
+| Fires when the UI is closed | **No** — only while the app process is running | **Yes** — the OS wakes and invokes the run regardless of whether the UI is open |
+| How it triggers a run | Internal timer calls the same engine directly | Calls `POST /api/scheduler/run` (via `curl`) or a small CLI entrypoint |
+| Setup | Zero — on by default when `schedule.enabled` | The app **generates and installs** the native artifact from the config page |
+| Survives reboot | Only if the backend is set to auto-start | **Yes** — the OS re-arms the schedule on login/boot |
+| Best for | A dev machine or server where the app stays running | A laptop that is opened intermittently, or unattended machines |
+
+Guidance: use **in-process** when EmailDeliveryHero is kept running (a server, or a dev box with the
+app always up). Use **OS-level** when the app is not always open and you still want daily audits —
+the native scheduler starts the backend if needed (or the CLI runs a headless audit) and hits
+`POST /api/scheduler/run`.
+
+The config page **detects the current OS** and shows only the relevant OS-level option
+(`launchd` on macOS, `cron`/`systemd` on Linux, `schtasks`/Task Scheduler on Windows). It can
+**generate the artifact**, let you **preview** it, and **install / update / uninstall** it for you.
+
+---
+
+## OS-level scheduling
+
+Each artifact below simply triggers a run — either by `curl`-ing `POST /api/scheduler/run` on the
+localhost backend (port 9312), or by invoking the CLI entrypoint
+`edh scheduler run` (a thin headless wrapper around the same audit engine). The app generates these
+files pre-filled with your configured times, then offers to install them.
+
+### macOS — launchd LaunchAgent (`.plist`)
+
+Installed to `~/Library/LaunchAgents/com.emaildeliveryhero.scheduler.plist`, loaded with
+`launchctl load -w <path>`. `StartCalendarInterval` fires at each configured time of day (multiple
+`<dict>` entries = multiple times per day). This is the "plist equivalent" referenced in the goals.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.emaildeliveryhero.scheduler</string>
+
+    <!-- Trigger the run: POST to the local backend on port 9312 -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/curl</string>
+        <string>-fsS</string>
+        <string>-X</string>
+        <string>POST</string>
+        <string>http://localhost:9312/api/scheduler/run</string>
+    </array>
+
+    <!-- 06:00 and 18:00 every day = two calendar entries -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key><integer>6</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>18</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+    </array>
+
+    <!-- If the Mac was asleep at the scheduled time, run at next wake -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/edh.scheduler.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/edh.scheduler.err.log</string>
+</dict>
+</plist>
+```
+
+Install / uninstall:
+
+```bash
+launchctl load -w  ~/Library/LaunchAgents/com.emaildeliveryhero.scheduler.plist   # install
+launchctl unload   ~/Library/LaunchAgents/com.emaildeliveryhero.scheduler.plist   # remove
+```
+
+### Linux — cron and/or a systemd timer
+
+**cron** — a crontab entry per time of day (edit with `crontab -e`, or the app drops a file in
+`/etc/cron.d/`):
+
+```cron
+# ~/.email_delivery_hero — audit at 06:00 and 18:00 daily
+0 6  * * *  curl -fsS -X POST http://localhost:9312/api/scheduler/run >> /tmp/edh.cron.log 2>&1
+0 18 * * *  curl -fsS -X POST http://localhost:9312/api/scheduler/run >> /tmp/edh.cron.log 2>&1
+```
+
+**systemd timer** — a `.service` (what to run) plus a `.timer` (when), installed under
+`~/.config/systemd/user/` and enabled with `systemctl --user enable --now edh-scheduler.timer`:
+
+```ini
+# ~/.config/systemd/user/edh-scheduler.service
+[Unit]
+Description=EmailDeliveryHero scheduled audit
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/curl -fsS -X POST http://localhost:9312/api/scheduler/run
+```
+
+```ini
+# ~/.config/systemd/user/edh-scheduler.timer
+[Unit]
+Description=Run EmailDeliveryHero audit at 06:00 and 18:00 daily
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+OnCalendar=*-*-* 18:00:00
+Persistent=true          # run on next boot if a scheduled time was missed
+
+[Install]
+WantedBy=timers.target
+```
+
+### Windows — Task Scheduler (`schtasks`)
+
+The app shells out to `schtasks` (or writes/imports a Task Scheduler XML). One task per time of day,
+or a single daily task; each fires the same POST via `curl.exe` (bundled with Windows 10+):
+
+```bat
+REM Create a daily 06:00 task
+schtasks /Create /TN "EmailDeliveryHero Audit 0600" /SC DAILY /ST 06:00 ^
+  /TR "curl.exe -fsS -X POST http://localhost:9312/api/scheduler/run"
+
+REM Add a second daily run at 18:00 (multiple times per day = multiple tasks)
+schtasks /Create /TN "EmailDeliveryHero Audit 1800" /SC DAILY /ST 18:00 ^
+  /TR "curl.exe -fsS -X POST http://localhost:9312/api/scheduler/run"
+
+REM Remove
+schtasks /Delete /TN "EmailDeliveryHero Audit 0600" /F
+```
+
+In all three cases the config page can **generate** the artifact from your saved `schedule:` block,
+**preview** it, and **install / update / uninstall** it — writing the same times, timezone, and
+target endpoint you configured. If the backend may not be running at trigger time, the generated
+artifact can instead invoke the CLI (`edh scheduler run`), which performs the audit headlessly using
+the same engine and store.
+
+---
+
+## What a scheduled run does
+
+A scheduled run is identical to a manual one — same engine, same output:
+
+* **Reuses the audit engine** from [Engineering §6](./engineering.mdx): for each included domain it
+  runs the full set of pluggable checkers (SPF, DKIM, DMARC, MX, PTR, DNSBL) and produces
+  severity-tagged findings with mandatory remediation.
+* **Writes a new run per domain** to the file store
+  (`~/.email_delivery_hero/audits/<domainId>/<auditId>.json`), exactly as [Engineering §7](./engineering.mdx)
+  describes — a scheduled run is just another audit record, timestamped.
+* **Diffs against the previous run** for **regression detection** (per [Engineering §8](./engineering.mdx)):
+  any finding that newly appears or worsens in severity is flagged as a **new problem**.
+* **Surfaces new problems on the Dashboard** — the [Dashboard](./dashboard.mdx) shows each domain's
+  latest score/status and highlights newly-introduced problems since the last run, which is the whole
+  point of running periodic checks.
+* **Records scheduler telemetry** — `lastRunAt`, `nextRunAt`, and the trigger source (in-process vs
+  OS-level) are exposed by `GET /api/scheduler` so the dashboard chevron tooltip and the config page
+  can show status.
+
+---
+
+## Acceptance criteria
+
+1. The dashboard top-right toggle turns scheduled checks on/off and persists `schedule.enabled` to
+   `~/.email_delivery_hero/config.yaml`; the chevron to its right opens this configuration page.
+2. Turning the schedule off never disables the manual **Run checks** button; both paths call the same
+   engine.
+3. The configuration page supports all three cadences — **every N hours**, **daily**, and **weekly**
+   (with weekday selection) — and persists the choice.
+4. The user can configure **one or more times of day** and add **multiple times per day**; Daily and
+   Weekly require at least one time.
+5. A timezone can be set (IANA name), defaulting to the system timezone, and scheduled runs fire in
+   that timezone.
+6. The user can scope scheduled runs to **all** monitored domains or an explicit **selected** subset.
+7. `GET/PUT /api/scheduler/config`, `GET /api/scheduler`, and `POST /api/scheduler/run` are
+   implemented; `PUT` (re)starts or stops the active scheduling layer to match the saved config.
+8. The app **detects the current OS** and offers the correct OS-level option: **launchd** on macOS,
+   **cron and/or systemd timer** on Linux, **Task Scheduler / schtasks** on Windows.
+9. From the config page the user can **preview**, **install/update**, and **uninstall** the OS-level
+   artifact; the generated artifact reflects the configured times, timezone, and target
+   (`POST /api/scheduler/run` or the CLI entrypoint) and runs **even when the app UI is closed**.
+10. Exactly one scheduling layer is active at a time (`runner: in-process` or `runner: os`), and the
+    in-process layer matches the behavior in [Engineering §8](./engineering.mdx).
+11. A scheduled run writes a new per-domain audit record, diffs it against the previous run, and
+    surfaces newly-introduced or worsened problems on the [Dashboard](./dashboard.mdx).
+12. `GET /api/scheduler` reports `enabled`, active `runner`, `lastRunAt`, `nextRunAt`, and OS-install
+    status.
+
+<!--
+  scheduled_checks.mdx maintenance: keep this consistent with engineering.mdx §8 (in-process
+  scheduler) and §7 (config.yaml under ~/.email_delivery_hero/). The schedule config lives in the
+  schedule: block of config.yaml; the endpoints are GET/PUT /api/scheduler/config, GET /api/scheduler,
+  POST /api/scheduler/run on the NestJS backend (port 9312). When a new OS scheduler or cadence is
+  added, update "OS-level scheduling", the config model, and the acceptance criteria. Remember to add
+  a TOC bullet for this file in overview.mdx.
+-->
