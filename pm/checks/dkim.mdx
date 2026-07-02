@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — DKIM check
-description: Engineering spec for the DKIM (DomainKeys Identified Mail) category — testing methodologies (DNS layer, selector discovery, message layer, rua observation), the per-selector sub-checks (presence, parse, key length, test flag, algorithm, flags, single-record, CNAME delegation, Ed25519-only, rotation, multi-selector, duplicate-key), the Brew/npm testing toolbox, the test-results YAML, the summary cell + full DKIM page UX, the fix-recommendation engine, and the DKIM problem-state catalog with per-state deep dives.
+description: Engineering spec for the DKIM (DomainKeys Identified Mail) category — testing methodologies (DNS layer, selector discovery, message layer, rua observation), the per-selector sub-checks (presence, parse, key length, test flag, algorithm, flags, single-record, CNAME delegation, Ed25519-only, rotation, multi-selector, duplicate-key), the Brew/npm testing toolbox with the exact per-run tool command lines and the dkim.tool_runs[] capture contract, the per-run test-results YAML (the dkim key inside ~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml), the dashboard summary cell + the run-scoped "view one category run" DKIM page UX (header with prev/next run navigation, per-selector overview, sub-test results table), the fix-recommendation engine, and the DKIM problem-state catalog with per-state deep dives.
 ---
 
 # EmailDeliveryHero — DKIM check
@@ -30,7 +30,12 @@ question lives in.
   store, and scheduler this check plugs into (`dkim.check.ts`, `checkId` `dkim`).
 * [Deliverability checks catalog](../spam_checks.mdx) — the master catalog; DKIM is §2 there and this
   file is its full expansion.
-* [Dashboard](../dashboard.mdx) — how the six category cells render, color, and sort.
+* [Dashboard](../dashboard.mdx) — how the six category cells render, color, and sort, and the
+  locked **Run → Test → Sub-test** vocabulary (a run = one execution of all checks for one domain,
+  with `startedAt`/`finishedAt`; DKIM is one of the six locked tests inside every run).
+* [Storage](../storage.mdx) — the per-run YAML file every run persists
+  (`~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml`); this spec defines only the `dkim` key
+  inside it (§5), never the file's overall shape.
 * [UI](../ui.mdx) — the app-wide summary-cell + chevron + full-page pattern this check follows.
 * [Scheduled checks](../scheduled_checks.mdx) — recurring-audit cadence and regression diffing.
 * [Report-email ingestion](../emails.mdx) — the DMARC `rua` corpus that will power the
@@ -145,9 +150,15 @@ Every sub-check runs **per selector** unless noted as domain-scoped. Selectors c
 
 ## 3. Testing toolbox — Brew / npm / pipx tools
 
-Verified against `formulae.brew.sh` (2026-07). First-round detection is pure `node:dns/promises`
+Verified against `formulae.brew.sh` and the npm/PyPI registries (2026-07): brew ships **doggo
+1.2.0**, **dnsx 1.2.3**, **knot 3.5.5** (kdig), **checkdmarc 5.17.3**, **parsedmarc 10.2.0**,
+**mailpit 1.30.3**, **swaks 20240103.0**, **dnsviz 0.11.1** (plus bind, ldns, q, massdns, msmtp,
+openssl@3); npm ships **mailauth 4.13.3** (library + CLI); PyPI ships **dkimpy 1.1.8**
+(`dkimverify`/`dkimsign`/`dknewkey`). First-round detection is pure `node:dns/promises`
 (no binaries required); these tools are the **debug bench** we shell out to for deeper diagnosis,
-cross-checking our own checker, and the future message layer. Install the bench with:
+cross-checking our own checker, and the future message layer. **Every tool invocation a run makes
+is captured verbatim into `dkim.tool_runs[]`** in the run's YAML file (see *How a test run
+executes the tools* below, and §5). Install the bench with:
 
 ```bash
 brew install bind doggo q dnsx ldns knot dnsviz checkdmarc parsedmarc swaks msmtp mailpit openssl@3
@@ -205,6 +216,55 @@ step-by-step SPF/DKIM/DMARC alignment replay), **Gmail "Show original"** (free v
 largest verifier), **MXToolbox / dmarcian DKIM Inspector / EasyDMARC** (domain+selector record
 checkers), **dmarcdkim.com** and **CaptainDNS** (selector-discovery testers probing ~100–130 common
 selectors — the same technique as our `dkim.selector_discovery`).
+
+### How a test run executes the tools
+
+The **decision engine** stays `node:dns/promises` (deterministic, no binaries required). On top of
+it, every run shells out to the bench tools below for **evidence-grade captures and cross-checks**,
+and records **one entry per invocation** in `dkim.tool_runs[]` inside the run's YAML file
+(`~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml` — [../storage.mdx](../storage.mdx), §5):
+
+```yaml
+tool_runs:
+  - tool: doggo                    # binary name
+    command: "doggo s1._domainkey.example.com TXT --json --timeout 5s"  # exact argv string
+    started_at: 2026-07-01T16:14:03Z
+    duration_ms: 142
+    exit_code: 0
+    output_format: json            # json | text
+    parsed: {…}                    # the captured/parsed stdout (shape per tool, below)
+    error: null                    # null, or the failure string (timeout, ENOENT, bad JSON…)
+```
+
+Rules that hold for **every** invocation: `command` is the **exact argv string with every input
+argument inlined** (selector, domain, resolver, file path) so a user can paste it into a terminal
+and reproduce the capture; stdout is captured in full, parsed per the tool's format, and stored
+under `parsed`; stderr goes into `error` on non-zero exit; each process gets a **hard kill
+timeout** (per-tool below) beyond any tool-level timeout flag; a **missing binary** records the
+entry with `exit_code: null` and `error: "ENOENT — not installed (brew install <formula>)"` and the
+checker degrades to its `node:dns/promises` result for that step (the UI uses the error to offer
+the install command). Tool runs never change a sub-test verdict on their own — they are evidence;
+when a cross-check **disagrees** with the in-process result, the disagreement itself is surfaced
+(propagation / resolver-dependent visibility warning).
+
+Per tool, in execution order within a run:
+
+| # | Tool | Exact command line (inputs inlined) | Output format | Timeout | Parsed how → feeds |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **doggo** — TXT fetch, once per selector | `doggo <selector>._domainkey.<domain> TXT --json --timeout 5s` | `json` | 5 s flag, 8 s kill | `JSON.parse(stdout)`; answers' `content` strings (joined 255-byte chunks) and TTLs → `selectors[].raw_record`, `txt_record_count`, TTL shown as evidence in `dkim.present.<selector>` |
+| 2 | **doggo** — CNAME fallback, only when #1 returns no TXT | `doggo <selector>._domainkey.<domain> CNAME --json --timeout 5s` | `json` | 5 s flag, 8 s kill | first CNAME answer → `selectors[].resolved_via: cname`, `cname_target`; then #1 re-runs against the target (`dkim.cname_delegation`) |
+| 3 | **kdig** — public-resolver cross-check, once per selector | `kdig @8.8.8.8 +json +timeout=5 +retry=1 TXT <selector>._domainkey.<domain>` | `json` (RFC 8427) | 5 s flag, 8 s kill | `answerRRs` compared with #1/`node:dns`; mismatch → propagation note on the `dkim.present.<selector>` evidence (never a fabricated critical) |
+| 4 | **openssl** — key decode, once per parseable `p=` | `openssl pkey -pubin -inform DER -text -noout` (the base64-decoded `p=` bytes are piped on **stdin**; `parsed.stdin_source` records `"p= of <selector> (<n> bytes)"`) | `text` | 3 s kill | regex the first line — `RSA Public-Key: \((\d+) bit\)` or `ED25519 Public-Key` — cross-checks `key_type`/`key_bits` (primary decode is Node `crypto.createPublicKey`); non-zero exit → evidence on `dkim.parses.<selector>` |
+| 5 | **doggo** — wildcard probe, once per domain | `doggo zz-<random8>._domainkey.<domain> TXT --json --timeout 5s` | `json` | 5 s flag, 8 s kill | any answer → `wildcard_shadow: true` (`dkim.underscore_label`), discovery results suppressed |
+| 6 | **dnsx** — discovery sweep, only when no selectors configured | `dnsx -txt -cname -resp -json -silent -retry 1 -t 6` (candidate FQDNs `<sel>._domainkey.<domain>`, one per line, piped on **stdin**; `parsed.stdin_source` records `"wordlist (<n> names, MX-guided first)"`) | `json` (NDJSON) | 30 s kill (whole sweep) | `JSON.parse` per line; hits → `selectors[]` rows with `source: discovered` (`dkim.selector_discovery`) |
+
+Future rounds append to the same array with the same shape: the message layer records
+`npx mailauth report /path/to/probe.eml` (JSON report → `dkim.signature_verify`, `dkim.alignment`,
+`l=`/`x=`/`h=` audits) and the `swaks` probe send; the observational layer records
+`parsedmarc /path/to/report.xml.gz` invocations ([../emails.mdx](../emails.mdx)). `checkdmarc`
+(no DKIM-selector probing) and the remaining §3 tools are **bench-only**: they appear in
+drill-down "diagnose it yourself" blocks but are never invoked by a run, so they never appear in
+`tool_runs[]`.
 
 ---
 
@@ -293,16 +353,37 @@ layer (reflectors and seed mailboxes have their own etiquette).
 
 ## 5. Test results (YAML)
 
-The information we extract from the tests, in one document per domain per run. The structured
-payload is produced by the checker as `results.dkim` (persisted inside the per-run audit record;
-see §10) and the per-test rows are the findings. Rendered as YAML — **`test_results.yaml`** — the
-canonical shape every DKIM UI surface and the regression differ consume:
+Every **run** (one execution of all checks for one domain — [../dashboard.mdx](../dashboard.mdx)
+§1) persists as **one YAML file**:
+
+```
+~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml
+```
+
+— `<domain>` lowercased; the filename is the run's **start** time in the local timezone, 12-hour
+clock, zero-padded, with an `AM`/`PM` suffix. Example:
+`~/.email_delivery_hero/runs/whitehatengineering.com/2026_07_01_09_14AM.yaml`. The file's overall
+shape — the top-level `run:` block (`run_id`, `domain`, `started_at`/`finished_at` ISO-UTC,
+`score`, `status`) followed by **one top-level key per category** (`spf`, `dkim`, `dmarc`,
+`blacklists`, `dns_infra`, `spam_content`) — is owned by [../storage.mdx](../storage.mdx); **this
+spec defines only the `dkim` key**. The DKIM section holds the category `status` (worst severity),
+the structured per-selector observation (the checker's `results.dkim` payload — same columns as
+§10), the `tool_runs[]` capture of every external tool invocation (§3), and the per-sub-test
+`tests[]` rows — the canonical shape every DKIM UI surface and the regression differ consume:
 
 ```yaml
-# test_results.yaml — DKIM category, one document per domain per audit run
-dkim:
+# ~/.email_delivery_hero/runs/example.com/2026_07_01_09_14AM.yaml
+run:
+  run_id: "2026-07-01-0914-example.com-7f3a"
   domain: example.com
-  checked_at: 2026-07-01T09:30:00Z
+  started_at: 2026-07-01T16:14:02Z    # ISO UTC (09:14 AM PDT — the filename time)
+  finished_at: 2026-07-01T16:14:11Z
+  score: 61
+  status: critical
+
+spf: {…}                              # owned by ./spf.mdx §5
+
+dkim:
   status: critical             # worst severity across the tests below
   # ---- the parsed observation (results.dkim) ----
   selectors_configured: [s1, google]
@@ -349,6 +430,64 @@ dkim:
       first_seen_at: 2024-03-14T00:00:00Z
   wildcard_shadow: false       # random-selector probe answered → wildcard TXT pollution
   duplicate_keys: []           # [{key_sha256, seen_on: ["other.com/s1"]}]
+  # ---- every external tool invocation this run made (§3), in execution order ----
+  tool_runs:
+    - tool: doggo
+      command: "doggo s1._domainkey.example.com TXT --json --timeout 5s"
+      started_at: 2026-07-01T16:14:03Z
+      duration_ms: 128
+      exit_code: 0
+      output_format: json
+      parsed: []                     # no TXT answer → CNAME fallback (next entry)
+      error: null
+    - tool: doggo
+      command: "doggo s1._domainkey.example.com CNAME --json --timeout 5s"
+      started_at: 2026-07-01T16:14:03Z
+      duration_ms: 141
+      exit_code: 0
+      output_format: json
+      parsed:
+        - { name: s1._domainkey.example.com., type: CNAME, ttl: 3600s,
+            content: s1.domainkey.u123.wl001.sendgrid.net. }
+      error: null                    # target then probed → NXDOMAIN (dangling delegation)
+    - tool: doggo
+      command: "doggo google._domainkey.example.com TXT --json --timeout 5s"
+      started_at: 2026-07-01T16:14:04Z
+      duration_ms: 96
+      exit_code: 0
+      output_format: json
+      parsed:
+        - { name: google._domainkey.example.com., type: TXT, ttl: 3600s,
+            content: "v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQ…" }
+      error: null
+    - tool: kdig
+      command: "kdig @8.8.8.8 +json +timeout=5 +retry=1 TXT google._domainkey.example.com"
+      started_at: 2026-07-01T16:14:04Z
+      duration_ms: 233
+      exit_code: 0
+      output_format: json
+      parsed: { answerRRs: 1, agrees_with_local: true }   # RFC 8427 answer, condensed
+      error: null
+    - tool: openssl
+      command: "openssl pkey -pubin -inform DER -text -noout"
+      started_at: 2026-07-01T16:14:05Z
+      duration_ms: 22
+      exit_code: 0
+      output_format: text
+      parsed:
+        stdin_source: "p= of google (162 bytes)"
+        first_line: "RSA Public-Key: (1024 bit)"
+        key_type: rsa
+        key_bits: 1024               # cross-checks selectors[].key_bits
+      error: null
+    - tool: doggo
+      command: "doggo zz-x7q4k2mn._domainkey.example.com TXT --json --timeout 5s"
+      started_at: 2026-07-01T16:14:05Z
+      duration_ms: 87
+      exit_code: 0
+      output_format: json
+      parsed: []                     # no answer → wildcard_shadow stays false
+      error: null
   # ---- the per-test rows (the findings, pass and fail alike) ----
   tests:
     - id: dkim.present.s1
@@ -356,14 +495,14 @@ dkim:
       title: DKIM selector "s1" not found
       result: fail                   # pass | fail | warn | info
       detail: CNAME target s1.domainkey.u123.wl001.sendgrid.net does not resolve (NXDOMAIN).
-      dns_value_observed: "s1._domainkey.example.com CNAME s1.domainkey.u123.wl001.sendgrid.net → NXDOMAIN"
+      evidence: "s1._domainkey.example.com CNAME s1.domainkey.u123.wl001.sendgrid.net → NXDOMAIN"
       fix: Re-point the CNAME to the target listed in your SendGrid dashboard, or remove it.
     - id: dkim.keylength.google
       selector: google
       title: 1024-bit RSA key (upgrade to 2048)
       result: warn
       detail: RFC 8301 requires ≥1024 and recommends ≥2048 bits; 1024-bit keys are a negative trust signal.
-      dns_value_observed: "k=rsa; p=… (1024-bit modulus)"
+      evidence: "k=rsa; p=… (1024-bit modulus)"
       fix: Generate a 2048-bit key in the Google Admin console, publish it, then re-enable signing.
     - id: dkim.multi
       title: Only 1 working selector (no rotation headroom)
@@ -375,27 +514,48 @@ dkim:
       result: pass
   # ---- matched problem states (see §9) ----
   problem_states: [PS-01, PS-04, PS-09]
+
+dmarc: {…}                            # owned by ./dmarc.mdx
+blacklists: {…}                       # owned by ./blacklists.mdx
+dns_infra: {…}
+spam_content: {…}
 ```
 
-Field-name mapping: `selectors[].*` keys are 1:1 with the `dkim_check_results` columns in §10
+Field-name mapping: the run identity (`domain`, start/finish times) lives **only** in the top-level
+`run:` block — the `dkim` section never repeats it. `selectors[].*` keys are 1:1 with the
+`dkim_check_results` columns in §10
 (`selector`, `query_name`, `resolved_via`, `cname_target`, `raw_record`, `key_type`, `key_bits`,
 `key_sha256`, `has_test_flag`, `is_revoked`, `flags`, `first_seen_at`, `present`, `parses`);
+`tool_runs[]` entries follow the §3 capture contract exactly
+(`tool`, `command` — the exact argv string with every input argument — `started_at`, `duration_ms`,
+`exit_code`, `output_format: json|text`, `parsed`, `error: null|string`);
 `tests[]` rows are the `findings` (`result: pass|fail|warn|info` ⇔ severity `ok|critical|warning|
-info`; per-selector finding ids are suffixed `.<selector>`); `problem_states` is derived (§9 mapping
+info`; per-selector finding ids are suffixed `.<selector>`; `evidence` carries the observed
+DNS name + raw answer, `fix` the copyable remediation); `problem_states` is derived (§9 mapping
 table) — never stored separately.
 
 ---
 
-## 6. User interface — the summary surface and the full DKIM page
+## 6. User interface — the summary surface and the DKIM category run page
 
 Two surfaces, following the app-wide pattern in [../ui.mdx](../ui.mdx): a **summary cell** on the
-main view, and a **chevron** that opens a **full page dedicated to DKIM** for that domain.
+Dashboard tables, and the **"view one category run" page** — a full page showing the DKIM sub-test
+results **of one specific run** for one domain.
 
-### 6.1 The summary surface (main view)
+**Routes (locked).** The run report is `/domains/:domainId/runs/:runId` (newest-run alias
+`/domains/:domainId`). The DKIM category run page is
+**`/domains/:domainId/runs/:runId/dkim`**, with the newest-run alias **`/domains/:domainId/dkim`**
+(the alias resolves to the domain's newest run and renders the identical page). Problem-state
+drill-downs nest under it: `/domains/:domainId/runs/:runId/dkim/:problemId` (alias
+`/domains/:domainId/dkim/:problemId`).
 
-DKIM is one of the six category columns on the Dashboard. The DKIM cell for a domain is the
-**worst severity** among all `dkim.*` findings in the latest run, and shows the single most
-decision-relevant metric for this technology: **working selectors and key strength**.
+### 6.1 The summary surface (Dashboard cells)
+
+DKIM is one of the six locked test columns on **both** Dashboard tables
+([../dashboard.mdx](../dashboard.mdx)). The DKIM cell is the **worst severity** among all `dkim.*`
+sub-tests of the run the row represents — the domain's **newest** run on the Domain-health table,
+**that** run on the Runs table — and shows the single most decision-relevant metric for this
+technology: **working selectors and key strength**.
 
 - **Color** — dark green (all selectors healthy, ≥2048-bit), amber (worst = warning, e.g. a
   1024-bit key or single selector), dark red (any critical — missing/revoked/SHA-1/dangling CNAME),
@@ -403,46 +563,84 @@ decision-relevant metric for this technology: **working selectors and key streng
 - **Label** — the one-line summary: `2 selectors · 2048-bit` / `1 of 2 selectors failing` /
   `selector "s1" missing` / `No selectors` / `—`.
 - **Hover** — tooltip with the top open problem's title.
-- **Chevron (›)** — on the right edge of the cell (visible on hover and on the domain run-detail
-  category chip). Clicking it navigates to the full DKIM page: **`/domains/:id/dkim`**. Clicking
-  anywhere else in the row still opens the domain run detail as today.
+- **Cell click (the one exception to whole-row navigation)** — clicking the **DKIM cell itself**
+  goes *inside the DKIM test* of the run the row represents:
+  - **Domain-health table** — opens the domain's **newest run's** DKIM page
+    (`/domains/:domainId/dkim`, the newest-run alias).
+  - **Runs table** — opens **that run's** DKIM page (`/domains/:domainId/runs/:runId/dkim`).
+  - Clicking **anywhere else in a row** still opens the **whole run report**
+    (`/domains/:domainId/runs/:runId`; Domain-health rows open the newest via
+    `/domains/:domainId`), per [../dashboard.mdx](../dashboard.mdx) §6.
 
-### 6.2 The full DKIM page (`/domains/:id/dkim`)
+### 6.2 The DKIM category run page — "view one category run" (`/domains/:domainId/runs/:runId/dkim`)
 
-One page, purely about DKIM for one domain. It must answer, top to bottom: *Is my mail signed with
-healthy keys? What exactly did we observe (the DNS names, the raw records, the key sizes)? Which
-tests passed/failed per selector? How do I fix each failure?* Every failed test shows the relevant
+One page, purely about **the DKIM results of one specific run** for one domain. It is
+**run-scoped**: every value on it (status, selectors, tool runs, tests) comes from that run's YAML
+file (§5) — never a live re-query — so an old run renders exactly what was observed then. It must
+answer, top to bottom: *Was my mail signed with
+healthy keys at this run? What exactly did we observe (the DNS names, the raw records, the key
+sizes, the exact tool commands)? Which sub-tests passed/failed per selector? How do I fix each
+failure?* Every failed sub-test shows the relevant
 debugging values — the exact DNS name queried, the raw TXT/CNAME answer, the decoded key type and
 bit length, and the expected value.
 
+**How the page is reached.**
+
+1. **Dashboard DKIM cell click** (§6.1) — newest run from the Domain-health table, that specific
+   run from the Runs table.
+2. **Run report DKIM section chevron** — on the run report (`/domains/:domainId/runs/:runId`), the
+   DKIM category section/chip carries a **› chevron**; pressing it opens this page for the same
+   `runId`.
+3. **Prev/next run navigation** — the **‹ / ›** controls in this page's own header step to the
+   previous/next run of the **same domain**, staying inside the DKIM category.
+4. **Direct URL** — both the run-scoped route and the newest-run alias are shareable/bookmarkable.
+
 Contents, in order (exact layout in §7):
 
-1. **Header** — domain name, "DKIM" title, the category StatusCell, `ran <timestamp>`, a
-   **Re-run** button (runs just this domain's audit), and a back link.
+1. **Header** — back link to this run's report, domain name, "DKIM" title, the category StatusCell
+   (this run's worst DKIM severity), the **run timestamp** (`run <startedAt, local>` — the same
+   time as the YAML filename), **‹ prev / next ›** run navigation (chronological over this domain's
+   stored runs, staying on the DKIM page; ‹ disabled at the oldest run, › disabled at the newest),
+   and a **Re-run** button (starts a fresh run for just this domain, then navigates to the new
+   run's DKIM page when it completes). When the run shown is **not** the newest, an amber banner
+   under the header reads "Viewing the run of `<timestamp>` — a newer run exists" with a
+   **"newest ›"** jump link.
 2. **Key health hero** — the domain-level verdict band: working-selector count, weakest key bits,
    rotation headroom, and the primary recommendation from §8 as the single CTA.
-3. **Selector cards** — one card per probed selector: selector name, `source` (configured /
+3. **Per-selector overview panel (selector cards)** — one card per selector probed **in this
+   run**: selector name, `source` (configured /
    discovered), resolution chain (`TXT` or `CNAME → target`), key type + bit length badge
    (`RSA 2048` green / `RSA 1024` amber / `revoked` red / `ed25519` slate), test/strict flags, key
    age, and the raw record (copyable, monospace, truncated with expand).
-4. **Test results table** — one row per §2 test instance (per selector where applicable):
-   pass/fail/warn/info icon, finding id, plain-language title, and — expanded via row accordion —
-   the full detail, the observed evidence (exact DNS name + raw answer), and the **Fix** block with
-   a copy-to-clipboard button carrying the exact record/CNAME to publish.
-5. **Selectors editor** — the per-domain config input: add/remove selector strings (writes the
+4. **Sub-test results table** — one row per §2 sub-test instance of this run (per selector where
+   applicable), fed by the run YAML's `tests[]` (§5):
+   pass/fail/warn/info icon, sub-test id, plain-language title, the observed value, and — expanded
+   via row accordion —
+   the full detail, the observed **evidence** (exact DNS name + raw answer), and the **Fix** block
+   with a copy-to-clipboard button carrying the exact record/CNAME to publish.
+5. **Tool runs (evidence)** — a collapsed accordion listing this run's `dkim.tool_runs[]` (§3/§5):
+   one row per invocation — tool, exact `command` (monospace, copyable, reproducible in a
+   terminal), duration, exit code — expanding to the captured `parsed` output. Failed invocations
+   (`error != null`) render amber with the error string (and the `brew install` hint on ENOENT).
+6. **Selectors editor** — the per-domain config input: add/remove selector strings (writes the
    domain's `dkimSelectors`), plus a **"Run discovery now"** action that probes the §4 wordlist and
    offers one-click import of hits. Empty state banner: "No selectors configured — discovery will
-   probe common selectors; add yours for precise auditing."
-6. **Problem states** — cards for each matched §9 problem state, each with a one-paragraph hook and
+   probe common selectors; add yours for precise auditing." (Edits affect **future** runs; the page
+   still renders this run's observation unchanged.)
+7. **Problem states** — cards for each matched §9 problem state, each with a one-paragraph hook and
    a **"Learn more ›"** chevron that opens the per-problem drill-down page
-   (`/domains/:id/dkim/:problemId`) — concept, your data, diagnose-it-yourself commands, and the
-   step-by-step path forward.
-7. **Message-layer panel (future)** — once the probe path lands: last probe verdict per receiver
+   (`/domains/:domainId/runs/:runId/dkim/:problemId`) — concept, your data, diagnose-it-yourself
+   commands, and the step-by-step path forward.
+8. **Message-layer panel (future)** — once the probe path lands: last probe verdict per receiver
    (verified ✓/✗, canonicalization, alignment, `l=`/`x=`/oversigning audit), and per-selector pass
    rates from `rua` ingestion.
 
-**Empty / never-run / loading states.** Never-run → gray header cell + "No audit yet — run one"
-CTA. Loading → skeleton rows. *No selectors + discovery found nothing* is **not** empty — it renders
+**Empty / never-run / loading states.** **Never-run** (the newest-run alias for a domain with no
+runs) → gray header cell, no run timestamp, prev/next hidden, and a "No runs yet — run checks" CTA
+that starts the first run. **Run not found** (a stale/deleted `runId` in the URL) → "This run no
+longer exists" with a link to the domain's newest DKIM page. **Loading** → skeleton header +
+skeleton selector cards + skeleton table rows (no layout shift). *No selectors + discovery found
+nothing* is **not** empty — it renders
 the `dkim.no_selectors` info plus the "likely unsigned" warning state (PS-12) with the selector
 editor front and center.
 
@@ -456,19 +654,20 @@ first, evidence second, work items third, configuration fourth, education last.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
-│ ‹ Back to example.com          DKIM                          [Re-run ⟳]   │  header row
-│ example.com  ·  [ red: selector "s1" missing ]  ·  ran 2026-07-01 09:30   │
+│ ‹ Back to run report        DKIM       ‹ prev · next ›       [Re-run ⟳]   │  header row
+│ example.com  ·  [ red: selector "s1" missing ]  ·  run 2026-07-01 09:14 AM │
+│ ⚠ Viewing the run of 2026-07-01 09:14 AM — a newer run exists  [newest ›]  │  (only when stale)
 ├────────────────────────────────────────────────────────────────────────────┤
 │  KEY HEALTH        1 of 2 selectors working · weakest key 1024-bit         │  hero band
 │  "Mail signed as s1 is failing at every receiver (no key in DNS)."         │
 │  Next step: re-point the s1 CNAME to your SendGrid target            [→]   │
 ├──────────────────────────────────┬─────────────────────────────────────────┤
-│  SELECTOR  s1        ✗ missing   │  SELECTOR  google      ⚠ RSA 1024      │  selector cards
-│  configured · CNAME →            │  configured · TXT                      │
-│  s1.domainkey.u123….sendgrid.net │  v=DKIM1; k=rsa; p=MIGfMA0…   [copy]   │
+│  SELECTOR  s1        ✗ missing   │  SELECTOR  google      ⚠ RSA 1024      │  per-selector
+│  configured · CNAME →            │  configured · TXT                      │  overview panel
+│  s1.domainkey.u123….sendgrid.net │  v=DKIM1; k=rsa; p=MIGfMA0…   [copy]   │  (selector cards)
 │  → NXDOMAIN (dangling)           │  key age 474d · no t=y · 1 TXT record  │
 ├──────────────────────────────────┴─────────────────────────────────────────┤
-│  TEST RESULTS                                   6 passed · 1 failed · 3 ⚠  │  main table
+│  SUB-TEST RESULTS (this run)                    6 passed · 1 failed · 3 ⚠  │  main table
 │  ✗ dkim.present.s1        no key at s1._domainkey.example.com       [v]    │
 │      observed: CNAME s1.domainkey.u123.wl001.sendgrid.net → NXDOMAIN       │
 │      expected: CNAME resolving to a v=DKIM1 TXT           [copy fix]       │
@@ -476,6 +675,9 @@ first, evidence second, work items third, configuration fourth, education last.
 │  ⚠ dkim.multi             only 1 working selector                   [v]    │
 │  ✓ dkim.testflag.google   no t=y                                    [v]    │
 │  …                                                                          │
+├────────────────────────────────────────────────────────────────────────────┤
+│  ▸ TOOL RUNS (6)   doggo ×4 · kdig ×1 · openssl ×1        all exit 0       │  evidence accordion
+│      $ doggo s1._domainkey.example.com TXT --json --timeout 5s   [copy]    │  (one expanded)
 ├────────────────────────────────────────────────────────────────────────────┤
 │  SELECTORS                       [ s1 × ] [ google × ] [ + add ]           │  config band
 │  [ Run discovery now ]  — probes 40+ common selectors and offers imports   │
@@ -487,38 +689,49 @@ first, evidence second, work items third, configuration fourth, education last.
 
 Placement rules and rationale:
 
-- **Highest: the verdict.** The header row carries identity + status; the **key-health hero**
-  directly under it is the one line a non-expert needs — how many selectors work, how strong the
-  weakest key is, and the single next move. One accent CTA maximum on the page (the hero's "next
-  step").
+- **Highest: the verdict.** The header row carries identity + status **+ run identity**: the back
+  link returns to **this run's** report, the run timestamp names exactly which run is on screen
+  (same time as the YAML filename), and the **‹ prev / next ›** pair steps through the domain's run
+  history without leaving the DKIM category (disabled ends, keyboard `←`/`→`). The **key-health
+  hero** directly under it is the one line a non-expert needs — how many selectors work, how strong
+  the weakest key is, and the single next move. One accent CTA maximum on the page (the hero's
+  "next step"). The stale-run banner renders only when a newer run exists, so the newest-run alias
+  never shows it.
 - **Second band: selector cards, two-up.** DKIM is inherently **per selector**, so the evidence
   surface is a card per selector, not one blob: name + verdict badge top-left, resolution chain and
   raw record beneath (monospace, copy button), and the vitals line (key age, flags, record count)
   at the card foot. Discovered-but-unconfigured selectors render with a dashed border and an
   **"Add to monitored"** inline action. On narrow widths cards stack.
-- **Main table: test results.** A table, not cards — users scan many rows; sort order is fixed
+- **Main table: sub-test results.** A table, not cards — users scan many rows; sort order is fixed
   fail → warn → info → pass (never alphabetical, never by selector). Each row: status icon (✗ red /
   ⚠ amber / ✓ green / ⓘ slate), finding id in small caps (per-selector ids keep their `.selector`
   suffix so the row is self-locating), plain-language title, right-aligned chevron `[v]` accordion.
   Expanded row shows *observed* (exact DNS name + raw answer + decoded key facts, monospace),
   *expected*, *why it matters* (one sentence), and the **Fix** strip: the exact TXT/CNAME to publish
   with `[copy fix]`. Copy buttons always copy the publishable value, never prose.
+- **Evidence accordion: tool runs.** Collapsed by default (experts only): one row per
+  `dkim.tool_runs[]` entry — tool, exact `command` in monospace with a copy button (paste-and-
+  reproduce is the point), duration, exit code — expanding to the captured `parsed` output.
+  Amber rows for `error != null`, carrying the error string and the `brew install` hint.
 - **Config band: the selectors editor.** Below the work items because configuration is a
   lower-frequency act than triage — but it must be on *this* page (DKIM is the only category with a
   per-domain input). Chips with an × per selector, an add field, and the discovery action with its
-  import flow.
+  import flow. Edits apply to future runs only; the run on screen is immutable history.
 - **Lowest: problem-state cards** — education and deep dives; up to three per row, title + one-line
-  hook + chevron to `/domains/:id/dkim/:problemId`. They repeat information the table already
-  flagged on purpose: the table is for operators, the cards for learners.
+  hook + chevron to `/domains/:domainId/runs/:runId/dkim/:problemId`. They repeat information the
+  table already flagged on purpose: the table is for operators, the cards for learners.
 - **Type & color:** shadcn/ui primitives (`Card`, `Table`, `Accordion`, `Badge`), lucide icons
   (`KeyRound`, `ShieldCheck`, `ShieldAlert`, `Info`, `ChevronRight`, `Copy`, `Wrench`). Severity
   colors identical to the Dashboard cells. Monospace (`font-mono text-xs`) for every DNS name, raw
   record, CNAME target, and hash.
-- **Drill-down pages** (`/domains/:id/dkim/:problemId`) reuse the same header row (so the user never
-  loses context), then: **Concept** (what this state means, 2–3 paragraphs), **Your data** (the §9
-  data fields rendered live from the latest run), **Diagnose it yourself** (copyable terminal
-  commands from §3), **Path forward** (numbered steps with copyable records), and a further-reading
-  footer. Back chevron returns to the DKIM page anchor.
+- **Drill-down pages** (`/domains/:domainId/runs/:runId/dkim/:problemId`; newest-run alias
+  `/domains/:domainId/dkim/:problemId`) reuse the same header row — run timestamp and prev/next
+  included, so the user never
+  loses context — then: **Concept** (what this state means, 2–3 paragraphs), **Your data** (the §9
+  data fields rendered from **this run's** YAML), **Diagnose it yourself** (copyable terminal
+  commands from §3 — the same commands the run itself executed appear pre-filled from
+  `tool_runs[].command`), **Path forward** (numbered steps with copyable records), and a
+  further-reading footer. Back chevron returns to this run's DKIM page anchor.
 
 ---
 
@@ -881,9 +1094,11 @@ forward from the previous run's row for the same `(domain_id, selector, key_sha2
 `dkim.rotation` can compute age even though each run inserts a fresh row.
 
 **Mapping onto today's file store.** There is **no database in the first round** (see
-[Engineering §7](../engineering.mdx)). Today the structured observation is the checker's
-`results.dkim` payload inside the per-run audit record, exactly the `selectors[]` +
-`wildcard_shadow` + `duplicate_keys` shape shown in §5's YAML (same snake_case keys in code, like
+[Engineering §7](../engineering.mdx)). Today the structured observation is the `dkim` key of the
+run's YAML file — `~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml`
+([../storage.mdx](../storage.mdx)) — exactly the `selectors[]` +
+`wildcard_shadow` + `duplicate_keys` + `tool_runs[]` + `tests[]` shape shown in §5 (same
+snake_case keys in code, like
 `results.dmarc`). The configured
 selectors live on each domain record (`dkimSelectors: string[]` — the future `dkim_selectors`
 table); `key_sha256` values for the duplicate-key compare are read across the latest stored audit of

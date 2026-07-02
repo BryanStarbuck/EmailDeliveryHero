@@ -1,0 +1,234 @@
+---
+title: "Use case: view one category run"
+description: The generic spec for the view-one-category-run page — the sub-test results of ONE test category (SPF, DKIM, DMARC, Blacklists, DNS & Infrastructure, or Spam & Content) within ONE health-check run. Reached by clicking a category cell on the Dashboard or a category section's chevron on a run report. Covers the header with category-sticky prev/next run navigation, the sub-test results table with expandable fixes and copy-to-clipboard, the deferred category-specific panels, the "How we measured" tool-run transparency strip, empty/404 states, the run-YAML data source, and acceptance criteria.
+---
+
+# Use case: view one category run
+
+This is the **generic spec** for the page that shows **one test category within one run** — the
+sub-test results for that category (Level 2 of the locked **Run → Test → Sub-test** hierarchy) as
+observed by that single `startedAt`/`finishedAt`-stamped execution. There are six instances of the
+page, one per locked category — **SPF, DKIM, DMARC, Blacklists, DNS & Infrastructure,
+Spam & Content** — all sharing the frame defined here; each category's own spec defines its extra
+panels. It builds on the sibling specs and does not repeat them:
+
+* [Dashboard](../dashboard.mdx) — the two tables whose **category-cell clicks** lead here, and the
+  locked vocabulary, colors, and routes.
+* [View one health check run](./view_health_check_run.mdx) — the run report whose category-section
+  **Open ›** chevron leads here; the frame this page slots under.
+* [Storage](../storage.mdx) — the run YAML file whose category key this page renders.
+* [Engineering](../engineering.mdx) — the audit engine, finding shape, and scheduler.
+* The six category specs, which own the sub-test catalogs and the category-specific panels this
+  page hosts: [SPF](../checks/spf.mdx) · [DKIM](../checks/dkim.mdx) ·
+  [DMARC](../checks/dmarc.mdx) · [Blacklists](../checks/blacklists.mdx) ·
+  [DNS & Infrastructure](../checks/dns.mdx) · [Spam & Content](../checks/spam_content.mdx).
+
+---
+
+## 1. Persona and goal
+
+| | |
+| --- | --- |
+| **Persona** | A deliverability owner (signed in as `bryan@whitehatengineering.com`). |
+| **Goal** | Having seen a red DKIM cell for `whitehatengineering.com`, open the DKIM results of that run, read every DKIM sub-test with its evidence, and copy the exact fix for each failure. |
+| **Precondition** | The domain has at least one persisted run whose YAML file contains the category's key (e.g. `dkim:` inside `~/.email_delivery_hero/runs/whitehatengineering.com/2026_07_01_09_14AM.yaml`). |
+
+---
+
+## 2. Getting here
+
+Four ways in, all landing on the same page:
+
+1. **Dashboard Table 1 (Domain health) — category cell click.** Clicking a category **cell** on a
+   domain's row (rather than the row itself) opens this page for that category on the domain's
+   **newest run**, via the newest-run alias route **`/domains/:domainId/<slug>`**.
+2. **Dashboard Table 2 (Runs) — category cell click.** Clicking a category cell on a run's row
+   opens this page for that category on **that specific run**:
+
+   ```
+   /domains/:domainId/runs/:runId/<slug>
+   ```
+
+3. **Run report — category section chevron.** On the
+   [run report](./view_health_check_run.mdx), each of the six category sections carries an
+   **Open ›** chevron (and each header category chip a small **›**) that opens this page for that
+   category of the run being viewed.
+4. **Direct URL.** The routes above are bookmarkable/shareable. The newest-run alias re-resolves to
+   the domain's most recent run on every visit.
+
+The **slugs are locked**: `spf`, `dkim`, `dmarc`, `blacklists`, `dns`, `spam-content` — mapping
+1:1 to the six categories and to the YAML category keys `spf`, `dkim`, `dmarc`, `blacklists`,
+`dns_infra`, `spam_content`.
+
+---
+
+## 3. Page layout
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Back to run report                                          [⟳ Re-run]     │  header row
+│ whitehatengineering.com  ·  DKIM                              [ Critical ]   │
+│ Run: started 2026-07-01 09:14 AM · finished 09:14 AM · 3.1s                  │
+│ ‹ prev run   [ 2026-07-01 09:14 AM ▾ ]  next run ›              [NEWEST]     │  run switcher
+│                                                     (stays on DKIM)          │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  SUB-TEST RESULTS                                   0 passed · 2 failed      │  main table
+│  ✗ dkim.selector_google   selector `google`: no TXT published       [v]      │
+│      observed: NXDOMAIN at google._domainkey.whitehatengineering.com         │
+│      fix: publish google._domainkey TXT "v=DKIM1; k=rsa; p=…"   [copy fix]  │
+│  ✗ dkim.key_parses        key does not parse — record missing      [v]      │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  (CATEGORY-SPECIFIC PANELS — defined per category spec)                      │
+│  e.g. SPF: published-record + include tree · DKIM: per-selector key panel ·  │
+│  DMARC: policy + per-source-IP report table · Blacklists: per-zone listing   │
+│  grid · DNS & Infra: MX/PTR/NS panels · Spam & Content: score breakdown      │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  ▸ HOW WE MEASURED (2 tool runs)                                             │  transparency strip
+│      $ dig +short TXT google._domainkey.whitehatengineering.com   0.09s  0   │
+│      $ dig +short TXT selector1._domainkey.whitehateng…          0.08s  0   │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 4. The header
+
+* **Domain + category name** — e.g. "whitehatengineering.com · DKIM".
+* **Category status chip** — the category's roll-up status for this run, in the locked colors
+  (dark green healthy / dark red critical / amber warning / light gray never-run), identical to
+  the Dashboard cell the user clicked.
+* **Run timestamp** — this run's `started_at` / `finished_at` / duration, so the user always knows
+  **which** run they are reading (a domain has many).
+* **Run switcher — category-sticky.** ‹ prev / next › steps plus a newest-first runs dropdown for
+  this domain (fed by `GET /api/audit/runs?domainId=`), exactly as on the run report — but
+  navigation **stays on this category across runs**: pressing ‹ prev on
+  `/domains/:d/runs/:r2/dkim` goes to `/domains/:d/runs/:r1/dkim`. This is how a user watches one
+  category evolve run over run. A **NEWEST** badge marks the most recent run.
+* **Re-run button** — runs this domain's checks again (`POST /api/audit/run/:domainId`, a full
+  run — runs are atomic per domain); on completion the page navigates to the new run's page **for
+  this same category**, so the user immediately sees whether their fix flipped the sub-tests.
+* **Back link** — "‹ Back to run report" returns to this run's
+  [run report](./view_health_check_run.mdx) (`/domains/:domainId/runs/:runId`), scrolled to this
+  category's section.
+
+---
+
+## 5. The sub-test results table
+
+The heart of the page: **one row per sub-test** of this category in this run, rendered from the
+category's `tests:` rows in the run YAML. Sort order is fixed fail → warn → info → pass (never
+alphabetical). Each row:
+
+* **Result icon** — ✗ red (fail) / ⚠ amber (warn) / ⓘ slate (info) / ✓ green (pass).
+* **Sub-test id + title** — the id in small caps (e.g. `dkim.selector_google`) with the
+  plain-language title.
+* **Observed value / evidence** — what the check actually saw, monospace for DNS names, records,
+  and IPs (e.g. the raw TXT answer, the DNSBL response code, the header value).
+* **Expandable accordion** (`[v]`) — opens the full detail: *observed* (the exact evidence), *why
+  it matters* (one sentence), and the **Fix** block — the concrete remediation with a
+  **copy-to-clipboard** button. Copy buttons always copy the **publishable value** (the exact TXT
+  record / header line / DNS entry), never prose. NEW / STILL PRESENT / RESOLVED regression badges
+  and "from reports" chips carry over from the run report unchanged.
+
+A counts strip above the table ("0 passed · 2 failed") matches the pass/fail counts shown on the
+run report's category section and the Dashboard cell metric.
+
+---
+
+## 6. Category-specific panels (deferred)
+
+Below the sub-test table, each category adds its own diagnostic panels. **This spec deliberately
+does not define them** — they belong to the category specs, which own their §6–7 UI sections:
+
+| Category | Panels defined in | Examples |
+| --- | --- | --- |
+| SPF | [../checks/spf.mdx](../checks/spf.mdx) | budget hero, published-record panel, include tree, sending-IP coverage, problem-state cards |
+| DKIM | [../checks/dkim.mdx](../checks/dkim.mdx) | per-selector key panels, key-length/parse detail |
+| DMARC | [../checks/dmarc.mdx](../checks/dmarc.mdx) | policy panel, per-source-IP aggregate-report table |
+| Blacklists | [../checks/blacklists.mdx](../checks/blacklists.mdx) | per-zone listing grid, TXT reasons, delisting links |
+| DNS & Infrastructure | [../checks/dns.mdx](../checks/dns.mdx) | MX / PTR-FCrDNS / NS panels |
+| Spam & Content | [../checks/spam_content.mdx](../checks/spam_content.mdx) | content-score breakdown, header checklist, placement gauge |
+
+This page provides the frame (header, sub-test table, tool-run strip, states); the category spec
+plugs its panels into the marked band.
+
+---
+
+## 7. Tool-run transparency — "How we measured"
+
+An expandable strip (collapsed by default) listing the category's **`tool_runs:`** from the run
+YAML — every external tool invocation the checker made for this category in this run. One row per
+tool run:
+
+**`$ command` (monospace, copyable) | duration | exit code**
+
+e.g. `$ dig +short TXT google._domainkey.whitehatengineering.com · 0.09s · exit 0`. A non-zero
+exit code renders the row amber. This lets a skeptical operator reproduce every measurement by
+hand in a terminal.
+
+---
+
+## 8. Empty, never-run, loading, and 404 states
+
+* **Never run** — the domain exists but has no runs (arrival via the newest-run alias): gray
+  header chip, "No runs yet — run checks to see [category] results" with a **Run checks** CTA.
+* **Category absent from run** — the run YAML predates a category or the checker was skipped: the
+  sub-test table is replaced by "This run did not measure [category]" with the Re-run CTA.
+* **A failing result is NOT empty** — e.g. "no DKIM record found" renders the fail rows with their
+  concrete publish-this remediations; emptiness refers only to absent data, never to bad results.
+* **Loading** — skeleton header + skeleton table rows sized to the table columns; no layout shift.
+* **404** — unknown `:runId`, unknown `:domainId`, or an unrecognized slug: "not found" state with
+  a **Back to dashboard** link.
+
+---
+
+## 9. Data source
+
+Everything on this page comes from **one category key inside one run's YAML file** (see
+[Storage](../storage.mdx)): the backend serves the run via **`GET /api/audit/runs/:runId`**, the
+frontend selects the slug's category key — `spf`, `dkim`, `dmarc`, `blacklists`, `dns_infra`, or
+`spam_content` — and renders its **structured observation** (feeding the category-specific
+panels), its **`tool_runs:`** (feeding §7), and its **`tests:`** rows (feeding §5). The run
+switcher and newest-run alias resolve through `GET /api/audit/runs?domainId=`. No
+category-specific endpoint exists: the run file is the single source of truth, which is what makes
+prev/next comparison across runs cheap and exact.
+
+---
+
+## 10. Acceptance criteria
+
+1. Clicking a **category cell** on Dashboard Table 1 opens `/domains/:domainId/<slug>` (this
+   category on the domain's newest run); on Table 2 it opens
+   `/domains/:domainId/runs/:runId/<slug>` (this category on that run). The run report's category
+   **Open ›** chevron opens the same route for the run being viewed. Slugs are exactly `spf`,
+   `dkim`, `dmarc`, `blacklists`, `dns`, `spam-content`.
+2. The header shows the domain, category name, the category's status chip in the locked colors,
+   and the run's `started_at` / `finished_at` / duration.
+3. The run switcher (‹ prev / next ›, runs dropdown, NEWEST badge) navigates between this
+   domain's runs while **staying on this category**; Re-run creates a fresh run and lands on this
+   category of the new run; the back link returns to this run's report.
+4. The sub-test table renders one row per sub-test from the category's `tests:` rows — result
+   icon, sub-test id + title, observed evidence — sorted fail → warn → info → pass, each row
+   expandable to the full detail and a concrete **Fix** with copy-to-clipboard that copies the
+   exact publishable value.
+5. Category-specific panels render per that category's own spec (§6 table); this page provides
+   only the shared frame.
+6. The "How we measured" strip lists every `tool_runs:` entry for this category in this run —
+   copyable command, duration, exit code.
+7. Empty / never-run / category-absent / loading / 404 states render per §8; a failing check
+   result always renders as results with fixes, never as an empty state.
+8. All data comes from the category key inside the run YAML via `GET /api/audit/runs/:runId`
+   (list/alias resolution via `GET /api/audit/runs?domainId=`); no category-specific endpoint.
+
+<!--
+  Keep this aligned with the run YAML layout in ../storage.mdx (category keys
+  spf/dkim/dmarc/blacklists/dns_infra/spam_content, each with observation, tool_runs, tests), the
+  Dashboard category-cell click behavior and Run → Test → Sub-test vocabulary in ../dashboard.mdx,
+  and the run report in ./view_health_check_run.mdx (that page previews sub-tests; THIS page owns
+  the full sub-test detail). LOCKED: routes /domains/:domainId/runs/:runId/<slug> with newest alias
+  /domains/:domainId/<slug> and slugs spf/dkim/dmarc/blacklists/dns/spam-content; the four status
+  colors; prev/next run navigation STAYS on the same category. This spec is the GENERIC frame —
+  category-specific panels live in ../checks/spf.mdx, dkim.mdx, dmarc.mdx, blacklists.mdx, dns.mdx,
+  spam_content.mdx and must never be redefined here. Copy buttons copy publishable values, never
+  prose.
+-->

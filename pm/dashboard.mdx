@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — Dashboard
-description: The main screen of EmailDeliveryHero — a plain-text brand header over TWO TanStack Tables. Table 1 (Domain health) is one row per monitored domain with six locked test columns (SPF, DKIM, DMARC, Blacklists, DNS & Infrastructure, Spam & Content), a per-row play button that runs checks for just that domain, and a triple-dot menu. Table 2 (Runs) is one row per run — Date, Domain, then the same six test columns — with a right chevron and a triple-dot menu on every row. Defines the Run → Test → Sub-test hierarchy, whole-row click navigation to a run report (top table opens the newest report), the top-right Run checks button and scheduled-checks toggle, and empty/loading states.
+description: The main screen of EmailDeliveryHero — a plain-text brand header over TWO TanStack Tables. Table 1 (Domain health) is one row per monitored domain with six locked test columns (SPF, DKIM, DMARC, Blacklists, DNS & Infrastructure, Spam & Content), a per-row play button that runs checks for just that domain, and a triple-dot menu. Table 2 (Runs) is one row per run — Date, Domain, then the same six test columns — with a right chevron and a triple-dot menu on every row. Defines the Run → Test → Sub-test hierarchy, the two-level click model (clicking anywhere on a row opens the run report — top table opens the domain's newest run; clicking a TEST CELL like SPF or DMARC opens that test's "view one category run" page with its sub-test results instead), the runs/<domain>/<timestamp>.yaml run history, the top-right Run checks button and scheduled-checks toggle, and empty/loading states.
 ---
 
 # EmailDeliveryHero — Dashboard
@@ -26,7 +26,11 @@ This spec builds on the siblings and does not repeat them:
   Table/Router/Query frontend on port **4444**.
 * [Scheduled checks](./scheduled_checks.mdx) — the recurring-checks configuration page the toggle's chevron opens.
 * [Spam checks](./spam_checks.mdx) — the full catalog of sub-tests each of the six test columns groups.
+* [Storage](./storage.mdx) — §7: the run history on disk, one YAML file per run at
+  `runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml`.
 * [View one health check run](./use_cases/view_health_check_run.mdx) — the run report a row click opens.
+* [View one category run](./use_cases/view_one_category_run.mdx) — the per-test sub-test-results page a
+  **test cell** click opens.
 
 ---
 
@@ -55,9 +59,11 @@ export interface AuditRun {
 }
 ```
 
-**Backend requirement.** The engine keeps the latest result per domain (`audits.json`) **and** a
-run history (`runs.json`): every run is appended with its `runId`, `startedAt`, `finishedAt`,
-capped at the newest **50 runs per domain**. Endpoints:
+**Backend requirement.** The engine keeps the latest result per domain (`audits.json`, a derived
+cache) **and** a run history: **every run persists as one YAML file** at
+`~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml` — one subdirectory per
+domain, filename = the run's start timestamp ([Storage §7](./storage.mdx)) — capped at the newest
+**50 runs per domain**. Endpoints:
 
 * `GET /api/audit/runs` — all kept runs, newest `startedAt` first (optional `?domainId=` filter).
 * `GET /api/audit/runs/:runId` — one run in full (the run report's data).
@@ -92,7 +98,9 @@ Domain health**, and **Table 2 — Runs**.
 
 * Both tables share the same six **test** columns, the same status-cell design (§5), and sticky
   header rows; each scrolls with the page.
-* Every row in **both** tables is a whole-row click target that opens a run report (§6).
+* Every row in **both** tables is a whole-row click target that opens a run report, and every
+  **test cell** inside a row is its own click target that opens that test's sub-test results
+  ("view one category run") — Table 1 for the domain's newest run, Table 2 for that row's run (§6).
 * Every row in both tables carries trailing row controls (§4.3 / §4.4): Table 1 rows end with a
   **play button** and a **triple-dot menu**; Table 2 rows end with a **right chevron** and a
   **triple-dot menu**.
@@ -256,22 +264,48 @@ Per-test choice: **SPF / DKIM / DMARC / DNS & Infrastructure** → `K of M fail`
 
 ---
 
-## 6. Row click → the run report (and the one exception)
+## 6. Click model — row click opens the run, cell click opens the test
 
-**Clicking anywhere in a row navigates to a run report** — the
-[view one health check run](./use_cases/view_health_check_run.mdx) page showing every test, every
-sub-test, its severity, and its remediation.
+Two nested click targets on every row of both tables. Both land on a run; they differ in **how
+deep** they open it:
 
-* **Table 1 (Domain health):** row click opens the domain's **newest** run report (`/domains/$id`).
+### 6.1 Row click → the run report ("view one run")
+
+**Clicking anywhere on a row opens that row up** — it navigates to the run report, the
+[view one health check run](./use_cases/view_health_check_run.mdx) page showing the run summary and
+all six tests with their sub-tests, severities, and remediations.
+
+* **Table 1 (Domain health):** row click opens the domain's **newest** run's report
+  (`/domains/$domainId` — the newest-run alias of `/domains/$domainId/runs/$runId`).
 * **Table 2 (Runs):** row click opens **that specific run's** report
   (`/domains/$domainId/runs/$runId`).
 * The whole row is the hit target (`cursor-pointer`, hover highlight), routed via TanStack Router.
 
-**The one exception — going inside a test.** Tests that have a full page
-([checks/*.mdx §6.1](./checks/overview.mdx)) show a small chevron next to their status cell; pressing
-that button goes **inside that test** (e.g. `/domains/$id/spf`) instead of opening the whole run
-report. Row controls (§4.3/§4.4) likewise capture their own clicks. Everything else in the row —
-including the other cells — falls through to the whole-row navigation.
+### 6.2 Test-cell click → inside that test ("view one category run")
+
+**Clicking one of the six TEST CELLS — SPF, DKIM, DMARC, Blacklists, DNS & Infrastructure, or
+Spam & Content — opens that test's page** instead of the whole run report: the
+[view one category run](./use_cases/view_one_category_run.mdx) page, which shows that test's
+**sub-test results** for the run (plus the test's own panels — see the category specs under
+[checks/](./checks/overview.mdx)).
+
+* **Table 1 (Domain health):** clicking a test cell opens that test **for the domain's newest run**
+  — e.g. the SPF cell → `/domains/$domainId/spf` (newest-run alias of
+  `/domains/$domainId/runs/$runId/spf`).
+* **Table 2 (Runs):** clicking a test cell opens that test **for that specific run** —
+  `/domains/$domainId/runs/$runId/<slug>`.
+* Category slugs, in column order: `spf`, `dkim`, `dmarc`, `blacklists`, `dns`, `spam-content`.
+* The **whole cell** is the hit target; on hover the cell shows a small chevron (›) at its right
+  edge as the affordance, and the cell (not the row) gets the hover highlight, so the two targets
+  read as distinct. A gray **never-run** cell has no test data to open — its click falls through
+  to the row navigation.
+* Cell clicks **stop propagation** — a test-cell click never also triggers the row navigation.
+
+### 6.3 Precedence
+
+Innermost target wins: **row controls** (§4.3/§4.4) > **test cell** (§6.2) > **whole row** (§6.1).
+Everything in the row that is not a control or a test cell — the Domain and Date columns included —
+falls through to the whole-row navigation.
 
 ---
 
@@ -326,13 +360,19 @@ An on/off switch for recurring checks, with a **chevron on its right**:
    (`YYYY-MM-DD HH:mm`), **Domain** column, the six test columns for that run, and trailing row
    controls: a **› right chevron** that opens the run and a **⋮ triple-dot menu** (Open report /
    Run checks again / Delete run).
-5. **Every row in both tables is clickable**: Table 1 rows open the domain's **newest** run report;
-   Runs rows open **that run's** report. Row controls and per-test chevrons capture their own
-   clicks and never trigger row navigation.
-6. Pressing a test cell's chevron goes **inside that test** (its full page) — the one exception to
-   whole-row navigation.
-7. The backend keeps a **run history** (`runId`, `startedAt`, `finishedAt`, findings; 50 newest per
-   domain) and serves `GET /api/audit/runs` (+ `/:runId`); the Runs table renders from it.
+5. **Every row in both tables is clickable**: Table 1 rows open the domain's **newest** run report
+   (`/domains/$domainId`); Runs rows open **that run's** report
+   (`/domains/$domainId/runs/$runId`). Row controls and test cells capture their own clicks and
+   never trigger row navigation.
+6. **Every test cell is clickable and goes inside that test**: clicking SPF, DKIM, DMARC,
+   Blacklists, DNS & Infrastructure, or Spam & Content opens that test's "view one category run"
+   page — Table 1 → the newest run (`/domains/$domainId/<slug>`), Table 2 → that run
+   (`/domains/$domainId/runs/$runId/<slug>`), slugs `spf`/`dkim`/`dmarc`/`blacklists`/`dns`/
+   `spam-content`. The whole cell is the target (hover chevron affordance); never-run gray cells
+   fall through to row navigation. Precedence: row controls > test cell > whole row (§6.3).
+7. The backend keeps a **run history** — one YAML file per run at
+   `runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml` ([Storage §7](./storage.mdx)); 50 newest per
+   domain — and serves `GET /api/audit/runs` (+ `/:runId`); the Runs table renders from it.
 8. Status cells follow the locked four-color mapping and short metric text rules (§5).
 9. The **Run checks** button and **scheduled toggle + chevron** behave per §7.
 10. Empty/never-run/loading states render per §8 with no layout shift.
@@ -342,8 +382,12 @@ An on/off switch for recurring checks, with a **chevron on its right**:
   ./spam_checks.mdx. LOCKED across all specs: the SIX tests (SPF, DKIM, DMARC, Blacklists,
   DNS & Infrastructure, Spam & Content), the FOUR status colors (dark green / dark red / amber /
   light gray), and the Run → Test → Sub-test vocabulary (run = per-domain with startedAt/finishedAt).
-  Table 1 = one row per domain (play + kebab), Table 2 = one row per run (chevron + kebab), whole-row
-  click opens a run report, test-cell chevrons open the test's page. The brand header is NORMAL text
+  Table 1 = one row per domain (play + kebab), Table 2 = one row per run (chevron + kebab). CLICK
+  MODEL (§6): whole-row click opens the run report (Table 1 → newest run, Table 2 → that run);
+  clicking a TEST CELL opens that test's "view one category run" page
+  (/domains/$domainId[/runs/$runId]/<slug>, slugs spf/dkim/dmarc/blacklists/dns/spam-content);
+  precedence row-controls > cell > row. Run history = one YAML per run at
+  runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml (storage.mdx §7). The brand header is NORMAL text
   (tracking-normal, plain spaces). When a metric string rule changes, update §5.2. Left bar lives in
   ./leftbar.mdx + pm/left_bar.yaml — never redefine it here.
 -->

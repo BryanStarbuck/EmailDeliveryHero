@@ -1,6 +1,6 @@
 ---
 title: Blacklists (DNSBL / RHSBL / IP & Domain Reputation Blocklists)
-description: How EmailDeliveryHero queries DNS-based blocklists for a domain's sending IPs and domain names, interprets 127.0.0.x return codes and TXT reasons, weights per-zone impact, and hands the user the exact per-zone delisting URL and reason code for every listing. Includes the complete tiered catalog of every blocklist we know (where it lives, how to look it up, how to delist), the dead-zone do-not-check registry, provider reputation portals, the Brew/Node test toolchain, the test plan and test_results.yaml schema, the summary-card + chevron full-page UI, the UX layout, the fix-recommendation playbook, the catalog of problem states with a diagnosis deep-dive for each, the left-bar Blacklists Dashboard (§17), the checked-in blacklists.yaml source-of-truth registry (§18), and the email-derived IP/domain target pipeline (§19).
+description: How EmailDeliveryHero queries DNS-based blocklists for a domain's sending IPs and domain names, interprets 127.0.0.x return codes and TXT reasons, weights per-zone impact, and hands the user the exact per-zone delisting URL and reason code for every listing. Includes the complete tiered catalog of every blocklist we know (where it lives, how to look it up, how to delist), the dead-zone do-not-check registry, provider reputation portals, the verified Brew/npm testing toolbox and the exact per-tool command lines a run executes (§10, captured into blacklists.tool_runs[]), the test plan (§11), the per-run YAML — the top-level `blacklists` key inside ~/.email_delivery_hero/runs/{domain}/{timestamp}.yaml with status, observation, tool_runs and tests (§12, storage contract in ../storage.mdx), the run-scoped "view one category run" page at /domains/:domainId/runs/:runId/blacklists with prev/next run navigation and the zones × targets listings matrix (§13), the UX layout (§14), the fix-recommendation playbook (§15), the catalog of problem states with a diagnosis deep-dive for each (§16), the left-bar Blacklists Dashboard (§17), the checked-in blacklists.yaml source-of-truth registry (§18), and the email-derived IP/domain target pipeline (§19).
 ---
 
 # Blacklists (DNSBL / RHSBL / IP & Domain Reputation Blocklists)
@@ -11,7 +11,8 @@ A DNS-based blocklist (DNSBL) is a list of IP addresses — and, for right-hand-
 - [../overview.mdx](../overview.mdx) — product charter, personas, port list.
 - [../engineering.mdx](../engineering.mdx) — Checker/Finding contract, file store, scheduler.
 - [../spam_checks.mdx](../spam_checks.mdx) — master catalog; Blacklists is one of its six categories.
-- [../dashboard.mdx](../dashboard.mdx) — the 6-column status dashboard (Blacklists is a column).
+- [../dashboard.mdx](../dashboard.mdx) — the 6-column status dashboard (Blacklists is a column) and the **Run → Test → Sub-test** vocabulary; this spec is the **Blacklists** test, its zone checks are the sub-tests.
+- [../storage.mdx](../storage.mdx) — the per-run YAML file store (`~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml`); this spec defines only the `blacklists` key inside that file (§12), never the file/`run:` envelope itself.
 - [../scheduled_checks.mdx](../scheduled_checks.mdx) — recurring-check config; blacklist status is time-varying, so cadence matters.
 - [../use_cases/domain_on_blacklist.mdx](../use_cases/domain_on_blacklist.mdx) — the end-to-end "you are listed, here is how to delist" user journey.
 - [./link_url_reputation.mdx](./link_url_reputation.mdx) — URI blocklists (SURBL, Spamhaus DBL, ivmURI) overlap with the domain-side zones here; that spec tests domains found *inside* message bodies, this one tests your sending domain and IPs.
@@ -89,6 +90,14 @@ The table above is the **default-enabled** set. The **complete catalog** — eve
 ## 4. User interface
 
 **Dashboard contribution.** The **Blacklists** column cell for a domain is the roll-up of all `dnsbl.*` findings: dark green when every enabled zone returns clean, amber when the worst listing is a `warning` (e.g. SpamCop, PBL, UCEPROTECT collateral), dark red when any high-weight zone (Zen/SBL/XBL/DBL/Barracuda/SURBL) lists a sending IP or the domain, light gray when never run. The cell shows a compact count badge, e.g. `2/47 listed`, meaning 2 of 47 (zone × target) checks are positive.
+
+**Cell click → the run-scoped category page.** Per [../dashboard.mdx §6](../dashboard.mdx), clicking the **Blacklists cell** (its chevron) is the one exception to whole-row navigation:
+
+- On a **Domain-health** row (Table 1) it opens the domain's **newest run's** Blacklists page — `/domains/:domainId/blacklists`, the newest-run alias of `/domains/:domainId/runs/:runId/blacklists`.
+- On a **Runs** row (Table 2) it opens **that run's** Blacklists page — `/domains/:domainId/runs/:runId/blacklists`.
+- Clicking anywhere else in either row opens the whole run report (`/domains/:domainId/runs/:runId`, newest alias `/domains/:domainId`), where the Blacklists section's chevron `›` also drills into this same category page.
+
+The full run-scoped page is specified in [§13.2](#132-the-full-page--view-one-category-run-domainsdomainidrunsrunidblacklists); its layout in [§14](#14-ux-design--what-goes-where-and-why).
 
 **Audit-detail view.** Findings render grouped under a "Blacklists" section, one row per positive/notable result, using shadcn/ui `Table` + `Badge` (React 19, lucide-react icons):
 
@@ -325,9 +334,14 @@ The biggest receivers run private reputation systems that behave like blocklists
 
 ---
 
-## 10. Test tooling — Brew-installed tools and Node libraries
+## 10. Testing toolbox — Brew / npm tools
 
-The checker's **primary path is in-process Node** (`node:dns/promises` / the `dnsbl` npm package) per [../engineering.mdx](../engineering.mdx). Brew tools serve three roles: (a) an **oracle** to cross-validate our checker in tests, (b) **diagnosis commands** we print on problem-state deep-dive pages so the user can verify independently, (c) optional future child-process integrations. Formula names verified with `brew info` (2026-07).
+Every tool below was verified to exist at formulae.brew.sh / npmjs.com (re-verified 2026-07: brew `doggo` 1.2.0, brew `dnsx` 1.2.3, npm `dnsbl` 5.1.1 published 2026-05 — all real and maintained). The checker's **primary path is in-process Node** (`node:dns/promises` / the `dnsbl` npm package) per [../engineering.mdx](../engineering.mdx). Brew tools serve three roles: (a) an **oracle** to cross-validate our checker in tests, (b) **diagnosis commands** we print on problem-state deep-dive pages so the user can verify independently, (c) child-process invocations during a run — every one of which is captured verbatim into `blacklists.tool_runs[]` (§10.4, §12).
+
+```bash
+brew install bind doggo q dnsx ldns knot nmap whois ipcalc checkdmarc swaks dnstwist
+npm install dnsbl            # the in-process DNSBL library — same TS/Node stack as the app
+```
 
 ### 10.1 DNS query tools (raw DNSBL lookups)
 
@@ -363,11 +377,40 @@ Parsing rules that the spec mandates regardless of tool: **empty `dig +short` ou
 
 ### 10.3 Node / in-process (the primary implementation path)
 
-| Package | Role |
-|---|---|
-| `dnsbl` (npm, v5.x) | Purpose-built: `lookup(ip, zone)` → boolean; `{includeTxt:true}` → `{listed, txt}`; `batch(ips[], zones[])` with concurrency control. The natural core of `dnsbl.checker.ts` |
-| `node:dns/promises` | Zero-dep fallback: `resolve4()`/`resolveTxt()`; `ENOTFOUND` = clean. Use a dedicated `dns.Resolver` with `setServers()` pointed at a non-public recursive resolver so Spamhaus/URIBL answer truthfully |
-| `mailauth` (npm) | SPF/DKIM/DMARC/ARC/BIMI verification with a CLI (`mailauth report message.eml` → JSON) — same runtime as the app |
+| Package | Install | What we use it for | Example |
+|---|---|---|---|
+| **dnsbl** (npm, v5.1.x, silverwind, BSD-2) | `npm i dnsbl` | Purpose-built DNSBL client and the core of `blacklists.checker.ts`: `lookup(ip, zone, opts)` → boolean; `{includeTxt:true}` → `{listed, txt}`; `batch(addresses[], zones[], opts)` fans every (target × zone) pair out concurrently and returns `[{address, blacklist, listed, txt}]`. Options: `servers`, `timeout` (default 5000 ms), `concurrency` (default 64 — we cap at 8), `includeTxt`. **Gotcha (mandatory):** the package's **default `servers` are OpenDNS public resolvers** (`208.67.220.220/.222.222`) — exactly the kind Spamhaus/URIBL refuse or garbage-answer. Every call MUST pass `servers:` pointed at our configured non-public recursive resolver (§3). | `await batch(["203.0.113.24"], ["zen.spamhaus.org"], { servers: ["127.0.0.1"], includeTxt: true, timeout: 5000, concurrency: 8 })` |
+| **node:dns/promises** (built-in) | — | Zero-dep fallback and the RHSBL/domain path (npm `dnsbl` is IP-oriented): `resolve4()`/`resolveTxt()`; `ENOTFOUND`/`ENODATA` = clean. Use a dedicated `dns.Resolver` with `setServers()` so Spamhaus/URIBL answer truthfully. | `new Resolver().resolve4("example.com.dbl.spamhaus.org")` |
+| **mailauth** (npm) | `npm i mailauth` | SPF/DKIM/DMARC/ARC/BIMI verification with a CLI (`mailauth report message.eml` → JSON) — corroborates §19 email-derived streams; same runtime as the app. | `npx mailauth report msg.eml` |
+
+> **Lookalikes that do NOT exist / must not be specced** (checked against the npm registry 2026-07):
+> there is **no npm `multirbl`**, **no `rbl-check`**, **no `dnsbl-check`**, and **no `delist`** package.
+> npm **`dnsbl-lookup`** exists but is **abandoned** (v0.3.3, last published 2015) — do not use it; the
+> maintained package is `dnsbl` (v5.1.1, 2026-05). On brew, `dog` is gone (use `doggo`) and the formula
+> named `drill` is an unrelated Rust HTTP load tester (`drill` the DNS tool ships in `ldns`). There is
+> no CLI "delisting tool" anywhere — delisting is always the operator's own web portal/URL (§9), which
+> is why the registry (§18) carries a `delist_url` per zone and the UI links it (never automates it).
+
+### 10.4 How a test run executes the tools
+
+One Blacklists run (for one domain, inside one dashboard **Run**) executes the tool sequence below. Every external invocation — in-process `dnsbl.batch()` included, logged with its equivalent call string — appends one entry to **`blacklists.tool_runs[]`** in the run file (§12) with the locked shape `{tool, command, started_at, duration_ms, exit_code, output_format, parsed, error}`. `command` is the **exact argv string with every input argument** (reversed IP, zone host, domain, resolver, timeouts) so any entry can be replayed verbatim in a terminal; `parsed` is the captured/parsed output; `error` is `null` or the failure string. In-process calls record `exit_code: 0` on resolution (including NXDOMAIN — "clean" is a successful answer) and `1` on library error.
+
+**Etiquette rules that bind every step** (they are why these exact flags exist): per-query timeout **5 s** (`dnsbl` default; `dig +time=3 +tries=1`), global concurrency cap **8** in-flight (never the library default 64), jittered exponential back-off on SERVFAIL/timeout, per-run answer cache honoring TTL, and **never** a large open resolver (8.8.8.8 / 1.1.1.1 / 9.9.9.9 / OpenDNS — the npm default!) — Spamhaus public mirrors refuse them in-band (`127.255.255.252/.254/.255`) and URIBL answers `127.0.0.1` (`URIBL_BLOCKED`); any refusal code parses as **inconclusive, never listed**, and flips the run into [PS-9](#ps-9--queries-refused--resolver-blocked). Spamhaus public zones are free only for low-volume, non-commercial use; with a DQS key configured the zone host in every command swaps to `<key>.zen.dq.spamhaus.net` (etc.) automatically.
+
+| # | Step (feeds §11 test) | Tool | Exact command line (inputs shown for IP `203.0.113.24`, domain `whitehatengineering.com`, zone `zen.spamhaus.org`, resolver `127.0.0.1`) | Output format | How stdout is parsed → which fields it feeds |
+|---|---|---|---|---|---|
+| 1 | Zone-health preflight (RFC 5782) | `dig` (brew `bind`) | `dig @127.0.0.1 +time=3 +tries=1 +noall +comments +answer 2.0.0.127.zen.spamhaus.org A` then `… 1.0.0.127.zen.spamhaus.org A` | text (header + answer section) | Parse the `status:` header — positive probe must be `NOERROR` with answer `127.0.0.2`, negative probe must be `NXDOMAIN`; **never** trust empty `+short` output (clean and SERVFAIL look identical). → `blacklists.zone_health[]` (`status: ok\|dead\|wildcarding\|blocked\|slow`, `probe_ms`) |
+| 2 | IP listing sweep (every sending IP × enabled IP zone) | npm `dnsbl` (in-process) | `dnsbl.batch(["203.0.113.24"], ["zen.spamhaus.org","bl.spamcop.net",…], {servers:["127.0.0.1"], includeTxt:true, timeout:5000, concurrency:8})` | json (array of `{address, blacklist, listed, txt}`) | Each element → one `blacklists.results[]` row (`listed`, `reason_txt` from `txt`); a listed hit triggers step 3 for the authoritative `return_code`. Refusal codes remap `listed→inconclusive` + `refusal_code` |
+| 3 | Per-hit evidence query (A + TXT, JSON) | `doggo` | `doggo --json @udp://127.0.0.1:53 A TXT 24.113.0.203.zen.spamhaus.org` | json (`answers[].address/rdata`, `status`) | JSON `answers` → `results[].return_code` (exact `127.0.0.x`), TXT string → `results[].reason_txt` + mined delist URL; `queryTime` → `query_ms`. This is the copy-pasteable evidence the §14 debug drawer shows |
+| 4 | Domain/RHSBL sweep (no reversal) | `node:dns/promises` (in-process) | `resolver.resolve4("whitehatengineering.com.dbl.spamhaus.org")` + `resolver.resolveTxt(…)` (resolver pinned via `setServers(["127.0.0.1"])`) | json (promise results) | `ENOTFOUND` → clean; `127.0.1.x` → decode DBL category via the registry `return_codes` map → `results[]` rows for domain targets |
+| 5 | Bulk cross-check / big fleets (optional oracle; replaces 2–4 when >200 pairs) | `dnsx` | `printf '%s\n' 24.113.0.203.zen.spamhaus.org … \| dnsx -a -txt -resp -json -silent -retry 1 -t 8 -r 127.0.0.1` | jsonl (one object per query name) | Each line's `a`/`txt` arrays parse exactly like step 3; absent name = clean. → same `results[]` rows, `tool_runs[].parsed` keeps the raw JSONL |
+| 6 | PTR / FCrDNS context on every listed IP | `dig` | `dig @127.0.0.1 +time=3 +tries=1 +short -x 203.0.113.24` | text (one PTR per line) | Non-empty → `targets.ips[].ptr`; forward-confirm with `dig +short A <ptr>` (must contain the IP) → `fcrdns_ok`. Feeds [PS-7](#ps-7--rdnsfcrdns-defect-driving-listings) |
+| 7 | ASN / netblock owner on every listed IP | `whois` (keg-only: `/opt/homebrew/opt/whois/bin/whois`) | `whois 203.0.113.24` | text (RPSL key: value) | Grep `OrgAbuseEmail:`, `OriginAS:`/`origin:`, `NetRange:` → `targets.ips[].asn`, the §15.2 collateral-escalation email address |
+| 8 | Domain age (RHSBL context) | `whois` | `whois whitehatengineering.com` | text | Parse `Creation Date:` → `targets.domains[].created`; <30 days feeds [PS-11](#ps-11--new-domain-zero-reputation) |
+| 9 | Positive reputation | npm `dnsbl` (in-process) | `dnsbl.batch(["203.0.113.24"], ["list.dnswl.org","score.senderscore.com","rep.mailspike.net"], {servers:["127.0.0.1"], timeout:5000, concurrency:8})` | json | DNSWL `127.0.x.y` → category/trust; Sender Score last octet → 0-100 score; Mailspike rep code → label. → `blacklists.positive_reputation` |
+| 10 | Oracle cross-check (**CI only**, never product runtime) | `checkdmarc`, `dig +noall +comments` fixtures | `checkdmarc whitehatengineering.com -f json` | json | Jest compares our auth-adjacent findings against recorded fixtures offline; not written to `tool_runs[]` (CI artifact, not a run artifact) |
+
+**Where it all lands.** Steps 1–9 are the producers of the §12 structured observation: `tool_runs[]` holds the verbatim invocations and raw parsed output (the audit trail); `zone_health[]`, `results[]`, `targets`, and `positive_reputation` hold the interpreted fields the UI renders; `tests[]` holds the per-sub-test verdicts derived from them. A user reading the §14 debug drawer sees the very `command` string from `tool_runs[]`, so "diagnose it yourself" is always a copy-paste of what we actually ran.
 
 ---
 
@@ -386,99 +429,225 @@ The Blacklists audit is a fixed sequence; every numbered test emits rows into `t
 9. **Diff against previous run** — clean→listed = new problem (alertable), listed→clean = resolved, sub-list escalation = escalation; inconclusive transitions are ignored (§6).
 10. **Oracle cross-check (CI only, not in the product runtime)** — the Jest suite validates our checker against `dig +noall +comments` output and, for the auth-adjacent checks, against `checkdmarc` JSON, using recorded fixtures so tests run offline.
 
-## 12. Test results — the YAML we persist per run
+## 12. Test results (YAML) — the `blacklists` section of the run file
 
-The structured output of every Blacklists run is written per audit as **`test_results.yaml`** under `~/.email_delivery_hero/audits/<domainId>/<auditId>/blacklists/test_results.yaml` (the same data the audit JSON carries under `dnsbl`, in the YAML-store convention the app already uses for domains). One file per run; the UI reads only this file to render §13. Schema (`schema_version: 1`):
+Every run persists as **one YAML file** at
+`~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml` — for example
+`~/.email_delivery_hero/runs/whitehatengineering.com/2026_07_01_09_14AM.yaml` (`<domain>`
+lowercased; filename = the run's **start** time in local tz, 12-hour clock, zero-padded, AM/PM
+suffix). The file/path convention, the top-level `run:` envelope (`run_id`, `domain`,
+`started_at`/`finished_at` ISO-UTC, `score`, `status`), and the rule of **one top-level key per
+category** (`spf, dkim, dmarc, blacklists, dns_infra, spam_content`) are owned by
+[../storage.mdx](../storage.mdx) — referenced here, never redefined. This spec owns exactly one
+key: **`blacklists:`** (checkId prefix stays `dnsbl`). A domain accumulates one such file per run;
+the append-only file history is what powers the `diff:` block, the §13.2 prev/next run navigation,
+and the 30-run sparkline. The UI reads only this file to render §13.
+
+The `blacklists:` section holds, in the locked order: `status` (worst post-weighting severity),
+the **structured observation** (resolver, targets, zone health, and the per-zone × per-target
+listing matrix rows with return codes and TXT reasons), **`tool_runs:`** (one entry per external
+tool invocation — §10.4), **`tests:`** (one row per sub-test, pass and fail alike), `summary`,
+`problem_states`, and `diff`. Full realistic example:
 
 ```yaml
-schema_version: 1
-technology: blacklists
-domain: whitehatengineering.com
-audit_id: 2026-07-01T09-30-00_a1b2
-ran_at: 2026-07-01T09:30:00-07:00
-duration_ms: 8412
+# ~/.email_delivery_hero/runs/whitehatengineering.com/2026_07_01_09_14AM.yaml
+run:                               # envelope — owned by ../storage.mdx, shown for orientation only
+  run_id: run_01J9ZK3W8Qf4
+  domain: whitehatengineering.com
+  started_at: 2026-07-01T16:14:03Z # ISO-UTC (09:14 AM PDT — the filename timestamp, local tz)
+  finished_at: 2026-07-01T16:14:41Z
+  score: 78
+  status: critical
 
-resolver:
-  mode: local-recursive          # system | local-recursive | dqs
-  server: 127.0.0.1:5353
-  refusals_detected: false       # true → see problem_states PS-9
+spf: { … }                         # owned by ./spf.mdx
+dkim: { … }                        # owned by ./dkim.mdx
+dmarc: { … }                       # owned by ./dmarc.mdx
+dns_infra: { … }
+spam_content: { … }
 
-targets:
-  ips:
-    - ip: 203.0.113.24
-      source: sending_ips        # sending_ips | mx_resolved | spf_authorized | email_report (S19)
-      ptr: mail.whitehatengineering.com
-      fcrdns_ok: true
-      asn: { number: 64500, org: "Example Hosting LLC" }
-  domains:
-    - domain: whitehatengineering.com
-      source: primary            # primary | return_path | dkim_d
-      created: 2015-03-02        # whois; feeds PS-11 (new-domain state)
+blacklists:
+  status: critical                 # worst post-weighting severity across tests[] below
+  duration_ms: 8412
 
-zone_health:                     # RFC 5782 preflight, one row per enabled zone
-  - zone: zen.spamhaus.org
-    status: ok                   # ok | dead | wildcarding | blocked | slow
-    positive_probe: "127.0.0.2"
-    negative_probe: NXDOMAIN
-    probe_ms: 31
+  # ---- the structured observation ------------------------------------------
+  resolver:
+    mode: local-recursive          # system | local-recursive | dqs
+    server: 127.0.0.1:53
+    refusals_detected: false       # true → problem state PS-9
 
-results:                         # one row per (zone x target) actually queried
-  - zone: zen.spamhaus.org
-    tier: high                   # high | medium | low
-    kind: ip                     # ip | domain
-    target: 203.0.113.24
-    listed: true
-    return_code: "127.0.0.4"
-    sub_list: XBL
-    reason_txt: "https://check.spamhaus.org/query/ip/203.0.113.24"
-    lookup_url: "https://check.spamhaus.org"
-    delist_url: "https://check.spamhaus.org"
-    severity: critical           # after per-zone weighting (S3)
-    inconclusive: false
-    refusal_code: null           # e.g. "127.255.255.254" when refused
-    query_ms: 42
-  - zone: bl.spamcop.net
-    tier: high
-    kind: ip
-    target: 203.0.113.24
-    listed: false
-    query_ms: 18
+  targets:
+    ips:
+      - ip: 203.0.113.24
+        source: sending_ips        # sending_ips | mx_resolved | spf_authorized | email_report (§19)
+        ptr: mail.whitehatengineering.com
+        fcrdns_ok: true
+        asn: { number: 64500, org: "Example Hosting LLC" }
+    domains:
+      - domain: whitehatengineering.com
+        source: primary            # primary | return_path | dkim_d
+        created: 2015-03-02        # whois; feeds PS-11 (new-domain state)
 
-positive_reputation:
-  dnswl: { listed: false, category: null, trust: null }   # absence = info
-  senderscore: { score: 84, severity: info }
-  mailspike_rep: { code: "127.0.0.17", label: good }
+  zone_health:                     # RFC 5782 preflight, one row per enabled zone
+    - zone: zen.spamhaus.org
+      status: ok                   # ok | dead | wildcarding | blocked | slow
+      positive_probe: "127.0.0.2"
+      negative_probe: NXDOMAIN
+      probe_ms: 31
 
-provider_portals:                # S9.7 manual checklist state
-  - provider: google_postmaster
-    check_url: "https://postmaster.google.com"
-    user_state: unverified       # unverified | verified_clean | problem_reported
-  - provider: microsoft_snds
-    check_url: "https://sendersupport.olc.protection.outlook.com/snds/"
-    user_state: unverified
+  results:                         # the listings matrix — one row per (zone × target) queried
+    - zone: zen.spamhaus.org
+      tier: high                   # high | medium | low
+      kind: ip                     # ip | domain
+      target: 203.0.113.24
+      listed: true
+      return_code: "127.0.0.4"
+      sub_list: XBL
+      reason_txt: "https://check.spamhaus.org/query/ip/203.0.113.24"
+      lookup_url: "https://check.spamhaus.org"
+      delist_url: "https://check.spamhaus.org"
+      severity: critical           # after per-zone weighting (§3)
+      inconclusive: false
+      refusal_code: null           # e.g. "127.255.255.254" when refused
+      query_ms: 42
+    - zone: bl.spamcop.net
+      tier: high
+      kind: ip
+      target: 203.0.113.24
+      listed: false
+      query_ms: 18
+    - zone: dbl.spamhaus.org
+      tier: high
+      kind: domain
+      target: whitehatengineering.com
+      listed: false
+      query_ms: 22
 
-summary:
-  zones_enabled: 47
-  pairs_queried: 96
-  listed: 2
-  clean: 92
-  inconclusive: 2
-  dead_zones_skipped: 0
-  worst_severity: critical
-  problem_states: [PS-2, PS-12]  # named states from S16 detected this run
+  # ---- tool_runs: one entry per external tool invocation (§10.4) ------------
+  tool_runs:
+    - tool: dig
+      command: "dig @127.0.0.1 +time=3 +tries=1 +noall +comments +answer 2.0.0.127.zen.spamhaus.org A"
+      started_at: 2026-07-01T16:14:03Z
+      duration_ms: 31
+      exit_code: 0
+      output_format: text
+      parsed: { status: NOERROR, answers: ["127.0.0.2"] }   # RFC 5782 positive probe OK
+      error: null
+    - tool: dnsbl(npm)
+      command: 'dnsbl.batch(["203.0.113.24"], ["zen.spamhaus.org","bl.spamcop.net"], {servers:["127.0.0.1"], includeTxt:true, timeout:5000, concurrency:8})'
+      started_at: 2026-07-01T16:14:04Z
+      duration_ms: 388
+      exit_code: 0                 # in-process: 0 = resolved (NXDOMAIN counts), 1 = library error
+      output_format: json
+      parsed:
+        - { address: "203.0.113.24", blacklist: zen.spamhaus.org, listed: true, txt: ["https://check.spamhaus.org/query/ip/203.0.113.24"] }
+        - { address: "203.0.113.24", blacklist: bl.spamcop.net, listed: false }
+      error: null
+    - tool: doggo
+      command: "doggo --json @udp://127.0.0.1:53 A TXT 24.113.0.203.zen.spamhaus.org"
+      started_at: 2026-07-01T16:14:05Z
+      duration_ms: 42
+      exit_code: 0
+      output_format: json
+      parsed: { answers: ["127.0.0.4"], txt: ["https://check.spamhaus.org/query/ip/203.0.113.24"], status: NOERROR }
+      error: null
+    - tool: dig
+      command: "dig @127.0.0.1 +time=3 +tries=1 +short -x 203.0.113.24"
+      started_at: 2026-07-01T16:14:05Z
+      duration_ms: 25
+      exit_code: 0
+      output_format: text
+      parsed: { ptr: mail.whitehatengineering.com }
+      error: null
+    - tool: whois
+      command: "/opt/homebrew/opt/whois/bin/whois 203.0.113.24"
+      started_at: 2026-07-01T16:14:06Z
+      duration_ms: 640
+      exit_code: 0
+      output_format: text
+      parsed: { org: "Example Hosting LLC", origin_as: AS64500, org_abuse_email: abuse@examplehosting.example }
+      error: null
+    - tool: dnsbl(npm)
+      command: 'dnsbl.batch(["203.0.113.24"], ["list.dnswl.org","score.senderscore.com","rep.mailspike.net"], {servers:["127.0.0.1"], timeout:5000, concurrency:8})'
+      started_at: 2026-07-01T16:14:07Z
+      duration_ms: 210
+      exit_code: 0
+      output_format: json
+      parsed:
+        - { address: "203.0.113.24", blacklist: list.dnswl.org, listed: false }
+        - { address: "203.0.113.24", blacklist: score.senderscore.com, listed: true, txt: [] }   # 127.0.4.84 → score 84
+        - { address: "203.0.113.24", blacklist: rep.mailspike.net, listed: true }                 # 127.0.0.17 → good
+      error: null
 
-diff:                            # vs previous audit of this domain
-  new_listings: [ { zone: zen.spamhaus.org, target: 203.0.113.24, sub_list: XBL } ]
-  cleared: []
-  escalated: []
-  first_run: false
+  positive_reputation:
+    dnswl: { listed: false, category: null, trust: null }   # absence = info
+    senderscore: { score: 84, severity: info }
+    mailspike_rep: { code: "127.0.0.17", label: good }
+
+  provider_portals:                # §9.7 manual checklist state
+    - provider: google_postmaster
+      check_url: "https://postmaster.google.com"
+      user_state: unverified       # unverified | verified_clean | problem_reported
+    - provider: microsoft_snds
+      check_url: "https://sendersupport.olc.protection.outlook.com/snds/"
+      user_state: unverified
+
+  # ---- the per-sub-test rows (pass and fail alike; the §13.2 table) ---------
+  tests:
+    - id: dnsbl.spamhaus_zen
+      title: Spamhaus ZEN — 203.0.113.24 listed (XBL, compromised host)
+      result: fail                 # pass | fail | warn | info
+      evidence: "24.113.0.203.zen.spamhaus.org → 127.0.0.4; TXT: https://check.spamhaus.org/query/ip/203.0.113.24"
+      fix: Clean the infected host first, then self-delist at https://check.spamhaus.org (XBL clears immediately once clean).
+    - id: dnsbl.spamcop
+      title: SpamCop SCBL — 203.0.113.24 clean
+      result: pass
+      evidence: "24.113.0.203.bl.spamcop.net → NXDOMAIN"
+    - id: dnsbl.spamhaus_dbl
+      title: Spamhaus DBL — whitehatengineering.com clean
+      result: pass
+      evidence: "whitehatengineering.com.dbl.spamhaus.org → NXDOMAIN"
+    - id: dnsbl.uceprotect_l3
+      title: UCEPROTECT L3 — ASN-wide collateral listing
+      result: info
+      evidence: "24.113.0.203.dnsbl-3.uceprotect.net → 127.0.0.2 (whole-ASN sweep; not your fault)"
+      fix: No action unless placement measurably suffers; never pay express delisting (RFC 6471).
+    - id: dnsbl.aggregate
+      title: 1 critical listing across 47 zones × 3 targets
+      result: fail
+      evidence: "listed 2 · clean 92 · inconclusive 2 — worst = Spamhaus XBL on 203.0.113.24"
+      fix: Fix the XBL cause first (§15 orders the playbook), then re-run to confirm delisting.
+
+  summary:
+    zones_enabled: 47
+    pairs_queried: 96
+    listed: 2
+    clean: 92
+    inconclusive: 2
+    dead_zones_skipped: 0
+    worst_severity: critical
+
+  problem_states: [PS-2, PS-12]    # named states from §16 detected this run
+
+  diff:                            # vs the previous run file of this domain
+    new_listings: [ { zone: zen.spamhaus.org, target: 203.0.113.24, sub_list: XBL } ]
+    cleared: []
+    escalated: []
+    first_run: false
 ```
 
-Field rules: `severity` is the **post-weighting** value (§3), so the UI never re-derives it; `problem_states` is the machine-detected mapping into §16 (the deep-dive pages key off these ids); `refusal_code` and `inconclusive` are always distinct from `listed` — a refused query is never a listing. The file is append-only history (one per audit), which is what powers the diff row and any future per-day timeline.
+Field rules: `severity` is the **post-weighting** value (§3), so the UI never re-derives it;
+`problem_states` is the machine-detected mapping into §16 (the deep-dive pages key off these ids)
+and is derived, never hand-edited; `refusal_code` and `inconclusive` are always distinct from
+`listed` — a refused query is never a listing; `tests[].result` maps to finding severity as
+`pass|fail|warn|info` ⇔ `ok|critical|warning|info`; every `tool_runs[].command` must be replayable
+verbatim in a terminal (in-process npm calls log their exact call expression). The legacy per-audit
+`audits/<domainId>/<auditId>` JSON/YAML layout is **superseded** by this run-file convention —
+[../storage.mdx](../storage.mdx) specifies the migration; §5's audit-JSON mapping remains the
+in-memory/DB contract only.
 
 ## 13. User interface — summary card and the chevron full page
 
-The Blacklists technology follows the product-wide pattern: **one summary surface on the main view, a chevron (`›`) that opens a full page dedicated purely to this one technology.** (This grows §4; the design language — colors, StatusCell, finding rows — is locked by [../ui.mdx](../ui.mdx).) The left-bar **Blacklists** entry does *not* land on a bare card list — it opens the **Blacklists Dashboard** specified in [§17](#17-the-blacklists-dashboard--what-the-left-bar-tab-opens); the summary card below is the Blacklists surface *inside other views* (main dashboard, per-domain audit detail) and the dashboard reuses its status language.
+The Blacklists technology follows the product-wide pattern: **one summary surface on the main view, a chevron (`›`) that opens a full page dedicated purely to this one technology** — and that full page is **run-scoped**: it shows the DNSBL/RHSBL sub-test results of **one specific run**, per the locked Run → Test → Sub-test hierarchy ([../dashboard.mdx §1](../dashboard.mdx)). (This grows §4; the design language — colors, StatusCell, finding rows — is locked by [../ui.mdx](../ui.mdx).) The left-bar **Blacklists** entry does *not* land on a bare card list — it opens the **Blacklists Dashboard** specified in [§17](#17-the-blacklists-dashboard--what-the-left-bar-tab-opens); the summary card below is the Blacklists surface *inside other views* (main dashboard, run report) and the dashboard reuses its status language.
 
 ### 13.1 The summary card (main view)
 
@@ -500,38 +669,135 @@ The most important single fact a user needs at a glance is: **"am I listed anywh
 * Line 3 (conditional): the diff chip — `▲ NEW`, `▼ resolved`, or nothing when unchanged. New-listing state is the one thing worth interrupting a glance for.
 * The chevron `›` (whole card is clickable) routes to the full Blacklists page. No other interaction lives on the card.
 
-### 13.2 The full page (`/blacklists/:domain` — one technology, everything about it)
+### 13.2 The full page — "view one category run" (`/domains/:domainId/runs/:runId/blacklists`)
 
-The full page shows **every pass and every fail**, with the debugging values (the exact DNS query name, the raw return code, the TXT answer, the target IP, the PTR, the resolver used) visible without leaving the page. Layout detail is §14; content blocks top-to-bottom:
+**Route (locked across all six category specs).** The page is scoped to **one run**:
+`/domains/:domainId/runs/:runId/blacklists`, with the **newest-run alias**
+`/domains/:domainId/blacklists` (resolves to the domain's latest `runId` and updates the URL). The
+left-bar dashboard's per-domain drill (`/blacklists/:domain`, §17) redirects to the newest-run
+alias; problem-state deep dives hang off the run page as
+`/domains/:domainId/runs/:runId/blacklists/state/:psId`. Everything rendered comes from that one
+run's file (§12) — the page never silently mixes runs.
 
-1. **Verdict header** — status color band, `2 listed · 92 clean · 2 unknown across 47 zones`, domain, run timestamp, **[Re-check now]** button, and the diff chips (`+1 new`, `−1 resolved`).
-2. **Problems table** — only the listed/inconclusive rows (§14 defines columns). Each row expands (chevron per row) to the **debug drawer**: the exact query name we sent (`24.113.0.203.zen.spamhaus.org`), raw answer (`127.0.0.4`), decoded sub-list, full TXT, resolver used, query latency, target's PTR/ASN context, and the matched [problem state](#16-problem-states--the-catalog-of-healthy-and-unhealthy-situations) with a **"Explain & fix this →"** link to that state's deep-dive page (§16).
-3. **Fix panel** — the prioritized recommendation list generated per §15 for this run's findings (root cause first, then delist links in weight order).
-4. **Provider portals checklist** — the §9.7 link-out rows with per-portal "mark verified" state, because clean public zones ≠ clean at Gmail/Microsoft.
-5. **All zones (passed too)** — the full pass/fail matrix, collapsed by default behind "Show all 47 zones ▸": every zone × target with a green ✓ / red ✕ / gray ? and its query evidence on hover. This is where "show what passed" lives — visible, but never above the problems.
-6. **History strip** — listed-count over the last 30 runs (sparkline), fed by the per-run `test_results.yaml` files; clicking a point loads that run's page read-only.
+**How the page is reached.**
 
-**States.** *Never-run:* gray page with a single [Run blacklist check] CTA. *Running:* the §progress_ui dock shows "querying 47 zones…" with per-zone ticks. *All clean:* green verdict header, "No listings across 47 zones", the fix panel is replaced by the **prevention** recommendations (§15.3), and the zones matrix is expanded by default (there is nothing above it to read). *Inconclusive-heavy:* amber banner naming the cause (resolver blocked / registration missing) linking PS-9's deep dive.
+- **Dashboard, Domain-health table (Table 1):** clicking the Blacklists **cell chevron** on a
+  domain row → that domain's **newest** run's page (the alias route).
+- **Dashboard, Runs table (Table 2):** clicking the Blacklists cell on a run row → **that run's**
+  page. Clicking anywhere else in either row opens the whole run report instead (§4).
+- **Run report** (`/domains/:domainId/runs/:runId`): the Blacklists section/category chip carries a
+  chevron `›` → this page for the same run.
+- **§13.1 summary card** chevron and **§17 Blacklists Dashboard** row chevrons → newest-run alias
+  (Needs-attention rows arrive with the matching sub-test row's accordion pre-expanded).
+
+The full page shows **every pass and every fail of that run**, with the debugging values (the
+exact DNS query name, the raw return code, the TXT answer, the target IP, the PTR, the resolver
+used, the verbatim `tool_runs[]` command) visible without leaving the page. Layout detail is §14;
+content blocks top-to-bottom:
+
+1. **Run header** — back link **‹** to this run's report, domain name, "Blacklists" title, the
+   category StatusCell, and the **run timestamp** (the run's `startedAt`, rendered
+   `2026-07-01 09:14 AM`). Right-aligned: **‹ prev / next ›** run navigation — steps
+   chronologically through this domain's run files (§12), swapping `:runId` in the URL; `prev` is
+   disabled on the oldest run, `next` on the newest — plus a **[Re-run ⟳]** button that starts a
+   **new** run for this domain (`POST /api/audit/run/:domainId`) and navigates to it on completion
+   (it never mutates the run being viewed). Viewing any non-newest run shows a slate
+   "historical run — newest is 2026-07-01 09:14 AM →" banner chip.
+2. **Verdict band** — status color band: `2 listed · 92 clean · 2 unknown across 47 zones`, the
+   run's diff chips vs the previous run (`▲ 1 new`, `▼ 1 resolved`).
+3. **Listings matrix** — the at-a-glance grid of **zones (rows) × sending IPs + domain (columns)**
+   built from `results[]`: each cell is **listed** (red ✕ + return code), **clean** (green ✓), or
+   **timeout/inconclusive** (gray ? — refused, dead zone, or timed out). HIGH-tier zones render
+   first and always visible; MEDIUM/LOW collapse behind "Show all 47 zones ▸" (expanded by default
+   only when all clean). Email-derived target columns carry a `via DMARC reports` chip (§19).
+   Clicking any cell scrolls to and expands that pair's sub-test row below.
+4. **Sub-test results table** — **one row per zone check** (zone × target), fed by `tests[]` +
+   `results[]`, sorted fail → warn → info → pass: status icon (✗ red / ⚠ amber / ⓘ slate /
+   ✓ green), sub-test id (`dnsbl.spamhaus_zen`), plain-language title, the **observed return code
+   + decoded TXT reason** (`127.0.0.4 · "compromised host (XBL)"`), and a chevron `[v]` accordion.
+   The expanded row shows the **evidence** (the exact query name, raw answer, full TXT, resolver,
+   latency, PTR/ASN context, the verbatim `tool_runs[].command` with `[copy]`) and the
+   **delisting steps**: the numbered cause-first fix from §15, the **[Delist ↗]** link
+   (per-zone `delist_url`, deep-linked where supported), and a **"Start the delisting flow ›"**
+   link into the end-to-end journey in
+   [../use_cases/domain_on_blacklist.mdx](../use_cases/domain_on_blacklist.mdx) — every blacklist
+   finding links that flow. Rows also link their matched
+   [problem state](#16-problem-states--the-catalog-of-healthy-and-unhealthy-situations) deep dive
+   ("Explain & fix this →").
+5. **Fix panel** — the prioritized recommendation list generated per §15 for this run's findings
+   (root cause first, then delist links in weight order).
+6. **Provider portals checklist** — the §9.7 link-out rows with per-portal "mark verified" state,
+   because clean public zones ≠ clean at Gmail/Microsoft.
+7. **History strip** — listed-count over the last 30 runs (sparkline), fed by the per-run YAML
+   files in `~/.email_delivery_hero/runs/<domain>/` (§12); clicking a point **navigates to that
+   run's page** (same route shape, that run's `runId`).
+
+**States.** *Never-run:* the alias route with no run files renders the gray never-run page — light
+gray header cell, "No runs yet — run a check to query 47 blocklist zones", one [Run blacklist
+check] CTA, no matrix/table skeletons. *Loading:* skeleton header + matrix + table rows sized to
+the final layout (no shift); *Running:* the §progress_ui dock shows "querying 47 zones…" with
+per-zone ticks, and the page swaps to the new run when it lands. *All clean:* green verdict band,
+"No listings across 47 zones", the fix panel is replaced by the **prevention** recommendations
+(§15.3), and the matrix is expanded by default (there is nothing above it to read).
+*Inconclusive-heavy:* amber banner naming the cause (resolver blocked / registration missing)
+linking PS-9's deep dive. *Unknown `runId`:* "run not found" with a link to the newest run.
 
 ## 14. UX design — what goes where, and why
 
-Spoken as the UX designer. The page is a **triage funnel**: severity decides vertical position; evidence hides one level down; navigation deeper is always a chevron. The user we design for arrives anxious ("my mail is bouncing") — the page must answer *am I in trouble?* in the first 100px, *what exactly is wrong?* in the first scroll, and *what do I do?* without leaving.
+Spoken as the UX designer. The page is a **triage funnel**: severity decides vertical position; evidence hides one level down; navigation deeper is always a chevron. The user we design for arrives anxious ("my mail is bouncing") — the page must answer *am I in trouble?* in the first 100px, *what exactly is wrong?* in the first scroll, and *what do I do?* without leaving. Desktop-first (localhost tool), 1200 px content max-width, the app-wide left nav (256 px) stays.
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Back to run 2026-07-01 09:14 AM      Blacklists       ‹ prev · next › [Re-run ⟳] │  header row
+│ whitehatengineering.com · [ red: 2 listed ] · run 2026-07-01 09:14 AM          │
+├────────────────────────────────────────────────────────────────────────────────┤
+│  ● 2 listed · 92 clean · 2 unknown  across 47 zones      ▲ 1 new  ▼ 0 resolved │  verdict band
+│  "Spamhaus XBL lists 203.0.113.24 — compromised host. Fix the cause first."    │
+├────────────────────────────────────────────────────────────────────────────────┤
+│  LISTINGS MATRIX                                    zones × targets            │
+│              203.0.113.24   198.51.100.7ᴰᴹᴬᴿᶜ   whitehatengineering.com        │
+│  zen.spamhaus.org   ✕ .4        ✓                  —                            │
+│  b.barracudacen…    ✓           ✓                  —                            │
+│  bl.spamcop.net     ✓           ?                  —                            │
+│  dbl.spamhaus.org   —           —                  ✓                            │
+│  Show all 47 zones ▸                     ✓ clean  ✕ listed  ? timeout/refused  │
+├────────────────────────────────────────────────────────────────────────────────┤
+│  SUB-TEST RESULTS                                 2 failed · 1 ⓘ · 89 passed   │
+│  ✗ dnsbl.spamhaus_zen   203.0.113.24 listed   127.0.0.4 "XBL: compromised" [v] │
+│      query: 24.113.0.203.zen.spamhaus.org → 127.0.0.4          [copy]          │
+│      TXT: https://check.spamhaus.org/query/ip/203.0.113.24                     │
+│      fix: ① clean the host ② self-delist  [Delist ↗] [Start delisting flow ›] │
+│  ⓘ dnsbl.uceprotect_l3  ASN-wide collateral   127.0.0.2 "neighbor"        [v] │
+│  ✓ dnsbl.spamcop        203.0.113.24 clean    NXDOMAIN                    [v] │
+│  ✓ dnsbl.spamhaus_dbl   domain clean          NXDOMAIN                    [v] │
+│  …                                                                             │
+├────────────────────────────────────────────────────────────────────────────────┤
+│  HOW TO FIX (this run)                                                         │
+│  1. Clean the compromised host behind 203.0.113.24 (XBL evidence ↑)            │
+│  2. Self-delist at check.spamhaus.org once clean            [Delist ↗]         │
+├────────────────────────────────────────────────────────────────────────────────┤
+│  PROVIDER PORTALS   Google Postmaster [Check ↗] Unverified · SNDS [Check ↗] …  │
+├────────────────────────────────────────────────────────────────────────────────┤
+│  HISTORY   ▁▁▂▁▁▁▄▂ listed count, last 30 runs (click a point → that run)      │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
 
 **Vertical order (top → bottom), fixed:**
 
-1. **Verdict band** (full-width, ~96px) — status color, one sentence, counts, [Re-check now] right-aligned. Highest position because it's the answer to the question that brought the user here. Nothing decorative above it.
-2. **Problems table** — the only table on the first screenful. Sorted worst-first by weighted severity, then tier, then zone name. Columns, left→right in scanning order: `Severity` (badge) · `List` (zone label + tier chip HIGH/MED/LOW) · `Target` (IP or domain, monospace) · `Meaning` (decoded sub-list in words: "compromised host", "policy: dynamic range") · `Since` (first-seen run, relative) · `Fix` ([Delist ↗] + [Copy fix]) · row-chevron `›`. Rationale: severity and list identity are what the user reports to their boss; the fix affordance is at line-end where the eye lands after reading the row. Row height 44px minimum; the whole row toggles the debug drawer.
-3. **Debug drawer** (inside a row, indented, `bg-muted`) — two-column key/value grid, all values monospace and copy-on-click: `Query`, `Answer`, `TXT`, `Resolver`, `Latency`, `PTR`, `ASN`, `Domain age` where relevant. Terminates with the "Explain & fix this →" deep-dive link. Debug values are one level down because they support the row's claim but would destroy scannability inline.
-4. **Fix panel** ("How to fix", card) — ordered list, never more than 5 visible ("+N more" expands). Each item: one imperative sentence + its link. Sits below the problems because fixing follows understanding, above the pass matrix because action beats reassurance.
-5. **Provider portals checklist** — compact rows: portal name · [Check ↗] · state pill (`Unverified` gray / `Clean` green / `Problem` red, user-set). Placed here because it is a *manual* extension of the fix workflow.
-6. **All-zones matrix** (collapsed) — table of zone × target cells (✓/✕/?), tier-grouped with HIGH first, sticky first column. Collapsed because 90+ green cells are emotional comfort, not information; expanded automatically only in the all-clean state.
-7. **History sparkline** — last, because trend is reflection, not triage.
+1. **Run header** (identity band) — back chevron to this run's report, domain + "Blacklists" + StatusCell + run timestamp, and the run controls right-aligned: **‹ prev / next ›** (chronological run stepping, disabled at either end) and **[Re-run ⟳]**. The header owns *which run am I looking at*; nothing below it may restate it.
+2. **Verdict band** (full-width, ~96px) — status color, one sentence, counts, diff chips. Highest content position because it's the answer to the question that brought the user here. Nothing decorative above it.
+3. **Listings matrix** — zone rows × target columns, cells ✓ clean / ✕ listed (with return-code suffix) / ? timeout-refused, tier-grouped with HIGH first, sticky first column, email-derived columns chip-tagged. Above the sub-test table because a 2-second scan of the grid localizes the damage (which target, which tier) before any reading; HIGH tier always visible, MEDIUM/LOW collapsed behind "Show all N zones ▸" because 90+ green cells are emotional comfort, not information (auto-expanded only in the all-clean state). A cell click jumps to its sub-test row.
+4. **Sub-test results table** — one row per zone check, sorted fail → warn → info → pass (never alphabetical). Columns, left→right in scanning order: status icon · `Sub-test` (id in small caps) · `Target` (IP or domain, monospace) · `Observed` (return code + decoded TXT reason: "compromised host", "policy: dynamic range") · `Since` (first-seen run, relative) · `Fix` ([Delist ↗] + [Copy fix]) · accordion chevron `[v]`. Rationale: severity and list identity are what the user reports to their boss; the fix affordance is at line-end where the eye lands after reading the row. Row height 44px minimum; the whole row toggles the debug drawer.
+5. **Debug drawer** (inside a row, indented, `bg-muted`) — two-column key/value grid, all values monospace and copy-on-click: `Query`, `Answer`, `TXT`, `Resolver`, `Latency`, `PTR`, `ASN`, `Domain age`, and `Command` (the verbatim §12 `tool_runs[].command`). Terminates with the **delisting steps** (§15 cause-first numbered list, [Delist ↗], "Start the delisting flow ›" into [../use_cases/domain_on_blacklist.mdx](../use_cases/domain_on_blacklist.mdx)) and the "Explain & fix this →" deep-dive link. Debug values are one level down because they support the row's claim but would destroy scannability inline.
+6. **Fix panel** ("How to fix", card) — ordered list, never more than 5 visible ("+N more" expands). Each item: one imperative sentence + its link. Sits below the sub-tests because fixing follows understanding.
+7. **Provider portals checklist** — compact rows: portal name · [Check ↗] · state pill (`Unverified` gray / `Clean` green / `Problem` red, user-set). Placed here because it is a *manual* extension of the fix workflow.
+8. **History sparkline** — last, because trend is reflection, not triage; each point navigates to that run's page.
 
 **Horizontal rules.** One content column, max-width ~1100px — tables need width; no right rail (the debug drawer replaces it, keeping evidence adjacent to its claim). All external links (`Delist ↗`, `Check ↗`) open new tabs with the ↗ affix; internal drill-downs use the chevron `›` exclusively — chevron always means "deeper inside EmailDeliveryHero", ↗ always means "leaving".
 
 **Typography & color.** Zone names, IPs, DNS answers, TXT strings: monospace. Severity uses the locked four-color system only — tier chips are neutral outline chips so tier never visually competes with severity. `info` findings never render red or amber anywhere on this page.
 
-**Empty/edge behaviors.** >10 problems: table paginates at 10 with severity groups kept intact. A single inconclusive zone renders as gray `?` in the matrix, not in the problems table, unless *every* HIGH-tier zone is inconclusive — then PS-9 escalates it to the problems table as one row (cause, not 47 symptoms). Mobile (~<768px): the problems table reflows to stacked cards, `Fix` actions stay visible without horizontal scroll; the matrix becomes per-zone accordion lists.
+**Empty/edge behaviors.** >10 failures: the sub-test table paginates at 10 with severity groups kept intact (pass rows always behind the fold). A single inconclusive zone renders as gray `?` in the matrix and an `info` sub-test row, unless *every* HIGH-tier zone is inconclusive — then PS-9 escalates to one failing row at the top (cause, not 47 symptoms). Prev/next run controls disable (not hide) at the ends of the run history; deleting the viewed run (dashboard kebab) navigates to the next-newest. Mobile (~<768px): the sub-test table reflows to stacked cards, `Fix` actions stay visible without horizontal scroll; the matrix becomes per-zone accordion lists.
 
 ## 15. Recommendations — how we tell the user to fix it
 

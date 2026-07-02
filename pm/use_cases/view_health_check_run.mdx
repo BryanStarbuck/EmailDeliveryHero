@@ -1,23 +1,29 @@
 ---
 title: "Use case: view one health-check run"
-description: Walkthrough — a signed-in user clicks a row on the Dashboard to open the full detail of a single day's health-check run for a domain, reads the run summary and the findings grouped by the six categories, sees the concrete fix for every problem, and compares the run against the previous day to spot new vs resolved issues.
+description: Walkthrough — a signed-in user clicks a row on the Dashboard to open the report for a single health-check run (one domain, one startedAt/finishedAt-stamped execution of all checks), reads the run summary header, switches between the domain's many runs with prev/next navigation, scans the six test categories with their sub-test previews, opens any category's dedicated view-one-category-run page via its chevron, and compares the run against the previous run to spot new vs resolved issues. Data comes from the run's YAML file via GET /api/audit/runs/:runId.
 ---
 
 # Use case: view one health-check run
 
-This walkthrough shows what happens when the user **clicks a row on the Dashboard**: they land on a
-detail page for **one health-check run** (one domain, one day) and read it in full — the run summary,
-every sub-check finding grouped by the six categories, and the exact fix for each problem. It builds
-on the sibling specs and does not repeat them:
+This walkthrough shows what happens when the user **clicks a row on the Dashboard**: they land on
+the report for **one health-check run** — one domain, one execution of all checks, stamped with a
+`startedAt` and `finishedAt` date-time. A domain accumulates **many runs** over time, and this page
+lets the user read any one of them in full and hop between them. It builds on the sibling specs and
+does not repeat them:
 
 * [Overview](../overview.mdx) — the product charter and the list of checks performed.
-* [Engineering](../engineering.mdx) — the audit engine, the `Finding` / `AuditResult` shape, the
-  `GET /api/audits/:auditId` endpoint, and the periodic scheduler that diffs runs.
-* [Dashboard](../dashboard.mdx) — the TanStack Table whose rows are runs; this page is where a row
-  click leads.
-* [Spam & content checks](../spam_checks.mdx) — the full catalog of sub-checks within the six
+* [Engineering](../engineering.mdx) — the audit engine, the finding shape, and the periodic
+  scheduler that diffs runs.
+* [Storage](../storage.mdx) — the run YAML file this page renders
+  (`~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml`); this spec references it and does not
+  redefine it.
+* [Dashboard](../dashboard.mdx) — the two TanStack Tables whose row clicks lead here, and the
+  locked **Run → Test → Sub-test** vocabulary.
+* [Spam & content checks](../spam_checks.mdx) — the full catalog of sub-tests within the six
   categories shown here.
-* [Audit a domain](./audit_a_domain.mdx) — the base add-domain / run-audit loop that produces a run.
+* [View one category run](./view_one_category_run.mdx) — the page each category section's chevron
+  opens: one category's sub-tests within this run, in full detail.
+* [Audit a domain](./audit_a_domain.mdx) — the base add-domain / run-checks loop that produces a run.
 * [Domain on a blacklist](./domain_on_blacklist.mdx) — the delisting flow linked from Blacklist
   findings on this page.
 
@@ -28,187 +34,290 @@ on the sibling specs and does not repeat them:
 | | |
 | --- | --- |
 | **Persona** | A deliverability owner (signed in as `bryan@whitehatengineering.com`). |
-| **Goal** | Open one day's health-check run for `whitehatengineering.com` and read every finding, grouped by category, with the exact fix for each problem. |
-| **Precondition** | The domain has at least one persisted run (`~/.email_delivery_hero/audits/<domainId>/<auditId>.json`) so a Dashboard row exists to click. |
+| **Goal** | Open one health-check run for `whitehatengineering.com`, read every test category and its sub-tests, get the exact fix for each problem, and see how the run compares to the previous one. |
+| **Precondition** | The domain has at least one persisted run (`~/.email_delivery_hero/runs/whitehatengineering.com/2026_07_01_09_14AM.yaml`) so a Dashboard row exists to click. |
 
 ---
 
 ## 2. Getting here
 
-1. The user is on the **Dashboard** (`http://localhost:4444/` → Dashboard), a TanStack Table where
-   each **row is one health-check run for one day**, with a **Date** column plus **6 category
-   columns**: **SPF**, **DKIM**, **DMARC**, **Blacklists**, **DNS & Infrastructure**, and
-   **Spam & Content**. Each cell is color-coded — dark green = healthy, dark red = critical,
-   amber = some problems, light gray = never run (see [Dashboard](../dashboard.mdx)).
-2. They **click a row** (a given day's run for a domain). The frontend navigates to the run detail
-   route:
+1. The user is on the **Dashboard** (`http://localhost:4444/` → Dashboard), which shows **two
+   tables** (see [Dashboard](../dashboard.mdx)): **Table 1 — Domain health** (one row per monitored
+   domain, cells from its newest run) and **Table 2 — Runs** (one row per run, newest first). Both
+   share the six locked test columns — **SPF**, **DKIM**, **DMARC**, **Blacklists**,
+   **DNS & Infrastructure**, **Spam & Content** — color-coded dark green = healthy, dark red =
+   critical, amber = some problems, light gray = never run.
+2. They **click anywhere on a row**:
+   * **Table 1 (Domain health)** row click → the domain's **newest** run report, via the
+     newest-run alias route **`/domains/:domainId`**.
+   * **Table 2 (Runs)** row click (or its **›** chevron) → **that specific run's** report:
 
-   ```
-   /domains/:id/audits/:auditId
-   ```
+     ```
+     /domains/:domainId/runs/:runId
+     ```
 
-   (also reachable from the **Audits** left-bar view). The `:auditId` is the `id` of the persisted
-   `AuditResult`; `:id` is the domain id.
-3. The page loads the run by calling **`GET /api/audits/:auditId`** (TanStack Query). The backend
-   reads `~/.email_delivery_hero/audits/<domainId>/<auditId>.json` and returns the full
-   `AuditResult { id, domain, startedAt, finishedAt, findings, score, status }`. If the id is
-   unknown the API returns `404` and the page shows a "run not found" state with a **Back to
-   dashboard** link.
+   * Clicking a **category cell** instead opens the
+     [view-one-category-run page](./view_one_category_run.mdx) for that category — not this page.
+     Row controls (play, kebab, chevron) capture their own clicks.
+3. The page loads the run by calling **`GET /api/audit/runs/:runId`** (TanStack Query). The backend
+   reads the run's **YAML file** — one file per run at
+   `~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml`, e.g.
+   `~/.email_delivery_hero/runs/whitehatengineering.com/2026_07_01_09_14AM.yaml` (see
+   [Storage](../storage.mdx)) — and returns the `run:` metadata block (`run_id`, `domain`,
+   `started_at`, `finished_at`, `score`, `status`) plus the six top-level category keys (`spf`,
+   `dkim`, `dmarc`, `blacklists`, `dns_infra`, `spam_content`), each carrying its structured
+   observation, `tool_runs:`, and `tests:` (sub-test rows). If the id is unknown the API returns
+   `404` and the page shows a "run not found" state with a **Back to dashboard** link. The
+   newest-run alias `/domains/:domainId` resolves the domain's most recent run
+   (`GET /api/audit/runs?domainId=` → first item) and renders the same page.
 
 ---
 
-## 3. The run summary header
+## 3. Page layout
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Back to dashboard                                        [⟳ Run checks again]│  header row
+│ whitehatengineering.com — run report                                          │
+│ Started 2026-07-01 09:14 AM · finished 09:14 AM · 3.1s      score 78  [WARN] │
+│ [SPF ✓][DKIM ✗][DMARC ⚠][Blkl ✓][DNS&Inf ⚠][Spam&Cont ✓]   3 open problems  │  category chips
+│ ‹ prev run   [ 2026-07-01 09:14 AM ▾ ]  next run ›              [NEWEST]     │  run switcher
+├──────────────────────────────────────────────────────────────────────────────┤
+│ vs previous run (2026-06-30 03:00 AM):  ( All | New | Resolved )             │  regression toggle
+├──────────────────────────────────────────────────────────────────────────────┤
+│ SPF                              [Healthy]   4 of 4 pass            [Open ›] │  category section
+│   ✓ spf.present    v=spf1 include:_spf.google.com ~all                       │   (sub-test preview)
+│   ⚠ spf.all        ~all (softfail) → consider -all            STILL PRESENT  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ DKIM                             [Critical]  0 of 2 pass  ← top problem:     │
+│                                  "selector google: no TXT"          [Open ›] │
+│   ✗ dkim.selector_google  no TXT at google._domainkey…   NEW    [copy fix]  │
+│   ✗ dkim.key_parses       no key to parse                NEW                │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ DMARC                            [Warning]   2 of 3 pass            [Open ›] │
+│   ⚠ dmarc.policy   p=none (monitor only)  [from reports]        [copy fix]  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Blacklists                       [Healthy]   3 of 3 pass            [Open ›] │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ DNS & Infrastructure             [Warning]   2 of 3 pass            [Open ›] │
+│   ⚠ infra.ptr      PTR/A mismatch on 203.0.113.24                [copy fix]  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Spam & Content                   [Healthy]   3 of 3 pass  RESOLVED ×1 [Open ›]│
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 4. The run summary header
 
 The top of the page is a summary card for this single run, mirroring the Dashboard cell colors so
 the detail matches the row the user just clicked:
 
-* **Date / timestamp** — the run's `startedAt` (and `finishedAt` / duration), e.g.
-  "Tue 2026-06-30, 04:00 PST · completed in 3.1s".
-* **Domain(s)** — the `domain` this run covered (`whitehatengineering.com`), with its registered
+* **Domain** — the `domain` this run covered (`whitehatengineering.com`), with its registered
   sending IPs and DKIM selectors shown as context.
+* **Run timestamp** — the run's `started_at` and `finished_at` with the computed duration, e.g.
+  "Started Tue 2026-07-01 09:14 AM · finished 09:14 AM · completed in 3.1s". This is the same
+  moment encoded in the run's YAML filename (`2026_07_01_09_14AM.yaml`).
 * **Overall score + status badge** — the numeric `score` and the `status` badge (the worst severity
-  present: `ok` / `warning` / `critical`).
+  present: healthy / warning / critical).
 * **Six category chips** — one chip each for **SPF**, **DKIM**, **DMARC**, **Blacklists**,
   **DNS & Infrastructure**, **Spam & Content**, colored to match the Dashboard cell for that
-  category on this run (dark green / dark red / amber / light gray). Clicking a chip scrolls to that
-  category's section below.
-* **Open-problem count** — the number of non-`ok` findings still present in this run (e.g.
-  "2 open problems"), so the user knows the size of the work at a glance.
+  category on this run (dark green / dark red / amber / light gray). Clicking a chip scrolls to
+  that category's section below (§5); the chip's small **›** chevron opens the category's full
+  page instead (same target as the section's **Open ›**).
+* **Open-problem count** — the number of non-pass sub-tests still present in this run (e.g.
+  "3 open problems"), so the user knows the size of the work at a glance.
+
+### 4.1 The run switcher
+
+Because a domain has **many runs**, the header carries a run switcher:
+
+* **‹ prev / next ›** — steps to the chronologically previous / next run **for this domain**
+  (URL changes to that run's `/domains/:domainId/runs/:runId`). "next ›" is disabled on the newest
+  run; "‹ prev" is disabled on the oldest kept run.
+* **Runs dropdown** — the current run's timestamp rendered as a dropdown listing this domain's
+  runs newest-first (fed by `GET /api/audit/runs?domainId=`), each entry showing its
+  `started_at` and status color dot; picking one navigates to it.
+* **NEWEST badge** — shown when the run being viewed is the domain's most recent run (always the
+  case when arriving via the `/domains/:domainId` alias).
 
 ---
 
-## 4. Findings grouped by category
+## 5. The body — the six test categories
 
-Below the header, the run's `findings[]` are grouped into the **six categories**. Each category is a
-collapsible section with its own status chip and a table of **every sub-check** that ran (see the
-full catalog in [Spam & content checks](../spam_checks.mdx)). Each row shows:
+The body of the page is **the list of the six test categories** (the locked Level-2 "tests" of the
+Run → Test → Sub-test hierarchy). Each category renders as a **section card**, in the locked order
+SPF → DKIM → DMARC → Blacklists → DNS & Infrastructure → Spam & Content, built from that
+category's top-level key in the run YAML (`spf`, `dkim`, `dmarc`, `blacklists`, `dns_infra`,
+`spam_content`). Each card shows:
 
-**sub-check | severity | detail (what was observed) | remediation (the concrete fix)**
+* **Category name + status chip** — colored per the locked mapping (dark green / dark red / amber /
+  light gray), identical to the header chip and the Dashboard cell.
+* **Sub-test pass/fail counts** — e.g. "2 of 3 pass" (from the category's `tests:` rows).
+* **The top problem** — the single worst open sub-test's title (e.g. "selector `google`: no TXT
+  published"), so a scan down the page reads like a triage list. Omitted when all pass.
+* **Open › chevron** — opens the **view-one-category-run page** for this category of **this run**:
 
-Healthy sub-checks render as green **ok** rows with no fix needed; problems render **amber**
-(`warning`) or **red** (`critical`) with the concrete remediation string shown prominently.
+  ```
+  /domains/:domainId/runs/:runId/<slug>
+  ```
 
-An example run for `whitehatengineering.com`:
+  with the locked slugs `spf`, `dkim`, `dmarc`, `blacklists`, `dns`, `spam-content` (newest-run
+  alias: `/domains/:domainId/<slug>`). That page —
+  [view one category run](./view_one_category_run.mdx) — carries the **full** sub-test detail,
+  the category-specific panels (record panels, include trees, per-source-IP tables …), and the
+  tool-run transparency strip.
+* **Sub-test preview rows** — the category's `tests:` rows rendered compactly, one line per
+  sub-test:
 
-### SPF
+  **status icon | sub-test id + title | observed detail | remediation (the concrete fix)**
 
-| Sub-check | Severity | Detail (observed) | Remediation (how to fix) |
+  Passing sub-tests render as green **✓** rows with no fix needed; problems render **amber ⚠**
+  (`warn`) or **red ✗** (`fail`) with the concrete remediation string shown prominently and a
+  **copy-the-fix** button (§6). This is a **preview** — expanded evidence, category panels, and
+  "How we measured" live on the category page behind **Open ›**.
+
+An example run for `whitehatengineering.com` (previews abridged):
+
+### SPF — [Healthy] 3 of 4 pass · [Open ›]
+
+| Sub-test | Result | Detail (observed) | Remediation (how to fix) |
 | --- | --- | --- | --- |
-| SPF record present | **ok** | One record: `v=spf1 include:_spf.google.com ~all` | — |
-| Single SPF record | **ok** | Exactly one `v=spf1` TXT at the apex | — |
-| DNS-lookup limit (≤10) | **ok** | 4 mechanism lookups resolved | — |
-| `all` qualifier | **warning** | Uses `~all` (softfail) | Consider `-all` (hardfail) once all senders are enumerated to stop spoofers cleanly. |
+| SPF record present | **pass** | One record: `v=spf1 include:_spf.google.com ~all` | — |
+| Single SPF record | **pass** | Exactly one `v=spf1` TXT at the apex | — |
+| DNS-lookup limit (≤10) | **pass** | 4 mechanism lookups resolved | — |
+| `all` qualifier | **warn** | Uses `~all` (softfail) | Consider `-all` (hardfail) once all senders are enumerated to stop spoofers cleanly. |
 
-### DKIM
+### DKIM — [Critical] 0 of 2 pass · top problem: "selector `google`: no TXT" · [Open ›]
 
-| Sub-check | Severity | Detail (observed) | Remediation (how to fix) |
+| Sub-test | Result | Detail (observed) | Remediation (how to fix) |
 | --- | --- | --- | --- |
-| Selector `google` | **critical** | No TXT at `google._domainkey.whitehatengineering.com` | Enable DKIM in Google Admin and publish the provided `google._domainkey` TXT public key. |
-| Key parses (`v=DKIM1; k=rsa; p=…`) | **critical** | No key to parse — record missing | Publish the DKIM public key TXT; re-check once DNS propagates. |
+| Selector `google` | **fail** | No TXT at `google._domainkey.whitehatengineering.com` | Enable DKIM in Google Admin and publish the provided `google._domainkey` TXT public key. |
+| Key parses (`v=DKIM1; k=rsa; p=…`) | **fail** | No key to parse — record missing | Publish the DKIM public key TXT; re-check once DNS propagates. |
 
-### DMARC
+### DMARC — [Warning] 2 of 3 pass · [Open ›]
 
-| Sub-check | Severity | Detail (observed) | Remediation (how to fix) |
+| Sub-test | Result | Detail (observed) | Remediation (how to fix) |
 | --- | --- | --- | --- |
-| DMARC record present | **ok** | `v=DMARC1; p=none; rua=mailto:dmarc@whitehatengineering.com` | — |
-| Policy strength | **warning** | `p=none` (monitor only — no enforcement) | Strengthen to `v=DMARC1; p=quarantine; rua=mailto:dmarc@whitehatengineering.com`. |
-| Aggregate reporting (`rua`) | **ok** | `rua` mailbox present | — |
+| DMARC record present | **pass** | `v=DMARC1; p=none; rua=mailto:dmarc@whitehatengineering.com` | — |
+| Policy strength | **warn** | `p=none` (monitor only — no enforcement) | Strengthen to `v=DMARC1; p=quarantine; rua=mailto:dmarc@whitehatengineering.com`. |
+| Aggregate reporting (`rua`) | **pass** | `rua` mailbox present | — |
 
-### Blacklists
+### Blacklists — [Healthy] 3 of 3 pass · [Open ›]
 
-| Sub-check | Severity | Detail (observed) | Remediation (how to fix) |
+| Sub-test | Result | Detail (observed) | Remediation (how to fix) |
 | --- | --- | --- | --- |
-| Spamhaus ZEN | **ok** | `24.113.0.203.zen.spamhaus.org` did not resolve — not listed | — |
-| Barracuda | **ok** | Not listed | — |
-| SpamCop | **ok** | Not listed | — |
+| Spamhaus ZEN | **pass** | `24.113.0.203.zen.spamhaus.org` did not resolve — not listed | — |
+| Barracuda | **pass** | Not listed | — |
+| SpamCop | **pass** | Not listed | — |
 
-### DNS & Infrastructure
+### DNS & Infrastructure — [Warning] 2 of 3 pass · [Open ›]
 
-| Sub-check | Severity | Detail (observed) | Remediation (how to fix) |
+| Sub-test | Result | Detail (observed) | Remediation (how to fix) |
 | --- | --- | --- | --- |
-| MX records | **ok** | `1 aspmx.l.google.com`, `5 alt1.aspmx.l.google.com` — reachable | — |
-| Reverse DNS / PTR | **warning** | Sending IP `203.0.113.24` has PTR `mail.whitehatengineering.com` but forward A does not confirm | Add/repair forward A so PTR and A agree (FCrDNS). |
-| Nameserver reachability | **ok** | 2 NS resolvable and authoritative | — |
+| MX records | **pass** | `1 aspmx.l.google.com`, `5 alt1.aspmx.l.google.com` — reachable | — |
+| Reverse DNS / PTR | **warn** | Sending IP `203.0.113.24` has PTR `mail.whitehatengineering.com` but forward A does not confirm | Add/repair forward A so PTR and A agree (FCrDNS). |
+| Nameserver reachability | **pass** | 2 NS resolvable and authoritative | — |
 
-### Spam & Content
+### Spam & Content — [Healthy] 2 of 3 pass · [Open ›]
 
-| Sub-check | Severity | Detail (observed) | Remediation (how to fix) |
+| Sub-test | Result | Detail (observed) | Remediation (how to fix) |
 | --- | --- | --- | --- |
-| Content spam score | **ok** | Sample message scored 0.8 (well under threshold) | — |
-| List-Unsubscribe header | **warning** | Missing `List-Unsubscribe` / one-click header | Add `List-Unsubscribe` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click` to bulk mail. |
-| TLS / MTA-STS | **ok** | STARTTLS offered; MTA-STS policy present | — |
+| Content spam score | **pass** | Sample message scored 0.8 (well under threshold) | — |
+| List-Unsubscribe header | **warn** | Missing `List-Unsubscribe` / one-click header | Add `List-Unsubscribe` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click` to bulk mail. |
+| TLS / MTA-STS | **pass** | STARTTLS offered; MTA-STS policy present | — |
 
-The user works top to bottom, reading each non-`ok` row's **remediation** — that "how to fix" line
-is the whole point of the page.
+The user works top to bottom, reading each non-passing row's **remediation** — that "how to fix"
+line is the whole point of the page — and presses **Open ›** wherever they need the full evidence.
 
-**Findings sourced from ingested reports.** Some findings come not from a live DNS lookup but from the
-**DMARC aggregate / TLS-RPT report emails** the domain received (see
-[Report-email ingestion](../emails.mdx)). These render in-line in the same groups — `dmarc.report_*`
-and `dmarc.real_pass_rate` under **DMARC**, `infra.tls_rpt_reports_ingested` under **DNS &
-Infrastructure** — each tagged with a small **"from reports"** chip, and expanding one reveals the
-**per-source-IP table** (source IP, count, disposition, SPF/DKIM eval + alignment, header-from,
-envelope). They obey the same six-category roll-up and copy-the-fix rules as every other finding; the
-dedicated **Reports** view is where the full per-domain report picture lives.
+**Findings sourced from ingested reports.** Some sub-tests come not from a live DNS lookup but from
+the **DMARC aggregate / TLS-RPT report emails** the domain received (see
+[Report-email ingestion](../emails.mdx)). These render in-line in the same categories —
+`dmarc.report_*` and `dmarc.real_pass_rate` under **DMARC**, `infra.tls_rpt_reports_ingested`
+under **DNS & Infrastructure** — each tagged with a small **"from reports"** chip; the full
+per-source-IP table (source IP, count, disposition, SPF/DKIM eval + alignment, header-from,
+envelope) lives on the category page behind **Open ›**. They obey the same six-category roll-up
+and copy-the-fix rules as every other sub-test; the dedicated **Reports** view is where the full
+per-domain report picture lives.
 
 ---
 
-## 5. Actions
+## 6. Actions
 
 The page exposes these actions:
 
-* **Run checks again** — re-runs this domain's audit (`POST /api/domains/:id/audit`), producing a
-  **new run** (a new `AuditResult` / a new Dashboard row for today). When it completes the UI
-  navigates to the fresh run so the user can confirm fixes flipped to `ok`. See
-  [Audit a domain](./audit_a_domain.mdx).
-* **Back to dashboard** — returns to the Dashboard table.
-* **Delisting links** — any **Blacklists** finding that is `critical` (an IP listed on a DNSBL)
-  links to the delisting flow with the blocklist-specific removal steps — see
+* **Run checks again** — re-runs this domain's checks (`POST /api/audit/run/:domainId`), producing
+  a **new run** — a new YAML file under `~/.email_delivery_hero/runs/<domain>/` and a new top row
+  in the Dashboard's Runs table. When it completes the UI navigates to the fresh run so the user
+  can confirm fixes flipped to pass. See [Audit a domain](./audit_a_domain.mdx).
+* **Back to dashboard** — returns to the Dashboard.
+* **Run switcher** — prev/next and the runs dropdown (§4.1) move between this domain's runs.
+* **Delisting links** — any **Blacklists** sub-test that fails (an IP listed on a DNSBL) links to
+  the delisting flow with the blocklist-specific removal steps — see
   [Domain on a blacklist](./domain_on_blacklist.mdx).
-* **Copy the fix** — every non-`ok` finding's `remediation` has a **copy-to-clipboard** button; for
-  record-level fixes (SPF/DKIM/DMARC TXT) it copies the **exact TXT record string** so the user can
-  paste it straight into their DNS provider without retyping.
+* **Copy the fix** — every non-passing sub-test's remediation has a **copy-to-clipboard** button;
+  for record-level fixes (SPF/DKIM/DMARC TXT) it copies the **exact TXT record string** so the user
+  can paste it straight into their DNS provider without retyping.
+* **Open ›** — per category section, opens that category's
+  [view-one-category-run page](./view_one_category_run.mdx) for this run.
 
 ---
 
-## 6. New vs resolved (regression view)
+## 7. New vs resolved (regression view)
 
 Because the **periodic scheduler diffs each run against the prior run** (see
-[Engineering §8](../engineering.mdx)), this page annotates each finding relative to the **previous
-day's run** for the same domain:
+[Engineering §8](../engineering.mdx)), this page annotates each sub-test relative to the
+**previous run** for the same domain (the preceding YAML file in the domain's runs directory):
 
 * **NEW** — a problem present in this run but absent from the prior run (e.g. the DKIM record was
-  deleted since yesterday). Badged so regressions stand out.
+  deleted since the last run). Badged so regressions stand out.
 * **STILL PRESENT** — a problem carried over from the prior run (unchanged, still open).
-* **RESOLVED** — a finding that was a problem in the prior run and is now `ok` in this run (shown as
-  a cleared/struck item so the user sees progress).
+* **RESOLVED** — a sub-test that was a problem in the prior run and now passes in this run (shown
+  as a cleared/struck item so the user sees progress).
 
-A small "**vs previous run (2026-06-29)**" toggle at the top lets the user filter to only NEW,
-only RESOLVED, or all findings. If this is the first run for the domain (no prior run to diff),
-the regression annotations are omitted and every finding is simply shown at its current severity.
+A small "**vs previous run (2026-06-30 03:00 AM)**" toggle at the top lets the user filter to only
+NEW, only RESOLVED, or all sub-tests. If this is the first run for the domain (no prior run to
+diff), the regression annotations are omitted and every sub-test is simply shown at its current
+severity.
 
 ---
 
-## 7. Acceptance criteria
+## 8. Acceptance criteria
 
-1. Clicking a Dashboard row navigates to `/domains/:id/audits/:auditId` and the page loads that run
-   via `GET /api/audits/:auditId`, reading the persisted `AuditResult` JSON; an unknown id yields a
-   404 "run not found" state.
-2. The summary header shows the run's date/timestamp, domain(s), overall score + status badge, six
-   category chips colored to match the Dashboard cells, and the open-problem count.
-3. Findings are grouped into the six categories (SPF, DKIM, DMARC, Blacklists, DNS & Infrastructure,
-   Spam & Content); each sub-check is a row with severity, observed detail, and — for every non-`ok`
-   finding — a concrete remediation string.
-4. Every non-`ok` finding shows its fix prominently with a copy-to-clipboard control that copies the
-   exact TXT record for record-level fixes.
-5. The page offers **Run checks again** (creating a new run), **Back to dashboard**, and delisting
-   links for critical Blacklist findings.
-6. Each finding is annotated NEW / STILL PRESENT / RESOLVED relative to the previous run for the same
-   domain, and this annotation is omitted only when there is no prior run to diff.
+1. Clicking a Dashboard **Runs** row (or its chevron) navigates to `/domains/:domainId/runs/:runId`;
+   clicking a **Domain health** row navigates to the newest-run alias `/domains/:domainId`. The
+   page loads the run via `GET /api/audit/runs/:runId`, whose data comes from the run's YAML file
+   at `~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml`; an unknown id yields a 404 "run not
+   found" state.
+2. The summary header shows the domain, the run's `started_at` / `finished_at` / duration, the
+   overall score + status badge, six category chips colored to match the Dashboard cells, and the
+   open-problem count.
+3. The header's **run switcher** offers ‹ prev / next ›, a newest-first runs dropdown for this
+   domain, and a NEWEST badge on the most recent run; navigation swaps the `:runId` in the URL.
+4. The body lists the **six categories** in locked order; each section card shows the category's
+   status chip, its sub-test pass/fail counts, its top open problem, preview sub-test rows
+   (result icon, observed detail, remediation), and an **Open ›** chevron that navigates to
+   `/domains/:domainId/runs/:runId/<slug>` (slugs: `spf`, `dkim`, `dmarc`, `blacklists`, `dns`,
+   `spam-content`).
+5. Every non-passing sub-test shows its fix prominently with a copy-to-clipboard control that
+   copies the exact TXT record for record-level fixes; report-sourced sub-tests carry the
+   "from reports" chip.
+6. The page offers **Run checks again** (creating a new run and navigating to it), **Back to
+   dashboard**, and delisting links for failing Blacklist sub-tests.
+7. Each sub-test is annotated NEW / STILL PRESENT / RESOLVED relative to the previous run for the
+   same domain, and this annotation is omitted only when there is no prior run to diff.
 
 <!--
-  Keep this aligned with GET /api/audits/:auditId and the AuditResult/Finding shape in
-  ../engineering.mdx, the six category columns in ../dashboard.mdx, and the sub-check catalog in
-  ../spam_checks.mdx. The six category groupings here must stay in lockstep with the six Dashboard
-  columns. Every non-ok finding must carry a concrete "how to fix" string — that is the product's
-  whole promise. The NEW/RESOLVED annotations must match the scheduler's run-diff behavior.
+  Keep this aligned with the run YAML layout in ../storage.mdx
+  (~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml — a run: metadata block plus
+  the six category keys spf/dkim/dmarc/blacklists/dns_infra/spam_content, each with observation,
+  tool_runs, and tests), the GET /api/audit/runs endpoints and Run → Test → Sub-test vocabulary in
+  ../dashboard.mdx, and the sub-test catalog in ../spam_checks.mdx. LOCKED: routes
+  /domains/:domainId/runs/:runId (newest alias /domains/:domainId) and category routes
+  /domains/:domainId/runs/:runId/<slug> with slugs spf/dkim/dmarc/blacklists/dns/spam-content —
+  never reintroduce the old /domains/:id/audits/:auditId form. The six category sections here must
+  stay in lockstep with the six Dashboard columns and with ./view_one_category_run.mdx (this page
+  previews sub-tests; the category page owns the full detail). Every non-passing sub-test must
+  carry a concrete "how to fix" string — that is the product's whole promise. The NEW/RESOLVED
+  annotations must match the scheduler's run-diff behavior.
 -->

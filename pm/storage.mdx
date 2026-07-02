@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — Local Storage, Config & Settings
-description: How EmailDeliveryHero persists state on disk — the no-database state root at ~/.email_delivery_hero/, the hierarchical app-level config.yaml (settings), the per-logged-in-user config under users/<email>/config.yaml, the domain list in human-editable YAML (domains.yaml) plus the machine-written audit collection (audits.json), holding the domain list and each domain's sync on/off flag, the OpenAuthFederated session store + signing secret, the two log files (log.log + error.err), the browser localStorage conventions (theme mirror + oaf_edh session, never secrets), and the store module that fronts all of it. Works identically on a developer laptop and on a server; the only thing that changes is where the state root resolves and who is logged in.
+description: How EmailDeliveryHero persists state on disk — the no-database state root at ~/.email_delivery_hero/, the hierarchical app-level config.yaml (settings), the per-logged-in-user config under users/<email>/config.yaml, the domain list in human-editable YAML (domains.yaml) plus the machine-written latest-audit collection (audits.json), the runs/ history tree (one YAML file per run, runs/<domain>/YYYY_MM_DD_hh_mm{AM|PM}.yaml, holding the run metadata plus one section per test category with structured observations, tool_runs, and per-sub-test rows), the OpenAuthFederated session store + signing secret, the two log files (log.log + error.err), the browser localStorage conventions (theme mirror + oaf_edh session, never secrets), and the store module that fronts all of it. Works identically on a developer laptop and on a server; the only thing that changes is where the state root resolves and who is logged in.
 ---
 
 # EmailDeliveryHero — Local Storage, Config & Settings
@@ -77,14 +77,20 @@ runtime data (`~/BGit/Bryan_git/EmailDeliveryHero/CLAUDE.md`).
 ~/.email_delivery_hero/
 ├── config.yaml              # APP-LEVEL settings — install-wide, hierarchical YAML (§3)
 ├── domains.yaml             # the monitored-domains list + each domain's sync on/off flag (§5)
-├── audits.json              # latest audit result keyed by domain id (§6)
-├── .auth_session_secret     # stable HS256 signing secret (auto-created; never in .env) (§7)
+├── audits.json              # latest audit result keyed by domain id — the fast cache (§6)
+├── runs/                    # RUN HISTORY — one YAML file per run, per domain (§7)
+│   ├── whitehatengineering.com/
+│   │   ├── 2026_06_30_03_00AM.yaml
+│   │   └── 2026_07_01_09_14AM.yaml
+│   └── act3ai.com/
+│       └── 2026_07_01_09_14AM.yaml
+├── .auth_session_secret     # stable HS256 signing secret (auto-created; never in .env) (§8)
 ├── users/                   # PER-LOGGED-IN-USER settings, keyed by verified email (§4)
 │   └── <email>/
 │       └── config.yaml      # that user's personal settings (theme, notif prefs, last view)
-├── sessions/                # OpenAuthFederated FileSessionStore records (§7)
-├── log.log                  # INFO/DEBUG/VERBOSE — the normal event trail (§10, errors.mdx)
-└── error.err                # WARN/ERROR/FATAL — the fault trail (§10, errors.mdx)
+├── sessions/                # OpenAuthFederated FileSessionStore records (§8)
+├── log.log                  # INFO/DEBUG/VERBOSE — the normal event trail (§11, errors.mdx)
+└── error.err                # WARN/ERROR/FATAL — the fault trail (§11, errors.mdx)
 ```
 
 Three tiers:
@@ -94,9 +100,12 @@ Three tiers:
   machine"; in server mode "this server".
 * **User-level** (`users/<email>/config.yaml`) — one folder per person who has ever logged in,
   created lazily on first write. Personal, cosmetic, per-user preferences.
-* **Machine-written collections & runtime** (`audits.json`, `sessions/`, `.auth_session_secret`,
-  `log.log`, `error.err`) — not hand-edited; the app owns them. The **domains list** (`domains.yaml`)
-  is app-owned too but deliberately kept in **YAML** so an operator can read and hand-edit it (§5).
+* **Machine-written collections & runtime** (`audits.json`, `runs/`, `sessions/`,
+  `.auth_session_secret`, `log.log`, `error.err`) — not hand-edited; the app owns them. The
+  **domains list** (`domains.yaml`) is app-owned too but deliberately kept in **YAML** so an
+  operator can read and hand-edit it (§5). The **run history** (`runs/`, §7) is app-written but
+  also deliberately **YAML** — each run file is a human-readable record an operator can open,
+  diff, and copy between machines.
 
 ### Why YAML for config + the domain list, JSON for the audit collection
 
@@ -107,7 +116,8 @@ The product rule is **"keep human-facing data in YAML unless the data type makes
 | Settings, preferences, toggles, small key/values | `config.yaml` (app) / `users/<email>/config.yaml` | Human-readable, hot-editable, **hierarchical**. |
 | The **monitored-domains list** — small, operator-facing, hand-editable on localhost | `domains.yaml` | A short sequence a person actually reads and edits; the store rewrites it atomically. |
 | The **latest-audit collection** — machine-written, high-churn, never hand-edited | `audits.json` | A keyed map the app owns and rewrites atomically; JSON matches the current code. |
-| Secrets (Google client id/secret) | `~/.credentials/email_delivery_hero.json` **or** env | Never in the state store, never in the repo (§7, [Authentication](./authentication.mdx)). |
+| The **run history** — one immutable record per run, read by humans and the UI alike | `runs/<domain>/<timestamp>.yaml` | Written once at run completion, never rewritten; YAML so an operator can open any run and read every test result (§7). |
+| Secrets (Google client id/secret) | `~/.credentials/email_delivery_hero.json` **or** env | Never in the state store, never in the repo (§8, [Authentication](./authentication.mdx)). |
 | Append-only logs | `log.log` / `error.err` | Flat append streams; appending to YAML/JSON is wrong. |
 
 ---
@@ -204,7 +214,7 @@ defaults:
 
 Secrets never go here — Google client credentials come from env or the out-of-repo credentials file
 ([Authentication](./authentication.mdx) §credentials); the auth signing secret is its own file
-(§7). `config.yaml` holds only non-secret ports, flags, and PM/admin-editable settings.
+(§8). `config.yaml` holds only non-secret ports, flags, and PM/admin-editable settings.
 
 ---
 
@@ -318,16 +328,17 @@ A legacy `domains.json` from an earlier install is migrated to `domains.yaml` on
   domain is on the recurring schedule only when the **global** `schedule.enabled` (§3) **and** its own
   `scheduleEnabled` are both true.
 * Adding/removing a domain, editing its IPs/selectors/label, and flipping its sync toggle all rewrite
-  this file through the `yaml-store` helper (§8). Records written by an older version that lack
+  this file through the `yaml-store` helper (§9). Records written by an older version that lack
   `label` / `scheduleEnabled` are backfilled with defaults (empty label, schedule **on**) on read.
 
 ---
 
-## 6. `audits.json` — audit history
+## 6. `audits.json` — the latest-result cache
 
-Audit runs persist under the state root (already implemented in
-`code/packages/backend/src/modules/audit/audit.service.ts`). The current shape is a single JSON map
-of **latest result keyed by domain id**:
+The **latest** audit result per domain persists under the state root (already implemented in
+`code/packages/backend/src/modules/audit/audit.service.ts`) as a single JSON map of **latest result
+keyed by domain id** — the fast cache the Dashboard's Domain-health table reads. The full per-run
+history is the `runs/` YAML tree (§7).
 
 ```json
 {
@@ -348,16 +359,113 @@ of **latest result keyed by domain id**:
 }
 ```
 
-* **Retention.** `storage.retentionDays` (§3) governs how much history is kept. When history grows to
-  per-run files (`audits/<domainId>/<auditId>.json`, the fuller model in
-  [Engineering §7](./engineering.mdx)), the store prunes runs older than the retention window; the
-  keyed-latest map above is the first-round shape.
+* **Role.** `audits.json` is a derived cache — it is always reconstructible from the newest run file
+  per domain in `runs/` (§7). It exists so the Dashboard's top table renders without scanning the
+  run tree.
 * **Regression detection** ([Engineering §8](./engineering.mdx)) diffs each new run against the
-  previous one to surface newly-introduced/worsened problems on the [Dashboard](./dashboard.mdx).
+  previous one (the two newest files in `runs/<domain>/`) to surface newly-introduced/worsened
+  problems on the [Dashboard](./dashboard.mdx).
 
 ---
 
-## 7. Auth session & signing secret (runtime, not settings)
+## 7. `runs/` — the run history (one YAML file per run)
+
+Every health-check **run** — one execution of all checks for **one domain**, per the locked
+**Run → Test → Sub-test** hierarchy in [Dashboard §1](./dashboard.mdx) — persists as **one YAML
+file** under the state root:
+
+```
+~/.email_delivery_hero/
+└── runs/
+    ├── whitehatengineering.com/
+    │   ├── 2026_06_28_06_00PM.yaml
+    │   ├── 2026_06_30_03_00AM.yaml
+    │   └── 2026_07_01_09_14AM.yaml      ← the newest run for this domain
+    └── act3ai.com/
+        └── 2026_07_01_09_14AM.yaml
+```
+
+A domain accumulates **many runs** over time; each run is one file, and the files never change once
+written.
+
+### 7.1 Directory rule
+
+* `runs/` sits directly under the state root.
+* One subdirectory **per domain**, named the **domain name, lowercased, verbatim**
+  (`whitehatengineering.com`) — so different domains' runs live in different directories and the
+  tree is human-browsable. The name is defensively sanitized like the email folder key (§4 policy:
+  reject/strip `/`, `\`, `..`, NUL) before use as a path segment.
+* The domain directory is created lazily on that domain's first run.
+
+### 7.2 Filename rule — the run timestamp (LOCKED)
+
+The filename is the run's **start time**, in this exact order — **year, month, day, hour, minutes,
+AM/PM, `.yaml`**:
+
+```
+YYYY_MM_DD_hh_mm{AM|PM}.yaml       e.g.  2026_07_01_09_14AM.yaml
+```
+
+* `YYYY` 4-digit year · `MM` 2-digit month · `DD` 2-digit day · `hh` 2-digit **12-hour-clock**
+  hour · `mm` 2-digit minutes — all zero-padded, joined by underscores — then `AM` or `PM`
+  (uppercase, no separator before it), then `.yaml`.
+* 12-hour-clock edge cases: midnight 00:xx → `12_xxAM`; noon 12:xx → `12_xxPM`.
+* The time is rendered in the app's configured **local timezone** (`schedule.timezone` in §3,
+  defaulting to the system tz) — the filename is for the human browsing the tree; the file body
+  keeps the precise ISO-8601 UTC instants.
+* **Collision rule:** if a second run for the same domain starts in the same minute, append `_2`
+  (`_3`, …) before `.yaml`.
+* Lexicographic sort of these names **is** chronological sort within a day segment-by-segment
+  (the AM/PM hour is the one non-lexicographic wrinkle — listings must parse the timestamp, not
+  string-sort blindly across noon/midnight).
+
+### 7.3 File shape — the run YAML specification
+
+One document per run: a `run:` metadata block, then **one top-level key per test category** — the
+six locked categories, keys `spf`, `dkim`, `dmarc`, `blacklists`, `dns_infra`, `spam_content`:
+
+```yaml
+# ~/.email_delivery_hero/runs/whitehatengineering.com/2026_07_01_09_14AM.yaml
+run:
+  run_id: 2026-07-01T16-14-02-a1b2      # unique id — what /runs/:runId resolves
+  domain: whitehatengineering.com
+  started_at: 2026-07-01T16:14:02.000Z  # ISO-8601 UTC (09:14 AM PDT — the filename time)
+  finished_at: 2026-07-01T16:14:05.310Z
+  score: 88
+  status: warning                        # healthy | warning | critical
+
+spf:          { ... }   # each category section owns: status (worst severity),
+dkim:         { ... }   # the structured observation for that category,
+dmarc:        { ... }   # tool_runs: [] — one record per external tool invocation
+blacklists:   { ... }   #   {tool, command, started_at, duration_ms, exit_code,
+dns_infra:    { ... }   #    output_format: json|text, parsed: <captured output>, error}
+spam_content: { ... }   # tests: [] — one row per sub-test {id, title,
+                        #   result: pass|fail|warn|info, evidence, fix}
+                        # problem_states: [] — matched problem-state ids
+```
+
+The **exact shape of each category section is owned by that category's spec** — see the
+"Test results (YAML)" section of each:
+[SPF](./checks/spf.mdx), [DKIM](./checks/dkim.mdx), [DMARC](./checks/dmarc.mdx),
+[Blacklists](./checks/blacklists.mdx), [DNS & Infrastructure](./checks/dns.mdx),
+[Spam & Content](./checks/spam_content.mdx). This document owns only the envelope: the path, the
+filename, the `run:` block, and the six category keys.
+
+### 7.4 Write / read / retention rules
+
+* **Written once, atomically** (write-temp-then-rename via the store layer, §9) when the run
+  finishes; a run file is immutable history and is never edited afterward. The same write also
+  refreshes the domain's entry in `audits.json` (§6).
+* **Read by** `GET /api/audit/runs` (listing — newest `started_at` first, optional `?domainId=`)
+  and `GET /api/audit/runs/:runId` (one run — the run report and every "view one category run"
+  page render from this file).
+* **Retention:** files older than `storage.retentionDays` (§3) are pruned, and at most the newest
+  **50 runs per domain** are kept ([Dashboard §1](./dashboard.mdx)); pruning deletes whole files,
+  never rewrites them. Deleting a domain removes its `runs/<domain>/` directory.
+
+---
+
+## 8. Auth session & signing secret (runtime, not settings)
 
 Authentication state also lives under the state root, kept **separate** from settings so it is never
 hand-edited or exported with a config backup:
@@ -374,7 +482,7 @@ provider secrets.
 
 ---
 
-## 8. The store layer (how code touches disk)
+## 9. The store layer (how code touches disk)
 
 All filesystem access for state goes through a thin **`store` module** so callers never deal with
 paths, parsing, atomic writes, or the local-vs-server difference ([Engineering §7](./engineering.mdx)).
@@ -397,7 +505,7 @@ change; services never touch the filesystem directly.
 
 ---
 
-## 9. Browser `localStorage` conventions (frontend)
+## 10. Browser `localStorage` conventions (frontend)
 
 The React frontend uses browser `localStorage` **only** as a fast, pre-network cache — the **server**
 (`users/<email>/config.yaml`) is always the source of truth. This mirrors the reference app's
@@ -405,7 +513,7 @@ The React frontend uses browser `localStorage` **only** as a fast, pre-network c
 
 * **Never store secrets or long-lived tokens** in `localStorage`
   ([Authentication](./authentication.mdx) §security). Auth is the `HttpOnly` `oaf_edh` cookie plus a
-  server-side session (§7); the JWT is held in memory by `@auth/react`, not persisted to
+  server-side session (§8); the JWT is held in memory by `@auth/react`, not persisted to
   `localStorage` by app code.
 * **`localStorage` is a mirror, not the record.** On sign-in the app hydrates from
   `GET /api/settings`; on change it writes through to the server and updates the mirror. Clearing
@@ -421,7 +529,7 @@ from — `localStorage` only accelerates the first paint.
 
 ---
 
-## 10. Logging
+## 11. Logging
 
 Logs are two append-only flat files **directly at the state root** (no `logs/` subdirectory),
 implemented in `code/packages/backend/src/shared/logging.ts` +
@@ -445,7 +553,7 @@ implemented in `code/packages/backend/src/shared/logging.ts` +
 
 ---
 
-## 11. What gets stored — the complete inventory
+## 12. What gets stored — the complete inventory
 
 Everything EmailDeliveryHero persists, and where:
 
@@ -466,7 +574,8 @@ Everything EmailDeliveryHero persists, and where:
 | **Last route + remembered table sort/filter** | `users/<email>/config.yaml → ui.last_route`, `tables.views` | **per-user** |
 | **The monitored-domains list** (domain, IPs, selectors, label) | `domains.yaml` | collection |
 | **Each domain's sync on/off** (`scheduleEnabled`) | `domains.yaml[].scheduleEnabled` | collection |
-| Latest audit result per domain (findings, score, status, timestamps) | `audits.json` | collection |
+| Latest audit result per domain (findings, score, status, timestamps) — derived cache | `audits.json` | collection |
+| **Run history** — one YAML per run: `run:` metadata + six category sections (structured observation, `tool_runs`, `tests`, `problem_states`) | `runs/<domain>/<YYYY_MM_DD_hh_mm{AM\|PM}>.yaml` | collection |
 | Auth session records | `sessions/` | runtime |
 | Auth signing secret | `.auth_session_secret` | runtime |
 | Google client id/secret | `~/.credentials/email_delivery_hero.json` **or** env | out-of-repo secret |
@@ -474,7 +583,7 @@ Everything EmailDeliveryHero persists, and where:
 
 ---
 
-## 12. Acceptance criteria
+## 13. Acceptance criteria
 
 Storage is correct when **all** of the following hold:
 
@@ -493,20 +602,34 @@ Storage is correct when **all** of the following hold:
    (human-readable YAML; a legacy `domains.json` is migrated on first read); a domain is on the
    recurring schedule only when global `schedule.enabled` **and** the domain's `scheduleEnabled` are
    both true.
-6. Audit history persists in `audits.json` and is pruned per `storage.retentionDays`.
-7. Auth session records (`sessions/`) and the signing secret (`.auth_session_secret`) live under the
+6. The latest audit result per domain persists in `audits.json` (a derived cache, reconstructible
+   from `runs/`).
+7. **Every run persists as one YAML file at `runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml`** — the
+   domain subdirectory is the lowercased domain name; the filename is the run's start time in the
+   configured local timezone (year, month, day, 12-hour-clock hour, minutes, AM/PM, `.yaml`,
+   zero-padded, `_2` suffix on same-minute collision); the file holds the `run:` metadata block plus
+   the six category keys (`spf`, `dkim`, `dmarc`, `blacklists`, `dns_infra`, `spam_content`), each
+   with its structured observation, `tool_runs`, `tests`, and `problem_states` per its category
+   spec. Run files are written once, atomically, and never edited; pruning (per
+   `storage.retentionDays` and the 50-runs-per-domain cap) deletes whole files.
+8. Auth session records (`sessions/`) and the signing secret (`.auth_session_secret`) live under the
    state root, separate from settings; **no** provider secret is stored there or in `config.yaml`.
-8. Every read/write goes through the `store` layer: atomic write-temp-then-rename, per-file mutex,
+9. Every read/write goes through the `store` layer: atomic write-temp-then-rename, per-file mutex,
    defaults on absence, schema validation on read; services never touch the filesystem directly.
-9. The frontend uses `localStorage` only as a **mirror** (`edh.theme`) with the server as the source
-   of truth; **no secret or long-lived token** is ever placed in `localStorage`.
-10. Logs are appended to `log.log` (INFO/DEBUG/VERBOSE) and `error.err` (WARN/ERROR/FATAL) at the
+10. The frontend uses `localStorage` only as a **mirror** (`edh.theme`) with the server as the source
+    of truth; **no secret or long-lived token** is ever placed in `localStorage`.
+11. Logs are appended to `log.log` (INFO/DEBUG/VERBOSE) and `error.err` (WARN/ERROR/FATAL) at the
     state root, size-capped with rotation; logging never throws. Full behavior in [errors.mdx](./errors.mdx).
-11. The layout, formats, and code are **identical** in local and server mode — only the resolved
+12. The layout, formats, and code are **identical** in local and server mode — only the resolved
     state root and the logged-in user differ; a state dir copies between machines unchanged.
 
 <!--
-  storage.mdx maintenance: keep consistent with engineering.mdx §7/§8 (file store, scheduler),
+  storage.mdx maintenance: §7 (runs/) owns the run-file ENVELOPE only — path runs/<domain>/,
+  filename YYYY_MM_DD_hh_mm{AM|PM}.yaml (start time, local tz, 12-hour clock), the run: block, and
+  the six category keys (spf, dkim, dmarc, blacklists, dns_infra, spam_content); each category
+  SECTION's shape is owned by its pm/checks/*.mdx "Test results (YAML)" section — keep the key names
+  in lockstep. audits.json stays a derived latest-per-domain cache. Keep consistent with
+  engineering.mdx §7/§8 (file store, scheduler),
   settings.mdx (every setting → a config.yaml/users key), domains.mdx (domains.yaml + scheduleEnabled),
   scheduled_checks.mdx (the schedule: block), and authentication.mdx (oaf_edh cookie, out-of-repo
   credentials, no secrets in localStorage). When a new setting is added, add its key to §3 (app) or §4

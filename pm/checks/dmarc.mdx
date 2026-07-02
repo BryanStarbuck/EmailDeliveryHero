@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — DMARC Check
-description: Engineering spec for the DMARC category — the tests we run against the _dmarc TXT record (presence, single-record, syntax, policy enforcement, subdomain/np policy, alignment, reporting, external-report authorization, tree-walk coverage), the Brew/npm testing toolbox, the test-results YAML, the dashboard summary surface and the full-page DMARC view (UX layout), the fix recommendations and rollout state machine, and the catalog of DMARC problem states with a deep-dive (data fields, diagnosis, tools, drill-down UI) for each.
+description: Engineering spec for the DMARC test (category) — the sub-tests we run against the _dmarc TXT record (presence, single-record, syntax, policy enforcement, subdomain/np policy, alignment, reporting, external-report authorization, tree-walk coverage), the Brew/npm testing toolbox and how a run executes each tool (exact command lines, timeouts, JSON capture into dmarc.tool_runs[]), the per-run test-results YAML (the top-level dmarc key inside ~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml), the dashboard summary surface and the run-scoped full DMARC page (/domains/:domainId/runs/:runId/dmarc with run context strip and prev/next run navigation), the fix recommendations and rollout state machine, and the catalog of DMARC problem states with a deep-dive (data fields, diagnosis, tools, drill-down UI) for each.
 ---
 
 # EmailDeliveryHero — DMARC Check
@@ -15,11 +15,16 @@ single largest lever against direct-domain phishing, and, since the **2024 Gmail
 rules**, an effectively mandatory record for any sender pushing volume.
 
 This check belongs to the **DMARC** dashboard category; all sub-check ids use the **`dmarc`**
-checkId prefix.
+checkId prefix. In the locked **Run → Test → Sub-test** hierarchy
+([../dashboard.mdx](../dashboard.mdx) §1), a **run** is one execution of all checks for one domain
+(with `startedAt`/`finishedAt`; a domain accumulates many runs), **DMARC** is one of the six locked
+tests (categories) inside every run, and the §2 sub-checks are its **sub-tests**.
 
 **Read alongside**
 - [../overview.mdx](../overview.mdx) — product charter, personas, port list.
 - [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
+- [../storage.mdx](../storage.mdx) — the per-run YAML file this check writes its `dmarc` section
+  into (`~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml`); the `run:` block is defined there.
 - [../spam_checks.mdx](../spam_checks.mdx) — master catalog; DMARC is category 3 of 6.
 - [../dashboard.mdx](../dashboard.mdx) — the 6-column status dashboard and cell roll-up.
 - [../scheduled_checks.mdx](../scheduled_checks.mdx) — recurring-check cadence and regression diffing.
@@ -100,9 +105,12 @@ Each remediation is the exact record/tag/step to apply.
 
 ## 3. Testing toolbox — Brew / npm tools
 
-Verified against `formulae.brew.sh` and the npm registry (2026-07). First-round detection is pure
-`node:dns/promises` (no binaries required); these tools are the **debug bench** we shell out to for
-deeper diagnosis, cross-checking our own checker, and report ingestion. Install the bench with:
+Verified against `formulae.brew.sh` and the npm registry (2026-07: brew **checkdmarc 5.17.3**,
+brew **parsedmarc 10.2.0**, npm **mailauth 4.13.3** — all current and actively maintained).
+First-round detection is pure `node:dns/promises` (no binaries required); these tools are the
+**debug bench** we shell out to for deeper diagnosis, cross-checking our own checker, and report
+ingestion. Every shell-out performed during a run is captured in `dmarc.tool_runs[]` — see
+**"How a test run executes the tools"** below. Install the bench with:
 
 ```bash
 brew install bind doggo q dnsx ldns knot checkdmarc parsedmarc swaks
@@ -117,6 +125,11 @@ npm install mailauth        # library + CLI, same TS/Node stack as the app
 | **parsedmarc** (Python, brew formula) | `brew install parsedmarc` | Parses aggregate (`rua`) and forensic (`ruf`) report files or watches an IMAP mailbox → normalized JSON. Powers the [../emails.mdx](../emails.mdx) ingestion path and the future `dmarc.real_pass_rate`. | `parsedmarc report.xml.gz` |
 | **mailauth** (npm) | `npm i mailauth` | Authenticates a raw `.eml` exactly like a receiving MTA: SPF, DKIM, DMARC, ARC, BIMI with alignment results. Usable as a **library** in our backend for message-level tests. | `npx mailauth report message.eml` |
 | **dmarc-cat** (Go) | `go install github.com/keltia/dmarc-cat@latest` | Pretty-prints one rua XML/zip on the CLI (resolves source IPs). Manual debugging only. | `dmarc-cat report.zip` |
+
+> **Gone / stale — do not add:** npm **`dmarc-parse`** (last publish 2020) and npm **`dmarc`**
+> (last publish 2019) are abandoned; there is no `dmarc-record`/`parse-dmarc` package. The
+> maintained TS/Node record parser+evaluator is **mailauth** (above). `opendmarc` and `dog` are
+> gone from Homebrew (use doggo).
 
 ### DNS query & probe tools
 
@@ -137,6 +150,44 @@ requires domain verification; see [./reputation_metrics.mdx](./reputation_metric
 **MXToolbox API** (paid; DMARC + 100-blacklist lookups), **dmarcian** / **EasyDMARC** (report
 analytics SaaS; both publish wildcard `_report._dmarc` authorizations), **learndmarc.com**
 (interactive live-message evaluation — great manual debugging aid to link from the UI).
+
+### How a test run executes the tools
+
+First-round detection itself runs in-process on `node:dns/promises`; those lookups populate
+`record:` and `external_report_auth[]` directly and are **not** tool runs. Every **shell-out** to
+an external binary during a run, however, is recorded as one entry in **`dmarc.tool_runs[]`** in
+the run YAML (§5, [../storage.mdx](../storage.mdx)):
+`{tool, command, started_at, duration_ms, exit_code, output_format, parsed, error}`.
+
+Execution rules:
+
+- **Exact argv.** `command` holds the exact command line with **every** input argument substituted
+  (the domain, the report file, the resolver IP…) — copy-paste-reproducible from the UI.
+- **Prefer JSON.** Every tool that can emit JSON is invoked with its JSON flag
+  (`output_format: json`); only kdig is `text`. Stdout is captured whole, `JSON.parse`d when
+  `json`, and stored under `parsed` (large outputs pruned to the fields we consume, noted per row
+  below). Stderr is captured separately and lands in `error` on failure.
+- **One entry per invocation**, retries included. Non-zero exit or timeout keeps the entry with
+  `exit_code` set (or `null` on timeout/kill), `parsed: null`, and `error` holding stderr or
+  `"timeout after <n>ms"`. `duration_ms` is wall-clock around the spawn.
+- **Missing binary** (preflight `command -v <tool>`) → the invocation is skipped entirely — no
+  fabricated entry — and surfaced once per run as an `info` finding naming the `brew install` line.
+- `started_at` is ISO-UTC; entries appear in invocation order.
+
+The tools a DMARC run shells out to, in order:
+
+| # | Tool | Exact command line (argv) | Output | Timeout | Captured → feeds |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **doggo** | `doggo _dmarc.<domain> TXT --json` — e.g. `doggo _dmarc.example.com TXT --json` | json | 10 s | Full answer array → `parsed.answers`; the raw TXT evidence shown on every test row; cross-checks the in-process `record.raw_record` / `found_at` (a mismatch = resolver inconsistency, noted in `tests[].detail`). |
+| 2 | **doggo** (per external report destination, deduped) | `doggo <domain>._report._dmarc.<report-domain> TXT --json` — e.g. `doggo example.com._report._dmarc.thirdparty.net TXT --json` | json | 10 s | Empty `answers` = unauthorized → `external_report_auth[].authorized` and the `dmarc.external_report_auth` evidence. One invocation (one entry) per distinct external report domain. |
+| 3 | **checkdmarc** | `checkdmarc <domain> -f json` — e.g. `checkdmarc example.com -f json` | json | 60 s (it also probes MX/DNSSEC) | The `dmarc` object of its JSON (pruned to `record`, `valid`, `location`, `tags`, `warnings`) → `parsed`; the conformance oracle cross-validating `record.parsed`, `policy`, `sp` effectiveness, obsolete tags, and external-destination authorization. Any disagreement with our checker is appended to the affected `tests[].detail`. |
+| 4 | **kdig** (conditional) | `kdig @8.8.8.8 +short TXT _dmarc.<domain>` | text | 10 s | Raw stdout lines → `parsed.lines`. Only invoked when the in-process lookup and doggo disagree, or on `dmarc.lookup_failed` — "does a public resolver see the same record?" evidence. |
+| 5 | **mailauth** (optional — only when the user supplies a message file) | `npx mailauth report <path-to-message.eml>` | json | 30 s | `dmarc`/`spf`/`dkim` alignment verdicts (pruned) → `parsed`; message-level evidence for PS-08/PS-13 drill-downs. |
+| 6 | **parsedmarc** *(future — rua ingestion)* | `parsedmarc <report.xml.gz>` | json | 120 s | Normalized report JSON → the [../emails.mdx](../emails.mdx) pipeline and `dmarc_aggregate_reports`. Runs inside the ingestion job, whose own `tool_runs` live on that job — **not** in a domain run. |
+
+Rows 1–3 run on every DMARC run; row 4 is conditional; rows 5–6 are optional/future. Each entry's
+`parsed` payload is diagnostic **provenance**: the structured truth the checker asserts stays in
+`record:` / `external_report_auth[]` / `tests[]`, and `tool_runs[]` proves where it came from.
 
 ---
 
@@ -190,16 +241,35 @@ amber.
 
 ## 5. Test results (YAML)
 
-The information we extract from the tests, in one document per domain per run. The structured
-payload is produced by the checker as `results.dmarc` (persisted inside the per-run audit record;
-see §10) and the per-test rows are the findings. Rendered as YAML — **`test_results.yaml`** — the
-canonical shape every DMARC UI surface and the regression differ consume:
+The information we extract from the tests. Every run persists as **one YAML file** — the full
+run-file spec (the `run:` block, category ordering, retention) is owned by
+[../storage.mdx](../storage.mdx), not redefined here — at:
+
+```
+~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml
+```
+
+e.g. `~/.email_delivery_hero/runs/whitehatengineering.com/2026_07_01_09_14AM.yaml` — `<domain>`
+lowercased; the filename is the run's **start** time in the local timezone, 12-hour clock,
+zero-padded, with an `AM`/`PM` suffix. The file opens with the `run:` block (`run_id`, `domain`,
+`started_at`/`finished_at` in ISO-UTC, `score`, `status`) followed by one top-level key per locked
+category: `spf, dkim, dmarc, blacklists, dns_infra, spam_content`. **This spec owns the `dmarc`
+key.** Its section holds the worst-severity `status`, the structured observation (`record:`,
+produced by the checker as `results.dmarc` — see §10), the shell-out provenance (`tool_runs:`,
+§3), the per-sub-test rows (`tests:` — the findings), and the derived `problem_states`. This is
+the canonical shape every DMARC UI surface and the regression differ consume:
 
 ```yaml
-# test_results.yaml — DMARC category, one document per domain per audit run
-dmarc:
+# ~/.email_delivery_hero/runs/example.com/2026_07_01_09_14AM.yaml — ONE file per run
+run:                           # owned by ../storage.mdx — shown for context only
+  run_id: 9f1c2e7a
   domain: example.com
-  checked_at: 2026-07-01T09:30:00Z
+  started_at: 2026-07-01T16:14:03Z     # ISO-UTC (the filename is the same instant, local tz)
+  finished_at: 2026-07-01T16:14:41Z
+  score: 68
+  status: warning
+# spf: … dkim: …               # the five sibling category keys, owned by their own specs
+dmarc:
   status: warning              # worst severity across the tests below
   # ---- the parsed observation (results.dmarc) ----
   record:
@@ -232,6 +302,43 @@ dmarc:
         report_domain: thirdparty.net
         auth_name: example.com._report._dmarc.thirdparty.net
         authorized: false
+  # ---- the shell-out provenance (one entry per external tool invocation; §3) ----
+  tool_runs:
+    - tool: doggo
+      command: "doggo _dmarc.example.com TXT --json"
+      started_at: 2026-07-01T16:14:04Z
+      duration_ms: 142
+      exit_code: 0
+      output_format: json
+      parsed:
+        answers:
+          - name: _dmarc.example.com.
+            type: TXT
+            answer: '"v=DMARC1; p=none; rua=mailto:reports@thirdparty.net; adkim=r; aspf=r"'
+      error: null
+    - tool: doggo
+      command: "doggo example.com._report._dmarc.thirdparty.net TXT --json"
+      started_at: 2026-07-01T16:14:05Z
+      duration_ms: 133
+      exit_code: 0
+      output_format: json
+      parsed:
+        answers: []              # NXDOMAIN — feeds external_report_auth[].authorized=false
+      error: null
+    - tool: checkdmarc
+      command: "checkdmarc example.com -f json"
+      started_at: 2026-07-01T16:14:05Z
+      duration_ms: 5210
+      exit_code: 0
+      output_format: json
+      parsed:                    # pruned to the dmarc object we consume
+        dmarc:
+          valid: true
+          location: _dmarc.example.com
+          record: "v=DMARC1; p=none; rua=mailto:reports@thirdparty.net; adkim=r; aspf=r"
+          warnings:
+            - "Unverified external destination: thirdparty.net"
+      error: null
   # ---- the per-test rows (the findings, pass and fail alike) ----
   tests:
     - id: dmarc.present
@@ -260,7 +367,10 @@ Field-name mapping: `record.*` keys are 1:1 with the `dmarc_check_results` colum
 (`raw_record`, `parsed`, `policy`, `subdomain_policy`, `pct`, `adkim`, `aspf`, `rua_uris`,
 `ruf_uris`, `is_enforcing`, `external_reports_authorized`); `tests[]` rows are the `findings`
 (`result: pass|fail|warn|info` ⇔ severity `ok|critical|warning|info`); `problem_states` is derived
-(§9 mapping table) — never stored separately.
+(§9 mapping table) — never stored separately. `tool_runs[]` is **provenance** and lives only in
+the run YAML (no §10 table); each entry's `parsed` payload feeds the `record.*` /
+`external_report_auth[]` / `tests[].evidence` fields named in §3's execution table. The domain
+name and run timestamps are **not** repeated inside `dmarc:` — the file's `run:` block owns them.
 
 ---
 
@@ -281,21 +391,44 @@ important fact about this technology at a glance:
 - **Label** — the one-line summary of the most decision-relevant metric: the **policy level**.
   `p=reject` / `p=quarantine` / `p=none` / `No record` / `K of M fail`.
 - **Hover** — tooltip with the top open problem's title.
-- **Chevron (›)** — on the right edge of the cell (visible on hover and on the domain run-detail
-  category chip). Clicking it navigates to the full DMARC page: **`/domains/:id/dmarc`**. Clicking
-  anywhere else in the row still opens the domain run detail as today.
+- **Cell click** — clicking the DMARC **cell itself** opens the "view one category run" page (§6.2):
+  on **Table 1 (Domain health)** it opens the domain's **newest** run's DMARC page
+  (`/domains/:domainId/dmarc`, the newest-run alias); on a **Table 2 (Runs)** row it opens **that
+  run's** DMARC page (`/domains/:domainId/runs/:runId/dmarc`). A chevron (›) on the cell's right
+  edge (visible on hover, and on the run report's DMARC category chip) routes to the same place.
+- **Row click (everywhere else)** — clicking anywhere else in the row opens the **whole run
+  report**: `/domains/:domainId/runs/:runId` (Table 2), or its newest alias `/domains/:domainId`
+  (Table 1), per [../dashboard.mdx](../dashboard.mdx) §6.
 
-### 6.2 The full DMARC page (`/domains/:id/dmarc`)
+### 6.2 The full DMARC page — one category of one run (`/domains/:domainId/runs/:runId/dmarc`)
 
-One page, purely about DMARC for one domain. It must answer, top to bottom: *Am I protected? What
-exactly did we observe (the DNS values)? Which tests passed/failed? How do I fix each failure?*
-Every failed test shows the relevant debugging values — the DNS name queried, the raw TXT answer,
-the expected record, and (when report data exists) source IP addresses.
+One page, purely about the DMARC sub-test results **of one specific run** for one domain — a
+"view one category run" page. The canonical route is **run-scoped** —
+`/domains/:domainId/runs/:runId/dmarc` — with the **newest-run alias** `/domains/:domainId/dmarc`
+(the same page, resolved to the domain's latest run and showing the "newest" indicator). It is
+reached two ways:
+
+- **Dashboard DMARC cell click** (§6.1): a Domain-health cell opens the newest run's page (the
+  alias route); a Runs-row cell opens that specific run's page.
+- **Run report chevron**: the DMARC section/category chip on the run report
+  (`/domains/:domainId/runs/:runId`) carries a chevron (›) into this page for the same run.
+
+It must answer, top to bottom: *Which run am I looking at? Am I protected? What exactly did we
+observe (the DNS values)? Which tests passed/failed? How do I fix each failure?* Every failed test
+shows the relevant debugging values — the DNS name queried, the raw TXT answer, the expected
+record, and (when report data exists) source IP addresses. An older run is a **historical
+snapshot** — nothing on the page silently swaps to newer data; the run context strip makes the
+vintage unmistakable.
 
 Contents, in order (exact layout in §7):
 
-1. **Header** — domain name, "DMARC" title, the category StatusCell, `ran <timestamp>`, a
-   **Re-run** button (runs just this domain's audit), and a back link.
+1. **Header** — domain name, "DMARC" title, the category StatusCell (this run's roll-up), a
+   **Re-run** button (starts a *new* run for just this domain, then navigates to the new run's
+   DMARC page), and a back link to this run's report. Directly beneath: the **run context strip**
+   — the run's timestamp (`startedAt`, `YYYY-MM-DD HH:mm`), a **‹ prev / next ›** run pager
+   stepping through this domain's runs in `startedAt` order (each step swaps `:runId` in the
+   route; ends disabled), and a **"newest"** badge when this run is the domain's latest (always
+   shown when the page was reached via the alias route).
 2. **Policy ladder** — a three-step `none → quarantine → reject` progress visual with the current
    step highlighted and the recommended next step (from §8) as a CTA.
 3. **Parsed record panel** — the raw TXT string (copyable, monospace) above a two-column tag table:
@@ -310,8 +443,13 @@ Contents, in order (exact layout in §7):
    domain, external? yes/no, authorization DNS name and its observed answer, authorized ✓/✗.
 6. **Problem states** — cards for each matched §9 problem state, each with a one-paragraph
    explanation and a **"Learn more ›"** chevron that opens the per-problem drill-down page
-   (`/domains/:id/dmarc/:problemId`) — concept, diagnosis, and the step-by-step path forward.
-7. **Sources (future)** — once `rua` ingestion lands: a per-source-IP table (IP, PTR, message
+   (`/domains/:domainId/runs/:runId/dmarc/:problemId`, newest alias
+   `/domains/:domainId/dmarc/:problemId`) — concept, diagnosis, and the step-by-step path forward.
+7. **Tool runs** — a collapsed provenance footer listing this run's `dmarc.tool_runs[]` entries
+   (§3/§5): tool, the exact command line (copyable — the user can reproduce it in a terminal),
+   duration, exit code, and an expandable view of the captured `parsed` output. Failed
+   invocations render their `error` in red.
+8. **Sources (future)** — once `rua` ingestion lands: a per-source-IP table (IP, PTR, message
    count, SPF/DKIM aligned pass, disposition) feeding PS-11/PS-12.
 
 **Empty / never-run / loading states.** Never-run → gray header cell + "No audit yet — run one"
@@ -332,8 +470,9 @@ first, evidence second, work items third, education last.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
-│ ‹ Back to example.com          DMARC                         [Re-run ⟳]   │  header row
-│ example.com  ·  [ amber: p=none ]  ·  ran 2026-07-01 09:30                 │
+│ ‹ Back to this run's report     DMARC                        [Re-run ⟳]   │  header row
+│ example.com  ·  [ amber: p=none ]                                          │
+│ Run 2026-07-01 09:14  ·  [‹ prev]  [next ›]  ·  ★ newest                   │  run context strip
 ├────────────────────────────────────────────────────────────────────────────┤
 │  POLICY LADDER      ( none ●───○ quarantine ───○ reject )                  │  hero band
 │  "Monitoring only — spoofed mail is still delivered."                      │
@@ -357,14 +496,23 @@ first, evidence second, work items third, education last.
 ├────────────────────────────────────────────────────────────────────────────┤
 │  PROBLEM STATES                                                             │  cards
 │  [PS-05 Stuck in monitoring ›]   [PS-10 Reports going nowhere ›]           │
+├────────────────────────────────────────────────────────────────────────────┤
+│  ▸ TOOL RUNS (3)                                            all succeeded  │  provenance footer
+│    doggo _dmarc.example.com TXT --json          142 ms  exit 0  [copy] [v] │  (collapsed)
+│    checkdmarc example.com -f json              5210 ms  exit 0  [copy] [v] │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Placement rules and rationale:
 
-- **Highest: the verdict.** The header row carries identity + status; the **policy ladder hero**
-  directly under it is the one visual a non-expert needs — where am I on none→quarantine→reject
-  and what's my next move. One accent CTA maximum on the page (the ladder's "next step").
+- **Highest: the verdict — anchored to one run.** The header row carries identity + status; the
+  **run context strip** directly beneath it pins the page to one run — the run timestamp, the
+  **‹ prev / next ›** pager (same domain, `startedAt` order, keyboard `←`/`→`; ends disabled),
+  and the **★ newest** badge on the domain's latest run. Paging swaps `:runId` in the route and
+  re-renders every band below from that run's YAML file — the strip is the only element that
+  changes meaning between runs, so it sits above everything. The **policy ladder hero** under it
+  is the one visual a non-expert needs — where am I on none→quarantine→reject and what's my next
+  move. One accent CTA maximum on the page (the ladder's "next step").
 - **Second band, two-up:** left = **Published record** (the ground truth users paste elsewhere;
   monospace, copy button top-right, tag table beneath with grayed inherited defaults); right =
   **Report destinations** (the most-missed failure — external authorization — gets its own card
@@ -375,17 +523,24 @@ Placement rules and rationale:
   accordion. Expanded row shows *observed* (exact DNS name + raw answer, monospace), *expected*,
   *why it matters* (one sentence), and the **Fix** strip: the exact TXT record/tag edit with
   `[copy fix]`. Copy buttons always copy the publishable value, never prose.
-- **Lowest: problem-state cards** — education and deep dives; two per row, title + one-line hook +
-  chevron to `/domains/:id/dmarc/:problemId`. They repeat information the table already flagged on
-  purpose: the table is for operators, the cards for learners.
+- **Lowest: problem-state cards, then the tool-runs footer.** Problem-state cards are education
+  and deep dives; two per row, title + one-line hook + chevron to
+  `/domains/:domainId/runs/:runId/dmarc/:problemId`. They repeat information the table already
+  flagged on purpose: the table is for operators, the cards for learners. Beneath them, the
+  **tool-runs footer** ships collapsed (provenance, not triage): one monospace row per
+  `tool_runs[]` entry — exact command, duration, exit code, `[copy]` for the command line, `[v]`
+  accordion for the captured `parsed` output/`error`. It is last because it answers "prove it",
+  never "what do I do".
 - **Type & color:** shadcn/ui primitives (`Card`, `Table`, `Accordion`, `Badge`), lucide icons
   (`ShieldCheck`/`ShieldAlert`/`Info`/`ChevronRight`/`Copy`/`Wrench`). Severity colors identical
   to the Dashboard cells. Monospace (`font-mono text-xs`) for every DNS name, TXT value, and IP.
-- **Drill-down pages** (`/domains/:id/dmarc/:problemId`) reuse the same header row (so the user
-  never loses context), then: **Concept** (what this state means, 2–3 paragraphs), **Your data**
-  (the §9 data fields rendered live from the latest run), **Diagnose it yourself** (copyable
-  terminal commands from §3), **Path forward** (numbered steps with copyable records), and a
-  further-reading footer. Back chevron returns to the DMARC page anchor.
+- **Drill-down pages** (`/domains/:domainId/runs/:runId/dmarc/:problemId`; newest alias
+  `/domains/:domainId/dmarc/:problemId`) reuse the same header row **and run context strip** (so
+  the user never loses context — the data shown is this run's, not the latest), then: **Concept**
+  (what this state means, 2–3 paragraphs), **Your data** (the §9 data fields rendered from this
+  run's `dmarc` section), **Diagnose it yourself** (copyable terminal commands from §3), **Path
+  forward** (numbered steps with copyable records), and a further-reading footer. Back chevron
+  returns to the run's DMARC page anchor.
 
 ---
 
@@ -705,14 +860,18 @@ CREATE TABLE dmarc_aggregate_reports (
 CREATE INDEX ix_dmarc_agg_domain_ip ON dmarc_aggregate_reports(domain_id, source_ip);
 ```
 
-**Mapping onto today's JSON file store.** There is **no database in the first round**. The audit
-runner persists each run under the state dir (`audits.json`, keyed by domain id); the human-readable
-findings live in `findings[]` (`checkId:"dmarc"`), and the checker's structured payload lives at
-**`results.dmarc`** on the same run object — the object in §5's `record:` block, mapping 1:1 to
-`dmarc_check_results`, with the per-URI list under `results.dmarc.external_report_auth[]` (maps to
-`dmarc_external_report_auth`). Future `rua` ingestion writes per-report JSON that maps to
-`dmarc_aggregate_reports`. Because the store module fronts all of this, the file→DB move is a
-single-module change.
+**Mapping onto today's file store.** There is **no database in the first round**. The audit
+runner persists every run as **one YAML file** at
+`~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml`
+([../storage.mdx](../storage.mdx)); this spec owns that file's top-level **`dmarc:`** key — the §5
+document. The checker's structured payload (`results.dmarc`) serializes as §5's `record:` block,
+mapping 1:1 to `dmarc_check_results`; the per-URI list under `external_report_auth[]` maps to
+`dmarc_external_report_auth`; the human-readable findings (`checkId:"dmarc"`) serialize as the
+`tests[]` rows and map to the shared `findings` table. `tool_runs[]` is YAML-only provenance with
+**no** table above — if it ever needs querying, it becomes a generic `tool_runs` table shared by
+all six categories, keyed by `audit_run_id` + category. Future `rua` ingestion writes per-report
+JSON that maps to `dmarc_aggregate_reports`. Because the store module fronts all of this, the
+file→DB move is a single-module change.
 
 ---
 
@@ -733,7 +892,10 @@ single-module change.
   only. Resolver failures get a short bounded retry and record as a **warning** "could not resolve"
   rather than a false critical.
 - **Regression detection** applies exactly as in [../scheduled_checks.mdx](../scheduled_checks.mdx):
-  compare the latest `results.dmarc` and `findings[]` to the prior run by finding id + severity.
+  compare the `dmarc` section of the domain's two newest run files
+  (`~/.email_delivery_hero/runs/<domain>/`, [../storage.mdx](../storage.mdx)) — `record:` and
+  `tests[]` — by finding id + severity. Every run appends a new file; nothing is overwritten, so
+  the diff (and the §6.2 prev/next pager) always has both sides.
 
 ---
 
@@ -775,21 +937,45 @@ single-module change.
    yields `dmarc.external_report_auth` **critical**; a present one clears it with an **ok** finding.
 8. Pass results are emitted as `ok` findings so the DMARC page renders an explicit passed/failed
    row per test, and the category cell label reflects the policy level.
-9. The structured payload is persisted at `results.dmarc` with all §5 `record:` fields (snake_case,
-   matching `dmarc_check_results` column names), including `external_report_auth[]`.
+9. Each run persists its DMARC results under the top-level **`dmarc`** key of the run's YAML file
+   at `~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml` (e.g.
+   `~/.email_delivery_hero/runs/whitehatengineering.com/2026_07_01_09_14AM.yaml`;
+   [../storage.mdx](../storage.mdx)), with all §5 `record:` fields (snake_case, matching
+   `dmarc_check_results` column names) including `external_report_auth[]`, the `tests[]` rows, and
+   the derived `problem_states` — and never repeats the `run:` block's domain/timestamps.
 10. Every non-`ok` finding carries a concrete `remediation` (the exact TXT record or tag edit),
     never a generic "check your DNS".
-11. The Dashboard DMARC cell reflects the worst severity; `info`-only never turns it amber; the
-    cell/category chip exposes a chevron routing to `/domains/:id/dmarc`.
-12. The full DMARC page renders: the policy ladder, the raw + parsed record panel, the fail-first
-    test-results table with observed/expected DNS values and copyable fixes, the report-destinations
-    panel with per-destination authorization state, and the matched problem-state cards linking to
-    drill-down pages.
+11. The Dashboard DMARC cell reflects the worst severity; `info`-only never turns it amber.
+    Clicking the DMARC **cell** on the Domain-health table opens the domain's **newest** run's
+    DMARC page (`/domains/:domainId/dmarc`); on a Runs-table row it opens **that run's** DMARC
+    page (`/domains/:domainId/runs/:runId/dmarc`); clicking anywhere else in the row opens the
+    whole run report (`/domains/:domainId/runs/:runId`, newest alias `/domains/:domainId`); the
+    run report's DMARC category chip carries a chevron into the same run-scoped page.
+12. The full DMARC page is **run-scoped**: it serves both `/domains/:domainId/runs/:runId/dmarc`
+    and the newest alias, and renders the run context strip (run timestamp, ‹ prev / next › pager
+    across the same domain's runs with ends disabled, "newest" badge on the latest run), the
+    policy ladder, the raw + parsed record panel, the fail-first test-results table with
+    observed/expected DNS values and copyable fixes, the report-destinations panel with
+    per-destination authorization state, the matched problem-state cards linking to run-scoped
+    drill-down pages, and the collapsed tool-runs provenance footer. Paging swaps `:runId` and
+    re-renders entirely from that run's YAML — older runs never show newer data.
 13. A second scheduled run that sees a dropped record, a policy downgrade, a new duplicate, `t=y`
     appearing, or a lost external-report authorization flags each as a **new problem** via the
-    regression diff.
+    regression diff of the two newest run files.
 14. `dmarc.real_pass_rate` (and PS-11/PS-12) are absent in the first round and clearly gated behind
     future `rua` ingestion.
+15. Every external tool invocation during a run is captured as one `dmarc.tool_runs[]` entry —
+    `tool`, the exact argv `command` (every input argument substituted, reproducible verbatim),
+    `started_at`, `duration_ms`, `exit_code`, `output_format` (`json` wherever the tool supports
+    it), the captured/parsed stdout under `parsed`, and `error: null` on success (stderr/timeout
+    text on failure, with `parsed: null`). In-process `node:dns` lookups produce **no** tool-run
+    entries; a binary missing from PATH is skipped with a single `info` finding, never a
+    fabricated entry.
+16. The §3 execution table is honored: doggo (record + per-external-destination authorization,
+    `--json`, 10 s) and checkdmarc (`-f json`, 60 s) run on every DMARC run; kdig runs only on
+    resolver disagreement or lookup failure; mailauth only with a user-supplied `.eml`; parsedmarc
+    only inside the future ingestion job — and each entry's `parsed` output feeds exactly the
+    structured fields that table names.
 
 <!--
   Maintenance notes:

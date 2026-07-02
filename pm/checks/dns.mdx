@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — DNS & Infrastructure Check
-description: Engineering spec for the DNS & Infrastructure category — the ten test families we run against a domain's DNS and mail infrastructure (MX routing, reverse DNS/FCrDNS, STARTTLS, MTA-STS, TLS-RPT, DANE, DNSSEC, zone & nameserver health, domain registration, SMTP hardening), the Brew testing toolbox, the test-results YAML, the dashboard summary surface and the full-page DNS view (UX layout), the fix recommendations and fix-order ladder, and the catalog of infrastructure problem states with a deep-dive (data fields, diagnosis, tools, drill-down UI) for each.
+description: Engineering spec for the DNS & Infrastructure category — the ten test families we run against a domain's DNS and mail infrastructure (MX routing, reverse DNS/FCrDNS, STARTTLS, MTA-STS, TLS-RPT, DANE, DNSSEC, zone & nameserver health, domain registration, SMTP hardening), the verified Brew/npm testing toolbox with the exact command line each tool is executed with, the `dns_infra` section of the per-run YAML file (~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml) including the `tool_runs` audit trail, the dashboard summary surface and the run-scoped "view one category run" DNS page (/domains/:domainId/runs/:runId/dns with prev/next run navigation — UX layout), the fix recommendations and fix-order ladder, and the catalog of infrastructure problem states with a deep-dive (data fields, diagnosis, tools, drill-down UI) for each.
 ---
 
 # EmailDeliveryHero — DNS & Infrastructure Check
@@ -15,13 +15,25 @@ reverse DNS (FCrDNS)** and **TLS in transit** are hard requirements, and Gmail's
 enforcement ramp turned FCrDNS failures into permanent `550-5.7.25` rejections.
 
 This check is the **DNS & Infrastructure** dashboard category; all sub-check ids use the
-**`infra.`** checkId prefix. It is the **category-level spec**: it defines the roll-up, the
-test-results document, the full-page DNS UI, and the problem-state catalog. The ten per-topic
-specs below own the per-sub-check detail; this file never contradicts them.
+**`infra.`** checkId prefix and the category's key in the per-run YAML file is **`dns_infra`**
+([../storage.mdx](../storage.mdx)). It is the **category-level spec**: it defines the roll-up,
+the category's section of the run document (including the `tool_runs` audit trail), the
+run-scoped full-page DNS UI, and the problem-state catalog. The ten per-topic specs below own
+the per-sub-check detail; this file never contradicts them.
+
+**Where this sits in the Run → Test → Sub-test hierarchy**
+([../dashboard.mdx](../dashboard.mdx) §1): a **run** is one execution of all checks for one
+domain (with `startedAt`/`finishedAt`; a domain accumulates many runs); **DNS & Infrastructure**
+is one of the six locked **tests** (categories) inside every run — SPF, DKIM, DMARC, Blacklists,
+DNS & Infrastructure, Spam & Content; the `infra.*` findings below are that test's
+**sub-tests**. Everything on the DNS page is therefore scoped to **one specific run** of one
+domain, never a blend of runs.
 
 **Read alongside**
 - [../overview.mdx](../overview.mdx) — product charter, personas, port list.
 - [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
+- [../storage.mdx](../storage.mdx) — the per-run YAML file this category writes its `dns_infra`
+  section into (path, filename, `run:` block — owned there, referenced here).
 - [../spam_checks.mdx](../spam_checks.mdx) — master catalog; DNS & Infrastructure is category 5 of 6.
 - [../run_checks.mdx](../run_checks.mdx) — run pipeline, concurrency semaphores, external-tool runner.
 - [../dashboard.mdx](../dashboard.mdx) / [../ui.mdx](../ui.mdx) — the 6-column dashboard and cell roll-up.
@@ -126,14 +138,19 @@ and adoption gaps → **info**: unsigned DNSSEC, no DANE, no MTA-STS, WHOIS priv
 
 ## 3. Testing toolbox — Brew / npm tools
 
-Verified against `formulae.brew.sh` 2026-07. First-round detection is pure `node:dns/promises`
-plus bounded sockets/HTTPS (per family spec); these tools are the **debug bench** we shell out to
-(via the [../run_checks.mdx](../run_checks.mdx) ToolRunner) for deeper diagnosis and for the
-copyable "diagnose it yourself" commands on the drill-down pages. Install the bench with:
+Re-verified against `formulae.brew.sh` and the npm registry **2026-07-01** — every formula and
+package named in this section returned a live registry entry on that date; the "gone/lookalike"
+notes below were re-confirmed as 404s at the same time. First-round detection is pure
+`node:dns/promises` plus bounded sockets/HTTPS (per family spec); these tools are the **debug
+bench** we shell out to (via the [../run_checks.mdx](../run_checks.mdx) ToolRunner) for deeper
+diagnosis and for the copyable "diagnose it yourself" commands on the drill-down pages. Every
+invocation the ToolRunner makes is recorded verbatim in the run file's
+`dns_infra.tool_runs[]` (§3.1, §5). Install the bench with:
 
 ```bash
 brew install bind knot ldns doggo q dnsx dnstracer dnsviz whois rdap asn \
-             swaks testssl sslscan gnutls certigo nmap dnstwist checkdmarc
+             swaks testssl sslscan gnutls certigo nmap dnstwist checkdmarc \
+             socat dnsperf ipcalc
 npm install mailauth        # library + CLI, same TS/Node stack as the app
 ```
 
@@ -148,6 +165,9 @@ npm install mailauth        # library + CLI, same TS/Node stack as the app
 | **q** | `brew install q` | Tiny client, UDP/TCP/DoT/DoH/DoQ — resolver-consistency cross-checks. | `q example.com MX @https://dns.google/dns-query` |
 | **dnsx** | `brew install dnsx` | Bulk resolution across many domains/names — sweeps, wildcard probes. | `echo example.com \| dnsx -mx -a -cname -resp` |
 | **dnstracer** | `brew install dnstracer` | Traces the delegation chain to the authoritative servers — lame-delegation hunting. | `dnstracer -s . -o example.com` |
+| **dnsperf** | `brew install dnsperf` | Per-NS latency measurement — feeds the `ns_response_time` trend (future probe). | `dnsperf -s 192.0.2.53 -d queries.txt -l 5` |
+| **massdns** | `brew install massdns` | High-volume resolver for the future PS-11 subdomain/dangling sweep (with dnsx). | `massdns -r resolvers.txt -t CNAME subs.txt -o J` |
+| **ipcalc** | `brew install ipcalc` | Manual IP-class sanity checks (private/CGNAT/loopback) when eyeballing MX answers. | `ipcalc 203.0.113.25` |
 
 ### DNSSEC
 
@@ -177,6 +197,7 @@ npm install mailauth        # library + CLI, same TS/Node stack as the app
 | **gnutls-cli** (gnutls) | `brew install gnutls` | **DANE-aware** TLS client — validates TLSA against the live cert. | `gnutls-cli --dane --starttls-proto=smtp mx.example.com -p 25` |
 | **certigo** | `brew install certigo` | Cert-chain parsing: expiry, SAN coverage of the MX name. | `certigo connect mx.example.com:25 --start-tls smtp` |
 | **nmap** | `brew install nmap` | NSE `smtp-commands`, `smtp-open-relay`, `ssl-enum-ciphers` for the SMTP-security family. | `nmap -p25 --script smtp-commands,smtp-open-relay mx.example.com` |
+| **socat** | `brew install socat` | Raw banner reads and scripted SMTP dialogs when swaks/nmap are too opinionated. | `echo QUIT \| socat - TCP:mx.example.com:25,connect-timeout=10` |
 
 ### Multi-check auditors & our own stack
 
@@ -185,11 +206,58 @@ npm install mailauth        # library + CLI, same TS/Node stack as the app
 | **checkdmarc** | `brew install checkdmarc` | Cross-validation oracle: SPF/DMARC/MTA-STS/TLS-RPT/BIMI plus MX and DNSSEC presence in one JSON pass. | `checkdmarc example.com -f json` |
 | **mailauth** (npm) | `npm i mailauth` | In-process (Node) SPF/DKIM/DMARC/ARC/MTA-STS verification — usable as a library in the backend. | `npx mailauth report message.eml` |
 
-**Not on Brew** (documented for completeness, not installed by default): `zonemaster-cli` (the
-gold-standard delegation auditor — Perl/Docker; we mirror its test ideas natively),
-`posttls-finger` (ships with Postfix; `gnutls-cli --dane` covers us), `sslyze` (pipx), `zdns` (go).
-**Gone from Homebrew:** `dog` (use doggo). **Deprecated upstream:** `fpdns` (installs but archived
-— do not depend on it).
+**Not on Brew — re-confirmed 404 on formulae.brew.sh 2026-07-01** (documented for completeness,
+not installed by default): `zonemaster-cli` (the gold-standard delegation auditor — Perl/Docker;
+we mirror its test ideas natively), `posttls-finger` (ships with Postfix; `gnutls-cli --dane`
+covers us), `sslyze` (pipx), `zdns` (go), `dnslookup` (go — doggo/q cover it).
+**Gone from Homebrew:** `dog` (use doggo). **Deprecated upstream:** `fpdns` (still installs but
+archived — do not depend on it). Do not "fix" a spec or script by inventing lookalike formulas —
+these are the confirmed absentees.
+
+### 3.1 How a test run executes the tools
+
+The category's checkers call external tools through the shared **ToolRunner**
+([../run_checks.mdx](../run_checks.mdx)): `execFile` (never a shell — no interpolation
+injection), argv built from typed inputs (domain, MX host, IP, port), a hard **timeout** per
+invocation, stdout+stderr captured in full, and **JSON output requested wherever the tool offers
+it**. Every invocation — success or failure — appends one entry to the run file's
+**`dns_infra.tool_runs[]`** (§5) with the exact argv string, timing, exit code, and the parsed
+output, so a run is fully reproducible from its YAML alone. Text-only tools are parsed with
+small dedicated parsers; a parse failure stores the raw text in `parsed.raw` and a non-null
+`error`, never a fabricated finding.
+
+Exact invocations (first-round set; `<domain>`, `<mx-host>`, `<ip>`, `<ns-ip>` substituted from
+the run's inputs — the same strings land verbatim in `tool_runs[].command`):
+
+| Tool | Exact command line | Output | Timeout | Parsed into (structured fields fed) |
+| --- | --- | --- | --- | --- |
+| doggo | `doggo <domain> MX A AAAA NS SOA TXT --json` | JSON | 10 s | primary record fetch cross-check → `dns_infra.mx_routing.hosts[]`, `dns_infra.dns_health.{ns,soa,ttls}` |
+| dig (bind) | `dig +time=5 +tries=2 +noall +answer <domain> DS` (also `DNSKEY`, `TLSA _25._tcp.<mx-host>`, `-x <ip>`) | text (answer lines) | 12 s | exotic-type fallback in `dns-util.ts` → `dns_infra.dnssec.*`, DANE TLSA presence, `dns_infra.reverse_dns.ips[].ptr` |
+| delv (bind) | `delv +time=5 @8.8.8.8 <domain> MX` | text (`; fully validated` / SERVFAIL) | 15 s | validation verdict → `dns_infra.dnssec` broken-vs-ok discrimination |
+| kdig (knot) | `kdig @8.8.8.8 +dnssec +timeout=5 <domain> MX` | text | 10 s | public-resolver cross-check; divergence noted in finding evidence (PS-12 future) |
+| drill (ldns) | `drill -TD -S DNSKEY <domain>` | text (chain trace) | 20 s | second-opinion trust chain → `dnssec_chain_complete` evidence |
+| dnsviz | `dnsviz probe -d 0 <domain>` piped to `dnsviz grok -l warning` | JSON | 60 s | per-RRset DNSSEC grading → drill-down "Your data" for PS-06 |
+| dnsx | `echo <domain> \| dnsx -silent -mx -a -aaaa -cname -resp -json` | JSON-lines | 15 s | bulk sweep verification → `dns_infra.mx_routing` cross-check |
+| dnstracer | `dnstracer -s . -o -q a <domain>` | text | 20 s | delegation path → `ns_lame` / `ns_parent_child` evidence |
+| rdap | `rdap --json <domain>` | JSON | 15 s (cached per domain per day) | registration snapshot → `domain_age`, `domain_expiry`, EPP status findings (family 9) |
+| whois | `whois <domain>` | text (key: value) | 15 s | fallback where RDAP is thin; registrar/expiry regexes → family 9 evidence |
+| asn | `asn -j <ip>` | JSON | 10 s | ASN/prefix per MX/sending IP → `redundancy.network_count` refinement, PTR-ticket routing |
+| dnstwist | `dnstwist --registered --format json <domain>` | JSON | 120 s (daily cache) | lookalike list → `name_similarity`, `idn_homograph` evidence |
+| swaks | `swaks --server <mx-host> --port 25 --timeout 15 --to postmaster@<domain> --from edh-probe@<domain> --tls-optional --quit-after RCPT --hide-all --show-raw-text` | text (SMTP transcript) | 30 s | banner, STARTTLS offer, transcript → `tls_transport` / `smtp_security` probes (opt-in, `smtp25` semaphore) |
+| openssl | `openssl s_client -starttls smtp -connect <mx-host>:25 -servername <mx-host> -brief` fed `QUIT\n` on stdin | text | 20 s | TLS version + cert chain → `tls_transport` evidence |
+| testssl | `testssl --starttls smtp --jsonfile-pretty /dev/stdout --quiet <mx-host>:25` | JSON | 300 s (deep audit, manual/debug only) | cipher/protocol grades → drill-down "More health metrics" |
+| certigo | `certigo connect --start-tls smtp --json <mx-host>:25` | JSON | 20 s | cert expiry + SAN coverage → `tls_transport`, DANE cert-match input |
+| gnutls-cli | `gnutls-cli --dane --starttls-proto=smtp --port 25 <mx-host>` fed `QUIT\n` | text (DANE verdict line) | 20 s | live TLSA↔cert validation → `dane_tlsa_cert_match` |
+| nmap | `nmap -p25 -Pn --host-timeout 60s --script smtp-commands,smtp-open-relay -oX - <mx-host>` | XML on stdout | 90 s (opt-in) | relay/VRFY/EXPN verdicts → `smtp_security` findings |
+| checkdmarc | `checkdmarc <domain> -f json` | JSON | 30 s | cross-validation oracle; disagreements with our checkers logged as `error` on the tool_run, never auto-promoted to findings |
+
+Rules that bind every row: (1) the argv string stored in `tool_runs[].command` is exactly what
+`execFile` ran — arguments never elided; (2) `output_format` records what we *requested*
+(`json`/`text`) — a tool that emitted invalid JSON keeps `output_format: json` plus an `error`;
+(3) timeout expiry sets `exit_code: null` and `error: "timeout after <n> ms"`; (4) tools are
+never invoked in the first round unless their family's probe is enabled — DNS-only rows run
+inline, socket rows sit behind the `smtp25` semaphore; (5) one tool invocation may feed several
+sub-tests, but each `tool_runs[]` entry appears once.
 
 ### Online / API checkers (reference only, linked from drill-downs)
 
@@ -230,17 +298,32 @@ Category-level rules that bind all ten:
 
 ---
 
-## 5. Test results (YAML)
+## 5. Test results (YAML) — the `dns_infra` section of the run file
 
-The information we extract, one document per domain per run. Structured payloads are produced by
-the checkers as `results[<checker id>]`; per-test rows are the findings. Rendered as YAML —
-**`test_results.yaml`** — the canonical shape the DNS page and the regression differ consume:
+Every run persists as **one YAML file** at
+`~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml` — e.g.
+`~/.email_delivery_hero/runs/whitehatengineering.com/2026_07_01_09_14AM.yaml` (`<domain>`
+lowercased; filename = the run's start time in the local timezone, 12-hour clock, zero-padded,
+`AM`/`PM` suffix). The file's top-level shape — the `run:` block (`run_id`, `domain`,
+`started_at`, `finished_at` ISO-UTC, `score`, `status`) followed by one top-level key per
+category (`spf, dkim, dmarc, blacklists, dns_infra, spam_content`) — is owned by
+[../storage.mdx](../storage.mdx) and not redefined here. **This spec owns the `dns_infra`
+key**: worst-severity `status`, the structured per-family snapshots (produced by the checkers as
+`results[<checker id>]`), the **`tool_runs[]`** audit trail (one entry per external-tool
+invocation, §3.1), the per-sub-test `tests[]` rows, and the derived `problem_states`. This is
+the canonical shape the DNS page and the regression differ consume:
 
 ```yaml
-# test_results.yaml — DNS & Infrastructure category, one document per domain per audit run
-infra:
+# ~/.email_delivery_hero/runs/example.com/2026_07_01_09_14AM.yaml (excerpt)
+run:                                  # owned by ../storage.mdx — shown for context only
+  run_id: run_01J9XK4T8PZQ
   domain: example.com
-  checked_at: 2026-07-01T09:30:00Z
+  started_at: 2026-07-01T16:14:03Z    # ISO UTC (filename is local-tz 09:14 AM)
+  finished_at: 2026-07-01T16:14:41Z
+  score: 74
+  status: warning
+# … spf / dkim / dmarc / blacklists sections …
+dns_infra:                            # ← this category's section (checkId prefix stays infra.)
   status: warning                     # worst severity across all ten families
   families:                           # roll-up per family (drives the family status strip)
     mx_routing:        { status: ok,       tests: 8 }
@@ -309,6 +392,47 @@ infra:
     algorithms: [13]                  # RFC 8624/9904: 13/15 good, 8 ok (≥2048), 5/7 deprecated
     ds_matches_dnskey: true
     dane_ready: true                  # signed + DS — the DANE prerequisite
+  # ---- every external-tool invocation this category made (§3.1), in execution order ----
+  tool_runs:
+    - tool: doggo
+      command: "doggo example.com MX A AAAA NS SOA TXT --json"
+      started_at: 2026-07-01T16:14:04Z
+      duration_ms: 312
+      exit_code: 0
+      output_format: json
+      parsed:
+        answers:
+          - { name: example.com., type: MX, ttl: 3600, address: "10 mx1.example.com." }
+          - { name: example.com., type: MX, ttl: 3600, address: "20 mx2.example.com." }
+      error: null
+    - tool: dig
+      command: "dig +time=5 +tries=2 +noall +answer -x 2001:db8::25"
+      started_at: 2026-07-01T16:14:05Z
+      duration_ms: 187
+      exit_code: 0
+      output_format: text
+      parsed: { answers: [], rcode: NXDOMAIN }   # ← the missing IPv6 PTR, verbatim
+      error: null
+    - tool: rdap
+      command: "rdap --json example.com"
+      started_at: 2026-07-01T16:14:06Z
+      duration_ms: 964
+      exit_code: 0
+      output_format: json
+      parsed:
+        registration_date: 2015-08-14T04:00:00Z
+        expiration_date: 2027-08-14T04:00:00Z
+        statuses: [client transfer prohibited]
+        registrar: "Example Registrar, Inc."
+      error: null
+    - tool: delv
+      command: "delv +time=5 @8.8.8.8 example.com MX"
+      started_at: 2026-07-01T16:14:07Z
+      duration_ms: 5211
+      exit_code: null                  # timed out — recorded, never hidden
+      output_format: text
+      parsed: null
+      error: "timeout after 15000 ms"
   # ---- the per-test rows (the findings, pass and fail alike) ----
   tests:
     - id: infra.reverse_dns
@@ -337,66 +461,98 @@ Field-name mapping: snapshot keys are 1:1 with the §10 tables (`infra_mx_hosts`
 `infra_ptr_records`, `infra_zone_snapshot`, `infra_dnssec_state`); `tests[]` rows are the
 `findings` (`result: pass|fail|warn|info` ⇔ severity `ok|critical|warning|info`; `family` is
 derived from the finding id per the §2 table); `families` and `problem_states` are derived at
-render time — never stored separately.
+render time — never stored separately. `tool_runs[]` entries follow the fixed shape `{tool,
+command, started_at, duration_ms, exit_code, output_format: json|text, parsed, error:
+null|string}` (§3.1) and are **append-only within a run** — the differ compares snapshots and
+tests across runs, never tool_runs (those are the evidence trail, not the verdict). The other
+five categories write their own top-level sections into the same file with the same
+tests/tool_runs conventions; [../storage.mdx](../storage.mdx) owns the file lifecycle
+(retention, pruning, the newest-run index the dashboard reads).
 
 ---
 
 ## 6. User interface — the summary surface and the full DNS page
 
 Two surfaces, following the app-wide pattern in [../ui.mdx](../ui.mdx): a **summary cell** on the
-main view, and a **chevron** that opens a **full page dedicated to DNS & Infrastructure** for that
-domain.
+main view, and a **"view one category run" page** — the DNS & Infrastructure sub-test results of
+**one specific run**, at **`/domains/:domainId/runs/:runId/dns`** with the newest-run alias
+**`/domains/:domainId/dns`**.
 
 ### 6.1 The summary surface (main view)
 
-DNS & Infrastructure is one of the six category columns on the Dashboard (key `dnsInfra`, prefix
-`infra`). The cell for a domain is the **worst severity** among all `infra.*` findings in the
-latest run and shows the single most decision-relevant fact:
+DNS & Infrastructure is one of the six category columns on both Dashboard tables (key `dnsInfra`,
+prefix `infra`; see [../dashboard.mdx](../dashboard.mdx)). A cell is the **worst severity** among
+all `infra.*` findings **in the run it represents** — the domain's newest run on the
+Domain-health table, that specific run on the Runs table — and shows the single most
+decision-relevant fact:
 
 - **Color** — dark green (all families healthy), amber (worst = warning, e.g. parent/child NS
   mismatch), dark red (any critical, e.g. FCrDNS failure), light gray (never run). `info`-only
   findings (unsigned DNSSEC, no DANE, `.pending` probes) keep the cell green.
 - **Label** — `Healthy` or `K of M fail` (K = warning+critical findings, M = total tests run).
 - **Hover** — tooltip with the top open problem's title (worst severity first).
-- **Chevron (›)** — on the right edge of the cell (visible on hover) and on the domain run-detail
-  category chip. Clicking it navigates to the full DNS page: **`/domains/:id/dns`**. Clicking
-  anywhere else in the row still opens the domain run detail.
+- **Cell click → the category run page.** Clicking the DNS & Infrastructure **cell** on a
+  **Domain-health (Table 1)** row opens that domain's **newest run's** DNS page
+  (`/domains/:domainId/dns`, the alias). Clicking the cell on a **Runs (Table 2)** row opens
+  **that run's** DNS page (`/domains/:domainId/runs/:runId/dns`). Clicking **anywhere else in
+  either row** still opens the whole run report (`/domains/:domainId/runs/:runId`, newest alias
+  `/domains/:domainId`). The chevron (›) on the run report's DNS & Infrastructure section header
+  routes to the same run-scoped page.
 
-### 6.2 The full DNS page (`/domains/:id/dns`)
+### 6.2 The DNS category run page (`/domains/:domainId/runs/:runId/dns`)
 
-One page, purely about DNS & Infrastructure for one domain. Top to bottom it must answer: *Is my
-plumbing blocking delivery right now? What did we observe (the actual DNS values, IPs, hostnames)?
-Which of the ten families pass/fail, test by test? How do I fix each failure, in what order?*
-Every failed test shows the debugging values — the DNS name queried, the raw answer, the IP
-address, the expected value.
+One page = the DNS & Infrastructure results of **one run** for one domain — never a blend of
+runs; every value on it comes from that run's `dns_infra` section in
+`~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml` (§5). The newest-run alias
+**`/domains/:domainId/dns`** renders the same page for the domain's latest run (and rewrites
+itself to the canonical run URL so links stay stable). Top to bottom it must answer: *Was my
+plumbing blocking delivery at this run? What did we observe (the actual DNS values, IPs,
+hostnames)? Which of the ten families pass/fail, sub-test by sub-test? How do I fix each
+failure, in what order?* Every failed sub-test shows the debugging values — the DNS name
+queried, the raw answer, the IP address, the expected value.
 
 Contents, in order (exact layout in §7):
 
 1. **Header** — domain name, "DNS & Infrastructure" title, the category StatusCell,
-   `ran <timestamp>`, a **Re-run** button, and a back link — identical chrome to the DMARC page.
-2. **Family status strip** — the hero: ten compact chips (MX · rDNS · TLS · MTA-STS · TLS-RPT ·
+   a **Re-run** button, and a back link to the run report — identical chrome to the DMARC page.
+2. **Run context strip** — directly under the header row: the run's start timestamp
+   (`YYYY-MM-DD HH:mm`, local), a **`newest`** badge when this run is the domain's latest,
+   and **prev ‹ / › next** run navigation that steps through **the same domain's runs** in
+   `startedAt` order, staying on the DNS category page (`‹` = older run, `›` = newer run;
+   each disabled at the ends of the history). Navigation swaps `:runId` in the URL — no page
+   state survives except scroll-to-family anchors.
+3. **Family status strip** — the hero: ten compact chips (MX · rDNS · TLS · MTA-STS · TLS-RPT ·
    DANE · DNSSEC · Zone · Domain · SMTP), each colored by that family's worst severity with a
-   ✓/✗/⚠/ⓘ glyph. Clicking a chip scrolls to that family's section in the test table. Beneath the
-   strip: one plain-language verdict line and the **primary next step** from the §8 fix-order
+   ✓/✗/⚠/ⓘ glyph. Clicking a chip scrolls to that family's section in the sub-test table. Beneath
+   the strip: one plain-language verdict line and the **primary next step** from the §8 fix-order
    ladder (one accent CTA maximum).
-3. **Mail path panel** (two-up left) — the observed MX topology from `results["infra.mx_routing"]`:
+4. **Mail path panel** (two-up left) — the observed MX topology from `results["infra.mx_routing"]`:
    one row per MX host (priority, hostname, IPs) with inline badges — CNAME ✗, private-IP ✗, and
    the PTR per IP from `results["infra.reverse_dns"]` (green when FCrDNS closes, red `no PTR` /
    `generic` when not). This panel is where the Gmail dual-stack trap becomes visible at a glance.
-4. **Zone panel** (two-up right) — from `results["infra.dns_health"]` + `results["infra.dnssec"]`:
+5. **Zone panel** (two-up right) — from `results["infra.dns_health"]` + `results["infra.dnssec"]`:
    the NS list (count + network diversity), parent/child match ✓/✗, the SOA values with their sane
    ranges grayed alongside, TTLs, wildcard probe result, and a one-line DNSSEC state
    (`signed, algorithm 13, DS ✓` / `unsigned` / `BROKEN — resolvers SERVFAIL`).
-5. **Test results table** — one row per finding, **grouped by family** in the §2 order, fail-first
-   within each family group; each family group header repeats the family chip and its pass/fail
-   count. Rows expand (accordion) to full detail, evidence (exact DNS name + raw answer,
-   monospace), and the **Fix** block with a copy button carrying the exact record/step.
-6. **Problem states** — cards for each matched §9 problem state with a one-paragraph hook and a
-   **"Learn more ›"** chevron opening the drill-down page (`/domains/:id/dns/:problemId`).
+6. **Grouped sub-test results table** — one row per sub-test (finding), **grouped by family** in
+   the §2 order, fail-first within each family group; each family group header repeats the family
+   chip and its pass/fail count. Rows expand (accordion) to full detail, evidence (exact DNS name
+   + raw answer, monospace), and the **Fix** block with a copy button carrying the exact
+   record/step. Expanded rows that were fed by an external tool link to the matching
+   `tool_runs[]` entry ("ran: `dig +time=5 … -x 2001:db8::25` · 187 ms") so the evidence is
+   traceable to the exact command.
+7. **Problem states** — cards for each matched §9 problem state with a one-paragraph hook and a
+   **"Learn more ›"** chevron opening the drill-down page (`/domains/:domainId/dns/:problemId`,
+   rendered from the run being viewed).
 
-**Empty / never-run / loading states.** Never-run → gray header cell + "No audit yet — run one"
-CTA. Loading → skeleton rows. A domain with no MX is **not** empty — it renders the
-`infra.mx_present` critical (or the null-MX explanation for a declared no-mail domain).
+**Empty / never-run / loading states.** Domain has **no runs at all** → the alias route shows
+the gray never-run header cell + "No audit yet — run one" CTA (no run context strip — there is
+nothing to navigate). **Unknown `:runId`** → "This run no longer exists" with a link to the
+domain's newest run (runs are pruned per [../storage.mdx](../storage.mdx) retention). **Run in
+progress** → the strip shows the run's `startedAt` with a live "running…" indicator; family
+chips and table rows skeleton-load as checkers finish. Loading → skeleton rows. A domain with no
+MX is **not** empty — it renders the `infra.mx_present` critical (or the null-MX explanation for
+a declared no-mail domain).
 
 **Per-domain config inputs.** None required in the first round (sending IPs already come from
 domain settings and default to the MX IPs). Future: a "receives mail?" toggle that flips the
@@ -413,8 +569,11 @@ the DMARC page — the two pages must feel like siblings.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ ‹ Back to example.com     DNS & Infrastructure               [Re-run ⟳]     │  header row
-│ example.com  ·  [ red: 4 of 63 fail ]  ·  ran 2026-07-01 09:30              │
+│ ‹ Back to run report      DNS & Infrastructure               [Re-run ⟳]     │  header row
+│ example.com  ·  [ red: 4 of 63 fail ]                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  ‹ prev run    Run 2026-07-01 09:14  [ newest ]                  next run › │  run context
+│                (‹ older · › newer — same domain, DNS page; ends disabled)   │  strip
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  [✓ MX] [✗ rDNS] [ⓘ TLS] [⚠ MTA-STS] [✓ TLS-RPT] [ⓘ DANE] [✓ DNSSEC]        │  family strip
 │  [⚠ Zone] [✓ Domain] [ⓘ SMTP]                                               │  (hero band)
@@ -429,10 +588,10 @@ the DMARC page — the two pages must feel like siblings.
 │      198.51.100.25 → mx2.example…✓ │  TTL  MX 3600 ✓ · wildcard none ✓      │
 │                                    │  DNSSEC signed · alg 13 · DS ✓         │
 ├────────────────────────────────────┴────────────────────────────────────────┤
-│  TEST RESULTS                                   55 passed · 2 failed · 6 ⚠  │  main table,
+│  SUB-TEST RESULTS (this run)                    55 passed · 2 failed · 6 ⚠  │  main table,
 │  ── Reverse DNS ──────────────────────────────────────────── 1 of 3 fail ── │  grouped by
 │  ✗ infra.reverse_dns   IPv6 MX has no PTR record                    [v]     │  family
-│      observed: dig -x 2001:db8::25 → NXDOMAIN                               │
+│      observed: dig -x 2001:db8::25 → NXDOMAIN   (tool run · 187 ms)         │
 │      expected: PTR → mail.example.com → AAAA → 2001:db8::25   [copy fix]    │
 │  ✓ infra.ptr_no_ips    every mail IP was PTR-checked                [v]     │
 │  ── Zone & NS health ─────────────────────────────────────── 2 of 15 warn ──│
@@ -446,7 +605,14 @@ the DMARC page — the two pages must feel like siblings.
 
 Placement rules and rationale:
 
-- **Highest: the verdict.** The family strip is the one visual a non-expert needs — ten chips, ten
+- **The run context strip sits above everything but the header.** The single most common
+  misreading of a category page is "this is the domain's current state" when the user has
+  navigated to an old run — so the run timestamp, the `newest` badge (only on the latest run),
+  and the **‹ prev / next ›** controls are pinned in their own band before any verdict is shown.
+  Prev/next step through the same domain's run history newest-last (`‹` older, `›` newer), stay
+  on the DNS category page, and disable at either end; on the newest run `›` is disabled and the
+  badge shows. Keyboard: `[` / `]` mirror ‹ / ›.
+- **Highest below the strip: the verdict.** The family strip is the one visual a non-expert needs — ten chips, ten
   colors, instant "where does it hurt". The verdict line under it must distinguish the three tiers
   in plain language: *rejected now* (critical in a gate family: rDNS, MX, TLS, registration hold),
   *reputation eroding* (warnings), *hardening available* (info). One accent CTA maximum — the
@@ -462,14 +628,14 @@ Placement rules and rationale:
   sentence) / **Fix** strip with `[copy fix]`. Copy buttons always copy the publishable value or
   command, never prose. Family chips in the strip anchor-link to these group headers.
 - **Lowest: problem-state cards** — education and deep dives, two per row, title + one-line hook +
-  chevron to `/domains/:id/dns/:problemId`. They deliberately repeat what the table flagged: the
-  table is for operators, the cards for learners.
+  chevron to `/domains/:domainId/dns/:problemId`. They deliberately repeat what the table flagged:
+  the table is for operators, the cards for learners.
 - **Type & color:** severity colors identical to the Dashboard cells; monospace
   (`font-mono text-xs`) for every DNS name, record value, and IP; lucide icons
   (`ShieldCheck`/`ShieldAlert`/`Info`/`ChevronRight`/`Copy`/`Wrench`/`Network`).
-- **Drill-down pages** (`/domains/:id/dns/:problemId`) reuse the same header chrome, then:
-  **Concept** (2-3 paragraphs), **Your data** (the §9 data fields rendered live from the latest
-  run), **Diagnose it yourself** (copyable §3 terminal commands with the domain substituted in),
+- **Drill-down pages** (`/domains/:domainId/dns/:problemId`) reuse the same header chrome, then:
+  **Concept** (2-3 paragraphs), **Your data** (the §9 data fields rendered live from the run
+  being viewed), **Diagnose it yourself** (copyable §3 terminal commands with the domain substituted in),
   **Tools**, **More health metrics**, **Path forward** (numbered steps). Back chevron returns to
   the DNS page.
 
@@ -836,14 +1002,19 @@ CREATE TABLE infra_dnssec_state (
 CREATE UNIQUE INDEX uq_infra_dnssec_run ON infra_dnssec_state(audit_run_id, domain_id);
 ```
 
-**Mapping onto today's JSON file store.** There is **no database in the first round**. The audit
-runner persists each run under the state dir (`audits.json`, keyed by domain id); the
-human-readable findings live in `findings[]` (checkId prefix `infra`), and the four structured
-snapshots live at `results["infra.mx_routing"]`, `results["infra.reverse_dns"]`,
-`results["infra.dns_health"]`, and `results["infra.dnssec"]` on the same run object — mapping 1:1
-to the tables above. Future family payloads (MTA-STS policy body, TLSA records, RDAP snapshot,
-SMTP probe transcripts) get their own `results[<checker id>]` keys and tables when their probes
-land. Because the store module fronts all of this, the file→DB move is a single-module change.
+**Mapping onto the file store.** There is **no database in the first round**. Each run persists
+as one YAML file at `~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml`
+([../storage.mdx](../storage.mdx) owns the path, `run:` block, retention, and pruning); this
+category's data is the file's top-level **`dns_infra`** section (§5). Inside it, the
+human-readable findings are the `tests[]` rows (checkId prefix `infra.`), the four structured
+snapshots — produced by the checkers as `results["infra.mx_routing"]`,
+`results["infra.reverse_dns"]`, `results["infra.dns_health"]`, `results["infra.dnssec"]` — map
+1:1 to the tables above, and every external-tool invocation is captured in
+`dns_infra.tool_runs[]` (no SQL table planned for tool_runs — it is an evidence trail, queried
+per run, never joined). Future family payloads (MTA-STS policy body, TLSA records, RDAP
+snapshot, SMTP probe transcripts) get their own `results[<checker id>]` keys and tables when
+their probes land. Because the store module fronts all of this, the file→DB move is a
+single-module change.
 
 ---
 
@@ -897,7 +1068,17 @@ land. Because the store module fronts all of this, the file→DB move is a singl
    warnings) until their probes exist.
 2. The four structured snapshots persist at `results["infra.mx_routing"]`,
    `results["infra.reverse_dns"]`, `results["infra.dns_health"]`, `results["infra.dnssec"]` with
-   the §5 field names (snake_case, matching §10 columns).
+   the §5 field names (snake_case, matching §10 columns), inside the **`dns_infra`** top-level
+   section of the run's YAML file at
+   `~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml` (path, filename format,
+   and `run:` block per [../storage.mdx](../storage.mdx); `<domain>` lowercased, filename = run
+   start time, local tz, 12-hour clock, zero-padded, AM/PM suffix).
+2a. Every external-tool invocation the category makes appends one `dns_infra.tool_runs[]` entry
+   with exactly `{tool, command, started_at, duration_ms, exit_code, output_format, parsed,
+   error}` (§3.1/§5): `command` is the verbatim argv string including every input argument
+   (domain, MX host, IP, port); JSON output is requested wherever the tool supports it; a
+   timeout stores `exit_code: null` and a non-null `error`; failures are recorded, never
+   silently dropped or promoted to fabricated findings.
 3. An MX target that is a CNAME, resolves to non-public space, or fails to resolve yields a
    **critical** with the offending host and IP in the evidence; a healthy set yields explicit
    `ok` findings including redundancy (`host_count`, `network_count` ≥ 2 → ok; 1 → warning).

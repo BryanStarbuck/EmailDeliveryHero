@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — SPF Check
-description: Engineering spec for the SPF category — the tests we run against the domain's v=spf1 TXT record (presence, single-record, RFC 7208 grammar/macros, the recursive 10-lookup and 2-void expansion, all-qualifier, deprecated ptr, CIDR scope, include health, sending-IP coverage), the Brew/npm testing toolbox, the test-results YAML, the dashboard summary surface and the full-page SPF view (UX layout), the fix recommendations, and the catalog of SPF problem states with a deep-dive (data fields, diagnosis, tools, drill-down UI) for each.
+description: Engineering spec for the SPF category — the tests we run against the domain's v=spf1 TXT record (presence, single-record, RFC 7208 grammar/macros, the recursive 10-lookup and 2-void expansion, all-qualifier, deprecated ptr, CIDR scope, include health, sending-IP coverage), the Brew/npm testing toolbox with the exact command lines a run executes (argv, timeout, JSON parsing, tool_runs capture), the per-run results YAML (the top-level `spf` key inside `~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml`), the dashboard summary surface and the run-scoped full-page SPF view (`/domains/:domainId/runs/:runId/spf` with run context strip and prev/next run navigation), the fix recommendations, and the catalog of SPF problem states with a deep-dive (data fields, diagnosis, tools, drill-down UI) for each.
 ---
 
 # EmailDeliveryHero — SPF Check
@@ -20,6 +20,9 @@ prefix. It is implemented as `spf.check.ts`.
 **Read alongside**
 - [../overview.mdx](../overview.mdx) — product charter, personas, port list (4444 UI / 9312 API).
 - [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
+- [../storage.mdx](../storage.mdx) — the runs directory: one YAML file per run under
+  `~/.email_delivery_hero/runs/<domain>/`, the `run:` block, and the six category keys (this spec
+  owns the `spf` key — §5).
 - [../spam_checks.mdx](../spam_checks.mdx) — master catalog; SPF is category 1 of 6.
 - [../dashboard.mdx](../dashboard.mdx) — the 6-column status dashboard and cell roll-up.
 - [../scheduled_checks.mdx](../scheduled_checks.mdx) — recurring-check cadence and regression diffing.
@@ -118,7 +121,7 @@ npm install mailauth        # library + CLI, same TS/Node stack as the app
 | **mailauth** (npm) | `npm i mailauth` | Authenticates like a receiving MTA — and exposes a standalone **`spf({sender, ip, helo})`** async function, so we can run true `check_host()` evaluations ("would IP x.x.x.x pass?") in-process in TypeScript. Powers the future `spf.alignment` and live-IP simulation. | `npx mailauth spf --sender a@example.com --ip 203.0.113.10` |
 | **spf-parse** (npm) | `npm i spf-parse` | Pure record-string parser with per-term validity flags — a second opinion for the syntax-lint layer (no DNS). | `spfParse("v=spf1 ip4:1.2.3.4 -all")` |
 | **pyspf** (pip only) | `pip install pyspf` | RFC 7208 reference-quality implementation (powers policyd-spf); manual cross-check. | `python -m spf 203.0.113.10 a@example.com mx.example.com` |
-| **spf-tools** (GitHub, not brew) | clone `jsarenik/spf-tools` | Shell scripts for flattening/denesting — reference for the future `spf.flatten` job. | `despf.sh example.com` |
+| **spf-tools** (GitHub, not brew) | clone `spf-tools/spf-tools` | Shell scripts for flattening/denesting — reference for the future `spf.flatten` job. | `despf.sh example.com` |
 
 > **Gone / nonexistent:** `dog` is no longer in Homebrew (use `doggo`); there is **no `node-spf`**
 > npm package (npm `spf` is an unrelated framework); "mailauthenticator" does not exist — the tool
@@ -145,6 +148,50 @@ Records"; paid API), **EasyDMARC SPF raw checker** (validates a record you paste
 publishing — a good future feature), **Mailhardener** (opinionated best-practice phrasing:
 softfail-over-fail with DMARC, do-not-flatten-statically), **Vamsoft SPF Policy Tester** (simulates
 a given IP+sender pair — our `mailauth spf` equivalent), **Google Admin Toolbox CheckMX**.
+
+### How a test run executes the tools
+
+First-round detection is in-process `node:dns/promises` — those queries land in the structured
+observation (`record:`, `include_tree`, `pass_set`) and are **not** tool runs. Whenever a run
+shells out to an external binary, the invocation is captured verbatim as one entry in
+**`spf.tool_runs[]`** inside the per-run YAML file (§5, [../storage.mdx](../storage.mdx)):
+`{tool, command, started_at, duration_ms, exit_code, output_format, parsed, error}`. Rules that
+apply to every invocation:
+
+- **The exact argv string is stored in `command`** — every input argument (domain, IP, resolver)
+  fully substituted, never templated, so the user can copy-paste the line into a terminal and
+  reproduce the answer byte-for-byte. This is the same string the drill-down pages' "Diagnose it
+  yourself" blocks display.
+- **JSON output is requested wherever the tool offers it** (`output_format: json`); stdout is
+  `JSON.parse`d into `parsed`. Text-only tools store trimmed stdout lines as-is
+  (`output_format: text`).
+- Each child process is started with `spawn` and an **argv array** (never a shell string — no
+  injection surface from domain names), runs under a **hard timeout** (killed after it),
+  stdout/stderr captured separately. A non-zero exit, kill-by-timeout, or unparseable stdout sets
+  `error` (a string; `null` on success) and downgrades the dependent sub-test to **warning**
+  ("tool unavailable — re-run"), never a false critical.
+- A **missing binary is not an error**: no `tool_runs` entry is written and the dependent
+  sub-test degrades as documented (e.g. `spf.dns_type` is skipped when `dig` is absent).
+
+The invocations, in run order:
+
+| # | When | Tool | Exact command line | Output | Timeout | Parsed into |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | Every run (when `dig` present) | **dig** | `dig +time=2 +tries=1 +short <domain> SPF` | text | 5 000 ms | Each non-empty stdout line is a stale **type-99** answer → `parsed: [<lines>]`; any line fires the `spf.dns_type` info finding with the lines as evidence. Empty stdout → `parsed: []`, test passes. |
+| 2 | Every run (when `checkdmarc` present) | **checkdmarc** | `checkdmarc <domain> -f json` | json | 30 000 ms | The conformance cross-check: `parsed.spf.record`, `.valid`, `.dns_lookups`, `.dns_void_lookups`, `.warnings[]`, `.error` are compared against our own `raw_record`, `lookup_count`, `void_count`, `eval_result`. Agreement is silent; any disagreement emits an `info` finding ("cross-check mismatch — ours n, checkdmarc m") so parser bugs on either side surface instead of hiding. |
+| 3 | Only when the apex TXT answer was missing or `temperror` | **doggo** | `doggo <domain> TXT @8.8.8.8 --json` | json | 5 000 ms | `parsed.responses[0].answers[]` from a public resolver disambiguates: an answer containing `v=spf1` here but not locally → `spf.lookup_failed` **warning** (local-resolver problem, "re-run"); no answer anywhere → `spf.missing` stands. The tool_run is the evidence either way. |
+| 4 | *Future* — per configured sending IP | **mailauth** | `npx mailauth spf --sender postmaster@<domain> --ip <ip> --helo <domain>` | json | 15 000 ms | `parsed.status.result` (`pass`/`fail`/`softfail`/`neutral`/`permerror`/`temperror`) is the live `check_host()` verdict cross-validating each `ip_coverage[]` row. Preferred form is the **in-process** `spf({sender, ip, helo})` call (same Node process, no child); it is still logged as a `tool_runs` entry with `command` set to the equivalent CLI line above so the user can reproduce it. |
+
+Everything else in the §3 tables — `kdig`, `drill`, `q`, `dnsx`, `dnsviz`, `swaks`, `spf-parse`,
+`pyspf`, `spf-tools` — is **debug bench only**: surfaced as copyable commands on the drill-down
+pages and used in our own test suites, but never executed by an audit run (swaks in particular
+sends real mail and must stay user-initiated).
+
+Where the captured output lands: every entry is appended to `spf.tool_runs[]` in the run file in
+execution order; row 1 feeds the `spf.dns_type` test row, row 2 feeds the cross-check `info`
+finding and hardens `lookup_count`/`void_count`/`eval_result`, row 3 feeds the
+`spf.lookup_failed`-vs-`spf.missing` decision, and row 4 (future) feeds
+`ip_coverage[].covered` confirmation. The UI's tool-run panel (§6.2) renders the list verbatim.
 
 ---
 
@@ -200,13 +247,30 @@ resolver failures are reported as `warning` ("re-run"), never a false critical.
 
 ## 5. Test results (YAML)
 
-The information we extract from the tests, one document per domain per run. The structured payload
-is produced by the checker as **`results.spf`** (persisted inside the per-run audit record; see
-§10) and the per-test rows are the findings. Rendered as YAML — **`test_results.yaml`** — the
-canonical shape every SPF UI surface and the regression differ consume:
+The information we extract from the tests. Every run persists as **one YAML file** in the runs
+directory (directory layout, filename grammar, and the `run:` block are owned by
+[../storage.mdx](../storage.mdx) — referenced here, not redefined):
+
+```
+~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml
+```
+
+e.g. `~/.email_delivery_hero/runs/example.com/2026_07_01_09_30AM.yaml` — `<domain>` is the domain
+name lowercased; the filename is the run's **start** time in the local timezone, 12-hour clock,
+zero-padded, with an AM/PM suffix. The file opens with a `run:` block (`run_id`, `domain`,
+`started_at`, `finished_at` ISO-UTC, `score`, `status`) followed by **one top-level key per
+category**: `spf`, `dkim`, `dmarc`, `blacklists`, `dns_infra`, `spam_content`.
+
+**This spec owns the top-level `spf` key.** It holds the worst-severity `status`, the structured
+observation produced by the checker (the `record:` block below — also exposed in-process as
+`results.spf`, see §10), the **`tool_runs[]`** capture of every external tool invocation (§3
+"How a test run executes the tools"), the per-test rows, and the matched problem states. This is
+the canonical shape every SPF UI surface and the regression differ consume:
 
 ```yaml
-# test_results.yaml — SPF category, one document per domain per audit run
+# ~/.email_delivery_hero/runs/example.com/2026_07_01_09_30AM.yaml — the SPF category section
+# run:            ← run_id / domain / started_at / finished_at / score / status (../storage.mdx)
+# …               ← sibling category keys: dkim, dmarc, blacklists, dns_infra, spam_content
 spf:
   domain: example.com
   checked_at: 2026-07-01T09:30:00Z
@@ -256,6 +320,30 @@ spf:
     ip_coverage:                     # one row per configured sending IP
       - { ip: 203.0.113.25, covered: true,  matched_by: "mx" }
       - { ip: 198.51.100.7, covered: false, matched_by: null }
+  # ---- external tool invocations during this run (§3), in execution order ----
+  tool_runs:
+    - tool: dig
+      command: "dig +time=2 +tries=1 +short example.com SPF"   # exact argv — copy-paste reproducible
+      started_at: 2026-07-01T09:30:01Z
+      duration_ms: 38
+      exit_code: 0
+      output_format: text            # json | text
+      parsed: []                     # empty answer — no stale type-99 RR → spf.dns_type passes
+      error: null
+    - tool: checkdmarc
+      command: "checkdmarc example.com -f json"
+      started_at: 2026-07-01T09:30:01Z
+      duration_ms: 2412
+      exit_code: 0
+      output_format: json
+      parsed:                        # the cross-check oracle agrees with our permerror verdict
+        spf:
+          record: "v=spf1 include:_spf.google.com include:sendgrid.net include:old-vendor.com mx a ~all"
+          valid: false
+          dns_lookups: 11
+          dns_void_lookups: 1
+          error: "Too many DNS lookups"
+      error: null
   # ---- the per-test rows (the findings, pass and fail alike) ----
   tests:
     - id: spf.present
@@ -284,14 +372,27 @@ Field-name mapping: `record.*` keys are 1:1 with the `spf_check_results` columns
 `byte_length`, `eval_result`), with the tree under `include_tree` (maps to `spf_include_tree`) and
 per-IP rows under `ip_coverage` (maps to `spf_ip_coverage`); `tests[]` rows are the `findings`
 (`result: pass|fail|warn|info` ⇔ severity `ok|critical|warning|info`); `problem_states` is derived
-(§9 mapping table) — never stored separately.
+(§9 mapping table) — never stored separately. **`tool_runs[]` lives only in the run file** — it is
+run forensics (what exactly was executed, when, and what came back), not queryable state, so it
+has no §10 table; the §3 execution rules define every field.
 
 ---
 
 ## 6. User interface — the summary surface and the full SPF page
 
 Two surfaces, following the app-wide pattern in [../ui.mdx](../ui.mdx): a **summary cell** on the
-main view, and a **chevron** that opens a **full page dedicated to SPF** for that domain.
+main view, and a **full page dedicated to SPF** — which is a **"view one category run" page**: it
+shows the SPF test results **of one specific run** (a run = one execution of all checks for one
+domain, per the Run → Test → Sub-test vocabulary in [../dashboard.mdx](../dashboard.mdx) §1).
+
+**Routes (LOCKED).**
+
+| Page | Route |
+| --- | --- |
+| SPF category run page (one run's SPF results) | `/domains/:domainId/runs/:runId/spf` |
+| Newest-run alias (always the domain's latest run) | `/domains/:domainId/spf` |
+| Problem-state drill-down | `/domains/:domainId/runs/:runId/spf/:problemId` (newest alias `/domains/:domainId/spf/:problemId`) |
+| The whole run report the page belongs to | `/domains/:domainId/runs/:runId` (newest alias `/domains/:domainId`) |
 
 ### 6.1 The summary surface (main view)
 
@@ -305,21 +406,42 @@ at a glance:
 - **Label** — the one-line summary of the most decision-relevant metric: the **evaluation state
   and budget**. `Valid · 4/10` / `permerror · 11/10` / `+all` / `No record` / `K of M fail`.
 - **Hover** — tooltip with the top open problem's title (e.g. "SPF permerror — 11/10 lookups").
-- **Chevron (›)** — on the right edge of the cell (visible on hover and on the domain run-detail
-  category chip). Clicking it navigates to the full SPF page: **`/domains/:id/spf`**. Clicking
-  anywhere else in the row still opens the domain run detail as today.
+- **Cell click → inside the test** (the one exception to whole-row navigation,
+  [../dashboard.mdx](../dashboard.mdx) §6). Clicking the **SPF cell on a Domain-health row**
+  opens the domain's **newest run's** SPF page (`/domains/:domainId/spf`, the newest-run alias).
+  Clicking the **SPF cell on a Runs-table row** opens **that run's** SPF page
+  (`/domains/:domainId/runs/:runId/spf`). Clicking anywhere else in either row still opens the
+  whole run report as today.
 
-### 6.2 The full SPF page (`/domains/:id/spf`)
+### 6.2 The full SPF page — a "view one category run" page
 
-One page, purely about SPF for one domain. It must answer, top to bottom: *Does my SPF evaluate
-cleanly? What exactly did we observe (the record, the lookup budget, the expanded tree)? Which
-tests passed/failed? How do I fix each failure?* Every failed test shows the relevant debugging
-values — the DNS name queried, the raw TXT answer, the offending term, the IP address at issue.
+`/domains/:domainId/runs/:runId/spf` — newest-run alias `/domains/:domainId/spf`.
+
+One page, purely about SPF **for one specific run of one domain** — everything on it (record,
+tree, table, tool runs) was observed during that run, at that run's `started_at`. It must answer,
+top to bottom: *Did my SPF evaluate cleanly in this run? What exactly did we observe (the record,
+the lookup budget, the expanded tree)? Which tests passed/failed? How do I fix each failure?*
+Every failed test shows the relevant debugging values — the DNS name queried, the raw TXT answer,
+the offending term, the IP address at issue. Data comes from the run's YAML file's `spf` key (§5).
+
+**How the page is reached.**
+
+1. The **SPF cell** on a Dashboard Domain-health row → the newest run's SPF page (§6.1).
+2. The **SPF cell** on a Dashboard Runs-table row → that run's SPF page (§6.1).
+3. The **SPF section chevron** on a run report (`/domains/:domainId/runs/:runId`) → that same
+   run's SPF page.
+4. The **‹ prev / next ›** controls in the run context strip (below) → the adjacent run's SPF
+   page for the same domain.
 
 Contents, in order (exact layout in §7):
 
-1. **Header** — domain name, "SPF" title, the category StatusCell, `ran <timestamp>`, a **Re-run**
-   button (runs just this domain's audit), and a back link.
+1. **Header** — domain name, "SPF" title, the category StatusCell, a **Re-run** button (starts a
+   **new** run for just this domain; on completion navigate to the new run's SPF page), and a back
+   link to this run's report. Directly beneath: the **run context strip** — the run's `started_at`
+   timestamp (local time), **‹ prev / next ›** navigation stepping chronologically through this
+   domain's runs (each swaps `:runId` in the URL; disabled at either end of the history), and a
+   **"Newest" indicator** — a badge shown when this run is the domain's latest (always shown on
+   the alias route); on an older run the badge is replaced by a **"Jump to newest ›"** link.
 2. **Budget hero** — the verdict banner: the eval result (`valid` / `permerror` / `none`) with a
    **lookup-budget gauge** (`n/10` segments, amber from 8, red past 10), the void count (`n/2`),
    and the `all`-qualifier chip. One accent CTA: the single next action (from §8).
@@ -338,13 +460,24 @@ Contents, in order (exact layout in §7):
 6. **Sending-IP coverage panel** — one row per configured sending IP: covered ✓/✗ and the pass-set
    entry that matched (or the exact `ip4:`/`ip6:` line to add, copyable). Empty state points at
    the Domains page where `sendingIps` are managed.
-7. **Problem states** — cards for each matched §9 problem state, each with a one-paragraph
+7. **Tool runs panel** — a collapsed-by-default accordion listing this run's `spf.tool_runs[]`
+   (§3/§5) verbatim: tool, the exact command line (monospace, copy button), duration, exit code,
+   and the parsed output in a code block. This is the "show your work" surface — the user can
+   re-run any line in a terminal and get the same answer.
+8. **Problem states** — cards for each matched §9 problem state, each with a one-paragraph
    explanation and a **"Learn more ›"** chevron that opens the per-problem drill-down page
-   (`/domains/:id/spf/:problemId`) — concept, diagnosis, and the step-by-step path forward.
+   (`/domains/:domainId/runs/:runId/spf/:problemId`, newest alias
+   `/domains/:domainId/spf/:problemId`) — concept, diagnosis, and the step-by-step path forward,
+   rendered from **this run's** data.
+
+**The sub-test results table stays the heart of the page** (item 5): one explicit pass/fail row
+per §2 sub-test for this run, fail-first, with copyable fixes.
 
 **Empty / never-run / loading states.** Never-run → gray header cell + "No audit yet — run one"
-CTA. Loading → skeleton rows. A no-record result is **not** empty — it renders the `spf.missing`
-critical with the concrete publish-this remediation and the budget hero at `none`.
+CTA (the alias route with zero runs). Loading → skeleton rows. A no-record result is **not**
+empty — it renders the `spf.missing` critical with the concrete publish-this remediation and the
+budget hero at `none`. A `:runId` that does not exist (deleted run) → "Run not found" with a
+"Jump to newest ›" link.
 
 **Per-domain config inputs.** SPF reads `sendingIps` (managed on the Domains page) for
 `spf.ip_coverage`. No SPF-specific selectors are required (unlike DKIM).
@@ -359,8 +492,9 @@ first, evidence second, work items third, education last.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
-│ ‹ Back to example.com            SPF                          [Re-run ⟳]  │  header row
-│ example.com  ·  [ red: permerror · 11/10 ]  ·  ran 2026-07-01 09:30       │
+│ ‹ Back to run report             SPF                          [Re-run ⟳]  │  header row
+│ example.com  ·  [ red: permerror · 11/10 ]                                 │
+│ RUN   ‹ prev    2026-07-01 09:30 AM    next ›              [ NEWEST ]      │  run context strip
 ├────────────────────────────────────────────────────────────────────────────┤
 │  LOOKUP BUDGET   ▓▓▓▓▓▓▓▓▓▓▓ 11/10   voids 1/2    [ ~all ]                │  hero band
 │  "permerror — receivers ignore this record; ALL mail fails SPF."           │
@@ -387,6 +521,10 @@ first, evidence second, work items third, education last.
 │  SENDING-IP COVERAGE                                                        │  coverage band
 │  ✓ 203.0.113.25   matched by mx        ✗ 198.51.100.7  [copy ip4 line]     │
 ├────────────────────────────────────────────────────────────────────────────┤
+│  TOOL RUNS (2)                                                    [v]      │  tool-runs band
+│  ▸ dig +time=2 +tries=1 +short example.com SPF          38 ms  exit 0     │  (collapsed)
+│  ▸ checkdmarc example.com -f json                     2412 ms  exit 0     │
+├────────────────────────────────────────────────────────────────────────────┤
 │  PROBLEM STATES                                                             │  cards
 │  [PS-03 Over the lookup limit ›]  [PS-04 Dead vendor include ›]            │
 │  [PS-08 Sending IP not covered ›]                                          │
@@ -398,6 +536,13 @@ Placement rules and rationale:
 - **Highest: the verdict.** The header row carries identity + status; the **budget hero** directly
   under it is the one visual a non-expert needs — am I `valid` or `permerror`, how close to the
   10-lookup cliff, and what's my next move. One accent CTA maximum on the page.
+- **Run context strip** — directly under the identity row, before any results. It makes it
+  unmistakable that everything below belongs to **one run**: the run's `started_at` in local time
+  (matching the run-file name, §5), **‹ prev / next ›** stepping chronologically through this
+  domain's runs (each swaps `:runId` in the URL, refetches, and scrolls to top; disabled with a
+  muted tooltip at either end of the history), and the **NEWEST** badge on the latest run — on an
+  older run it becomes a **"Jump to newest ›"** link. Muted styling (`text-slate-500`, small);
+  it orients, it never competes with the verdict.
 - **Second band, two-up:** left = **Published record** (the ground truth users paste elsewhere;
   monospace, copy button top-right, mechanism table beneath with lookup costs); right = **Include
   tree** (the most-diagnostic SPF visual — the void/over-budget node is visible at a glance rather
@@ -410,17 +555,25 @@ Placement rules and rationale:
   Copy buttons always copy the publishable value, never prose.
 - **Coverage band** below the table: per-IP verdicts are operational data the user acts on
   (add-this-line), distinct from record hygiene.
+- **Tool-runs band** — collapsed accordion under the coverage band: one row per `tool_runs[]`
+  entry showing the tool, the exact command line (monospace, `[copy]`), duration and exit code;
+  expanding a row reveals the `parsed` output as a code block (and `error` when set, in red).
+  Collapsed by default because it is forensics, not triage — but always present, because "what
+  exactly did you run?" is the first question a skeptical operator asks.
 - **Lowest: problem-state cards** — education and deep dives; two per row, title + one-line hook +
-  chevron to `/domains/:id/spf/:problemId`. They repeat information the table already flagged on
+  chevron to `/domains/:domainId/runs/:runId/spf/:problemId` (newest alias
+  `/domains/:domainId/spf/:problemId`). They repeat information the table already flagged on
   purpose: the table is for operators, the cards for learners.
 - **Type & color:** shadcn/ui primitives (`Card`, `Table`, `Accordion`, `Badge`), lucide icons
   (`ShieldCheck`/`ShieldAlert`/`Info`/`ChevronRight`/`Copy`/`Wrench`). Severity colors identical
   to the Dashboard cells. Monospace (`font-mono text-xs`) for every DNS name, term, and IP.
-- **Drill-down pages** (`/domains/:id/spf/:problemId`) reuse the same header row, then: **Concept**
-  (what this state means, 2–3 paragraphs), **Your data** (the §9 data fields rendered live from the
-  latest run), **Diagnose it yourself** (copyable terminal commands from §3), **Path forward**
-  (numbered steps with copyable records), and a further-reading footer. Back chevron returns to the
-  SPF page anchor.
+- **Drill-down pages** (`/domains/:domainId/runs/:runId/spf/:problemId`, newest alias
+  `/domains/:domainId/spf/:problemId`) reuse the same header row **and run context strip**, then:
+  **Concept** (what this state means, 2–3 paragraphs), **Your data** (the §9 data fields rendered
+  from **this run**), **Diagnose it yourself** (copyable terminal commands from §3 — the same
+  argv strings recorded in `tool_runs[]` where the run executed them), **Path forward** (numbered
+  steps with copyable records), and a further-reading footer. Back chevron returns to the SPF page
+  anchor for the same run.
 
 ---
 
@@ -730,14 +883,16 @@ CREATE TABLE spf_ip_coverage (
 CREATE INDEX ix_spf_coverage_result ON spf_ip_coverage(spf_result_id);
 ```
 
-**Mapping onto today's JSON file store.** There is **no database in the first round**. The audit
-runner persists each run under the state dir (keyed by domain id); the human-readable findings
-live in `findings[]` (`checkId:"spf"`), and the checker's structured payload lives at
-**`results.spf`** on the same run object — the object in §5's `record:` block, mapping 1:1 to
-`spf_check_results`, with the tree nested under `results.spf.include_tree` (maps to
-`spf_include_tree` rows via parent pointers), the authorized CIDRs under `results.spf.pass_set`,
-and the per-IP rows under `results.spf.ip_coverage[]` (maps to `spf_ip_coverage`). Because the
-store module fronts all of this, the file→DB move is a single-module change.
+**Mapping onto today's file store.** There is **no database in the first round**. Each run
+persists as one YAML file — `~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml`
+([../storage.mdx](../storage.mdx)) — whose top-level `spf` key is the §5 document: the
+human-readable findings are the `tests[]` rows (`checkId:"spf"` in-process), and the checker's
+structured payload (exposed in-process as **`results.spf`**) is the `record:` block, mapping 1:1
+to `spf_check_results`, with the tree nested under `include_tree` (maps to `spf_include_tree`
+rows via parent pointers), the authorized CIDRs under `pass_set`, and the per-IP rows under
+`ip_coverage[]` (maps to `spf_ip_coverage`). **`tool_runs[]` is deliberately file-only** — run
+forensics with no DB table (§5). Because the store module fronts all of this, the file→DB move is
+a single-module change.
 
 ---
 
@@ -810,21 +965,40 @@ store module fronts all of this, the file→DB move is a single-module change.
    line to add; full coverage emits an **ok** finding.
 10. Pass results are emitted as `ok` findings so the SPF page renders an explicit passed/failed
     row per test, and the category cell label reflects the eval state and lookup budget.
-11. The structured payload is persisted at `results.spf` with all §5 `record:` fields (snake_case,
-    matching `spf_check_results` column names), including `include_tree`, `pass_set`, and
-    `ip_coverage[]`.
+11. The structured payload is persisted under the **top-level `spf` key** of the per-run YAML file
+    `~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml`
+    ([../storage.mdx](../storage.mdx)) with all §5 `record:` fields (snake_case, matching
+    `spf_check_results` column names), including `include_tree`, `pass_set`, `ip_coverage[]`,
+    `tool_runs[]`, `tests[]`, and `problem_states`; the same object is exposed in-process as
+    `results.spf`.
 12. Every non-`ok` finding carries a concrete `remediation` (the exact term/record/step), never a
     generic "check your DNS".
-13. The Dashboard SPF cell reflects the worst severity; `info`-only never turns it amber; the
-    cell/category chip exposes a chevron routing to `/domains/:id/spf`.
-14. The full SPF page renders: the budget hero (eval verdict, lookup gauge, void count, all-chip),
-    the raw + mechanism-table record panel, the expandable include tree with per-node lookup costs
-    and void badges, the fail-first test-results table with copyable fixes, the sending-IP
-    coverage panel, and the matched problem-state cards linking to drill-down pages
-    (`/domains/:id/spf/:problemId`).
+13. The Dashboard SPF cell reflects the worst severity; `info`-only never turns it amber; clicking
+    the SPF cell on a **Domain-health** row opens the domain's **newest run's** SPF page
+    (`/domains/:domainId/spf`), clicking the SPF cell on a **Runs-table** row opens **that run's**
+    SPF page (`/domains/:domainId/runs/:runId/spf`), and clicking anywhere else in a row opens the
+    whole run report; the run report's SPF section chevron opens the same run-scoped SPF page.
+14. The full SPF page is **run-scoped** (`/domains/:domainId/runs/:runId/spf`, newest-run alias
+    `/domains/:domainId/spf`) and renders: the header with Re-run (starts a **new** run) and the
+    **run context strip** (run `started_at` timestamp, working ‹ prev / next › navigation across
+    the domain's runs, NEWEST badge on the latest run / "Jump to newest ›" on older ones), the
+    budget hero (eval verdict, lookup gauge, void count, all-chip), the raw + mechanism-table
+    record panel, the expandable include tree with per-node lookup costs and void badges, the
+    fail-first test-results table with copyable fixes (the heart of the page), the sending-IP
+    coverage panel, the collapsed tool-runs panel, and the matched problem-state cards linking to
+    run-scoped drill-down pages (`/domains/:domainId/runs/:runId/spf/:problemId`, newest alias
+    `/domains/:domainId/spf/:problemId`).
 15. A second scheduled run that sees a dropped record, a new duplicate, the lookup count crossing
     8 or 10, a weakened `all`, a new void include, or an IP falling out of coverage flags each as
     a **new problem** via the regression diff.
+16. Every external tool invocation during a run is captured as one `spf.tool_runs[]` entry —
+    `tool`, the **exact argv string** in `command` (every input argument substituted,
+    copy-paste reproducible), `started_at`, `duration_ms`, `exit_code`,
+    `output_format: json|text` (JSON requested wherever the tool supports it), the captured
+    `parsed` output, and `error` (`null` on success) — per the §3 execution table (dig type-99
+    probe, checkdmarc cross-check, conditional doggo public-resolver probe); processes are
+    spawned with argv arrays under hard timeouts, and a missing binary or timeout degrades to
+    **warning**/skip, never a false critical.
 
 <!--
   Maintenance notes:
@@ -836,9 +1010,28 @@ store module fronts all of this, the file→DB move is a single-module change.
     non-sending domains exactly "v=spf1 -all" + Null MX + DMARC p=reject.
   * Keep finding ids in sync with code/packages/backend/src/modules/audit/checks/spf.check.ts
     (the authoritative id list is §2) and with ../spam_checks.mdx (category 1, spf prefix).
-  * Toolbox (§3) verified against formulae.brew.sh + npm 2026-07: bind, doggo, q, dnsx, ldns,
-    knot, checkdmarc, swaks, dnsviz are brew formulas; `dog` is GONE from Homebrew; there is NO
-    `node-spf` npm package (npm `spf` is unrelated); pyspf/libspf2 are pip/source only.
+  * Toolbox (§3) re-verified against formulae.brew.sh + npm 2026-07: bind, doggo (1.2.x), q,
+    dnsx, ldns, knot, checkdmarc (5.17.x), swaks, dnsviz are brew formulas; mailauth (4.13.x) and
+    spf-parse (1.0.4) are npm; `dog` is GONE from Homebrew; there is NO `node-spf` npm package
+    (npm `spf` is unrelated); pyspf/libspf2 are pip/source only; spf-tools canonical repo is
+    github.com/spf-tools/spf-tools.
+  * §3 "How a test run executes the tools" is the authoritative argv list — keep the exact
+    command lines, timeouts, JSON-first parsing rules, and parse→field mappings in sync with
+    spf.check.ts. Run-invoked: dig (type-99, always when present), checkdmarc -f json
+    (cross-check, when present), doggo @8.8.8.8 --json (only on missing/temperror apex answers),
+    mailauth spf (FUTURE, per sending IP, prefer in-process spf()). Everything else is debug
+    bench only — never executed by a run (swaks sends real mail; user-initiated only).
+  * Storage (LOCKED, 2026-07): one YAML file per run at
+    ~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml — ../storage.mdx owns the
+    directory/filename grammar and the run: block; THIS spec owns the top-level `spf` key,
+    including tool_runs[] ({tool, command(exact argv), started_at, duration_ms, exit_code,
+    output_format json|text, parsed, error}). tool_runs is file-only — no §10 DB table.
+  * Run-scoped UI (LOCKED, 2026-07): the SPF page is a "view one category run" page —
+    /domains/:domainId/runs/:runId/spf, newest alias /domains/:domainId/spf; drill-downs append
+    /:problemId to both. Dashboard cell clicks: Domain-health SPF cell → newest run's SPF page,
+    Runs-row SPF cell → that run's SPF page; the run report's SPF chevron → same run's SPF page.
+    The header carries the run context strip (started_at, ‹ prev / next ›, NEWEST badge / "Jump
+    to newest"). Keep routes and cell-click semantics in sync with ../dashboard.mdx §6.
   * spf.alignment (PS-11) stays FUTURE until message-level data exists (mailauth on live mail or
     the rua ingestion pipeline in ../emails.mdx). spf.flatten automation (PS-12) stays FUTURE.
   * SPF is the aspf half of DMARC alignment — keep §8/§9 consistent with ./dmarc.mdx PS-11/PS-13.
