@@ -6,7 +6,6 @@ import { mapLimit } from "@shared/concurrency"
 import { readJson, writeJson } from "@shared/json-store"
 import { logError, logInfo } from "@shared/logging"
 import { resolveStateDir } from "@shared/state-dir"
-import type { AuditResult } from "../audit/checks/types"
 import { computeNextRun } from "./next-run"
 import {
   installArtifact,
@@ -22,11 +21,19 @@ import type {
   OsArtifactPreview,
   RunTrigger,
   ScheduleConfig,
+  SchedulerRunOutcome,
   SchedulerStatus,
 } from "./schedule.types"
 
 /** How many domains a scheduled run audits concurrently (matches AuditService's manual path). */
 const SCHEDULED_RUN_CONCURRENCY = 4
+
+/**
+ * A scheduled trigger landing within this window of the previous run is a duplicate, not a new
+ * slot (pm/settings.mdx §3.3): the in-process timer and the OS-level agent can both fire around
+ * the same configured time, and launchd replays missed slots after wake.
+ */
+const DEDUPE_WINDOW_MS = 5 * 60 * 1000
 
 /** Scheduler telemetry persisted across restarts (lastRunAt survives a backend reboot). */
 interface SchedulerState {
@@ -111,16 +118,26 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
 
   /* ------------------------------------ status ------------------------------------ */
 
-  /** GET /api/scheduler — enabled, active runner, nextRunAt, lastRunAt, OS-install status. */
+  /**
+   * GET /api/scheduler — everything the dashboard toggle and the Settings §3 status block need in
+   * one read: the switch + slots, computed next run, last-run telemetry, coverage, OS install.
+   */
   status(): SchedulerStatus {
     const cfg = this.getConfig()
     const state = this.loadState()
+    const all = this.domains.list()
     return {
       enabled: cfg.enabled,
       runner: cfg.runner,
+      cadence: cfg.cadence,
+      times: cfg.times,
+      weekdays: cfg.weekdays,
       nextRunAt: computeNextRun(cfg, new Date(), state.lastRunAt),
       lastRunAt: state.lastRunAt,
       lastTrigger: state.lastTrigger,
+      running: this.running,
+      domainsCovered: this.scopedDomains(cfg).length,
+      domainsTotal: all.length,
       os: cfg.os,
     }
   }
@@ -128,26 +145,38 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   /* ------------------------------------- runs ------------------------------------- */
 
   /**
-   * POST /api/scheduler/run — run a full scheduled audit NOW for the configured scope
-   * ("all" monitored domains or the selected subset; per-domain scheduleEnabled is honored for
-   * scheduled triggers per pm/domains.mdx §6). This is what the OS-level artifacts call.
+   * POST /api/scheduler/run — trigger a scheduled audit NOW for the configured scope
+   * ("all" monitored domains or the selected subset, ANDed with each domain's own
+   * scheduleEnabled flag per pm/domains.mdx §6). This is what the OS-level artifacts call.
+   *
+   * It honors the master switch (pm/settings.mdx §3.3): scheduling defaults OFF, and the launchd
+   * agent is installed by `just build` regardless — so a trigger while `enabled: false` must be a
+   * clean no-op, not a surprise audit. `force: true` (the Settings tab's "Run a scheduled check
+   * now") bypasses the switch AND the dedupe so the user can preview what a scheduled run does.
    */
-  async runNow(trigger: RunTrigger = "manual"): Promise<AuditResult[]> {
+  async runNow(trigger: RunTrigger = "manual", force = false): Promise<SchedulerRunOutcome> {
+    const cfg = this.getConfig()
+    if (!cfg.enabled && !force) {
+      logInfo(`Scheduled run skipped — scheduling is off (${trigger})`, "Scheduler")
+      return { started: false, reason: "disabled" }
+    }
     if (this.running) {
       logInfo(`Scheduled run skipped — a run is already in progress (${trigger})`, "Scheduler")
-      return []
+      return { started: false, reason: "already_running" }
+    }
+    // Dedupe: the in-process timer and the OS agent may both fire at the same configured slot.
+    if (!force) {
+      const last = Date.parse(this.loadState().lastRunAt ?? "")
+      if (Number.isFinite(last) && Date.now() - last < DEDUPE_WINDOW_MS) {
+        logInfo(`Scheduled run skipped — last run was under 5 minutes ago (${trigger})`, "Scheduler")
+        return { started: false, reason: "recently_ran" }
+      }
     }
     this.running = true
     try {
-      const cfg = this.getConfig()
-      const all = this.domains.list()
-      const scoped =
-        cfg.domains === "all" ? all : all.filter((d) => (cfg.domains as string[]).includes(d.id))
-      // The global switch ANDs with each domain's own scheduleEnabled flag (pm/domains.mdx §6);
-      // a manual trigger of the scheduler endpoint keeps the same scoping.
-      const included = scoped.filter((d) => d.scheduleEnabled)
+      const included = this.scopedDomains(cfg)
       logInfo(
-        `Scheduled check run started (${trigger}; ${included.length}/${all.length} domain(s))`,
+        `Scheduled check run started (${trigger}; ${included.length}/${this.domains.list().length} domain(s))`,
         "Scheduler",
       )
       const results = await mapLimit(included, SCHEDULED_RUN_CONCURRENCY, (d) =>
@@ -155,12 +184,20 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
       )
       this.saveState({ lastRunAt: new Date().toISOString(), lastTrigger: trigger })
       logInfo(`Scheduled check run finished (${results.length} domain(s))`, "Scheduler")
-      return results
+      return { started: true, domains: results.length }
     } finally {
       this.running = false
       // A completed run moves the next slot forward — re-arm against the fresh lastRunAt.
       this.rearm(this.getConfig())
     }
+  }
+
+  /** The domains a scheduled run covers: the configured scope AND each domain's own switch. */
+  private scopedDomains(cfg: ScheduleConfig) {
+    const all = this.domains.list()
+    const scoped =
+      cfg.domains === "all" ? all : all.filter((d) => (cfg.domains as string[]).includes(d.id))
+    return scoped.filter((d) => d.scheduleEnabled)
   }
 
   /* --------------------------------- OS-level layer --------------------------------- */

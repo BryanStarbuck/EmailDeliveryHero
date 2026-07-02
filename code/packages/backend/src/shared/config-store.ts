@@ -108,11 +108,13 @@ export function defaultAppConfig(): AppConfigFile {
       weights: { critical: 40, warning: 15, info: 0 },
     },
     schedule: {
-      enabled: true,
+      // DEFAULT OFF (pm/settings.mdx §3.1): a fresh install never fires scheduled DNSBL/SMTP/HTTP
+      // traffic until the user flips the switch. Enabling seeds these times/weekdays: 06:00 daily.
+      enabled: false,
       cadence: "daily",
       everyHours: 6,
       times: ["06:00"],
-      weekdays: ["mon"],
+      weekdays: [],
       timezone: systemTimezone(),
       domains: "all",
       runner: "in-process",

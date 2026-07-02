@@ -47,14 +47,37 @@ export interface ScheduleConfig {
 /** What fired a scheduled run (recorded as scheduler telemetry). */
 export type RunTrigger = "in-process" | "os" | "manual"
 
-/** GET /api/scheduler payload (pm/scheduled_checks.mdx acceptance criterion 12). */
+/** GET /api/scheduler payload (pm/scheduled_checks.mdx criterion 12 + pm/settings.mdx §3.3). */
 export interface SchedulerStatus {
   enabled: boolean
   runner: ScheduleRunner
+  cadence: ScheduleCadence
+  /** The configured "HH:MM" slots — surfaced so the Settings §3 status block needs one GET. */
+  times: string[]
+  weekdays: Weekday[]
   nextRunAt: string | null
   lastRunAt: string | null
   lastTrigger: RunTrigger | null
+  /** True while a scheduled run is in flight. */
+  running: boolean
+  /** How many monitored domains a scheduled run covers right now (global AND per-domain switch). */
+  domainsCovered: number
+  domainsTotal: number
   os: ScheduleOsState
+}
+
+/**
+ * POST /api/scheduler/run outcome (pm/settings.mdx §3.3). The endpoint honors the master switch:
+ * when scheduling is off it SKIPS (`started: false`) unless the body forces it, and a scheduled
+ * trigger that lands within the dedupe window of the previous run is also skipped — that is what
+ * lets the launchd agent stay installed while the toggle is off, and lets both scheduling layers
+ * coexist without double-running.
+ */
+export interface SchedulerRunOutcome {
+  started: boolean
+  reason?: "disabled" | "already_running" | "recently_ran"
+  /** How many domains the run covered (present when started). */
+  domains?: number
 }
 
 /** GET /api/scheduler/os/preview payload — the generated OS artifact, before installing. */

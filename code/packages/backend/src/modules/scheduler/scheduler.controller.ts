@@ -1,10 +1,10 @@
 import { Body, Controller, Get, Post, Put } from "@nestjs/common"
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger"
-import type { AuditResult } from "../audit/checks/types"
 import type {
   OsArtifactPreview,
   RunTrigger,
   ScheduleConfig,
+  SchedulerRunOutcome,
   SchedulerStatus,
 } from "./schedule.types"
 import { SchedulerService } from "./scheduler.service"
@@ -41,10 +41,14 @@ export class SchedulerController {
   }
 
   @Post("run")
-  @ApiOperation({ summary: "Run a full scheduled audit now (what the OS-level schedulers call)" })
-  run(@Body() body?: { trigger?: string }): Promise<AuditResult[]> {
+  @ApiOperation({
+    summary:
+      "Trigger a scheduled audit now. Honors the master switch (skips when scheduling is off) " +
+      "and dedupes double-fires unless the body carries force: true (pm/settings.mdx §3.3).",
+  })
+  run(@Body() body?: { trigger?: string; force?: boolean }): Promise<SchedulerRunOutcome> {
     const trigger: RunTrigger = body?.trigger === "os" ? "os" : "manual"
-    return this.scheduler.runNow(trigger)
+    return this.scheduler.runNow(trigger, body?.force === true)
   }
 
   @Get("os/preview")
