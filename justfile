@@ -53,9 +53,51 @@ _preflight-tools:
     [ "$ok" = 1 ] || { echo "Fix the above and re-run." >&2; exit 1; }
     echo "✓ node $(node -v)   pnpm $(pnpm -v)"
 
+# The auth library (@auth/backend, @auth/react) is consumed via pnpm `link:` deps that expect
+# OpenAuthFederated as a SIBLING of this repo. On a machine where it lives elsewhere, find it
+# (OPENAUTH_FEDERATED_DIR override, then a shallow search of common roots) and symlink it into
+# place; if it isn't cloned at all, fail with the clone command. Also builds its dist/ if stale.
+_preflight-openauth:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sibling="$(dirname "{{repo}}")/OpenAuthFederated"
+    marker="code/packages/auth-backend"
+    found=""
+    if [ -d "$sibling/$marker" ]; then
+      found="$sibling"
+    elif [ -n "${OPENAUTH_FEDERATED_DIR:-}" ] && [ -d "$OPENAUTH_FEDERATED_DIR/$marker" ]; then
+      found="$OPENAUTH_FEDERATED_DIR"
+    else
+      for root in "$HOME/BGit" "$HOME/git" "$HOME/src" "$HOME/code" "$HOME/Projects" "$HOME"; do
+        [ -d "$root" ] || continue
+        hit="$(find "$root" -maxdepth 3 -type d -name OpenAuthFederated -not -path '*/node_modules/*' 2>/dev/null | head -n 1 || true)"
+        if [ -n "$hit" ] && [ -d "$hit/$marker" ]; then found="$hit"; break; fi
+      done
+    fi
+    if [ -z "$found" ]; then
+      echo "✗ OpenAuthFederated not found on this machine." >&2
+      echo "  Clone it next to this repo:" >&2
+      echo "    git clone https://github.com/BryanStarbuck/OpenAuthFederated.git \"$sibling\"" >&2
+      echo "  …or point OPENAUTH_FEDERATED_DIR at an existing checkout and re-run." >&2
+      exit 1
+    fi
+    # Materialize the sibling layout the package.json `link:` deps expect.
+    if [ ! -d "$sibling/$marker" ]; then
+      rm -f "$sibling" 2>/dev/null || true   # clear a stale/broken symlink, never a real dir
+      ln -s "$found" "$sibling"
+      echo "✓ linked $sibling → $found"
+    fi
+    # The link: deps consume dist/ — build the library if it hasn't been built yet.
+    if [ ! -f "$found/$marker/dist/index.js" ] || [ ! -f "$found/code/packages/auth-react/dist/index.js" ]; then
+      echo "▶ Building OpenAuthFederated (dist/ missing)…"
+      pnpm -C "$found/code" install
+      pnpm -C "$found/code" -r build
+    fi
+    echo "✓ OpenAuthFederated ready: $found"
+
 # ── build ──────────────────────────────────────────────────────────────────────
 # Install deps, compile both packages, and install the launchd cron job on localhost.
-build: _preflight-tools
+build: _preflight-tools _preflight-openauth
     #!/usr/bin/env bash
     set -euo pipefail
     echo "▶ Installing dependencies…"
@@ -100,7 +142,7 @@ uninstall-agent:
 # command line is freed. Follow output with `just logs`; shut down with `just stop`.
 #
 # Start the web app in the BACKGROUND (fresh restart; web :4444 + API :9312).
-run: _preflight-tools stop
+run: _preflight-tools _preflight-openauth stop
     #!/usr/bin/env bash
     set -euo pipefail
 

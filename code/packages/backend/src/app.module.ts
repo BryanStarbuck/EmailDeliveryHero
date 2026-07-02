@@ -6,6 +6,7 @@ import { JwtAuthGuard } from "@module/auth/jwt-auth.guard"
 import { RolesGuard } from "@module/auth/roles.guard"
 import { DomainsModule } from "@module/domains/domains.module"
 import { HealthModule } from "@module/health/health.module"
+import { SchedulerModule } from "@module/scheduler/scheduler.module"
 import { Module } from "@nestjs/common"
 import { ConfigModule } from "@nestjs/config"
 import { APP_GUARD } from "@nestjs/core"
@@ -27,6 +28,7 @@ import { APP_GUARD } from "@nestjs/core"
     DomainsModule,
     AuditModule,
     BlacklistsModule,
+    SchedulerModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },

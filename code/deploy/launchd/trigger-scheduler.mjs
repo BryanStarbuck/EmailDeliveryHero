@@ -19,7 +19,12 @@ async function main() {
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), TIMEOUT_MS)
   try {
-    const res = await fetch(URL, { method: "POST", signal: ac.signal })
+    const res = await fetch(URL, {
+      method: "POST",
+      signal: ac.signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ trigger: "os" }),
+    })
     const body = await res.text().catch(() => "")
     if (!res.ok) {
       console.error(`[${stamp()}] scheduler run failed: HTTP ${res.status} ${res.statusText} ${body}`)
