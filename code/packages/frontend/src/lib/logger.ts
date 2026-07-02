@@ -47,6 +47,7 @@ function forward(level: "error" | "warn", message: string, extra?: unknown): voi
 }
 
 export const logger = {
+  debug: (msg: string, ...rest: unknown[]) => console.debug(`[edh] ${msg}`, ...rest),
   info: (msg: string, ...rest: unknown[]) => console.info(`[edh] ${msg}`, ...rest),
   warn: (msg: string, ...rest: unknown[]) => {
     console.warn(`[edh] ${msg}`, ...rest)

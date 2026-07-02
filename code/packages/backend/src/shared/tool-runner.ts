@@ -80,7 +80,11 @@ function execute(file: string, args: readonly string[], opts: ToolRunOptions): P
           resolve({ code: 0, stdout, stderr, timedOut: false })
           return
         }
-        const e = err as NodeJS.ErrnoException & { killed?: boolean; code?: number | string }
+        const e = err as NodeJS.ErrnoException & {
+          killed?: boolean
+          code?: number | string
+          signal?: NodeJS.Signals | null
+        }
         const timedOut = e.killed === true || e.signal === "SIGTERM" || e.signal === "SIGKILL"
         // Non-zero exit → numeric code (data, not an exception). Spawn failure (ENOENT…) → null
         // code with the reason appended to stderr for diagnostics.

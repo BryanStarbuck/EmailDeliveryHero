@@ -8,12 +8,12 @@ import { join } from "node:path"
  * and the two log files (log.log / error.err) — lives here so no runtime data is ever committed
  * to the repo. See pm/storage.mdx §1 and pm/errors.mdx §1.
  *
- * Default: ~/T/_emaildeliveryhero (override with EDH_STATE_DIR). Created on first use. Falls back
+ * Default: ~/.email_delivery_hero (override with EDH_STATE_DIR). Created on first use. Falls back
  * to a temp dir if os.homedir() is unavailable (rare, sandboxed hosts) so resolution never throws.
  */
 
 /** Last-resort root when os.homedir() is unavailable. */
-const FALLBACK_STATE_DIR = "/tmp/_emaildeliveryhero"
+const FALLBACK_STATE_DIR = "/tmp/.email_delivery_hero"
 
 /** Resolve the state root without side effects other than the best-effort mkdir. */
 function computeStateDir(): string {
@@ -21,7 +21,7 @@ function computeStateDir(): string {
   if (override && override.length > 0) return override
   try {
     const home = homedir()
-    if (home && home.trim() !== "") return join(home, "T", "_emaildeliveryhero")
+    if (home && home.trim() !== "") return join(home, ".email_delivery_hero")
   } catch {
     // homedir() can throw on a misconfigured host — fall through to the temp dir.
   }
