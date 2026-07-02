@@ -2,6 +2,7 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router"
 import {
   ArrowLeft,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Info,
   KeyRound,
@@ -9,13 +10,14 @@ import {
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
+  TriangleAlert,
   Wrench,
   X,
 } from "lucide-react"
-import { useState } from "react"
-import { useAuditResults } from "@/api/audit"
+import { useEffect, useState } from "react"
+import { useAuditResults, useAuditRuns } from "@/api/audit"
 import { useDomains, useUpdateDomain } from "@/api/domains"
-import type { DkimResults, DkimSelectorResult, Finding, Severity } from "@/api/types"
+import type { DkimResults, DkimSelectorResult, DkimToolRun, Finding, Severity } from "@/api/types"
 import { CopyFixButton } from "@/components/CopyFixButton"
 import { StatusCell } from "@/components/StatusCell"
 import { NEVER_CELL, rollupCategories } from "@/lib/categories"
@@ -26,47 +28,141 @@ import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext"
 const ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2, ok: 3 }
 
 /**
- * The full-page DKIM view (pm/checks/dkim.mdx §6.2/§7) — everything about one domain's DKIM: the
- * key-health hero, one card per selector (resolution chain, raw record, key badges), the fail-first
- * test-results table with observed DNS values and copyable fixes, the selectors editor with
- * discovery import, and problem-state cards linking to the per-problem drill-down pages.
+ * The DKIM category RUN page (pm/checks/dkim.mdx §6.2/§7) — "view one category run": everything
+ * about the DKIM results of ONE specific run for one domain. Run-scoped route
+ * /domains/:id/runs/:runId/dkim plus the newest-run alias /domains/:id/dkim. Renders, in triage
+ * order: the header (back to this run's report, status, run timestamp, ‹ prev / next › run
+ * navigation, Re-run), the key-health hero, one card per selector (resolution chain, raw record,
+ * key badges), the fail-first test-results table with observed DNS values and copyable fixes, the
+ * tool-runs evidence accordion, the selectors editor with discovery import, and problem-state
+ * cards linking to the per-problem drill-down pages.
  */
 export function DkimPage() {
-  const { id = "" } = useParams({ strict: false }) as { id?: string }
+  const { id = "", runId } = useParams({ strict: false }) as { id?: string; runId?: string }
   const { data: domains } = useDomains()
   const { data: results } = useAuditResults()
+  const { data: runs } = useAuditRuns()
   const runDomains = useScanRunner()
   const scanning = useScanProgress().some((s) => s.domainId === id)
   const navigate = useNavigate()
 
   const domain = (domains ?? []).find((d) => d.id === id)
-  const result = (results ?? []).find((r) => r.domainId === id)
+  // This domain's run history, newest startedAt first — drives ‹ prev / next › (§6.2 item 3).
+  const domainRuns = (runs ?? []).filter((r) => r.domainId === id)
+  const newest = (results ?? []).find((r) => r.domainId === id) ?? domainRuns[0]
+  // Run-scoped: render exactly the run in the URL; the alias renders the newest run.
+  const result = runId ? domainRuns.find((r) => r.runId === runId) : newest
+  const runNotFound = Boolean(runId) && runs !== undefined && !result
+
+  const currentRunId = result?.runId
+  const idx = currentRunId ? domainRuns.findIndex((r) => r.runId === currentRunId) : -1
+  const prevRun = idx >= 0 ? domainRuns[idx + 1] : undefined // chronologically older
+  const nextRun = idx > 0 ? domainRuns[idx - 1] : undefined // chronologically newer
+  const isStale =
+    Boolean(runId) && Boolean(result) && domainRuns.length > 0 && domainRuns[0]?.runId !== runId
+
+  const goToRun = (run?: { runId?: string }) => {
+    if (!run?.runId) return
+    navigate({ to: "/domains/$id/runs/$runId/dkim", params: { id, runId: run.runId } })
+  }
+
+  // Keyboard ← / → step through the domain's runs, staying on the DKIM page (§7 header rules).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return
+      if (e.key === "ArrowLeft" && prevRun?.runId) {
+        navigate({ to: "/domains/$id/runs/$runId/dkim", params: { id, runId: prevRun.runId } })
+      } else if (e.key === "ArrowRight" && nextRun?.runId) {
+        navigate({ to: "/domains/$id/runs/$runId/dkim", params: { id, runId: nextRun.runId } })
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [navigate, id, prevRun?.runId, nextRun?.runId])
+
   const findings = (result?.findings ?? []).filter((f) => f.checkId === "dkim")
   const dkim = result?.results?.dkim
-  const cell = rollupCategories(result?.findings).dkim ?? NEVER_CELL
+  const cell = rollupCategories(result?.findings, result?.results).dkim ?? NEVER_CELL
   const problems = matchProblemStates(findings)
+  const runStarted = result?.startedAt ?? result?.ranAt
 
-  const onRunAgain = () => runDomains([{ id, name: domain?.name ?? id }])
+  // Re-run starts a fresh run for just this domain, then lands on the new run's DKIM page (the
+  // newest-run alias resolves to it once the scan completes — §6.2 item 1).
+  const onRunAgain = () => {
+    void runDomains([{ id, name: domain?.name ?? id }]).then(() => {
+      navigate({ to: "/domains/$id/dkim", params: { id } })
+    })
+  }
+
+  if (runNotFound) {
+    return (
+      <div className="mx-auto max-w-5xl">
+        <h1 className="text-2xl font-bold">DKIM</h1>
+        <div className="mt-6 rounded-lg border border-dashed border-[var(--edh-border)] p-10 text-center">
+          <p className="text-slate-600">This run no longer exists.</p>
+          <Link
+            to="/domains/$id/dkim"
+            params={{ id }}
+            className="mt-2 inline-flex items-center gap-1 text-[var(--edh-primary)] underline"
+          >
+            Open the newest DKIM run for {domain?.name ?? id}
+          </Link>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="mx-auto max-w-5xl">
       <div className="mb-4 flex items-center justify-between">
         <button
           type="button"
-          onClick={() => navigate({ to: "/domains/$id", params: { id } })}
+          onClick={() =>
+            runId
+              ? navigate({ to: "/domains/$id/runs/$runId", params: { id, runId } })
+              : navigate({ to: "/domains/$id", params: { id } })
+          }
           className="inline-flex items-center gap-1 text-sm text-[var(--edh-muted)] hover:text-slate-700"
         >
-          <ArrowLeft className="h-4 w-4" /> Back to {domain?.name ?? id}
+          <ArrowLeft className="h-4 w-4" /> Back to run report
         </button>
-        <button
-          type="button"
-          onClick={onRunAgain}
-          disabled={scanning}
-          className="inline-flex items-center gap-2 rounded-md bg-[var(--edh-primary)] px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-        >
-          <RefreshCw className={scanning ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-          Re-run
-        </button>
+        <div className="flex items-center gap-2">
+          {result && (
+            <span className="inline-flex items-center rounded-md border border-[var(--edh-border)] text-sm">
+              <button
+                type="button"
+                onClick={() => goToRun(prevRun)}
+                disabled={!prevRun?.runId}
+                aria-label="Previous run"
+                title="Previous run (older)"
+                className="inline-flex items-center gap-1 px-2 py-1.5 text-[var(--edh-muted)] hover:text-slate-700 disabled:opacity-40"
+              >
+                <ChevronLeft className="h-4 w-4" /> prev
+              </button>
+              <span className="h-4 w-px bg-[var(--edh-border)]" />
+              <button
+                type="button"
+                onClick={() => goToRun(nextRun)}
+                disabled={!nextRun?.runId}
+                aria-label="Next run"
+                title="Next run (newer)"
+                className="inline-flex items-center gap-1 px-2 py-1.5 text-[var(--edh-muted)] hover:text-slate-700 disabled:opacity-40"
+              >
+                next <ChevronRight className="h-4 w-4" />
+              </button>
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={onRunAgain}
+            disabled={scanning}
+            className="inline-flex items-center gap-2 rounded-md bg-[var(--edh-primary)] px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            <RefreshCw className={scanning ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+            Re-run
+          </button>
+        </div>
       </div>
 
       <h1 className="text-2xl font-bold">DKIM</h1>
@@ -75,12 +171,29 @@ export function DkimPage() {
         <span className="w-32">
           <StatusCell status={cell} />
         </span>
-        {result && <span>· ran {new Date(result.ranAt).toLocaleString()}</span>}
+        {runStarted && <span>· run {new Date(runStarted).toLocaleString()}</span>}
       </div>
+
+      {isStale && (
+        <div className="mt-3 flex items-center justify-between gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          <span className="flex items-center gap-2">
+            <TriangleAlert className="h-4 w-4 shrink-0" />
+            Viewing the run of {runStarted ? new Date(runStarted).toLocaleString() : runId} — a
+            newer run exists
+          </span>
+          <Link
+            to="/domains/$id/dkim"
+            params={{ id }}
+            className="shrink-0 font-medium underline hover:text-amber-900"
+          >
+            newest ›
+          </Link>
+        </div>
+      )}
 
       {!result ? (
         <div className="mt-6 rounded-lg border border-dashed border-[var(--edh-border)] p-10 text-center">
-          <p className="text-slate-600">No audit yet.</p>
+          <p className="text-slate-600">No runs yet.</p>
           <button
             type="button"
             onClick={onRunAgain}
@@ -108,6 +221,8 @@ export function DkimPage() {
 
           <TestResultsTable findings={findings} />
 
+          <ToolRunsAccordion toolRuns={dkim?.tool_runs ?? []} />
+
           <SelectorsEditor
             domainId={id}
             domainName={domain?.name ?? id}
@@ -121,21 +236,7 @@ export function DkimPage() {
               <h2 className="mb-2 font-semibold">Problem states</h2>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {problems.map((ps) => (
-                  <Link
-                    key={ps.id}
-                    to="/domains/$id/dkim/$problemId"
-                    params={{ id, problemId: ps.id }}
-                    className="group rounded-lg border border-[var(--edh-border)] bg-white p-4 hover:border-[var(--edh-primary)]"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold uppercase text-[var(--edh-muted)]">
-                        {ps.id}
-                      </span>
-                      <ChevronRight className="h-4 w-4 text-[var(--edh-muted)] group-hover:text-[var(--edh-primary)]" />
-                    </div>
-                    <div className="mt-1 font-medium">{ps.title}</div>
-                    <p className="mt-1 text-sm text-slate-600">{ps.hook}</p>
-                  </Link>
+                  <ProblemCard key={ps.id} ps={ps} id={id} runId={runId} />
                 ))}
               </div>
             </section>
@@ -143,6 +244,152 @@ export function DkimPage() {
         </>
       )}
     </div>
+  )
+}
+
+/**
+ * One problem-state card (§7 lowest band): id + title + one-line hook + Learn-more chevron. Links
+ * run-scoped (/domains/:id/runs/:runId/dkim/:problemId) when a runId is in the URL, else via the
+ * newest-run alias.
+ */
+function ProblemCard({
+  ps,
+  id,
+  runId,
+}: {
+  ps: { id: string; title: string; hook: string }
+  id: string
+  runId?: string
+}) {
+  const className =
+    "group rounded-lg border border-[var(--edh-border)] bg-white p-4 hover:border-[var(--edh-primary)]"
+  const body = (
+    <>
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold uppercase text-[var(--edh-muted)]">{ps.id}</span>
+        <ChevronRight className="h-4 w-4 text-[var(--edh-muted)] group-hover:text-[var(--edh-primary)]" />
+      </div>
+      <div className="mt-1 font-medium">{ps.title}</div>
+      <p className="mt-1 text-sm text-slate-600">{ps.hook}</p>
+    </>
+  )
+  return runId ? (
+    <Link
+      to="/domains/$id/runs/$runId/dkim/$problemId"
+      params={{ id, runId, problemId: ps.id }}
+      className={className}
+    >
+      {body}
+    </Link>
+  ) : (
+    <Link to="/domains/$id/dkim/$problemId" params={{ id, problemId: ps.id }} className={className}>
+      {body}
+    </Link>
+  )
+}
+
+/**
+ * The tool-runs evidence accordion (pm/checks/dkim.mdx §6.2 item 5 / §7): collapsed by default,
+ * one row per `dkim.tool_runs[]` entry — tool, exact copyable command, duration, exit code —
+ * expanding to the captured parsed output. Failed invocations render amber with the error string
+ * (which carries the `brew install` hint on ENOENT).
+ */
+function ToolRunsAccordion({ toolRuns }: { toolRuns: DkimToolRun[] }) {
+  const [open, setOpen] = useState(false)
+  if (toolRuns.length === 0) return null
+
+  const byTool = new Map<string, number>()
+  for (const t of toolRuns) byTool.set(t.tool, (byTool.get(t.tool) ?? 0) + 1)
+  const summary = [...byTool.entries()].map(([tool, n]) => `${tool} ×${n}`).join(" · ")
+  const failed = toolRuns.filter((t) => t.error !== null).length
+
+  // Stable row keys: started_at+command, de-duplicated for repeat invocations.
+  const seen = new Map<string, number>()
+  const rows = toolRuns.map((run) => {
+    const base = `${run.started_at}|${run.command}`
+    const n = seen.get(base) ?? 0
+    seen.set(base, n + 1)
+    return { run, key: n === 0 ? base : `${base}|${n}` }
+  })
+
+  return (
+    <section className="mt-4 overflow-hidden rounded-lg border border-[var(--edh-border)] bg-white">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-slate-50"
+      >
+        {open ? (
+          <ChevronDown className="h-4 w-4 shrink-0 text-[var(--edh-muted)]" />
+        ) : (
+          <ChevronRight className="h-4 w-4 shrink-0 text-[var(--edh-muted)]" />
+        )}
+        <span className="font-semibold">Tool runs ({toolRuns.length})</span>
+        <span className="text-xs text-[var(--edh-muted)]">{summary}</span>
+        <span className="ml-auto text-xs text-[var(--edh-muted)]">
+          {failed === 0 ? "all exit 0" : `${failed} failed`}
+        </span>
+      </button>
+      {open && (
+        <ul>
+          {rows.map(({ run, key }) => (
+            <ToolRunRow key={key} run={run} />
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function ToolRunRow({ run }: { run: DkimToolRun }) {
+  const [open, setOpen] = useState(false)
+  const failed = run.error !== null
+  return (
+    <li
+      className={cn(
+        "border-t border-[var(--edh-border)]",
+        failed && "bg-amber-50", // ENOENT / timeout / bad-output rows render amber (§7)
+      )}
+    >
+      <div className="flex items-center gap-2 px-3 py-2 text-sm">
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+        >
+          <ChevronDown
+            className={cn(
+              "h-3.5 w-3.5 shrink-0 text-[var(--edh-muted)] transition-transform",
+              !open && "-rotate-90",
+            )}
+          />
+          <span className="w-16 shrink-0 font-medium">{run.tool}</span>
+          <code className="truncate font-mono text-xs text-slate-700">$ {run.command}</code>
+        </button>
+        <span className="shrink-0 text-xs tabular-nums text-[var(--edh-muted)]">
+          {run.duration_ms}ms
+        </span>
+        <span
+          className={cn(
+            "shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium",
+            run.exit_code === 0 ? "bg-slate-100 text-slate-600" : "bg-amber-100 text-amber-800",
+          )}
+        >
+          exit {run.exit_code ?? "—"}
+        </span>
+        <CopyFixButton text={run.command} label="Copy" />
+      </div>
+      {failed && (
+        <p className="break-all px-3 pb-2 pl-9 font-mono text-xs text-amber-800">{run.error}</p>
+      )}
+      {open && (
+        <pre className="mx-3 mb-2 ml-9 max-h-64 overflow-auto rounded bg-slate-50 p-2 font-mono text-xs text-slate-700">
+          {JSON.stringify(run.parsed, null, 2) ?? "null"}
+        </pre>
+      )}
+    </li>
   )
 }
 

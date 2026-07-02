@@ -7,6 +7,9 @@ import { defineConfig } from "vitest/config"
 // than silently drifting to another port. See pm/overview.mdx "Key facts".
 const WEBAPP_PORT = Number(process.env.WEBAPP_PORT ?? 4444)
 const API_PORT = Number(process.env.API_PORT ?? 9312)
+// Where the backend lives. "localhost" for local dev; docker-compose sets API_HOST=backend so the
+// preview server inside the frontend container proxies /api to the backend service (pm/engineering.mdx §9).
+const API_HOST = process.env.API_HOST ?? "localhost"
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -24,7 +27,7 @@ export default defineConfig({
     },
     proxy: {
       // Dev: proxy API + the embedded auth API to the NestJS backend so cookies/origin stay simple.
-      "/api": { target: `http://localhost:${API_PORT}`, changeOrigin: true },
+      "/api": { target: `http://${API_HOST}:${API_PORT}`, changeOrigin: true },
     },
   },
   preview: { port: WEBAPP_PORT, strictPort: true },

@@ -29,14 +29,15 @@ export function useBlacklistRuns() {
   })
 }
 
-/** Latest blacklist run for one domain (the full technology page). */
-export function useBlacklistRun(domain: string) {
+/** Latest blacklist run for one domain (the newest-run alias of the full technology page). */
+export function useBlacklistRun(domain: string, enabled = true) {
   return useQuery({
     queryKey: [...RUNS_KEY, domain],
     queryFn: async () =>
       (await api.get<BlacklistRunResults>(`/blacklists/results/${encodeURIComponent(domain)}`))
         .data,
     retry: false,
+    enabled: enabled && domain.length > 0,
   })
 }
 

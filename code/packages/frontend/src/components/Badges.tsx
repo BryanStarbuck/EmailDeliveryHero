@@ -28,6 +28,19 @@ export function SeverityBadge({ severity }: { severity: Severity }) {
   )
 }
 
+/**
+ * The regression marker (pm/engineering.mdx §8): flags a finding that newly appeared — or worsened
+ * in severity — versus the domain's previous run, and rolls up per-run as "N new" on the Dashboard.
+ */
+export function NewProblemBadge({ count }: { count?: number }) {
+  if (count !== undefined && count < 1) return null
+  return (
+    <span className="inline-flex items-center rounded-full bg-fuchsia-100 px-2 py-0.5 text-xs font-semibold text-fuchsia-800">
+      {count === undefined ? "New" : `${count} new`}
+    </span>
+  )
+}
+
 /** A 0–100 deliverability score, colored by band. */
 export function ScoreBadge({ score }: { score: number }) {
   const style =

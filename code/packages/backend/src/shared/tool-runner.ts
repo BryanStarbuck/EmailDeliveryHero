@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process"
 import { accessSync, constants } from "node:fs"
 import { delimiter, join } from "node:path"
+import { readAppConfig } from "./config-store"
 import { type ResourceClass, withResource } from "./concurrency"
 
 /**
@@ -118,6 +119,17 @@ function execute(file: string, args: readonly string[], opts: ToolRunOptions): P
 /** The tools a run may shell out to; the RunContext carries their resolved paths (§5.2). */
 export const RUN_TOOLS = ["dig", "openssl", "whois", "swaks", "spamassassin", "spamc"] as const
 
+/** The config.yaml → tools.paths.<name> override (best-effort: a broken config never breaks discovery). */
+function configuredToolPath(name: string): string | null {
+  try {
+    const paths = readAppConfig().tools.paths
+    const value = paths?.[name]
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null
+  } catch {
+    return null
+  }
+}
+
 /** Conventional per-platform locations appended after PATH (pm/run_checks.mdx §6–§8). */
 function fallbackDirs(): string[] {
   if (process.platform === "darwin") return ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
@@ -145,6 +157,10 @@ function isExecutable(path: string): boolean {
  * launchd/cron-scheduled run (minimal PATH) find the same tools a manual run does.
  */
 export function locateTool(name: string): string | null {
+  // Resolution step 1 (§5.2): the explicit override — config.yaml → tools.paths.<name>
+  // (Settings → Tools & environment), or the EDH_TOOL_<NAME> environment variable.
+  const configured = configuredToolPath(name)
+  if (configured) return configured
   const override = process.env[`EDH_TOOL_${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`]?.trim()
   if (override) return override
   const pathDirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean)

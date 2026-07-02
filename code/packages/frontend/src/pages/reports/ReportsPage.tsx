@@ -1,8 +1,9 @@
 import { Link, useNavigate } from "@tanstack/react-router"
-import { ChevronRight, MoreVertical } from "lucide-react"
+import { ChevronRight, Mailbox, MoreVertical } from "lucide-react"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { useAuditRuns, useDeleteRun } from "@/api/audit"
+import { useDomains } from "@/api/domains"
 import type { AuditResult } from "@/api/types"
 import { ScoreBadge } from "@/components/Badges"
 import { StatusCell } from "@/components/StatusCell"
@@ -100,7 +101,54 @@ export function ReportsPage() {
           </p>
         </>
       )}
+
+      <IngestedReportsSection />
     </div>
+  )
+}
+
+/**
+ * Second section (pm/emails.mdx §7.1 / left_bar.yaml): the INGESTED report emails — DMARC
+ * aggregate (rua) and TLS-RPT reports receivers mailed back. One row per monitored domain,
+ * opening that domain's Reports view (problems, per-source tables, Ingest now).
+ */
+function IngestedReportsSection() {
+  const { data: domains } = useDomains()
+  const list = domains ?? []
+  return (
+    <section className="mt-10">
+      <header className="mb-3 flex items-center gap-2">
+        <Mailbox className="h-5 w-5 text-[var(--edh-primary)]" />
+        <h2 className="text-lg font-semibold">Report emails (DMARC rua &amp; TLS-RPT)</h2>
+      </header>
+      <p className="mb-3 text-sm text-[var(--edh-muted)]">
+        The machine reports receivers send back to your domains — who sent mail as you and whether
+        it authenticated, and whether inbound TLS worked. Open a domain to see the ingested
+        reports, the problems they reveal, and the fixes.
+      </p>
+      {list.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-[var(--edh-border)] p-6 text-center text-sm text-slate-600">
+          Add a domain first — then publish rua= on its DMARC / TLS-RPT records to receive reports.
+        </div>
+      ) : (
+        <ul className="overflow-hidden rounded-lg border border-[var(--edh-border)] bg-white">
+          {list.map((d) => (
+            <li key={d.id} className="border-t border-[var(--edh-border)] first:border-t-0">
+              <Link
+                to="/domains/$id/reports"
+                params={{ id: d.id }}
+                className="flex items-center justify-between px-4 py-3 text-sm hover:bg-slate-50"
+              >
+                <span className="font-medium">{d.name}</span>
+                <span className="inline-flex items-center gap-1 text-[var(--edh-muted)]">
+                  Ingested reports <ChevronRight className="h-4 w-4" />
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }
 

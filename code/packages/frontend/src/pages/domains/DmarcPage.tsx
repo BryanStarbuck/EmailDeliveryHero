@@ -1,13 +1,24 @@
 import { Link, useNavigate, useParams } from "@tanstack/react-router"
-import { ArrowLeft, ChevronRight, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react"
-import { useAuditResults } from "@/api/audit"
+import {
+  ArrowLeft,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  RefreshCw,
+  ShieldAlert,
+  ShieldCheck,
+  Star,
+} from "lucide-react"
+import { useEffect, useMemo, useState } from "react"
+import { useAuditResults, useAuditRun, useAuditRuns } from "@/api/audit"
 import { useDomains } from "@/api/domains"
-import type { DmarcResults, Finding } from "@/api/types"
+import type { AuditResult, DmarcResults, DmarcToolRun, Finding } from "@/api/types"
 import { CopyFixButton } from "@/components/CopyFixButton"
 import { StatusCell } from "@/components/StatusCell"
 import { TestResultsTable } from "@/components/TestResultsTable"
 import { NEVER_CELL, rollupCategories } from "@/lib/categories"
-import { matchProblemStates } from "@/lib/dmarc-problems"
+import { normalizeDmarcSection } from "@/lib/dmarc"
+import { matchProblemStates, problemStateById } from "@/lib/dmarc-problems"
 import { cn } from "@/lib/utils"
 import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext"
 
@@ -45,38 +56,105 @@ const TAG_META: {
   { tag: "rf", meaning: "Report format", obsolete: true },
 ]
 
+/** The run context strip's timestamp format (pm/checks/dmarc.mdx §6.2: YYYY-MM-DD HH:mm). */
+function fmtRunStamp(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const p = (n: number): string => String(n).padStart(2, "0")
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
 /**
- * The full-page DMARC view (pm/checks/dmarc.mdx §6.2/§7) — everything about one domain's DMARC:
- * the policy ladder, the raw + parsed record, the fail-first test-results table with observed DNS
- * values and copyable fixes, report-destination authorization, and problem-state cards linking to
- * the per-problem drill-down pages.
+ * The full-page DMARC view — one category of ONE run (pm/checks/dmarc.mdx §6.2/§7). Serves the
+ * canonical run-scoped route /domains/:id/runs/:runId/dmarc AND the newest-run alias
+ * /domains/:id/dmarc. Renders, top to bottom: header + run context strip (timestamp, ‹ prev /
+ * next › pager, ★ newest badge), the policy ladder, the raw + parsed record, report-destination
+ * authorization, the fail-first test-results table, matched problem-state cards, the optional
+ * suggested-record builder, and the collapsed tool-runs provenance footer. An older run is a
+ * historical snapshot — every band renders from that run's data, never silently the latest.
  */
 export function DmarcPage() {
-  const { id = "" } = useParams({ strict: false }) as { id?: string }
+  const { id = "", runId } = useParams({ strict: false }) as { id?: string; runId?: string }
   const { data: domains } = useDomains()
   const { data: results } = useAuditResults()
+  const { data: allRuns } = useAuditRuns()
+  const { data: historicalRun } = useAuditRun(runId)
   const runDomains = useScanRunner()
   const scanning = useScanProgress().some((s) => s.domainId === id)
   const navigate = useNavigate()
 
   const domain = (domains ?? []).find((d) => d.id === id)
-  const result = (results ?? []).find((r) => r.domainId === id)
-  const findings = (result?.findings ?? []).filter((f) => f.checkId === "dmarc")
-  const dmarc = result?.results?.dmarc
-  const cell = rollupCategories(result?.findings).dmarc ?? NEVER_CELL
-  const problems = matchProblemStates(findings)
+  const latest = (results ?? []).find((r) => r.domainId === id)
+  const result = runId ? historicalRun : latest
 
-  const onRunAgain = () => runDomains([{ id, name: domain?.name ?? id }])
+  // This domain's runs in startedAt order (oldest → newest) — the ‹ prev / next › pager rail.
+  const domainRuns = useMemo(
+    () =>
+      (allRuns ?? [])
+        .filter((r) => r.domainId === id)
+        .sort((a, b) => (a.startedAt ?? a.ranAt).localeCompare(b.startedAt ?? b.ranAt)),
+    [allRuns, id],
+  )
+  const indexInRail = domainRuns.findIndex((r) => r.runId && r.runId === result?.runId)
+  const effectiveIndex = indexInRail >= 0 ? indexInRail : !runId ? domainRuns.length - 1 : -1
+  const prevRun = effectiveIndex > 0 ? domainRuns[effectiveIndex - 1] : undefined
+  const nextRun =
+    effectiveIndex >= 0 && effectiveIndex < domainRuns.length - 1
+      ? domainRuns[effectiveIndex + 1]
+      : undefined
+  // The alias route always shows the newest indicator (pm/checks/dmarc.mdx §6.2).
+  const isNewest = !runId || (effectiveIndex >= 0 && effectiveIndex === domainRuns.length - 1)
+
+  const goToRun = (r: AuditResult | undefined): void => {
+    if (r?.runId) {
+      navigate({ to: "/domains/$id/runs/$runId/dmarc", params: { id, runId: r.runId } })
+    }
+  }
+
+  // Keyboard ←/→ steps the pager (pm/checks/dmarc.mdx §7), ignoring keystrokes inside inputs.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const target = e.target as HTMLElement | null
+      if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return
+      if (e.key === "ArrowLeft" && prevRun) goToRun(prevRun)
+      if (e.key === "ArrowRight" && nextRun) goToRun(nextRun)
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  })
+
+  const findings = (result?.findings ?? []).filter((f) => f.checkId === "dmarc")
+  const { record: dmarc, toolRuns, problemStates } = normalizeDmarcSection(result?.results?.dmarc)
+  const cell = rollupCategories(result?.findings).dmarc ?? NEVER_CELL
+
+  // Problem cards: prefer the backend-derived §9 ids; fall back to finding-id matching for runs
+  // persisted before the backend derivation existed.
+  const problems = problemStates
+    ? problemStates
+        .map((psId) => problemStateById(psId))
+        .filter((ps): ps is NonNullable<typeof ps> => ps !== undefined)
+    : matchProblemStates(findings)
+
+  // Re-run (pm/checks/dmarc.mdx §6.2): starts a NEW run for just this domain; the alias route then
+  // shows the new run once the scan lands, so navigate there when viewing an older snapshot.
+  const onRunAgain = (): void => {
+    runDomains([{ id, name: domain?.name ?? id }])
+    if (runId) navigate({ to: "/domains/$id/dmarc", params: { id } })
+  }
 
   return (
     <div className="mx-auto max-w-5xl">
       <div className="mb-4 flex items-center justify-between">
         <button
           type="button"
-          onClick={() => navigate({ to: "/domains/$id", params: { id } })}
+          onClick={() =>
+            runId && result?.runId
+              ? navigate({ to: "/domains/$id/runs/$runId", params: { id, runId: result.runId } })
+              : navigate({ to: "/domains/$id", params: { id } })
+          }
           className="inline-flex items-center gap-1 text-sm text-[var(--edh-muted)] hover:text-slate-700"
         >
-          <ArrowLeft className="h-4 w-4" /> Back to {domain?.name ?? id}
+          <ArrowLeft className="h-4 w-4" /> Back to this run's report
         </button>
         <button
           type="button"
@@ -95,12 +173,42 @@ export function DmarcPage() {
         <span className="w-32">
           <StatusCell status={cell} />
         </span>
-        {result && <span>· ran {new Date(result.ranAt).toLocaleString()}</span>}
       </div>
+
+      {/* Run context strip (pm/checks/dmarc.mdx §6.2/§7): pins the page to ONE run. */}
+      {result && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-[var(--edh-muted)]">
+          <span className="tabular-nums">Run {fmtRunStamp(result.startedAt ?? result.ranAt)}</span>
+          <span>·</span>
+          <button
+            type="button"
+            onClick={() => goToRun(prevRun)}
+            disabled={!prevRun}
+            aria-label="Previous run"
+            className="inline-flex items-center gap-0.5 rounded border border-[var(--edh-border)] px-2 py-0.5 text-xs hover:bg-slate-50 disabled:opacity-40"
+          >
+            <ChevronLeft className="h-3.5 w-3.5" /> prev
+          </button>
+          <button
+            type="button"
+            onClick={() => goToRun(nextRun)}
+            disabled={!nextRun}
+            aria-label="Next run"
+            className="inline-flex items-center gap-0.5 rounded border border-[var(--edh-border)] px-2 py-0.5 text-xs hover:bg-slate-50 disabled:opacity-40"
+          >
+            next <ChevronRight className="h-3.5 w-3.5" />
+          </button>
+          {isNewest && (
+            <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-xs font-medium text-amber-700">
+              <Star className="h-3 w-3" /> newest
+            </span>
+          )}
+        </div>
+      )}
 
       {!result ? (
         <div className="mt-6 rounded-lg border border-dashed border-[var(--edh-border)] p-10 text-center">
-          <p className="text-slate-600">No audit yet.</p>
+          <p className="text-slate-600">No audit yet — run one.</p>
           <button
             type="button"
             onClick={onRunAgain}
@@ -118,32 +226,55 @@ export function DmarcPage() {
             <ReportDestinations dmarc={dmarc} domainName={domain?.name ?? id} />
           </div>
 
-          <TestResultsTable findings={findings} emptyText="No DMARC tests in the latest run." />
+          <TestResultsTable findings={findings} emptyText="No DMARC tests in this run." />
 
           {problems.length > 0 && (
             <section className="mt-6">
               <h2 className="mb-2 font-semibold">Problem states</h2>
               <div className="grid gap-3 sm:grid-cols-2">
-                {problems.map((ps) => (
-                  <Link
-                    key={ps.id}
-                    to="/domains/$id/dmarc/$problemId"
-                    params={{ id, problemId: ps.id }}
-                    className="group rounded-lg border border-[var(--edh-border)] bg-white p-4 hover:border-[var(--edh-primary)]"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold uppercase text-[var(--edh-muted)]">
-                        {ps.id}
-                      </span>
-                      <ChevronRight className="h-4 w-4 text-[var(--edh-muted)] group-hover:text-[var(--edh-primary)]" />
-                    </div>
-                    <div className="mt-1 font-medium">{ps.title}</div>
-                    <p className="mt-1 text-sm text-slate-600">{ps.hook}</p>
-                  </Link>
-                ))}
+                {problems.map((ps) => {
+                  const card = (
+                    <>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold uppercase text-[var(--edh-muted)]">
+                          {ps.id}
+                        </span>
+                        <ChevronRight className="h-4 w-4 text-[var(--edh-muted)] group-hover:text-[var(--edh-primary)]" />
+                      </div>
+                      <div className="mt-1 font-medium">{ps.title}</div>
+                      <p className="mt-1 text-sm text-slate-600">{ps.hook}</p>
+                    </>
+                  )
+                  const className =
+                    "group rounded-lg border border-[var(--edh-border)] bg-white p-4 hover:border-[var(--edh-primary)]"
+                  // Drill-downs stay run-scoped so the user never loses run context (§7).
+                  return runId && result.runId ? (
+                    <Link
+                      key={ps.id}
+                      to="/domains/$id/runs/$runId/dmarc/$problemId"
+                      params={{ id, runId: result.runId, problemId: ps.id }}
+                      className={className}
+                    >
+                      {card}
+                    </Link>
+                  ) : (
+                    <Link
+                      key={ps.id}
+                      to="/domains/$id/dmarc/$problemId"
+                      params={{ id, problemId: ps.id }}
+                      className={className}
+                    >
+                      {card}
+                    </Link>
+                  )
+                })}
               </div>
             </section>
           )}
+
+          <SuggestedRecordBuilder domainName={domain?.name ?? id} dmarc={dmarc} />
+
+          <ToolRunsFooter toolRuns={toolRuns} />
         </>
       )}
     </div>
@@ -341,5 +472,149 @@ function ReportDestinations({ dmarc, domainName }: { dmarc?: DmarcResults; domai
         </ul>
       )}
     </section>
+  )
+}
+
+/**
+ * The optional "Suggested record" builder (pm/checks/dmarc.mdx §6.2 per-domain config inputs):
+ * desired p, rua mailbox, cover subdomains? → a ready-to-publish TXT string. Advisory only —
+ * never auto-published.
+ */
+function SuggestedRecordBuilder({
+  domainName,
+  dmarc,
+}: {
+  domainName: string
+  dmarc?: DmarcResults
+}) {
+  const [policy, setPolicy] = useState<"none" | "quarantine" | "reject">(dmarc?.policy ?? "none")
+  const [mailbox, setMailbox] = useState(`dmarc@${domainName}`)
+  const [coverSubdomains, setCoverSubdomains] = useState(false)
+  const record = `v=DMARC1; p=${policy}; rua=mailto:${mailbox}${coverSubdomains ? "; sp=reject; np=reject" : ""}`
+  return (
+    <section className="mt-6 rounded-lg border border-[var(--edh-border)] bg-white p-4">
+      <h2 className="font-semibold">Suggested record</h2>
+      <p className="mt-1 text-xs text-[var(--edh-muted)]">
+        Build a ready-to-publish TXT string for{" "}
+        <span className="font-mono">_dmarc.{domainName}</span>. Advisory only — nothing is
+        published automatically.
+      </p>
+      <div className="mt-3 flex flex-wrap items-center gap-3 text-sm">
+        <label className="flex items-center gap-1.5">
+          Policy
+          <select
+            value={policy}
+            onChange={(e) => setPolicy(e.target.value as "none" | "quarantine" | "reject")}
+            className="rounded border border-[var(--edh-border)] px-2 py-1 text-sm"
+          >
+            <option value="none">none (monitor)</option>
+            <option value="quarantine">quarantine</option>
+            <option value="reject">reject</option>
+          </select>
+        </label>
+        <label className="flex items-center gap-1.5">
+          Reports to
+          <input
+            value={mailbox}
+            onChange={(e) => setMailbox(e.target.value)}
+            className="w-56 rounded border border-[var(--edh-border)] px-2 py-1 font-mono text-xs"
+          />
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={coverSubdomains}
+            onChange={(e) => setCoverSubdomains(e.target.checked)}
+          />
+          Cover subdomains (sp=reject; np=reject)
+        </label>
+      </div>
+      <div className="mt-3 flex items-center justify-between gap-2 rounded-md bg-slate-50 p-2">
+        <code className="break-all font-mono text-xs text-slate-700">{record}</code>
+        <CopyFixButton text={record} label="Copy" />
+      </div>
+    </section>
+  )
+}
+
+/**
+ * The collapsed tool-runs provenance footer (pm/checks/dmarc.mdx §6.2 item 7 / §7): one monospace
+ * row per `dmarc.tool_runs[]` entry — exact command (copyable, reproducible in a terminal),
+ * duration, exit code — with an accordion for the captured `parsed` output. Failed invocations
+ * render their `error` in red. It answers "prove it", never "what do I do", so it ships last
+ * and collapsed.
+ */
+function ToolRunsFooter({ toolRuns }: { toolRuns: DmarcToolRun[] }) {
+  const [open, setOpen] = useState(false)
+  if (toolRuns.length === 0) return null
+  const failed = toolRuns.filter((t) => t.error !== null).length
+  return (
+    <section className="mt-6 rounded-lg border border-[var(--edh-border)] bg-white">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between px-4 py-3 text-left"
+      >
+        <span className="flex items-center gap-2 font-semibold">
+          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+          Tool runs ({toolRuns.length})
+        </span>
+        <span className={cn("text-xs", failed > 0 ? "text-red-600" : "text-[var(--edh-muted)]")}>
+          {failed > 0 ? `${failed} failed` : "all succeeded"}
+        </span>
+      </button>
+      {open && (
+        <ul className="border-t border-[var(--edh-border)]">
+          {toolRuns.map((t) => (
+            <ToolRunRow key={`${t.tool}-${t.started_at}-${t.command}`} run={t} />
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function ToolRunRow({ run }: { run: DmarcToolRun }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <li className="border-b border-[var(--edh-border)] px-4 py-2 text-sm last:border-b-0">
+      <div className="flex items-center gap-2">
+        <code className="min-w-0 flex-1 break-all font-mono text-xs text-slate-700">
+          {run.command}
+        </code>
+        <span className="shrink-0 text-xs tabular-nums text-[var(--edh-muted)]">
+          {run.duration_ms} ms
+        </span>
+        <span
+          className={cn(
+            "shrink-0 text-xs tabular-nums",
+            run.error ? "text-red-600" : "text-[var(--edh-muted)]",
+          )}
+        >
+          {run.exit_code === null ? "killed" : `exit ${run.exit_code}`}
+        </span>
+        <CopyFixButton text={run.command} label="Copy" />
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-label={`Toggle ${run.tool} output`}
+          className="rounded p-1 text-[var(--edh-muted)] hover:bg-slate-100"
+        >
+          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+        </button>
+      </div>
+      {open && (
+        <div className="mt-2">
+          {run.error && (
+            <p className="mb-1 break-all font-mono text-xs text-red-600">{run.error}</p>
+          )}
+          {run.parsed !== null && run.parsed !== undefined && (
+            <pre className="max-h-72 overflow-auto rounded-md bg-slate-900 p-2 font-mono text-xs text-slate-100">
+              {JSON.stringify(run.parsed, null, 2)}
+            </pre>
+          )}
+        </div>
+      )}
+    </li>
   )
 }

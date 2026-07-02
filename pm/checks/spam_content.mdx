@@ -584,14 +584,227 @@ when any listed prefix matches a finding at warning/critical severity (PS-09 mat
 
 Drill-down pages follow the app-wide pattern (§2): **Concept**, **Your data** (the matched
 findings + the relevant snapshot rendered live from the viewed run), **Diagnose it yourself**
-(the §3 commands with the domain/sample/link substituted in — e.g. PS-04 carries
-`dig +short A <domain>.dbl.spamhaus.org` per flagged domain plus the zone's delisting portal
-link), **Tools**, and a numbered **Path forward**. Highlights per state: PS-01 explains
-block-vs-filter and the provider block pages; PS-02 renders the fired-rules table sorted by
-points; PS-03 shows the exact two headers to add, copyable; PS-04 carries the per-zone delisting
-URLs and the "secure the compromised site first" warning; PS-06 explains the 0.1%/0.3% bands and
-the suppress-then-slow playbook; PS-08 walks the DMARC-enforcement prerequisite and the VMC
-purchase path; PS-09 is the onboarding page (upload sample, verify GPT, enroll FBL, add seeds).
+(the §3 commands with the domain/sample/link substituted in), **Tools**, **More health metrics**,
+and a numbered **Path forward**. The deep-dive per state:
+
+### PS-00 — Message layer healthy end to end
+
+The goal state: a scored sample under 2.0 with clean structure, both unsubscribe headers present
+and DKIM-covered, every link full-URL https on domains you control and clean on the URI zones,
+complaint rate under 0.1% with sources connected, ≥ 90% inbox placement, BIMI rendering (or
+consciously declined).
+- **Data fields:** `families.*.status = ok`, all six §4 snapshots clean, a current `sample_id`.
+- **Diagnose/debug:** nothing to fix — `spamassassin --test-mode --local <sample>` and a
+  mail-tester.com pass (9–10/10) should agree with us.
+- **Tools:** the §3 bench, run on schedule rather than ad hoc.
+- **More health metrics:** the run-over-run trend is the health metric now — placement pts,
+  complaint band, score drift on the *same* sample (ruleset updates re-price rules).
+- **UI:** all-green strip; the drill-down teaches *keeping* it green — templates rot (a designer
+  ships an image-only hero), lists age (complaints creep), a vendor link changes hands.
+
+### PS-01 — Mail is blocked or vanishing at a provider
+
+- **Concept:** blocked ≠ filtered. Spam-folder placement means the message was accepted and
+  judged; **Missing** means it was rejected in SMTP or silently dropped — a different, more
+  urgent problem. Since the enforcement waves this is visible in bounce text: Gmail
+  `421 4.7.26` (unauthenticated rate-limit) and `550 5.7.x` permanent policy rejects
+  (Nov 2025 ramp), Microsoft `550 5.7.515` (May 2025, 5k+/day). A majority-Missing provider
+  while others inbox fine points at that provider's gate, not at content.
+- **Data fields:** `inbox_placement.providers[]` (`missing` counts), `seed_missing`,
+  `seedlist_overall`; the swaks `tool_runs[]` transcripts carry the SMTP reply per seed.
+- **Diagnose/debug:** read the per-seed SMTP transcript (`tool_runs[]` → final `250`/`4xx`/`5xx`
+  line); re-send one probe by hand: `swaks --server <smtp-host> --port 587 --tls --from
+  probe@<domain> --to <seed@provider> --data @<sample>`; grep ingested bounces for the sentinel
+  codes above.
+- **Tools:** swaks (transcript), the provider postmaster pages (Gmail sender guidelines,
+  Microsoft delist portal), [../emails.mdx](../emails.mdx) bounce ingestion.
+- **More health metrics:** future — sentinel-code counters per provider per run, so enforcement
+  onset is timestamped.
+- **UI:** the hero's provider strip shows Missing in dark red; the drill-down explains
+  block-vs-filter and links the provider's unblock/delist path; fix = clear the named gate
+  (auth, complaint, or listing) before resuming volume to that provider.
+
+### PS-02 — The message itself scores as spam
+
+- **Concept:** rule engines price every structural defect and sum the points; at SpamAssassin's
+  default 5.0 the message is tagged spam, and real inboxes are tuned tighter — the safe target
+  is **< 2.0**. The score is fully diagnosable: every fired rule has a name, a weight, and a
+  concrete fix, so remediation is "fix the biggest number first", never "make it less spammy".
+- **Data fields:** `content_score.{score,threshold,engine,rules_fired[]}` and the per-rule
+  `{rule, score, description}` rows; `sample_id` names what was graded.
+- **Diagnose/debug:** `spamassassin --test-mode --local <sample>` → read the rule report
+  points-descending → fix the named defect (add the `text/plain` part, cut the image share,
+  sentence-case the subject, drop the attachment) → re-score until < 2.0.
+- **Tools:** SpamAssassin via `cpanm Mail::SpamAssassin` (§3 — never `brew install
+  spamassassin`); tidy-html5 for the HTML part; mail-tester.com as the external second opinion.
+- **More health metrics:** score trend on an unchanged sample = ruleset drift (`sa-update`);
+  a jump after a template edit pinpoints the edit; future — a second engine (Rspamd via Docker,
+  or npm `spamscanner`) for band-edge cross-validation.
+- **UI:** the fired-rules table sorted by points, each row carrying its sub-check id and copy
+  fix; the score renders as `1.4 / 5.0` with the 2.0 warning line marked.
+
+### PS-03 — Bulk-sender compliance gap (Gmail/Yahoo 2024)
+
+- **Concept:** the two-header one-click pair is a hard gate for bulk senders, not a score:
+  `List-Unsubscribe: <https://…>` (HTTPS URI, opaque per-recipient token) **and**
+  `List-Unsubscribe-Post: List-Unsubscribe=One-Click` (RFC 8058). The endpoint must accept the
+  bare form-encoded POST with 2xx — no redirect, no login — and be honored within 2 days. DKIM's
+  `h=` must cover both headers so they can't be stripped in transit. `From:` must align with an
+  authenticated domain. Transactional-only senders are exempt — the `isBulkSender` flag decides
+  the severity.
+- **Data fields:** `list_unsubscribe.{header_present,one_click,https_uri,mailto_uri,
+  is_bulk_sender,from_alignment}`.
+- **Diagnose/debug:** read the sample's headers verbatim; `npx mailauth report <sample>` →
+  check `dkim[].signingHeaders` includes both `List-Unsubscribe*` names and the `from_alignment`
+  verdicts; opt-in endpoint probe: `curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -X
+  POST -H 'Content-Type: application/x-www-form-urlencoded' -d 'List-Unsubscribe=One-Click'
+  '<uri>'` — **only with a synthetic recipient token; a real token really unsubscribes someone.**
+- **Tools:** mailauth (npm), curl; the actual fix site is usually the ESP's header settings.
+- **More health metrics:** future — `list_unsub_honored`: re-probe a synthetic address after 48 h
+  to verify the unsubscribe took effect.
+- **UI:** observed/expected prints both headers verbatim (present green, absent red with the
+  exact line to add, copyable); the bulk toggle is linked from the card so a transactional
+  sender can downgrade the state in one click.
+
+### PS-04 — A linked domain is blocklisted
+
+- **Concept:** receivers extract every URL, reduce it to the registrable domain, and query the
+  URI zones — one listed domain (a partner, a tracker, a shortener endpoint, your own hacked
+  blog) filters the message everywhere, regardless of the sending domain's health. Return codes
+  carry the diagnosis: DBL `127.0.1.2/4/5/6` = spam/phish/malware/botnet, `127.0.1.102–.106` =
+  **abused-legitimate** (a compromised legit site — secure it first, then delist); SURBL last
+  octet is a bitmask (8 = phish, 16 = malware, 64 = abuse, 128 = cracked); URIBL 2 = black,
+  4 = grey, and **1 means your resolver is blocked** — an inconclusive result, never a listing.
+- **Data fields:** `link_reputation.zone_hits[]` (`domain`, `zone`, `code`, `reason`,
+  `delisting_url`), `links_total`, `unique_domains`.
+- **Diagnose/debug:** per flagged domain: `dig +short A <domain>.dbl.spamhaus.org` /
+  `<domain>.multi.surbl.org` / `<domain>.multi.uribl.com`, then the TXT re-query for the reason
+  string — through the system/own resolver (the zones' public mirrors block open resolvers like
+  8.8.8.8); decode the return code before acting on it.
+- **Tools:** dig/doggo (§3), the per-zone delisting portals (check.spamhaus.org, surbl.org,
+  uribl.com) carried in the finding.
+- **More health metrics:** re-query flagged domains every run — abused-legit listings drop after
+  cleanup; a *new* hit on an unchanged template means the linked site changed, not your mail.
+- **UI:** one row per hit naming domain, zone, decoded meaning, and the correct delisting URL;
+  abused-legit codes swap in the "secure the compromised site first" fix variant.
+
+### PS-05 — Link hygiene looks phish-shaped
+
+- **Concept:** short of a listing, links carry their own penalty signals: raw-IP URLs
+  (near-certain filtering), `http:` scheme, punycode/homograph hosts impersonating a brand,
+  public shorteners (filters expand them anyway — SpamAssassin 4.x DecodeShortURLs — so they
+  hide nothing and cost trust), deep redirect chains, and simply too many links or domains.
+  All computable locally from the sample.
+- **Data fields:** `link_reputation.flagged[]` (`domain`/`url`, `kind`, `final_domain`),
+  `links_total`, `unique_domains`.
+- **Diagnose/debug:** eyeball the flagged URLs (scheme, host, look-alike characters); expand a
+  shortener: `curl -sIL --max-redirs 5 -o /dev/null -w '%{url_effective} %{num_redirects}'
+  <url>` → PSL-reduce the final domain and re-check it against the §3 zones.
+- **Tools:** curl (single URL), lychee (bulk, JSON), tldts in-process for the PSL reduction.
+- **More health metrics:** future probes — `url_reachable` (dead links score too),
+  `url_redirect_chain` depth, `url_safe_browsing` (needs an API key).
+- **UI:** one row per offense with the exact URL in monospace; fix = full destination URLs on
+  your own https domains, a branded short domain if shortening is unavoidable, prune the count.
+
+### PS-06 — Complaints/bounces over the line
+
+- **Concept:** user-reported spam is the purest "recipients don't want this" signal, and Gmail
+  throttles on it directly: **< 0.1%** is the stated ideal, **≥ 0.3%** the hard line — at or
+  above it Gmail withholds mitigation until **7 consecutive days** back under. Hard bounces ride
+  along as the list-hygiene signal. Neither is probeable from outside: the numbers come from
+  Google Postmaster Tools, Microsoft SNDS/JMRP, and FBLs — which is why PS-09 gates this state.
+- **Data fields:** `sender_reputation.{complaint_rate,complaint_trend,bounce_rate,
+  gpt_spam_rate,sources}`.
+- **Diagnose/debug:** Postmaster Tools spam-rate dashboard (populates at ≥ 5,000 msgs/day to
+  Gmail); SNDS filter-verdict color per IP; correlate the spike date with the campaign/segment
+  that caused it; suppress every complainer from FBL data.
+- **Tools:** the GPT connector (§3 API sources), SNDS/JMRP enrollment,
+  [../emails.mdx](../emails.mdx) FBL ingestion.
+- **More health metrics:** complaint trend vs send volume (spikes correlate with one segment);
+  engagement/sunsetting policy; future — per-campaign complaint attribution.
+- **UI:** the Reputation panel's mini-gauge with the 0.1%/0.3% lines; the drill-down is the
+  suppress-then-slow playbook, with the 7-clean-days mitigation rule spelled out.
+
+### PS-07 — Reputation decay in progress
+
+- **Concept:** the slow-burn state: GPT domain/IP reputation sliding to MEDIUM, engagement
+  falling, warmup skipped on a new IP/domain, burst-and-silence volume patterns, or this app's
+  own [Blacklists](./blacklists.mdx) history showing repeat listings. Nothing is on fire yet —
+  the point of the state is to act before PS-01/PS-06 arrive.
+- **Data fields:** `sender_reputation.{gpt_domain_reputation,gpt_ip_reputations[],
+  complaint_trend,recurring_blocklists}`, `inbox_placement` `seed_trend`.
+- **Diagnose/debug:** read the GPT band history (falling = which campaign/segment started it?);
+  check volume day-over-day for spikes; review the blocklist-history trend across stored runs.
+- **Tools:** GPT connector, the app's own run history (the differ is the detector here).
+- **More health metrics:** placement trend (▲/▼ pts on the hero) is the leading indicator;
+  future — engagement metrics from the ESP connector.
+- **UI:** trend arrows on the Reputation panel and hero; fix = ramp discipline (4–8 week
+  warmup), steady volume, prune the coldest segment — behavioral fixes, no record to publish.
+
+### PS-08 — BIMI published but not rendering
+
+- **Concept:** BIMI displays the brand logo — and doubles as a forcing function for DMARC
+  enforcement, its hard prerequisite (`p=quarantine`/`reject`). The chain is: enforcing DMARC →
+  `default._bimi` TXT (`v=BIMI1` first, `l=` HTTPS SVG Tiny-PS URL) → and for Gmail/Apple, an
+  `a=` VMC/CMC from a Mark Verifying Authority. A record published while DMARC is `p=none` is
+  the critical variant (advertises a logo no one will render and signals config drift);
+  SVG-only is the common warning; an intentionally empty `l=`/`a=` is declined BIMI — a valid
+  opt-out (info).
+- **Data fields:** `bimi.{selector,record_found,raw_record,dmarc_enforcing,logo_url,vmc_url,
+  vmc}`.
+- **Diagnose/debug:** `dig +short TXT default._bimi.<domain>` (tag order, values) →
+  `dig +short TXT _dmarc.<domain>` (policy must be quarantine/reject) → `curl -sI <logo-url>`
+  (200, `image/svg+xml`) → `npx mailauth vmc -a <vmc-url> -d <domain>` for issuer/validity/logo
+  hash (future probe).
+- **Tools:** dig, curl, mailauth vmc, checkdmarc (cross-check), the BIMI Group SVG conformance
+  checker; MVA portals (DigiCert/Entrust) for the VMC purchase.
+- **More health metrics:** future — `bimi_vmc_valid` expiry watch (a VMC nearing expiry is a
+  regression the differ flags before the logo disappears).
+- **UI:** the BIMI chip's row group reads as a chain (DMARC ✓ → record ✓ → SVG ✓ → VMC ✗) so
+  the first broken link is obvious; fix strip carries the exact TXT record; the drill-down
+  walks the DMARC prerequisite and the VMC path — deliberately last in the §5 ladder
+  (branding, not deliverability).
+
+### PS-09 — Flying blind — no sample / sources / seeds
+
+- **Concept:** not a failure — the onboarding state. Scoring, list-management, and link checks
+  grade a real message and cannot run without an uploaded `.eml`; complaint and reputation
+  numbers exist only inside Postmaster Tools/SNDS/FBLs the sender must enroll in; placement
+  needs seeds. The category must present each gap as *unlock* ("upload one sample → ~40 more
+  sub-tests next run"), never as a red mark: all PS-09 findings are `info` and the cell stays
+  green.
+- **Data fields:** `sample_id` absent, `sender_reputation.sources` = absent,
+  `inbox_placement` never tested, `postmaster_verified`, `fbl_enrollment`, `seed_coverage`.
+- **Diagnose/debug:** none — the fixes are actions: get an `.eml` (Gmail ⋮ → "Show original" →
+  Download, or the ESP's "view source"); verify the domain in Postmaster Tools
+  (`google-site-verification` TXT — the one part we can see in DNS); register sending IPs at
+  SNDS and turn on JMRP; enroll FBLs and route them into [../emails.mdx](../emails.mdx); add
+  seed accounts or a seed-service key.
+- **Tools:** the upload panel (drag-drop/paste, size-capped per
+  [./content_scoring.mdx](./content_scoring.mdx)); the provider consoles linked stepwise from
+  the drill-down.
+- **More health metrics:** once connected, PS-06/PS-07's metrics populate — this state is the
+  gateway to the whole behavior layer.
+- **UI:** the Sample & sources panel is the page CTA; each absent source is a quiet
+  "Connect ›" row; the drill-down is the onboarding checklist in fix-order.
+
+### PS-10 — Delivered, but to the wrong place (Gmail tabs)
+
+- **Concept:** Promotions is a tab, not a spam folder — mail there was accepted, authenticated,
+  and shown; open rates differ but deliverability is intact. The state exists to *prevent
+  panic*: it is a warning at most, and chasing Primary-tab placement with tricks (fake personal
+  tone, stripped styling that harms the brand) costs more than it earns. Slow delivery
+  (`seed_delivery_latency`) rides along here — minutes-late mail at one provider hints at
+  greylisting or throttling.
+- **Data fields:** `inbox_placement.providers[]` (`promotions` counts), `seed_tab_placement`,
+  `seed_delivery_latency`.
+- **Diagnose/debug:** compare the Promotions share across runs (a jump correlates with a
+  template change); test a plainer variant (fewer images, fewer links, lighter markup) through
+  the same seeds and diff the tab split.
+- **Tools:** the seed loop itself is the instrument; no external tool applies.
+- **More health metrics:** tab split trend per provider; latency percentiles per provider.
+- **UI:** Promotions renders amber-lite with an explicit "this is not spam-foldering" note;
+  fix = content-weight levers, offered as optional tuning, never as a compliance item.
 
 ---
 

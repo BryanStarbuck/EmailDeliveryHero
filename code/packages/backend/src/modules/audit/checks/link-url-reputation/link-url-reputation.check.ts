@@ -1,3 +1,4 @@
+import { withResource } from "@shared/concurrency"
 import { resolve4, resolveTxt } from "../dns-util"
 import type { Checker, Finding } from "../types"
 
@@ -327,12 +328,14 @@ const SEVERITY_RANK: Record<Severity, number> = { ok: 0, info: 1, warning: 2, cr
  * 1.0.0.127.<zone> must be NXDOMAIN. On failure the zone is inconclusive (info), never false-listed.
  */
 async function zoneUsable(zone: string): Promise<{ usable: boolean; reason?: string }> {
-  const positive = await resolve4(`2.0.0.127.${zone}`)
+  // RHSBL zones share the process-global `dnsbl` semaphore with the blacklists checker — same
+  // mirrors, same rate limits (pm/run_checks.mdx §3.1).
+  const positive = await withResource("dnsbl", () => resolve4(`2.0.0.127.${zone}`))
   if (positive.error) return { usable: false, reason: `test point unreachable (${positive.error})` }
   if (positive.records.length === 0) {
     return { usable: false, reason: "test point 2.0.0.127 not listed (mirror/resolver blocked)" }
   }
-  const negative = await resolve4(`1.0.0.127.${zone}`)
+  const negative = await withResource("dnsbl", () => resolve4(`1.0.0.127.${zone}`))
   if (negative.records.length > 0) {
     return { usable: false, reason: "test point 1.0.0.127 wrongly listed (resolver intercepting)" }
   }
@@ -515,7 +518,8 @@ async function analyzeSample(sample: SampleBody, ctx: { domain: string }): Promi
     for (const z of URI_ZONES) {
       if (!usable.get(z.zone)?.usable) continue
       const query = `${domain}.${z.zone}`
-      const a = await resolve4(query)
+      // Through the process-global dnsbl semaphore (pm/run_checks.mdx §3.1).
+      const a = await withResource("dnsbl", () => resolve4(query))
       if (a.error) {
         transient = true
         continue

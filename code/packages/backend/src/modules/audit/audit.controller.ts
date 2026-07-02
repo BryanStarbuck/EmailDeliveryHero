@@ -47,12 +47,15 @@ export class AuditController {
   @Post("run/:domainId")
   @ApiOperation({ summary: "Run a fresh deliverability audit for one domain" })
   run(@Param("domainId") domainId: string): Promise<AuditResult> {
-    return this.audit.runForDomain(domainId)
+    // Trigger #1/#2 (pm/run_checks.mdx §1): the UI's per-domain fan-out and row buttons.
+    return this.audit.runForDomain(domainId, "manual")
   }
 
   @Post("run")
   @ApiOperation({ summary: "Run a fresh audit for every monitored domain" })
   runAll(): Promise<AuditResult[]> {
-    return this.audit.runForAll()
+    // Trigger #5 (pm/run_checks.mdx §1): programmatic audit-all, one response. Deprecated for the
+    // UI — the dashboard fans out per-domain requests instead (pm/progress_ui.mdx §4.1).
+    return this.audit.runForAll("api")
   }
 }

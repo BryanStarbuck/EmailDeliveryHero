@@ -1,90 +1,42 @@
-import { useAuth, useUser } from "@auth/react"
-import { Link, useParams } from "@tanstack/react-router"
+import { useParams } from "@tanstack/react-router"
+import { AdminSettings } from "./AdminSettings"
+import { GeneralSettings } from "./GeneralSettings"
+import { SchedulingSettings } from "./SchedulingSettings"
 
 /**
- * Settings. First round is intentionally thin: an Account panel (identity from the
- * OpenAuthFederated session, or the `default` user with a Sign-in prompt — pm/ui.mdx §7.4), a
- * read-only Scheduling note, and an Admin placeholder. The settings left bar
- * (Sidebar variant="settings") drives navigation between these sections.
+ * Settings (pm/settings.mdx): the right content pane behind the settings left bar
+ * (Sidebar variant="settings", data-driven from pm/left_bar.yaml). Three sections:
+ *
+ *   /settings            → GeneralSettings — the all-users groups: Account & access (§7),
+ *                          Appearance (§8), Notifications — my prefs (§4), Monitored domains (§1),
+ *                          Checks configuration shown read-only (§2), Storage & data (§5),
+ *                          Tools & environment (§6).
+ *   /settings/scheduling → SchedulingSettings — the §3 Scheduling tab (default OFF, one-flip
+ *                          enable, times of day + weekday chips, status block).
+ *   /settings/admin      → AdminSettings — every admin-only control, gated by role:admin in the
+ *                          UI and enforced 403 by the backend either way.
  */
 export function SettingsPage() {
-  const { isSignedIn } = useAuth()
-  const { user } = useUser()
   const params = useParams({ strict: false }) as { section?: string }
   const section = params.section ?? "account"
 
-  const email = user?.primaryEmailAddress ?? "—"
-  const name = [user?.firstName, user?.lastName].filter(Boolean).join(" ") || "—"
-
   return (
     <div className="mx-auto max-w-3xl">
-      <h1 className="mb-6 text-2xl font-bold">Settings</h1>
+      <h1 className="mb-6 text-2xl font-bold">
+        {section === "scheduling"
+          ? "Settings › Scheduling"
+          : section === "admin"
+            ? "Settings › Admin"
+            : "Settings"}
+      </h1>
 
-      {section === "account" && (
-        <Panel title="Account">
-          {isSignedIn ? (
-            <>
-              <Row label="Name" value={name} />
-              <Row label="Email" value={email} />
-              <p className="mt-3 text-sm text-[var(--edh-muted)]">
-                Identity is provided by OpenAuthFederated (Google Workspace SSO). There is no
-                password to manage here.
-              </p>
-            </>
-          ) : (
-            <>
-              <Row label="Current user" value="default" />
-              <p className="mt-3 text-sm text-slate-600">
-                You are using the app as the <code>default</code> user — settings persist under that
-                account until you sign in. Signing in is optional and never required.
-              </p>
-              <Link
-                to="/sign-in"
-                className="mt-3 inline-block rounded-md bg-[var(--edh-primary)] px-3 py-2 text-sm font-medium text-white"
-              >
-                Sign in
-              </Link>
-            </>
-          )}
-        </Panel>
+      {section === "scheduling" ? (
+        <SchedulingSettings />
+      ) : section === "admin" ? (
+        <AdminSettings />
+      ) : (
+        <GeneralSettings />
       )}
-
-      {section === "scheduling" && (
-        <Panel title="Scheduling">
-          <p className="text-sm text-slate-600">
-            Periodic re-audits run on the backend when <code>EDH_PERIODIC_AUDIT_MINUTES</code> is
-            set to a positive number of minutes. When enabled, every monitored domain is re-checked
-            on that interval so newly-introduced problems surface automatically.
-          </p>
-        </Panel>
-      )}
-
-      {section === "admin" && (
-        <Panel title="Admin">
-          <p className="text-sm text-slate-600">
-            Admin-only configuration. Visible because your OpenAuthFederated token carries the{" "}
-            <code>role:admin</code> claim.
-          </p>
-        </Panel>
-      )}
-    </div>
-  )
-}
-
-function Panel({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="rounded-lg border border-[var(--edh-border)] bg-white p-5">
-      <h2 className="mb-3 font-semibold">{title}</h2>
-      {children}
-    </section>
-  )
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between border-b border-[var(--edh-border)] py-2 text-sm last:border-0">
-      <span className="text-[var(--edh-muted)]">{label}</span>
-      <span className="font-medium">{value}</span>
     </div>
   )
 }

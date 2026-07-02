@@ -4,10 +4,14 @@
   "private": true,
   "description": "EmailDeliveryHero back-end — NestJS REST API with Swagger; auth via OpenAuthFederated (@auth/backend, an externally-linked open-source library).",
   "main": "dist/main.js",
+  "bin": {
+    "edh": "dist/cli.js"
+  },
   "scripts": {
     "dev": "nest start --watch",
     "build": "nest build",
     "start": "node dist/main.js",
+    "cli": "node dist/cli.js",
     "test": "jest --passWithNoTests"
   },
   "dependencies": {

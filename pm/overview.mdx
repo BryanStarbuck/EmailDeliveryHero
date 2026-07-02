@@ -81,12 +81,16 @@ All MDX specifications in this directory and its subdirectories:
   launchd plist, Linux cron/systemd timer, Windows Task Scheduler).
 * [Settings](./settings.mdx) — the Settings page: checks configuration, DNSBL zones, notifications,
   storage & data, tools & environment, and the `role:admin`-gated Admin sub-section.
-* [Storage](./storage.mdx) — how state is persisted on disk (no database): the state root
-  `~/.email_delivery_hero/`, the hierarchical app-level `config.yaml` (settings), the
-  per-logged-in-user `users/<email>/config.yaml`, the `domains.yaml` domain list + each domain's sync
-  on/off flag, `audits.json`, the auth session store + signing secret, the two log files, the
-  browser `localStorage` conventions (theme mirror, never secrets), and the store layer that fronts
-  it all — identical in local and server mode.
+* [Storage](./storage.mdx) — the storage **authority**: how state is persisted on disk (no
+  database): the state root `~/.email_delivery_hero/`, the hierarchical app-level `config.yaml`
+  (settings), the per-logged-in-user `users/<email>/config.yaml`, the `domains.yaml` domain list +
+  each domain's sync on/off flag, the `audits.json` latest-result cache + the `runs/` YAML run
+  history (one file per run), the per-check `blacklists/<domain>/` deep store +
+  `blacklist_zones.yaml`, the auth session store + signing secret, the two log files, the browser
+  `localStorage` conventions (never secrets), and the store layer that fronts it all — identical
+  in local and server mode. Ends with the spec-by-spec storage map (every spec: file → keys →
+  backend writer → UI read path → user-editable fields) and the drift ledger of every known
+  code-vs-spec divergence.
 * [Error handling & logging](./errors.mdx) — how errors and logs are handled: the two append-only
   rolling files at the storage root (`log.log` for the normal event trail, `error.err` for the fault
   trail), the dependency-free synchronous `RollingFileWriter`, the `AppLogger` that routes all of

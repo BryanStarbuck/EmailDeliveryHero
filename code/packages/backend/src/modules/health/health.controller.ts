@@ -5,6 +5,7 @@ import { Body, Controller, Get, HttpCode, Post } from "@nestjs/common"
 import { ConfigService } from "@nestjs/config"
 import { ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger"
 import { logError, logWarn } from "@shared/logging"
+import { locateTools } from "@shared/tool-runner"
 import { ClientErrorDto } from "./dto/client-error.dto"
 
 /**
@@ -23,6 +24,19 @@ export class HealthController {
   @ApiOkResponse({ description: "Service is up" })
   health(): { status: string; app: string } {
     return { status: "ok", app: "email-delivery-hero" }
+  }
+
+  @Public()
+  @Get("tools")
+  @ApiOperation({
+    summary: "External-tool discovery diagnostics (dig, openssl, swaks, spamassassin…)",
+  })
+  tools(): { tools: Record<string, string | null> } {
+    // The ToolLocator's resolved map (pm/run_checks.mdx §5.2) — the same override → PATH →
+    // conventional-locations resolution a run performs at Stage 0, so Settings can show
+    // "dig ✓ /opt/homebrew/bin/dig · spamassassin ✗ not installed". null = not installed
+    // (a capability downgrade for the affected checks, never a failure — §5.3).
+    return { tools: locateTools() }
   }
 
   @Public()

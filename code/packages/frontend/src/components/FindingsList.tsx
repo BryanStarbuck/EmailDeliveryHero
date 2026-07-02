@@ -1,6 +1,6 @@
 import { Wrench } from "lucide-react"
 import type { Finding } from "@/api/types"
-import { SeverityBadge } from "./Badges"
+import { NewProblemBadge, SeverityBadge } from "./Badges"
 import { CopyFixButton } from "./CopyFixButton"
 
 /**
@@ -59,6 +59,7 @@ export function FindingsList({ findings }: { findings: Finding[] }) {
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <SeverityBadge severity={f.severity} />
+                {f.isNew && <NewProblemBadge />}
                 <span className="font-medium">{f.title}</span>
                 <span className="text-xs uppercase text-[var(--edh-muted)]">{f.checkId}</span>
               </div>
@@ -72,7 +73,7 @@ export function FindingsList({ findings }: { findings: Finding[] }) {
                     <Wrench className="mt-0.5 h-4 w-4 shrink-0 text-[var(--edh-primary)]" />
                     <span>
                       <span className="font-medium">Fix: </span>
-                      {f.remediation}
+                      <RemediationText text={f.remediation} />
                     </span>
                   </span>
                   {f.severity !== "ok" && <CopyFixButton text={f.evidence ?? f.remediation} />}

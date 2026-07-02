@@ -1,31 +1,41 @@
 import { useNavigate, useParams } from "@tanstack/react-router"
 import { ArrowLeft, Terminal } from "lucide-react"
-import { useAuditResults } from "@/api/audit"
+import { useAuditResults, useAuditRuns } from "@/api/audit"
 import { useDomains } from "@/api/domains"
 import { SeverityBadge } from "@/components/Badges"
 import { CopyFixButton } from "@/components/CopyFixButton"
 import { problemStateById } from "@/lib/dkim-problems"
 
 /**
- * The per-problem DKIM drill-down page (pm/checks/dkim.mdx §7): concept, your data, diagnose-it-
- * yourself commands (domain and selector substituted in, copyable), tools, extra health metrics,
- * and the numbered path forward. Route: /domains/:id/dkim/:problemId.
+ * The per-problem DKIM drill-down page (pm/checks/dkim.mdx §7): concept, your data (from THIS
+ * run's stored results), diagnose-it-yourself commands (domain and selector substituted in,
+ * copyable), tools, extra health metrics, and the numbered path forward. Routes:
+ * /domains/:id/runs/:runId/dkim/:problemId and the newest-run alias /domains/:id/dkim/:problemId.
  */
 export function DkimProblemPage() {
-  const { id = "", problemId = "" } = useParams({ strict: false }) as {
+  const {
+    id = "",
+    runId,
+    problemId = "",
+  } = useParams({ strict: false }) as {
     id?: string
+    runId?: string
     problemId?: string
   }
   const { data: domains } = useDomains()
   const { data: results } = useAuditResults()
+  const { data: runs } = useAuditRuns()
   const navigate = useNavigate()
 
   const domain = (domains ?? []).find((d) => d.id === id)
   const name = domain?.name ?? id
   const ps = problemStateById(problemId.toUpperCase())
 
+  // Run-scoped (§7 drill-down rules): render this RUN's data; the alias renders the newest run.
   // Substitute a real selector into the commands: prefer one that is failing this problem's tests.
-  const result = (results ?? []).find((r) => r.domainId === id)
+  const result = runId
+    ? (runs ?? []).find((r) => r.runId === runId)
+    : (results ?? []).find((r) => r.domainId === id)
   const dkimFindings = (result?.findings ?? []).filter((f) => f.checkId === "dkim")
   const failingSelector = ps
     ? dkimFindings
@@ -39,14 +49,22 @@ export function DkimProblemPage() {
   const substitute = (raw: string) =>
     raw.replaceAll("<domain>", name).replaceAll("<selector>", selector)
 
+  // The same commands this run itself executed (deduped), reproducible in a terminal (§7).
+  const toolCommands = [...new Set((result?.results?.dkim?.tool_runs ?? []).map((t) => t.command))]
+
   return (
     <div className="mx-auto max-w-3xl">
       <button
         type="button"
-        onClick={() => navigate({ to: "/domains/$id/dkim", params: { id } })}
+        onClick={() =>
+          runId
+            ? navigate({ to: "/domains/$id/runs/$runId/dkim", params: { id, runId } })
+            : navigate({ to: "/domains/$id/dkim", params: { id } })
+        }
         className="mb-4 inline-flex items-center gap-1 text-sm text-[var(--edh-muted)] hover:text-slate-700"
       >
         <ArrowLeft className="h-4 w-4" /> Back to DKIM for {name}
+        {result?.startedAt && ` · run ${new Date(result.startedAt).toLocaleString()}`}
       </button>
 
       {!ps ? (
@@ -95,6 +113,28 @@ export function DkimProblemPage() {
                 )
               })}
             </ul>
+            {/* The exact commands THIS run executed, pre-filled from tool_runs[].command (§7). */}
+            {toolCommands.length > 0 && (
+              <div className="mt-3">
+                <p className="mb-1 text-xs font-medium uppercase text-[var(--edh-muted)]">
+                  Commands this run executed
+                </p>
+                <ul className="space-y-2">
+                  {toolCommands.map((cmd) => (
+                    <li
+                      key={cmd}
+                      className="flex items-center justify-between gap-2 rounded-md bg-slate-900 p-2 text-slate-100"
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        <Terminal className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                        <code className="break-all font-mono text-xs">{cmd}</code>
+                      </span>
+                      <CopyFixButton text={cmd} label="Copy" />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </Section>
 
           <Section title="Tools">

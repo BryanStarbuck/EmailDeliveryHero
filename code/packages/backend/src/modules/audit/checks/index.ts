@@ -5,6 +5,7 @@ import { contentScoringCheck } from "./content-scoring/content-scoring.check"
 import { daneTlsaCheck } from "./dane-tlsa/dane-tlsa.check"
 import { dkimCheck } from "./dkim/dkim.check"
 import { dmarcCheck } from "./dmarc/dmarc.check"
+import { dmarcReportsCheck } from "./dmarc-reports/dmarc-reports.check"
 import { dnsHealthCheck } from "./dns-health/dns-health.check"
 import { dnssecCheck } from "./dnssec/dnssec.check"
 import { domainReputationCheck } from "./domain-reputation/domain-reputation.check"
@@ -34,8 +35,9 @@ export const CHECKERS: Checker[] = [
   spfCheck,
   // DKIM
   dkimCheck,
-  // DMARC (+ ARC companion)
+  // DMARC (+ ARC companion + ingested rua-report findings, pm/emails.mdx §5)
   dmarcCheck,
+  dmarcReportsCheck,
   arcCheck,
   // Blacklists
   blacklistCheck,

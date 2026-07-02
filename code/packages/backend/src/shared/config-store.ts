@@ -29,6 +29,34 @@ export const CONFIG_SCHEMA_VERSION = 1
 // App-level config.yaml (pm/storage.mdx §3) — one nested block per concern.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * One recognized Mark Verifying Authority (pm/checks/bimi.mdx §5 — the `bimi_mva` reference table
+ * mapped onto `config.yaml → checks.bimi.mvaAllowList`). The future VMC/CMC round matches
+ * `issuerDnMatch` against the certificate issuer DN.
+ */
+export interface BimiMvaEntry {
+  name: string
+  issuerDnMatch: string
+  /** Which mark types the MVA may issue: "vmc" (registered trademark) and/or "cmc". */
+  markTypes: string[]
+  enabled: boolean
+}
+
+/**
+ * One bundled subdomain-takeover fingerprint (pm/checks/dns_health.mdx §5 — the
+ * `takeover_fingerprints` reference table mapped onto `config.yaml → dns_health.fingerprints`,
+ * seeded with the built-in provider list, admin-editable). `cname_suffix` is matched against the
+ * final CNAME target; `unclaimed_signature` waits for the future HTTP-probe round.
+ */
+export interface TakeoverFingerprint {
+  provider: string
+  /** Suffix matched against the final CNAME target, e.g. ".herokudns.com". */
+  cname_suffix: string
+  /** HTTP body marker for the future "unclaimed endpoint" confirmation probe. */
+  unclaimed_signature?: string
+  enabled: boolean
+}
+
 export interface AppConfigFile {
   schema_version: number
   updated_at: string
@@ -42,6 +70,32 @@ export interface AppConfigFile {
     spf: { maxLookups: number }
     dkim: { defaultSelectors: string[] }
     dnsbl: { zones: string[] }
+    /**
+     * Content-scoring admin settings (pm/checks/content_scoring.mdx §4): the SpamAssassin spam
+     * threshold override (default 5.0), the inbox-safe target (default 2.0 — totals below it are
+     * `ok`), and whether network content tests (URIBL/Razor/Pyzor/DCC) are enabled (default off so
+     * scoring is deterministic). The binary path override is env: EDH_TOOL_SPAMASSASSIN/_SPAMC.
+     */
+    content: { threshold: number; safeTarget: number; networkTests: boolean }
+    /**
+     * List-Unsubscribe / one-click admin settings (pm/checks/list_unsubscribe.mdx §4 admin-only):
+     * the Gmail/Yahoo bulk-sender daily threshold (default 5,000 — documentation for the
+     * per-domain isBulkSender flag), the endpoint-probe timeout (default 5s), whether the live
+     * one-click POST probe is globally permitted at all, and the probe cadence (default 24h —
+     * the probe never re-fires more often than this even when audits run every tick, §6).
+     */
+    listUnsub: {
+      bulkThresholdPerDay: number
+      probeTimeoutMs: number
+      probeAllowed: boolean
+      probeCadenceHours: number
+    }
+    /**
+     * BIMI admin settings (pm/checks/bimi.mdx §5): the recognized Mark Verifying Authorities
+     * (the `bimi_mva` reference table mapped onto config.yaml). Consumed by the future VMC/CMC
+     * certificate-validation round; admin-only editing.
+     */
+    bimi: { mvaAllowList: BimiMvaEntry[] }
     thresholds: { green: number; amber: number }
     weights: { critical: number; warning: number; info: number }
   }
@@ -61,8 +115,53 @@ export interface AppConfigFile {
     smtp: { host: string; port: number; from: string }
   }
   storage: { retentionDays: number }
-  tools: { preferCli: boolean; resolvers: string[]; timeoutMs: number }
+  /**
+   * Domain Registration Reputation (pm/checks/domain_reputation.mdx §5/§6): the long-TTL RDAP
+   * cache (registration data is stale-tolerant — default 24h vs the 6h DNS cadence), the per-run
+   * RDAP request budget, and the admin-editable reference lists (parking-provider nameservers,
+   * high-abuse TLDs, registrar abuse-reputation watchlist — the `parking_nameservers` /
+   * `registrar_reputation` reference tables mapped onto config.yaml).
+   */
+  domain_reputation: {
+    cache_ttl_hours: number
+    rdap_request_budget: number
+    parking_nameservers: string[]
+    high_abuse_tlds: string[]
+    registrar_reputation: {
+      match_type: "registrar_iana_id" | "registrar_name" | "tld"
+      match_value: string
+      note?: string
+    }[]
+  }
+  /**
+   * DNS Zone & Nameserver Health (pm/checks/dns_health.mdx §4/§5): the bundled, admin-editable
+   * subdomain-takeover fingerprint list the dangling-CNAME sub-check matches final targets against.
+   */
+  dns_health: {
+    fingerprints: TakeoverFingerprint[]
+  }
+  /**
+   * External-tool settings. `paths` is the ToolLocator's explicit-override map
+   * (pm/run_checks.mdx §5.2 resolution step 1, Settings → Tools & environment): e.g.
+   * `paths: { dig: /opt/homebrew/bin/dig }` pins a tool to an absolute path ahead of the
+   * PATH search and the per-platform conventional locations.
+   */
+  tools: { preferCli: boolean; resolvers: string[]; timeoutMs: number; paths: Record<string, string> }
   access: { allowedDomains: string[] }
+  /**
+   * Report-email ingestion (pm/emails.mdx §8, admin-only): the DMARC-aggregate/TLS-RPT report
+   * sources and cadence. `enabled` is the master switch — off, the two report-fed findings
+   * (dmarc.real_pass_rate / infra.tls_rpt_reports_ingested) return a single "ingestion disabled"
+   * info. `dropFolder` "" means the default `<state>/reports/inbox`. IMAP credentials come from
+   * the out-of-repo credentials file (never stored here).
+   */
+  reports: {
+    enabled: boolean
+    dropFolder: string
+    pollMinutes: number
+    windowDays: number
+    imap: { host: string; port: number; user: string; mailbox: string }
+  }
   defaults: UserPreferences
 }
 
@@ -104,6 +203,19 @@ export function defaultAppConfig(): AppConfigFile {
       spf: { maxLookups: 10 },
       dkim: { defaultSelectors: ["google", "selector1", "selector2", "k1"] },
       dnsbl: { zones: ["zen.spamhaus.org", "b.barracudacentral.org", "bl.spamcop.net"] },
+      content: { threshold: 5.0, safeTarget: 2.0, networkTests: false },
+      listUnsub: {
+        bulkThresholdPerDay: 5000,
+        probeTimeoutMs: 5000,
+        probeAllowed: true,
+        probeCadenceHours: 24,
+      },
+      bimi: {
+        mvaAllowList: [
+          { name: "DigiCert", issuerDnMatch: "DigiCert", markTypes: ["vmc", "cmc"], enabled: true },
+          { name: "Entrust", issuerDnMatch: "Entrust", markTypes: ["vmc", "cmc"], enabled: true },
+        ],
+      },
       thresholds: { green: 90, amber: 70 },
       weights: { critical: 40, warning: 15, info: 0 },
     },
@@ -125,8 +237,79 @@ export function defaultAppConfig(): AppConfigFile {
       smtp: { host: "", port: 587, from: "edh@whitehatengineering.com" },
     },
     storage: { retentionDays: 90 },
-    tools: { preferCli: false, resolvers: [], timeoutMs: 5000 },
+    domain_reputation: {
+      // Registration data changes over days/years — cache RDAP for 24h and skip re-querying on
+      // the frequent DNS cadence (pm/checks/domain_reputation.mdx §3 "Caching & rate limits").
+      cache_ttl_hours: 24,
+      rdap_request_budget: 5,
+      parking_nameservers: [
+        "sedoparking.com",
+        "bodis.com",
+        "above.com",
+        "parkingcrew.net",
+        "dan.com",
+        "afternic.com",
+        "cashparking.com",
+        "hugedomains.com",
+        "sedo.com",
+        "parklogic.com",
+        "namedrive.com",
+        "voodoo.com",
+      ],
+      // Spamhaus TLD abuse stats — advisory only (info findings).
+      high_abuse_tlds: [
+        "top",
+        "xyz",
+        "click",
+        "link",
+        "work",
+        "gq",
+        "ml",
+        "cf",
+        "ga",
+        "tk",
+        "zip",
+        "mov",
+        "rest",
+        "cyou",
+        "sbs",
+        "icu",
+        "buzz",
+      ],
+      // Curated abuse-tolerant registrar watchlist — empty by default, admin-editable.
+      registrar_reputation: [],
+    },
+    dns_health: {
+      // Seed = the classic takeover-prone providers; keep fresh (new SaaS endpoints appear
+      // constantly — pm/checks/dns_health.mdx maintenance notes). Admin-editable.
+      fingerprints: [
+        { provider: "Heroku", cname_suffix: ".herokudns.com", enabled: true },
+        { provider: "Heroku", cname_suffix: ".herokuapp.com", enabled: true },
+        { provider: "AWS S3", cname_suffix: ".s3.amazonaws.com", enabled: true },
+        { provider: "AWS CloudFront", cname_suffix: ".cloudfront.net", enabled: true },
+        { provider: "GitHub Pages", cname_suffix: ".github.io", enabled: true },
+        { provider: "Azure App Service", cname_suffix: ".azurewebsites.net", enabled: true },
+        { provider: "Azure Traffic Manager", cname_suffix: ".trafficmanager.net", enabled: true },
+        { provider: "WordPress.com", cname_suffix: ".wordpress.com", enabled: true },
+        { provider: "Pantheon", cname_suffix: ".pantheonsite.io", enabled: true },
+        { provider: "SendGrid", cname_suffix: ".sendgrid.net", enabled: true },
+        { provider: "Shopify", cname_suffix: ".myshopify.com", enabled: true },
+        { provider: "Fastly", cname_suffix: ".fastly.net", enabled: true },
+        { provider: "Netlify", cname_suffix: ".netlify.app", enabled: true },
+        { provider: "Vercel", cname_suffix: ".vercel.app", enabled: true },
+      ],
+    },
+    tools: { preferCli: false, resolvers: [], timeoutMs: 5000, paths: {} },
     access: { allowedDomains: ["whitehatengineering.com", "act3ai.com"] },
+    reports: {
+      // Ingestion defaults ON: the drop folder is local-only (no network traffic), and the
+      // hourly poll is a no-op until files/an IMAP mailbox are configured (pm/emails.mdx §4.1).
+      enabled: true,
+      dropFolder: "",
+      pollMinutes: 60,
+      windowDays: 7,
+      imap: { host: "", port: 993, user: "", mailbox: "INBOX" },
+    },
     defaults: {
       theme: "system",
       density: "comfortable",

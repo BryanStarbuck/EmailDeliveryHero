@@ -1,10 +1,12 @@
 import { Link, useNavigate, useParams } from "@tanstack/react-router"
-import { ArrowLeft, ChevronRight, RefreshCw, Wrench } from "lucide-react"
+import { ArrowLeft, ChevronDown, ChevronRight, RefreshCw, Wrench } from "lucide-react"
+import { useState } from "react"
 import { useAuditResults, useAuditRun } from "@/api/audit"
 import { useDomains } from "@/api/domains"
 import type { Finding } from "@/api/types"
 import { ScoreBadge, SeverityBadge } from "@/components/Badges"
 import { CopyFixButton } from "@/components/CopyFixButton"
+import { RemediationText } from "@/components/FindingsList"
 import { StatusCell } from "@/components/StatusCell"
 import {
   CATEGORIES,
@@ -35,7 +37,7 @@ export function RunDetailPage() {
 
   const domain = (domains ?? []).find((d) => d.id === id)
   const result = runId ? historicalRun : (results ?? []).find((r) => r.domainId === id)
-  const cells = rollupCategories(result?.findings)
+  const cells = rollupCategories(result?.findings, result?.results)
 
   // Runs through the shared scan runner so a "Running <domain>" card shows in the dock.
   const onRunAgain = () => runDomains([{ id, name: domain?.name ?? id }])
@@ -99,15 +101,39 @@ export function RunDetailPage() {
                 <a key={c.key} href={`#cat-${c.key}`} className="block">
                   <div className="mb-1 flex items-center justify-center gap-1 text-center text-[11px] font-medium text-[var(--edh-muted)]">
                     {c.header}
-                    {techRoute && (
+                    {/* DKIM's chevron stays run-scoped on a historical run (pm/checks/dkim.mdx
+                        §6.2 item 2 — the run report's DKIM chevron opens THAT run's DKIM page). */}
+                    {c.key === "dkim" && runId ? (
                       <Link
-                        to={techRoute}
-                        params={{ id }}
-                        aria-label={`Open the ${c.header} page`}
+                        to="/domains/$id/runs/$runId/dkim"
+                        params={{ id, runId }}
+                        aria-label={`Open the ${c.header} page for this run`}
                         className="hover:text-slate-700"
                       >
                         <ChevronRight className="h-3.5 w-3.5" />
                       </Link>
+                    ) : c.key === "dnsInfra" && runId ? (
+                      // The DNS & Infrastructure chevron routes to the SAME run's DNS page
+                      // (pm/checks/dns.mdx §6.1 — the run report's section chevron is run-scoped).
+                      <Link
+                        to="/domains/$id/runs/$runId/dns"
+                        params={{ id, runId }}
+                        aria-label={`Open the ${c.header} page for this run`}
+                        className="hover:text-slate-700"
+                      >
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      </Link>
+                    ) : (
+                      techRoute && (
+                        <Link
+                          to={techRoute}
+                          params={{ id }}
+                          aria-label={`Open the ${c.header} page`}
+                          className="hover:text-slate-700"
+                        >
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        </Link>
+                      )
                     )}
                   </div>
                   <StatusCell status={cells[c.key] ?? NEVER_CELL} />
@@ -116,37 +142,161 @@ export function RunDetailPage() {
             })}
           </div>
 
-          {/* Findings grouped by the six categories. */}
+          {/* Findings grouped by the six categories — each a collapsible section (pm/ui.mdx §5):
+              categories with problems open expanded; healthy categories collapse to a quiet
+              "all healthy" line. Keyed by run so a fresh run resets the open/closed state. */}
           <div className="mt-6 space-y-5">
             {CATEGORIES.map((c) => {
               const findings = result.findings
                 .filter((f) => categoryOf(f.checkId) === c.key)
                 .sort((a, b) => ORDER[a.severity] - ORDER[b.severity])
               if (findings.length === 0) return null
-              const problems = findings.filter(
-                (f) => f.severity === "warning" || f.severity === "critical",
-              ).length
               return (
-                <section key={c.key} id={`cat-${c.key}`}>
-                  <div className="mb-2 flex items-center justify-between">
-                    <h2 className="font-semibold">{c.header}</h2>
-                    <span className="text-xs text-[var(--edh-muted)]">
-                      {problems === 0
-                        ? "all healthy"
-                        : `${problems} problem${problems === 1 ? "" : "s"}`}
-                    </span>
-                  </div>
-                  <ul className="space-y-2">
-                    {findings.map((f) => (
-                      <FindingRow key={f.id} finding={f} />
-                    ))}
-                  </ul>
-                </section>
+                <CategorySection
+                  key={`${c.key}-${result.runId ?? result.ranAt}`}
+                  catKey={c.key}
+                  header={c.header}
+                  findings={findings}
+                />
               )
             })}
           </div>
         </>
       )}
+    </div>
+  )
+}
+
+/**
+ * One collapsible category section (pm/ui.mdx §5). Sections with open problems start expanded;
+ * all-healthy sections start collapsed to their quiet "all healthy" header line.
+ */
+function CategorySection({
+  catKey,
+  header,
+  findings,
+}: {
+  catKey: string
+  header: string
+  findings: Finding[]
+}) {
+  const problems = findings.filter(
+    (f) => f.severity === "warning" || f.severity === "critical",
+  ).length
+  const [open, setOpen] = useState(problems > 0)
+
+  // ARC rolls into the DMARC cell but renders as its own labelled advisory sub-group inside the
+  // expanded DMARC section (pm/checks/arc.mdx §4 — "DMARC ▸ ARC (Authenticated Received Chain)").
+  const arcFindings = catKey === "dmarc" ? findings.filter((f) => f.checkId === "arc") : []
+  // BIMI rolls into the Spam & Content cell but renders grouped under its own "BIMI" subhead
+  // inside that section (pm/checks/bimi.mdx §4 — "Spam & Content › BIMI").
+  const bimiFindings =
+    catKey === "spamContent" ? findings.filter((f) => f.checkId === "content.bimi") : []
+  const mainFindings = findings.filter(
+    (f) =>
+      !(arcFindings.length > 0 && f.checkId === "arc") &&
+      !(bimiFindings.length > 0 && f.checkId === "content.bimi"),
+  )
+
+  return (
+    <section id={`cat-${catKey}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="mb-2 flex w-full items-center justify-between text-left"
+      >
+        <h2 className="flex items-center gap-1 font-semibold">
+          {open ? (
+            <ChevronDown className="h-4 w-4 shrink-0 text-[var(--edh-muted)]" />
+          ) : (
+            <ChevronRight className="h-4 w-4 shrink-0 text-[var(--edh-muted)]" />
+          )}
+          {header}
+        </h2>
+        <span
+          className={`text-xs ${problems === 0 ? "text-green-800" : "text-[var(--edh-muted)]"}`}
+        >
+          {problems === 0 ? "all healthy" : `${problems} problem${problems === 1 ? "" : "s"}`}
+        </span>
+      </button>
+      {open && (
+        <>
+          <ul className="space-y-2">
+            {mainFindings.map((f) => (
+              <FindingRow key={f.id} finding={f} />
+            ))}
+          </ul>
+          {arcFindings.length > 0 && <ArcSubGroup findings={arcFindings} />}
+          {bimiFindings.length > 0 && <BimiSubGroup findings={bimiFindings} />}
+        </>
+      )}
+    </section>
+  )
+}
+
+/**
+ * The BIMI sub-group inside the Spam & Content section (pm/checks/bimi.mdx §4 — "Spam & Content ›
+ * BIMI"). BIMI has no dashboard cell of its own; its content.bimi findings roll into the Spam &
+ * Content cell but render under their own subhead here, with the logo/certificate preview panel
+ * placeholder until the HTTPS/SVG/VMC validation round ships.
+ */
+function BimiSubGroup({ findings }: { findings: Finding[] }) {
+  const problems = findings.filter(
+    (f) => f.severity === "warning" || f.severity === "critical",
+  ).length
+  return (
+    <div className="mt-3">
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-slate-700">BIMI (brand logo)</h3>
+        <span className="text-xs text-[var(--edh-muted)]">
+          {problems === 0 ? "all healthy" : `${problems} problem${problems === 1 ? "" : "s"}`}
+        </span>
+      </div>
+      <ul className="space-y-2">
+        {findings.map((f) => (
+          <FindingRow key={f.id} finding={f} />
+        ))}
+      </ul>
+      <p className="mt-2 text-xs text-[var(--edh-muted)]">
+        Logo &amp; certificate validation (SVG Tiny-PS preview, VMC issuer/expiry) is a future
+        round.
+      </p>
+    </div>
+  )
+}
+
+/**
+ * The ARC advisory sub-group inside the DMARC section (pm/checks/arc.mdx §4). ARC has no dashboard
+ * cell of its own; its arc.* findings roll into the DMARC cell but are labelled separately here as
+ * "forwarding preservation (advisory)". The "Capture sample…" action (the admin-gated
+ * swaks-through-forwarder probe that unlocks the chain-validation sub-checks) ships in a later
+ * round, so the affordance is present but disabled.
+ */
+function ArcSubGroup({ findings }: { findings: Finding[] }) {
+  return (
+    <div className="mt-3">
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+          ARC (Authenticated Received Chain) — forwarding preservation
+          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-[var(--edh-muted)]">
+            advisory
+          </span>
+        </h3>
+        <button
+          type="button"
+          disabled
+          title="Sends a real swaks probe through a declared forwarder to capture and validate the ARC chain. Admin-only; ships in a later round."
+          className="rounded-md border border-[var(--edh-border)] px-2 py-1 text-xs text-[var(--edh-muted)] opacity-60"
+        >
+          Capture sample…
+        </button>
+      </div>
+      <ul className="space-y-2">
+        {findings.map((f) => (
+          <FindingRow key={f.id} finding={f} />
+        ))}
+      </ul>
     </div>
   )
 }
@@ -159,6 +309,13 @@ function FindingRow({ finding: f }: { finding: Finding }) {
         <SeverityBadge severity={f.severity} />
         <span className="font-medium">{f.title}</span>
         <span className="text-xs uppercase text-[var(--edh-muted)]">{f.checkId}</span>
+        {/* Report-derived evidence chip (pm/emails.mdx §7.2): the finding came from an ingested
+            DMARC-aggregate/TLS-RPT report email, not a live DNS lookup. */}
+        {f.source === "report" && (
+          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] uppercase tracking-wide text-slate-500">
+            from reports
+          </span>
+        )}
       </div>
       <p className="mt-1 text-sm text-slate-600">{f.detail}</p>
       {f.evidence && (
@@ -170,7 +327,7 @@ function FindingRow({ finding: f }: { finding: Finding }) {
             <Wrench className="mt-0.5 h-4 w-4 shrink-0 text-[var(--edh-primary)]" />
             <span>
               <span className="font-medium">Fix: </span>
-              {f.remediation}
+              <RemediationText text={f.remediation} />
             </span>
           </span>
           <CopyFixButton text={f.evidence ?? f.remediation} />

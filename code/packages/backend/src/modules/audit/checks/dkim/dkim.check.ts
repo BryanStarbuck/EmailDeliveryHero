@@ -1,7 +1,8 @@
-import { createHash, createPublicKey } from "node:crypto"
+import { createHash, createPublicKey, randomBytes } from "node:crypto"
 import { mapLimit } from "@shared/concurrency"
 import { resolveCname, resolveMx, resolveTxt } from "../dns-util"
 import type { Checker, CheckOutcome, Finding } from "../types"
+import { DkimToolBench, type DkimToolRun } from "./dkim-tools"
 
 /**
  * DKIM (pm/checks/dkim.mdx). Audits the DNS-published key side of DKIM per selector: presence
@@ -114,6 +115,8 @@ export interface DkimResults {
   wildcard_shadow: boolean
   duplicate_keys: { key_sha256: string; seen_on: string[] }[]
   selectors: DkimSelectorResult[]
+  /** Every external tool invocation this run made, in execution order (§3 capture contract). */
+  tool_runs: DkimToolRun[]
 }
 
 /** Tokenize a raw DKIM key record into a tag map (names lower-cased, first occurrence wins). */
@@ -502,14 +505,14 @@ export function analyzeSelectorRecord(
   return { findings, result }
 }
 
-/** Random label that must not exist — an answer means a wildcard TXT shadows _domainkey. */
-const WILDCARD_PROBE_SELECTOR = "edh-wildcard-probe-zz9"
-
 export const dkimCheck: Checker = {
   id: "dkim",
   label: "DKIM keys",
   async run(ctx): Promise<CheckOutcome> {
     const findings: Finding[] = []
+    // The evidence bench (§3): doggo/kdig/openssl/dnsx captures recorded into tool_runs[]. The
+    // runs array is shared by reference so entries land in the results as they are captured.
+    const bench = new DkimToolBench(ctx.signal, ctx.tools)
     const results: DkimResults = {
       selectors_configured: [...ctx.dkimSelectors],
       discovery_ran: false,
@@ -517,11 +520,16 @@ export const dkimCheck: Checker = {
       wildcard_shadow: false,
       duplicate_keys: [],
       selectors: [],
+      tool_runs: bench.runs,
     }
 
-    // Wildcard-TXT guard (dkim.underscore_label): if a selector that cannot exist answers, every
-    // probe on this domain "resolves" with junk — receivers permerror and discovery is unreliable.
-    const wildcardProbe = await resolveTxt(`${WILDCARD_PROBE_SELECTOR}._domainkey.${ctx.domain}`)
+    // Wildcard-TXT guard (dkim.underscore_label): if a random selector that cannot exist answers,
+    // every probe on this domain "resolves" with junk — receivers permerror and discovery is
+    // unreliable. The label is `zz-<random8>` per pm/checks/dkim.mdx §3 row 5 / §4 edge case (c).
+    const wildcardSelector = `zz-${randomBytes(4).toString("hex")}`
+    const wildcardName = `${wildcardSelector}._domainkey.${ctx.domain}`
+    const wildcardProbe = await resolveTxt(wildcardName)
+    await bench.doggoTxt(wildcardName) // §3 row 5 — evidence capture, once per domain
     if (wildcardProbe.records.length > 0) {
       results.wildcard_shadow = true
       findings.push({
@@ -529,7 +537,7 @@ export const dkimCheck: Checker = {
         checkId: "dkim",
         title: "A wildcard TXT record shadows _domainkey",
         severity: "warning",
-        detail: `A TXT lookup for a selector that cannot exist (${WILDCARD_PROBE_SELECTOR}._domainkey.${ctx.domain}) returned an answer — a wildcard *.${ctx.domain} TXT is answering every DKIM query with non-DKIM data. Receivers get permerror junk and selector discovery is unreliable.`,
+        detail: `A TXT lookup for a selector that cannot exist (${wildcardName}) returned an answer — a wildcard *.${ctx.domain} TXT is answering every DKIM query with non-DKIM data. Receivers get permerror junk and selector discovery is unreliable.`,
         remediation: `Publish explicit records under _domainkey and remove or scope the wildcard TXT so it no longer covers *._domainkey.${ctx.domain}.`,
         evidence: wildcardProbe.records[0],
       })
@@ -553,6 +561,8 @@ export const dkimCheck: Checker = {
       if (!results.wildcard_shadow) {
         results.discovery_ran = true
         const ordered = await discoveryOrder(ctx.domain)
+        // §3 row 6 — the dnsx sweep evidence capture (the decision engine stays node:dns below).
+        await bench.dnsxSweep(ordered.map((s) => `${s}._domainkey.${ctx.domain}`))
         const hits = await mapLimit(ordered, DISCOVERY_CONCURRENCY, async (selector) => {
           const lookup = await resolveTxt(`${selector}._domainkey.${ctx.domain}`)
           return lookup.records.some(looksLikeDkim) ? selector : null
@@ -587,7 +597,7 @@ export const dkimCheck: Checker = {
 
     // Probe every selector (bounded — configured lists are small, discovery lists already filtered).
     const analyses = await mapLimit(probeList, DISCOVERY_CONCURRENCY, ({ selector, source }) =>
-      probeSelector(ctx.domain, selector, source),
+      probeSelector(ctx.domain, selector, source, bench),
     )
     for (const a of analyses) {
       findings.push(...a.findings)
@@ -728,11 +738,56 @@ async function discoveryOrder(domain: string): Promise<string[]> {
   return [...new Set([...hinted, ...COMMON_SELECTORS])]
 }
 
+/**
+ * Extract and base64-decode the record's p= value for the openssl cross-check (§3 row 4). Returns
+ * null when there is nothing decodable (absent/empty/corrupt p=).
+ */
+function decodedKeyBytes(rawRecord: string | null): Buffer | null {
+  if (!rawRecord) return null
+  const p = parseDkimRecord(rawRecord).p
+  if (!p) return null
+  const clean = p.replace(/\s+/g, "")
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(clean)) return null
+  const der = Buffer.from(clean, "base64")
+  return der.length > 0 ? der : null
+}
+
+/**
+ * The per-selector evidence captures (§3 rows 1–4) around the node:dns decision result: doggo TXT
+ * (CNAME fallback only when TXT was empty), the kdig public-resolver cross-check — a disagreement
+ * appends a propagation NOTE to the dkim.present.<selector> finding, never a fabricated critical —
+ * and the openssl decode of a parseable key.
+ */
+async function captureSelectorEvidence(
+  bench: DkimToolBench,
+  name: string,
+  selector: string,
+  localTxtCount: number,
+  analysis: { findings: Finding[]; result: DkimSelectorResult | null },
+): Promise<void> {
+  const doggoAnswers = await bench.doggoTxt(name) // §3 row 1
+  if ((doggoAnswers?.length ?? 0) === 0 && localTxtCount === 0) {
+    await bench.doggoCname(name) // §3 row 2 — CNAME fallback, only when no TXT answered
+  }
+  const agrees = await bench.kdigCrossCheck(name, localTxtCount) // §3 row 3
+  if (agrees === false) {
+    const present = analysis.findings.find((f) => f.id === `dkim.present.${selector}`)
+    if (present) {
+      present.detail += ` Note: the public resolver 8.8.8.8 answers differently from the local resolver for ${name} — propagation lag or resolver-dependent visibility (see the kdig tool run).`
+    }
+  }
+  if (analysis.result?.parses) {
+    const der = decodedKeyBytes(analysis.result.raw_record)
+    if (der) await bench.opensslDecode(selector, der) // §3 row 4
+  }
+}
+
 /** Resolve one selector (TXT, falling back through a CNAME delegation) and analyze the record. */
 async function probeSelector(
   domain: string,
   selector: string,
   source: "configured" | "discovered",
+  bench: DkimToolBench,
 ): Promise<{ findings: Finding[]; result: DkimSelectorResult | null }> {
   const name = `${selector}._domainkey.${domain}`
   const emptyResult = (resolvedVia: "none" | "cname", cnameTarget: string | null) => ({
@@ -760,7 +815,7 @@ async function probeSelector(
   const lookup = await rawResolveTxt(name)
   if (lookup.error) {
     // Transient failure — never fabricate a "missing" critical (pm/checks/dkim.mdx §4 edge case d).
-    return {
+    const analysis = {
       findings: [
         {
           id: `dkim.lookup_failed.${selector}`,
@@ -770,10 +825,12 @@ async function probeSelector(
           detail: `DNS lookup for TXT ${name} failed (${lookup.error}) — could not determine whether the key is published.`,
           remediation:
             "Retry the audit; if it persists, verify the domain's nameservers respond for _domainkey names.",
-        },
+        } satisfies Finding,
       ],
       result: emptyResult("none", null),
     }
+    await captureSelectorEvidence(bench, name, selector, 0, analysis)
+    return analysis
   }
 
   if (lookup.records.length > 0) {
@@ -795,6 +852,7 @@ async function probeSelector(
         detail: `${name} → ${delegatedTo}, which resolves to a key. The ESP rotates this key for you.`,
       })
     }
+    await captureSelectorEvidence(bench, name, selector, lookup.records.length, analysis)
     return analysis
   }
 
@@ -816,10 +874,12 @@ async function probeSelector(
         severity: "ok",
         detail: `${name} → ${target}, which resolves to a key. The ESP rotates this key for you.`,
       })
+      await captureSelectorEvidence(bench, name, selector, 0, analysis)
+      await bench.doggoTxt(target) // §3 row 2 tail — #1 re-run against the CNAME target
       return analysis
     }
     // Dangling delegation: the CNAME exists, the target does not answer.
-    return {
+    const analysis = {
       findings: [
         {
           id: `dkim.cname_delegation.${selector}`,
@@ -829,10 +889,12 @@ async function probeSelector(
           detail: `${name} is a CNAME to ${target}, but the target has no TXT record${targetLookup.error ? ` (lookup: ${targetLookup.error})` : " (NXDOMAIN)"}. Every message signed with this selector fails with permerror — and a stale vendor CNAME is a subdomain-takeover risk.`,
           remediation: `Re-point the CNAME at ${name} to the exact target your ESP's dashboard lists, or remove it if that ESP is decommissioned.`,
           evidence: `${name} CNAME ${target} → no key`,
-        },
+        } satisfies Finding,
       ],
       result: emptyResult("cname", target),
     }
+    await captureSelectorEvidence(bench, name, selector, 0, analysis)
+    return analysis
   }
 
   const missingFinding: Finding = {
@@ -843,7 +905,9 @@ async function probeSelector(
     detail: `No DKIM public key (and no CNAME) is published at ${name}. Mail signed with this selector fails DKIM at every receiver (permerror "no key for signature") — worse than not signing at all.`,
     remediation: `Publish the DKIM TXT record your provider gives you at ${name} (or the CNAME your ESP specifies), or correct the selector name.`,
   }
-  return { findings: [missingFinding], result: emptyResult("none", null) }
+  const analysis = { findings: [missingFinding], result: emptyResult("none", null) }
+  await captureSelectorEvidence(bench, name, selector, 0, analysis)
+  return analysis
 }
 
 /**

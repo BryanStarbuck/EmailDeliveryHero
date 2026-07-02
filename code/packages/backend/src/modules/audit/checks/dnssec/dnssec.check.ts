@@ -17,9 +17,24 @@ import type { Checker, CheckOutcome, Finding } from "../types"
 
 const CHECK_ID = "infra.dnssec"
 
+/** One apex DNSKEY, parsed (pm/checks/dnssec.mdx §5 `dnskey_algos` JSONB element). */
+export interface DnskeyAlgoInfo {
+  keyTag: number
+  flags: number
+  alg: number
+  algName: string
+  bits: number | null
+}
+
 /**
- * The structured DNSSEC state persisted at results["infra.dnssec"] (pm/checks/dns.mdx §5) —
- * the DNS page's Zone panel one-liner. Nullable fields mean "could not be determined this run".
+ * The structured DNSSEC state persisted at results["infra.dnssec"]. Two documented shapes overlap
+ * here and both are kept in sync:
+ *  - the snake_case Zone-panel one-liner fields (pm/checks/dns.mdx §5) read by the DNS page;
+ *  - the `dnssec_check_results` row fields (pm/checks/dnssec.mdx §5): signed, dsPresent, validates,
+ *    bogus, dnskeyAlgos, dsDigestType, dsAlgoMatch, the nsec3 trio, rrsigEarliestExpiry,
+ *    resolverUsed, checkedAt — so the file-store-to-Postgres migration is a direct mapping.
+ * Nullable fields mean "could not be determined this run" (validation-dependent ones stay null
+ * until the `dig +dnssec` / validating-resolver path ships).
  */
 export interface DnssecResults {
   signed: boolean
@@ -28,6 +43,51 @@ export interface DnssecResults {
   algorithms: number[]
   ds_matches_dnskey: boolean | null
   dane_ready: boolean
+  // ---- dnssec_check_results fields (pm/checks/dnssec.mdx §5) ----
+  /** DS at parent/registrar (mirrors ds_present). */
+  dsPresent: boolean | null
+  /** AD=1 from a validating resolver — NULL until the validating-resolver path ships. */
+  validates: boolean | null
+  /** SERVFAIL with CD=0 but success with CD=1 ⇒ broken chain. False until the probe ships. */
+  bogus: boolean
+  /** The parsed apex DNSKEY set: [{keyTag, flags, alg, algName, bits}]. */
+  dnskeyAlgos: DnskeyAlgoInfo[]
+  /** Digest type of the DS that matched a live KSK (1=SHA1, 2=SHA256); else the published type. */
+  dsDigestType: number | null
+  /** Published DS matches a live KSK (mirrors ds_matches_dnskey). */
+  dsAlgoMatch: boolean | null
+  /** NSEC3 in use — stays false (the SQL DEFAULT) until the +dnssec NXDOMAIN probe ships. */
+  nsec3: boolean
+  nsec3Iterations: number | null
+  nsec3Optout: boolean | null
+  /** Soonest apex RRSIG expiration (ISO) — NULL until the +dnssec probe ships. */
+  rrsigEarliestExpiry: string | null
+  /** Validating resolver queried (e.g. "1.1.1.1") — NULL on the presence-only first round. */
+  resolverUsed: string | null
+  /** ISO date-time this DNSSEC observation was taken. */
+  checkedAt: string
+}
+
+/** The future-gated `dnssec_check_results` fields at their first-round defaults (spec §5/§7). */
+function futureFieldDefaults(): Pick<
+  DnssecResults,
+  | "validates"
+  | "bogus"
+  | "nsec3"
+  | "nsec3Iterations"
+  | "nsec3Optout"
+  | "rrsigEarliestExpiry"
+  | "resolverUsed"
+> {
+  return {
+    validates: null,
+    bogus: false,
+    nsec3: false,
+    nsec3Iterations: null,
+    nsec3Optout: null,
+    rrsigEarliestExpiry: null,
+    resolverUsed: null,
+  }
 }
 
 // RRSIG near-expiry lead time (spec default 72h) — used only by the future rrsig_expiry advisory.
@@ -201,25 +261,16 @@ export const dnssecCheck: Checker = {
 
     if (keys.length === 0) {
       // Unsigned zone — advisory only (an upgrade you're missing, not a break). Must NOT go amber.
+      // Spec acceptance #2: exactly ONE `info` finding — the DANE consequence rides in its detail
+      // (and results.dane_ready=false signals the DANE/TLSA check, spec acceptance #13).
       findings.push({
         id: "infra.dnssec_signed.unsigned",
         checkId: "infra.dnssec_signed",
         title: "Zone is not DNSSEC-signed",
         severity: "info",
-        detail: `${domain} publishes no DNSKEY, so the zone is unsigned. DNS answers (MX, SPF, DKIM, DMARC, MTA-STS) carry no tamper-evidence and DANE/TLSA is impossible.`,
+        detail: `${domain} publishes no DNSKEY, so the zone is unsigned — optional, but required for DANE. DNS answers (MX, SPF, DKIM, DMARC, MTA-STS) carry no tamper-evidence and DANE/TLSA is impossible until the zone is signed and validates.`,
         remediation:
-          "Enable DNSSEC at your DNS provider/registrar — it is one-click at most managed providers (Cloudflare, Route 53, Google Domains). After enabling, publish the DS at your registrar to complete the chain of trust.",
-      })
-      // infra.dnssec_dane_ready (derived): unsigned ⇒ DANE not possible.
-      findings.push({
-        id: "infra.dnssec_dane_ready.unsigned",
-        checkId: "infra.dnssec_dane_ready",
-        title: "DANE not possible (zone unsigned)",
-        severity: "info",
-        detail:
-          "TLSA records are only trustworthy in a DNSSEC-signed, validating zone. This zone is unsigned, so DANE cannot be relied on.",
-        remediation:
-          "Complete DNSSEC first (enable signing + publish the DS), then publish TLSA records per the DANE/TLSA check.",
+          "Enable DNSSEC at your DNS provider/registrar — it is one-click at most managed providers (Cloudflare, Route 53, Google Domains). After enabling, publish the DS at your registrar to complete the chain of trust; then TLSA/DANE becomes possible (see the DANE/TLSA check).",
       })
       return {
         findings,
@@ -230,6 +281,12 @@ export const dnssecCheck: Checker = {
           algorithms: [],
           ds_matches_dnskey: null,
           dane_ready: false,
+          dsPresent: null,
+          dnskeyAlgos: [],
+          dsDigestType: null,
+          dsAlgoMatch: null,
+          ...futureFieldDefaults(),
+          checkedAt: new Date().toISOString(),
         } satisfies DnssecResults,
       }
     }
@@ -311,6 +368,7 @@ export const dnssecCheck: Checker = {
     let dsPresent: boolean | null = null
     let dsDigestTypes: number[] = []
     let dsMatches: boolean | null = null
+    let dsDigestType: number | null = null
     const dsRes = await dig(domain, "DS")
     if (dsRes.error) {
       findings.push({
@@ -365,6 +423,10 @@ export const dnssecCheck: Checker = {
       }
 
       dsMatches = matched !== null
+      // The single dsDigestType column (spec §5): the digest type of the DS that matched a live
+      // KSK; on a mismatch, the strongest published type so the row still records what exists.
+      dsDigestType =
+        matched?.digestType ?? (dsDigestTypes.includes(2) ? 2 : (dsDigestTypes[0] ?? null))
       if (!matched) {
         findings.push({
           id: "infra.dnssec_ds_algo_match.mismatch",
@@ -478,6 +540,18 @@ export const dnssecCheck: Checker = {
         algorithms: uniqueAlgos,
         ds_matches_dnskey: dsMatches,
         dane_ready: dsPresent === true,
+        dsPresent,
+        dnskeyAlgos: keys.map((k) => ({
+          keyTag: k.keyTag,
+          flags: k.flags,
+          alg: k.algorithm,
+          algName: algName(k.algorithm),
+          bits: k.bits,
+        })),
+        dsDigestType,
+        dsAlgoMatch: dsMatches,
+        ...futureFieldDefaults(),
+        checkedAt: new Date().toISOString(),
       } satisfies DnssecResults,
     }
   },

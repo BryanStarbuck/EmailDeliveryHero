@@ -1,3 +1,6 @@
+import { Resolver } from "node:dns/promises"
+import { domainToASCII } from "node:url"
+import { readAppConfig, type TakeoverFingerprint } from "@shared/config-store"
 import {
   resolve4,
   resolve6,
@@ -7,7 +10,7 @@ import {
   resolveSoa,
   resolveTxt,
 } from "../dns-util"
-import type { Checker, CheckOutcome, Finding } from "../types"
+import type { Checker, CheckOutcome, DnsHealthConfig, Finding } from "../types"
 
 /**
  * DNS Zone & Nameserver Health (infra.dns_health). Audits the delegation plumbing every other
@@ -23,12 +26,41 @@ import type { Checker, CheckOutcome, Finding } from "../types"
 const CHECK_ID = "infra.dns_health"
 
 /**
- * The structured zone snapshot persisted at results["infra.dns_health"] (pm/checks/dns.mdx §5) —
- * what the DNS page's Zone panel renders. `parent_child_match` and `ttls` stay null until their
- * probes (authoritative parent query / dig TTL parsing) land; snake_case mirrors the spec YAML.
+ * One nameserver row of the zone snapshot (pm/checks/dns_health.mdx §5 `dns_nameservers`):
+ * resolved addresses, the /24+/48 diversity key, the NS-as-CNAME flag, and the (first-round,
+ * inferred) lame flag. `asn`/`authoritative`/`answers_tcp` stay for future probes.
+ */
+export interface DnsNameserverRow {
+  host: string
+  ips: string[]
+  /** "/24 (v4) + first-3-hextets (v6)" diversity key(s), "+"-joined; "" when unresolved. */
+  net_group: string
+  /** NS target is itself a CNAME (RFC 2181 §10.3 violation). */
+  is_cname: boolean
+  /** First-round inference: the NS resolves to no address (precise AA-bit probe is future). */
+  lame: boolean
+}
+
+/** One dangling record observed this run (pm/checks/dns_health.mdx §5 `dns_health_results.dangling`). */
+export interface DanglingEntry {
+  /** The owner name carrying the dangling reference. */
+  name: string
+  /** The record type holding the reference (CNAME / SPF / MX / NS). */
+  type: "CNAME" | "SPF" | "MX" | "NS"
+  /** The dead / unclaimed target. */
+  target: string
+  kind: "cname" | "include" | "mx" | "ns"
+}
+
+/**
+ * The structured zone snapshot persisted at results["infra.dns_health"] (pm/checks/dns.mdx §5 +
+ * pm/checks/dns_health.mdx §5 — the `dns_health_results` summary + `dns_nameservers` rows mapped
+ * onto today's per-run store) — what the DNS page's Zone panel renders. `parent_child_match` and
+ * `ttls` stay null until their probes (authoritative parent query / dig TTL parsing) land;
+ * snake_case mirrors the spec YAML.
  */
 export interface DnsHealthResults {
-  ns: { host: string; ips: string[] }[]
+  ns: DnsNameserverRow[]
   ns_count: number
   network_count: number
   parent_child_match: boolean | null
@@ -44,6 +76,12 @@ export interface DnsHealthResults {
   ttls: Record<string, number> | null
   wildcard: { detected: boolean; probe: string; types: string[] }
   cname_at_apex: boolean
+  /** Dangling CNAME / SPF-include / MX / sub-delegated-NS targets found this run. */
+  dangling: DanglingEntry[]
+  /** Apex TXT RRset size (infra.txt_bloat). */
+  txt_record_count: number
+  /** How many v=spf1 TXT records the apex publishes (>1 = permerror, infra.multi_txt_spf). */
+  spf_record_count: number
 }
 
 function emptySnapshot(): DnsHealthResults {
@@ -56,26 +94,36 @@ function emptySnapshot(): DnsHealthResults {
     ttls: null,
     wildcard: { detected: false, probe: "", types: [] },
     cname_at_apex: false,
+    dangling: [],
+    txt_record_count: 0,
+    spf_record_count: 0,
   }
 }
 
-interface Fingerprint {
-  provider: string
-  suffix: string
-}
-
-// Bundled subdomain-takeover fingerprints (config/takeover_fingerprints.json in the store).
-const TAKEOVER_FINGERPRINTS: Fingerprint[] = [
-  { provider: "Heroku", suffix: ".herokudns.com" },
-  { provider: "Heroku", suffix: ".herokuapp.com" },
-  { provider: "AWS S3", suffix: ".s3.amazonaws.com" },
-  { provider: "AWS CloudFront", suffix: ".cloudfront.net" },
-  { provider: "GitHub Pages", suffix: ".github.io" },
-  { provider: "Azure App Service", suffix: ".azurewebsites.net" },
-  { provider: "WordPress.com", suffix: ".wordpress.com" },
-  { provider: "Pantheon", suffix: ".pantheonsite.io" },
-  { provider: "SendGrid", suffix: ".sendgrid.net" },
+// Built-in subdomain-takeover fingerprints — the fallback when config.yaml is unreadable. The
+// live (seeded, admin-editable) list is `config.yaml → dns_health.fingerprints` (pm/checks/
+// dns_health.mdx §5 `takeover_fingerprints`), loaded once per run in run().
+const FALLBACK_FINGERPRINTS: TakeoverFingerprint[] = [
+  { provider: "Heroku", cname_suffix: ".herokudns.com", enabled: true },
+  { provider: "Heroku", cname_suffix: ".herokuapp.com", enabled: true },
+  { provider: "AWS S3", cname_suffix: ".s3.amazonaws.com", enabled: true },
+  { provider: "AWS CloudFront", cname_suffix: ".cloudfront.net", enabled: true },
+  { provider: "GitHub Pages", cname_suffix: ".github.io", enabled: true },
+  { provider: "Azure App Service", cname_suffix: ".azurewebsites.net", enabled: true },
+  { provider: "WordPress.com", cname_suffix: ".wordpress.com", enabled: true },
+  { provider: "Pantheon", cname_suffix: ".pantheonsite.io", enabled: true },
+  { provider: "SendGrid", cname_suffix: ".sendgrid.net", enabled: true },
 ]
+
+/** The admin-editable fingerprint list from config.yaml; built-in seed on any failure. */
+function loadFingerprints(): TakeoverFingerprint[] {
+  try {
+    const list = readAppConfig().dns_health.fingerprints.filter((f) => f.enabled)
+    return list.length > 0 ? list : FALLBACK_FINGERPRINTS
+  } catch {
+    return FALLBACK_FINGERPRINTS
+  }
+}
 
 // Probe-gated sub-checks: emit exactly one info each (never warning/critical) per acceptance #10.
 const FUTURE_SUBCHECKS = [
@@ -139,9 +187,9 @@ function netGroup(ip: string): string {
   return ip.split(".").slice(0, 3).join(".")
 }
 
-function matchFingerprint(target: string): string | null {
+function matchFingerprint(target: string, fingerprints: TakeoverFingerprint[]): string | null {
   const t = fqdnLower(target)
-  for (const fp of TAKEOVER_FINGERPRINTS) if (t.endsWith(fp.suffix)) return fp.provider
+  for (const fp of fingerprints) if (t.endsWith(fp.cname_suffix.toLowerCase())) return fp.provider
   return null
 }
 
@@ -186,8 +234,16 @@ async function classifyTarget(name: string): Promise<"live" | "dead" | "transien
   return "dead"
 }
 
-/** infra.ns_sanity (+ infra.ns_no_cname). Count, resolve, network-diversity, NS-as-CNAME. */
-async function checkNs(domain: string, findings: Finding[], snap: DnsHealthResults): Promise<void> {
+/**
+ * infra.ns_sanity (+ infra.ns_no_cname, first-round infra.ns_lame inference, and the operator's
+ * expected-NS drift alert). Count, resolve, network-diversity, NS-as-CNAME, allow-list compare.
+ */
+async function checkNs(
+  domain: string,
+  findings: Finding[],
+  snap: DnsHealthResults,
+  expectedNs: string[],
+): Promise<void> {
   const ns = await resolveNs(domain)
   if (ns.error) {
     findings.push(
@@ -212,10 +268,12 @@ async function checkNs(domain: string, findings: Finding[], snap: DnsHealthResul
   }
 
   const hosts = unique(ns.records.map(fqdnLower))
-  const nsInfos: { host: string; ips: string[]; groups: string[] }[] = []
+  const nsInfos: { host: string; ips: string[]; groups: string[]; isCname: boolean; dead: boolean }[] =
+    []
   for (const host of hosts) {
     const cname = await resolveCname(host)
-    if (!cname.error && cname.records.length > 0) {
+    const isCname = !cname.error && cname.records.length > 0
+    if (isCname) {
       findings.push({
         id: `infra.ns_no_cname.${host}`,
         checkId: CHECK_ID,
@@ -228,15 +286,74 @@ async function checkNs(domain: string, findings: Finding[], snap: DnsHealthResul
     }
     const [a, aaaa] = await Promise.all([resolve4(host), resolve6(host)])
     const ips = [...a.records, ...aaaa.records]
-    nsInfos.push({ host, ips, groups: unique(ips.map(netGroup)) })
+    // Dead = a definitive empty answer (not a transient failure) — the first-round lame inference.
+    const dead = !a.error && !aaaa.error && ips.length === 0
+    nsInfos.push({ host, ips, groups: unique(ips.map(netGroup)), isCname, dead })
   }
 
-  snap.ns = nsInfos.map((n) => ({ host: n.host, ips: n.ips }))
+  const resolvedCount = nsInfos.filter((n) => n.ips.length > 0).length
+
+  snap.ns = nsInfos.map((n) => ({
+    host: n.host,
+    ips: n.ips,
+    net_group: n.groups.join("+"),
+    is_cname: n.isCname,
+    lame: n.dead,
+  }))
   snap.ns_count = hosts.length
   snap.network_count = new Set(nsInfos.flatMap((n) => n.groups)).size
 
-  const resolvedCount = nsInfos.filter((n) => n.ips.length > 0).length
   const evidence = nsInfos.map((n) => `${n.host}=${n.ips.join("/") || "?"}`).join(", ")
+
+  // First-round infra.ns_lame inference (pm/checks/dns_health.mdx §3): an NS listed in the
+  // delegation that definitively resolves to no address is almost certainly lame — receivers whose
+  // resolver picks it get SERVFAIL and score SPF/DMARC as temperror. The precise per-server AA-bit
+  // probe stays a future info. Only fires when at least one sibling NS works; the all-dead case is
+  // the critical infra.ns_sanity below.
+  if (resolvedCount > 0) {
+    for (const n of nsInfos.filter((n) => n.dead)) {
+      findings.push({
+        id: `infra.ns_lame.${n.host}`,
+        checkId: CHECK_ID,
+        title: `Nameserver ${n.host} looks lame (does not resolve)`,
+        severity: "warning",
+        detail: `${n.host} is listed in ${domain}'s delegation but resolves to no A/AAAA address, so resolvers that pick it get no answer — SPF/DKIM/DMARC lookups intermittently fail (temperror) depending on which NS a receiver happens to query. (Inferred; the authoritative AA-bit probe is a future check.)`,
+        remediation: `Remove ${n.host} from the delegation at the registrar, or restore its A/AAAA records and zone config so it answers authoritatively for ${domain}.`,
+        evidence,
+      })
+    }
+  }
+
+  // Operator expected-NS allow-list (pm/checks/dns_health.mdx §4): flag drift when the published
+  // NS set differs from what the operator declared — an unnoticed delegation change is how
+  // hijacks and provider migrations silently break mail auth.
+  if (expectedNs.length > 0) {
+    const expected = new Set(expectedNs.map(fqdnLower))
+    const missing = [...expected].filter((h) => !hosts.includes(h))
+    const unexpected = hosts.filter((h) => !expected.has(h))
+    if (missing.length > 0 || unexpected.length > 0) {
+      findings.push({
+        id: "infra.ns_expected_drift",
+        checkId: CHECK_ID,
+        title: "NS set drifted from the expected allow-list",
+        severity: "warning",
+        detail: `${domain}'s published NS set differs from the configured expectation.${
+          missing.length > 0 ? ` Missing: ${missing.join(", ")}.` : ""
+        }${unexpected.length > 0 ? ` Unexpected: ${unexpected.join(", ")}.` : ""} An unnoticed delegation change can mean a provider migration went wrong — or a hijack.`,
+        remediation: `Either fix the registrar delegation back to the expected set (${[...expected].join(", ")}), or update the domain's expected-NS list in its DNS-health settings if this change was intentional.`,
+        evidence: `published: ${hosts.join(", ")}`,
+      })
+    } else {
+      findings.push({
+        id: "infra.ns_expected_drift",
+        checkId: CHECK_ID,
+        title: "NS set matches the expected allow-list",
+        severity: "ok",
+        detail: `All ${hosts.length} published nameservers match the configured expectation.`,
+        evidence: hosts.join(", "),
+      })
+    }
+  }
 
   if (hosts.length < 2 || resolvedCount === 0) {
     findings.push({
@@ -337,28 +454,9 @@ async function checkSoa(
     })
   }
 
-  if (!r.serial || r.serial === 0) {
-    findings.push({
-      id: "infra.soa_serial",
-      checkId: CHECK_ID,
-      title: "SOA serial is missing or zero",
-      severity: "warning",
-      detail:
-        "The SOA serial is zero/absent, so secondaries cannot detect zone changes and may serve stale auth records.",
-      remediation:
-        "Set a non-zero, advancing serial using the YYYYMMDDnn convention, e.g. 2026070101, and bump it on every zone edit so secondaries reload.",
-      evidence: `serial=${r.serial}`,
-    })
-  } else {
-    findings.push({
-      id: "infra.soa_serial",
-      checkId: CHECK_ID,
-      title: "SOA serial present",
-      severity: "ok",
-      detail: `SOA serial is ${r.serial}. Cross-run monotonic checks (serial went backwards / never advances after a record change) are performed by the audit store against the previous run.`,
-      evidence: `serial=${r.serial}`,
-    })
-  }
+  // infra.soa_serial (presence + cross-run monotonic compare) is emitted by checkSoaSerial after
+  // every sub-check has filled the snapshot, so the "unchanged despite a record change" nudge can
+  // diff the whole zone snapshot against the previous run.
 
   // MNAME (primary master) must resolve and ideally be in the NS set.
   const mname = fqdnLower(r.nsname)
@@ -429,6 +527,130 @@ async function checkSoa(
   }
 }
 
+/** True when any zone fact other than the serial differs between two snapshots. */
+function zoneChanged(prev: Partial<DnsHealthResults>, cur: DnsHealthResults): boolean {
+  const prevNs = (prev.ns ?? []).map((n) => n.host).sort()
+  const curNs = cur.ns.map((n) => n.host).sort()
+  if (prevNs.join(",") !== curNs.join(",")) return true
+  if ((prev.cname_at_apex ?? false) !== cur.cname_at_apex) return true
+  if ((prev.wildcard?.detected ?? false) !== cur.wildcard.detected) return true
+  if ((prev.txt_record_count ?? cur.txt_record_count) !== cur.txt_record_count) return true
+  const p = prev.soa
+  const c = cur.soa
+  if (!p || !c) return false
+  return (
+    p.mname !== c.mname ||
+    p.rname !== c.rname ||
+    p.refresh !== c.refresh ||
+    p.retry !== c.retry ||
+    p.expire !== c.expire ||
+    p.min_ttl !== c.min_ttl
+  )
+}
+
+/**
+ * infra.soa_serial (pm/checks/dns_health.mdx §3.8, acceptance #7): presence/non-zero, plus the
+ * cross-run monotonic compare against the previous audit's snapshot — a serial that went BACKWARDS
+ * is a warning (secondaries will ignore the newer zone), and a serial that did not advance even
+ * though other zone facts changed is an info nudge. Runs after every sub-check so the current
+ * snapshot is complete.
+ */
+function checkSoaSerial(
+  domain: string,
+  findings: Finding[],
+  snap: DnsHealthResults,
+  prev: Partial<DnsHealthResults> | undefined,
+): void {
+  const serial = snap.soa?.serial
+  if (snap.soa === null || serial === undefined) return // no SOA — no-delegation info already emitted.
+  if (!serial) {
+    findings.push({
+      id: "infra.soa_serial",
+      checkId: CHECK_ID,
+      title: "SOA serial is missing or zero",
+      severity: "warning",
+      detail:
+        "The SOA serial is zero/absent, so secondaries cannot detect zone changes and may serve stale auth records.",
+      remediation:
+        "Set a non-zero, advancing serial using the YYYYMMDDnn convention, e.g. 2026070101, and bump it on every zone edit so secondaries reload.",
+      evidence: `serial=${serial}`,
+    })
+    return
+  }
+  const prevSerial = prev?.soa?.serial
+  if (typeof prevSerial === "number" && prevSerial > 0 && serial < prevSerial) {
+    findings.push({
+      id: "infra.soa_serial",
+      checkId: CHECK_ID,
+      title: "SOA serial went backwards",
+      severity: "warning",
+      detail: `${domain}'s SOA serial regressed from ${prevSerial} (previous run) to ${serial}. Secondaries treat a lower serial as "no change" (or as a broken zone), so they keep serving the OLD records — an SPF/DKIM rotation may never propagate.`,
+      remediation: `Bump the serial above ${prevSerial} on the primary (use the YYYYMMDDnn or unix-time convention) and reload every secondary so the zone converges.`,
+      evidence: `previous=${prevSerial} current=${serial}`,
+    })
+    return
+  }
+  if (typeof prevSerial === "number" && serial === prevSerial && prev && zoneChanged(prev, snap)) {
+    findings.push({
+      id: "infra.soa_serial",
+      checkId: CHECK_ID,
+      title: "SOA serial did not advance despite a zone change",
+      severity: "info",
+      detail: `Zone records for ${domain} changed since the previous run, but the SOA serial is still ${serial}. Secondaries only reload when the serial advances, so they may keep serving the old records.`,
+      remediation:
+        "Bump the SOA serial on every zone edit (YYYYMMDDnn or unix-time convention) so secondaries pick up the change.",
+      evidence: `serial=${serial} (unchanged)`,
+    })
+    return
+  }
+  findings.push({
+    id: "infra.soa_serial",
+    checkId: CHECK_ID,
+    title: "SOA serial present",
+    severity: "ok",
+    detail:
+      typeof prevSerial === "number"
+        ? `SOA serial is ${serial} (previous run: ${prevSerial}) — monotonic.`
+        : `SOA serial is ${serial}. Cross-run monotonic compares start with the next run.`,
+    evidence: `serial=${serial}`,
+  })
+}
+
+/**
+ * infra.ns_parent_child — first-round drift approximation (pm/checks/dns_health.mdx §3):
+ * node:dns cannot query the parent (TLD) servers, so compare the effective NS set as seen by two
+ * independent public resolvers. A difference means a delegation change has not fully propagated
+ * (registrar updated but zone not, or vice versa). The authoritative parent-vs-child compare stays
+ * a future probe (its "not evaluated" info is still emitted). Any lookup failure = silent skip —
+ * never a false positive.
+ */
+async function checkParentChildDrift(domain: string, findings: Finding[]): Promise<void> {
+  const nsVia = async (server: string): Promise<string[] | null> => {
+    try {
+      const r = new Resolver({ timeout: 4000, tries: 1 })
+      r.setServers([server])
+      const records = await r.resolveNs(domain)
+      return unique(records.map(fqdnLower)).sort()
+    } catch {
+      return null
+    }
+  }
+  const [a, b] = await Promise.all([nsVia("8.8.8.8"), nsVia("1.1.1.1")])
+  if (!a || !b) return // resolver unreachable/blocked — the future-probe info already covers this.
+  if (a.join(",") !== b.join(",")) {
+    findings.push({
+      id: "infra.ns_parent_child",
+      checkId: CHECK_ID,
+      title: "NS set differs between public resolvers (delegation drift)",
+      severity: "warning",
+      detail: `Two public resolvers see different NS sets for ${domain} — 8.8.8.8: [${a.join(", ")}]; 1.1.1.1: [${b.join(", ")}]. This is the signature of a parent↔child delegation mismatch mid-propagation: some receivers resolve your auth records through nameservers you no longer (or do not yet) control. (Approximation; the authoritative parent-zone compare is a future probe.)`,
+      remediation:
+        "Update the registrar/parent delegation to match the in-zone NS RRset exactly (both directions), then wait out the old NS TTL.",
+      evidence: `8.8.8.8=[${a.join(",")}] 1.1.1.1=[${b.join(",")}]`,
+    })
+  }
+}
+
 /** infra.cname_at_apex. Any CNAME at the zone apex masks SOA/NS/MX/TXT. */
 async function checkApexCname(
   domain: string,
@@ -468,8 +690,15 @@ async function checkApexCname(
   }
 }
 
-/** Curated mail-relevant labels to scan for dangling CNAMEs, plus MX hosts. */
-async function danglingLabels(domain: string, selectors: string[]): Promise<string[]> {
+/**
+ * Curated mail-relevant labels to scan for dangling CNAMEs, plus MX hosts and the operator's
+ * extra-labels list (pm/checks/dns_health.mdx §4 per-domain config).
+ */
+async function danglingLabels(
+  domain: string,
+  selectors: string[],
+  extraLabels: string[],
+): Promise<string[]> {
   const base = [
     "mail",
     "smtp",
@@ -482,7 +711,13 @@ async function danglingLabels(domain: string, selectors: string[]): Promise<stri
     "mta-sts",
   ]
   const dkim = selectors.map((s) => `${s}._domainkey`)
-  const labels = [...base, ...dkim].map((l) => `${l}.${domain}`)
+  // Operator-supplied extras: a bare label goes under the domain; a name already ending in the
+  // domain is used as-is.
+  const extras = extraLabels
+    .map(fqdnLower)
+    .filter(Boolean)
+    .map((l) => (l === domain || l.endsWith(`.${domain}`) ? l : `${l}.${domain}`))
+  const labels = [...base, ...dkim].map((l) => `${l}.${domain}`).concat(extras)
   const mx = await resolveMx(domain)
   if (!mx.error) {
     for (const rec of mx.records) {
@@ -497,22 +732,26 @@ async function danglingLabels(domain: string, selectors: string[]): Promise<stri
 async function checkDanglingCname(
   domain: string,
   selectors: string[],
+  extraLabels: string[],
+  fingerprints: TakeoverFingerprint[],
   findings: Finding[],
+  snap: DnsHealthResults,
 ): Promise<void> {
-  const labels = await danglingLabels(domain, selectors)
+  const labels = await danglingLabels(domain, selectors, extraLabels)
   for (const label of labels) {
     const c = await resolveCname(label)
     if (c.error || c.records.length === 0) continue // no CNAME here (or transient) — nothing to flag.
     const { final, chain } = await followCname(label)
-    const fp = matchFingerprint(final)
+    const fp = matchFingerprint(final, fingerprints)
     const status = await classifyTarget(final)
     if (status === "transient") continue
     const chainStr = [...chain, final].join(" → ")
     if (status === "dead") {
+      snap.dangling.push({ name: label, type: "CNAME", target: final, kind: "cname" })
       findings.push({
         id: `infra.dangling_cname.${label}`,
         checkId: CHECK_ID,
-        title: `Dangling CNAME on ${label}${fp ? ` — ${fp} takeover risk` : ""}`,
+        title: `Dangling CNAME on ${label} — ${fp ? `${fp} ` : ""}takeover risk`,
         severity: "critical",
         detail: `${label} is a CNAME to ${final}, which does not resolve (NXDOMAIN).${
           fp
@@ -545,7 +784,11 @@ async function checkDanglingCname(
 }
 
 /** infra.dangling_include. SPF include:/redirect= and MX targets must resolve to a live service. */
-async function checkDanglingInclude(domain: string, findings: Finding[]): Promise<void> {
+async function checkDanglingInclude(
+  domain: string,
+  findings: Finding[],
+  snap: DnsHealthResults,
+): Promise<void> {
   const txt = await resolveTxt(domain)
   if (!txt.error) {
     const spf = txt.records.find((r) => r.toLowerCase().startsWith("v=spf1"))
@@ -557,6 +800,7 @@ async function checkDanglingInclude(domain: string, findings: Finding[]): Promis
         const target = fqdnLower(m[2])
         const status = await classifyTarget(target)
         if (status === "dead") {
+          snap.dangling.push({ name: domain, type: "SPF", target, kind: "include" })
           findings.push({
             id: `infra.dangling_include.${target}`,
             checkId: CHECK_ID,
@@ -593,6 +837,75 @@ async function checkDanglingInclude(domain: string, findings: Finding[]): Promis
   }
 }
 
+/**
+ * infra.dangling_ns (pm/checks/dns_health.mdx §2): discover sub-delegations under the
+ * mail-relevant labels (an NS RRset on a subdomain) and verify every delegated nameserver still
+ * resolves. A sub-delegated NS that is NXDOMAIN is a lame sub-delegation an attacker can register
+ * to control the whole subtree. First round resolves the NS hosts; the authoritative AA-bit probe
+ * per child server is a future check.
+ */
+async function checkDanglingNs(
+  domain: string,
+  selectors: string[],
+  extraLabels: string[],
+  findings: Finding[],
+  snap: DnsHealthResults,
+): Promise<void> {
+  const apexNs = new Set(snap.ns.map((n) => n.host))
+  // Only subdomains of the audited zone can be sub-delegations of it; MX hosts in other zones
+  // (collected by danglingLabels) are excluded.
+  const labels = (await danglingLabels(domain, selectors, extraLabels)).filter(
+    (l) => l !== domain && l.endsWith(`.${domain}`),
+  )
+  let subDelegations = 0
+  for (const label of labels) {
+    const ns = await resolveNs(label)
+    if (ns.error || ns.records.length === 0) continue // not sub-delegated (or transient).
+    const childNs = unique(ns.records.map(fqdnLower))
+    // The same NS set as the apex usually means the resolver answered from the parent zone — not
+    // an independent sub-delegation worth re-checking.
+    if (childNs.every((h) => apexNs.has(h))) continue
+    subDelegations++
+    const dead: string[] = []
+    for (const host of childNs) {
+      const [a, aaaa] = await Promise.all([resolve4(host), resolve6(host)])
+      if (!a.error && !aaaa.error && a.records.length === 0 && aaaa.records.length === 0)
+        dead.push(host)
+    }
+    if (dead.length > 0) {
+      for (const host of dead)
+        snap.dangling.push({ name: label, type: "NS", target: host, kind: "ns" })
+      findings.push({
+        id: `infra.dangling_ns.${label}`,
+        checkId: CHECK_ID,
+        title: `Lame sub-delegation on ${label} — takeover risk`,
+        severity: "warning",
+        detail: `${label} is delegated to ${childNs.join(", ")}, but ${dead.join(", ")} no longer resolve${dead.length === 1 ? "s" : ""} (NXDOMAIN). Whoever registers or claims a dead delegated nameserver answers for the WHOLE ${label} subtree — hosting phishing or sending mail under it.`,
+        remediation: `Remove the sub-delegation NS records on ${label}, or repoint them to live nameservers that answer authoritatively for it. Never leave a delegation pointing at a host that no longer exists.`,
+        evidence: `${label} NS ${childNs.join(", ")}; dead: ${dead.join(", ")}`,
+      })
+    } else {
+      findings.push({
+        id: `infra.dangling_ns.${label}`,
+        checkId: CHECK_ID,
+        title: `Sub-delegation on ${label} is healthy`,
+        severity: "ok",
+        detail: `${label} is delegated to ${childNs.join(", ")}; every delegated nameserver resolves. (Per-server authoritative probing is a future check.)`,
+        evidence: `${label} NS ${childNs.join(", ")}`,
+      })
+    }
+  }
+  if (subDelegations === 0) {
+    findings.push({
+      id: "infra.dangling_ns",
+      checkId: CHECK_ID,
+      title: "No sub-delegations found",
+      severity: "ok",
+      detail: `No independently delegated subdomains were discovered under the scanned mail-relevant labels of ${domain}, so there is no sub-delegation to go lame.`,
+    })
+  }
+}
+
 function detectTxtDuplicates(records: string[]): string[] {
   const dups: string[] = []
   const counts = new Map<string, number>()
@@ -606,7 +919,11 @@ function detectTxtDuplicates(records: string[]): string[] {
 }
 
 /** infra.multi_txt_spf + infra.txt_bloat. */
-async function checkTxt(domain: string, findings: Finding[]): Promise<void> {
+async function checkTxt(
+  domain: string,
+  findings: Finding[],
+  snap: DnsHealthResults,
+): Promise<void> {
   const txt = await resolveTxt(domain)
   if (txt.error) {
     findings.push(
@@ -620,6 +937,8 @@ async function checkTxt(domain: string, findings: Finding[]): Promise<void> {
   }
   const records = txt.records
   const spfRecs = records.filter((r) => r.toLowerCase().startsWith("v=spf1"))
+  snap.txt_record_count = records.length
+  snap.spf_record_count = spfRecs.length
   if (spfRecs.length >= 2) {
     findings.push({
       id: "infra.multi_txt_spf",
@@ -711,14 +1030,20 @@ async function checkWildcard(
   }
 }
 
-function emitFutureInfos(findings: Finding[]): void {
+function emitFutureInfos(findings: Finding[], skipAxfrProbe: boolean): void {
   for (const f of FUTURE_SUBCHECKS) {
+    // The operator can opt a domain out of the (future) AXFR probe (pm/checks/dns_health.mdx §4).
+    const skipped = f.id === "infra.zone_transfer" && skipAxfrProbe
     findings.push({
       id: f.id,
       checkId: CHECK_ID,
-      title: `${f.id} not evaluated (future probe)`,
+      title: skipped
+        ? `${f.id} not evaluated (skipped by domain settings)`
+        : `${f.id} not evaluated (future probe)`,
       severity: "info",
-      detail: `${f.what} is not performed in the first round — it needs a dig/authoritative-query, TCP/AXFR, or HTTP-signature capability not enabled yet. No problem is asserted; this row is informational only.`,
+      detail: skipped
+        ? `${f.what} is disabled for this domain (skip-AXFR-probe is set in its DNS-health settings). No problem is asserted; this row is informational only.`
+        : `${f.what} is not performed in the first round — it needs a dig/authoritative-query, TCP/AXFR, or HTTP-signature capability not enabled yet. No problem is asserted; this row is informational only.`,
       remediation: f.remediation,
     })
   }
@@ -730,20 +1055,32 @@ export const dnsHealthCheck: Checker = {
   async run(ctx): Promise<CheckOutcome> {
     const findings: Finding[] = []
     const snap = emptySnapshot()
-    const domain = fqdnLower(ctx.domain)
+    // IDN domains are normalized to their punycode A-label before any query (spec §3 edge cases).
+    const domain = fqdnLower(domainToASCII(ctx.domain.trim()) || ctx.domain)
     if (!domain) return { findings }
 
     const selectors = ctx.dkimSelectors ?? []
+    const cfg: DnsHealthConfig = {
+      extraLabels: ctx.dnsHealth?.extraLabels ?? [],
+      expectedNs: ctx.dnsHealth?.expectedNs ?? [],
+      skipAxfrProbe: ctx.dnsHealth?.skipAxfrProbe ?? false,
+    }
+    // The previous run's zone snapshot — powers the cross-run SOA-serial monotonic compare.
+    const prev = ctx.previousResults?.[CHECK_ID] as Partial<DnsHealthResults> | undefined
 
     // Ordered, but independent — run each sub-check with its own graceful degradation.
-    await checkNs(domain, findings, snap)
+    await checkNs(domain, findings, snap, cfg.expectedNs)
+    await checkParentChildDrift(domain, findings)
     await checkSoa(domain, findings, snap)
     await checkApexCname(domain, findings, snap)
-    await checkDanglingCname(domain, selectors, findings)
-    await checkDanglingInclude(domain, findings)
-    await checkTxt(domain, findings)
+    await checkDanglingCname(domain, selectors, cfg.extraLabels, loadFingerprints(), findings, snap)
+    await checkDanglingInclude(domain, findings, snap)
+    await checkDanglingNs(domain, selectors, cfg.extraLabels, findings, snap)
+    await checkTxt(domain, findings, snap)
     await checkWildcard(domain, findings, snap)
-    emitFutureInfos(findings)
+    // Last: the serial compare diffs the completed snapshot against the previous run's.
+    checkSoaSerial(domain, findings, snap, prev)
+    emitFutureInfos(findings, cfg.skipAxfrProbe)
 
     return { findings, results: snap }
   },

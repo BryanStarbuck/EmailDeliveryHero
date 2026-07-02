@@ -253,7 +253,7 @@ schedule:
 ```
 
 **Runtime state** is *not* mixed into user intent — the scheduler keeps its telemetry in
-`scheduler.json` next to it (`lastRunAt`, `lastTrigger: "scheduled" | "manual"`); `nextRunAt` is
+`scheduler-state.json` next to it (`lastRunAt`, `lastTrigger: "in-process" | "os" | "manual"`); `nextRunAt` is
 always **computed** from `times` × `weekdays`, never persisted. Scheduled runs write ordinary run
 records to `audits.json` / `runs.json` exactly like manual runs.
 
@@ -544,7 +544,7 @@ The Settings page is correct when **all** of the following hold:
    narrow the weekdays; the status block shows computed next run, last run + trigger source, and
    the covered-domain count; "Run a scheduled check now" fires
    `POST /api/scheduler/run` `{ force: true }`; intent persists to the `schedule:` block of
-   `config.yaml`, runtime state to `scheduler.json`, and a scheduled run audits only domains with
+   `config.yaml`, runtime state to `scheduler-state.json`, and a scheduled run audits only domains with
    `scheduleEnabled: true`. All of §3 is **all-users**.
 5. **Notifications** (§4) lets each user set their own desktop/email/severity/mode preferences
    (per-user block keyed by OAF `sub`), while the shared webhook and SMTP channels are admin-only;
@@ -571,7 +571,7 @@ The Settings page is correct when **all** of the following hold:
   add its row to the relevant §, its key to the config model, and its line to the Permissions table
   (mark admin-only fields). §3 (Scheduling) is the authoritative spec for the /settings/scheduling
   tab — default OFF, times-of-day (multiple per day), weekday chips, config.yaml schedule: block,
-  scheduler.json runtime state, and the /api/scheduler endpoints; ./scheduled_checks.mdx keeps the
+  scheduler-state.json runtime state, and the /api/scheduler endpoints; ./scheduled_checks.mdx keeps the
   OS-level (launchd/cron/systemd/schtasks) detail and the noted enhancements (interval cadence,
   IANA timezone, domain subsets) and must not contradict §3 on defaults (OFF) or permissions
   (all-users). The six check categories stay catalogued in ./spam_checks.mdx — Settings only

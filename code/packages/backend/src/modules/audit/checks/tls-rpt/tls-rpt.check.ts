@@ -1,3 +1,4 @@
+import { deriveTlsRptFindings } from "@module/reports/derive-findings"
 import { resolve4, resolve6, resolveMx, resolveTxt } from "../dns-util"
 import type { Checker, Finding } from "../types"
 
@@ -60,7 +61,11 @@ function isExternal(target: string, audited: string): boolean {
   return t !== a && !t.endsWith(`.${a}`)
 }
 
-/** Future sub-checks: registered but non-scoring, never warning/critical (RFC 8460 §7 of the spec). */
+/**
+ * The TTL sub-check stays a registered non-scoring future stub; report ingestion is now REAL —
+ * `infra.tls_rpt_reports_ingested` is fed from the ingested TLS-RPT reports (pm/emails.mdx §5) by
+ * deriveTlsRptFindings, appended alongside this stub in run().
+ */
 function futureFindings(domain: string): Finding[] {
   return [
     {
@@ -70,15 +75,6 @@ function futureFindings(domain: string): Finding[] {
       severity: "info",
       detail: `The TTL of _smtp._tls.${domain} is not inspected in the first round — node:dns omits it and dig +short does not return it.`,
       remediation: `Keep the TTL of the _smtp._tls.${domain} TXT record between 3600 and 86400 seconds (too low causes excess lookups, too high slows fixes).`,
-    },
-    {
-      id: "infra.tls_rpt_reports_ingested",
-      checkId: CHECK_ID,
-      title: "TLS report ingestion (future)",
-      severity: "info",
-      detail:
-        "Actual RFC 8460 JSON aggregate reports are not yet collected or parsed; failure volume and trend (starttls-not-supported, certificate-host-mismatch, validation-failure) will be surfaced once a report mailbox or HTTPS collector is deployed.",
-      remediation: `Stand up a tls-reports@${domain} mailbox or an HTTPS collector to receive the daily application/tlsrpt+gzip reports; parsing and trend analysis ships in a future round.`,
     },
   ]
 }
@@ -176,7 +172,10 @@ export const tlsRptCheck: Checker = {
   async run(ctx): Promise<Finding[]> {
     const domain = ctx.domain
     const name = `_smtp._tls.${domain}`
-    const future = futureFindings(domain)
+    // The TTL future stub + the REAL report-fed sub-check (pm/emails.mdx §5): ingested TLS-RPT
+    // reports for this domain roll into infra.tls_rpt_reports_ingested (warning on failures,
+    // info at zero / when nothing is ingested yet / when ingestion is disabled).
+    const future = [...futureFindings(domain), ...deriveTlsRptFindings(ctx.domainId ?? "", domain)]
 
     const { records, error, empty } = await resolveTxt(name)
     if (error) {

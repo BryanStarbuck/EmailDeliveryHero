@@ -1,5 +1,5 @@
-import { isValidTimezone, systemTimezone } from "./schedule-config.store"
 import { type ScheduleConfig, WEEKDAYS, type Weekday } from "./schedule.types"
+import { isValidTimezone, systemTimezone } from "./schedule-config.store"
 
 /**
  * Next-run computation (pm/scheduled_checks.mdx acceptance criterion 5: scheduled runs fire in the
@@ -94,7 +94,8 @@ export function computeNextRun(
     .sort((a, b) => a[0] * 60 + a[1] - (b[0] * 60 + b[1]))
   if (times.length === 0) return null
   // Weekly with no weekdays selected behaves like daily (normalization treats empty as every day).
-  const days: Weekday[] = cfg.cadence === "weekly" && cfg.weekdays.length > 0 ? cfg.weekdays : WEEKDAYS
+  const days: Weekday[] =
+    cfg.cadence === "weekly" && cfg.weekdays.length > 0 ? cfg.weekdays : WEEKDAYS
 
   // Scan today + the next 8 calendar days in the target tz — always finds a weekly slot.
   for (let offset = 0; offset <= 8; offset++) {

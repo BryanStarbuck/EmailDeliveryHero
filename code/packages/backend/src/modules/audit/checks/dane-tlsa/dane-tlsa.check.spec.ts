@@ -1,0 +1,191 @@
+import type { DigAnswer } from "../dns-util"
+import { parseDigAnswer } from "../dns-util"
+import { analyzeHost, type HostObservation, parseTlsa } from "./dane-tlsa.check"
+
+const SHA256 = "a".repeat(64)
+const SHA512 = "b".repeat(128)
+
+/** Build a TLSA answer RR the way `digAnswer` returns them. */
+const rr = (rdata: string, ttl = 3600): DigAnswer => ({
+  name: "_25._tcp.mail.example.com",
+  ttl,
+  type: "TLSA",
+  rdata,
+})
+
+const observe = (over: Partial<HostObservation> = {}): HostObservation => ({
+  host: "mail.example.com",
+  priority: 10,
+  canonical: "mail.example.com",
+  cnamed: false,
+  tlsa: { records: [] },
+  dnssec: { signed: true, error: false },
+  checkedAt: "2026-07-01T12:00:00Z",
+  ...over,
+})
+
+const byPrefix = <T extends { id: string }>(findings: T[], prefix: string): T[] =>
+  findings.filter((f) => f.id.startsWith(prefix))
+
+describe("parseDigAnswer", () => {
+  it("parses owner, ttl and rdata from a full-answer line", () => {
+    const out = parseDigAnswer(
+      `;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n_25._tcp.mail.example.com. 3600 IN TLSA 3 1 1 ${SHA256}\n`,
+      "TLSA",
+    )
+    expect(out).toEqual([
+      {
+        name: "_25._tcp.mail.example.com",
+        ttl: 3600,
+        type: "TLSA",
+        rdata: `3 1 1 ${SHA256}`,
+      },
+    ])
+  })
+
+  it("skips CNAME-chase lines and comments", () => {
+    const out = parseDigAnswer(
+      `mx.example.com. 300 IN CNAME mail.example.com.\n_25._tcp.mail.example.com. 60 IN TLSA 3 1 1 ${SHA256}\n`,
+      "TLSA",
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0].ttl).toBe(60)
+  })
+})
+
+describe("parseTlsa", () => {
+  it("parses usage/selector/mtype/data and carries the TTL", () => {
+    const [t] = parseTlsa([rr(`3 1 1 ${SHA256}`, 1800)])
+    expect(t).toMatchObject({ usage: 3, selector: 1, mtype: 1, data: SHA256, ttl: 1800 })
+  })
+
+  it("joins dig's space-chunked digest and lower-cases it", () => {
+    const upper = SHA256.toUpperCase()
+    const [t] = parseTlsa([rr(`3 1 1 ${upper.slice(0, 32)} ${upper.slice(32)}`)])
+    expect(t.data).toBe(SHA256)
+  })
+
+  it("drops non-numeric garbage rows", () => {
+    expect(parseTlsa([rr("not a tlsa record")])).toHaveLength(0)
+  })
+})
+
+describe("analyzeHost", () => {
+  it("healthy 3 1 1 x2 on a signed zone: only ok findings and a fully-populated row (AC2)", () => {
+    const { findings, row, summary } = analyzeHost(
+      observe({ tlsa: { records: [rr(`3 1 1 ${SHA256}`), rr(`3 1 1 ${"c".repeat(64)}`)] } }),
+    )
+    expect(findings.every((f) => f.severity === "ok")).toBe(true)
+    expect(summary.usableDane).toBe(true)
+    expect(row).toEqual({
+      mxHost: "mail.example.com",
+      mxPreference: 10,
+      dnssecSigned: true,
+      tlsaPresent: true,
+      tlsaRecords: [
+        { usage: 3, selector: 1, mtype: 1, data: SHA256, ttl: 3600 },
+        { usage: 3, selector: 1, mtype: 1, data: "c".repeat(64), ttl: 3600 },
+      ],
+      paramsOk: true,
+      recommended311: true,
+      certMatch: null,
+      rolloverReady: true,
+      starttlsOffered: null,
+      probeError: null,
+      checkedAt: "2026-07-01T12:00:00Z",
+    })
+  })
+
+  it("TLSA on an unsigned zone is critical dane_without_dnssec (AC3)", () => {
+    const { findings } = analyzeHost(
+      observe({
+        tlsa: { records: [rr(`3 1 1 ${SHA256}`)] },
+        dnssec: { signed: false, error: false },
+      }),
+    )
+    const f = byPrefix(findings, "infra.dane_without_dnssec")[0]
+    expect(f.severity).toBe("critical")
+    expect(f.remediation).toContain("DS record")
+  })
+
+  it("usage 0/1 (PKIX) is a critical params finding (AC4)", () => {
+    const { findings } = analyzeHost(observe({ tlsa: { records: [rr(`1 1 1 ${SHA256}`)] } }))
+    const f = byPrefix(findings, "infra.dane_tlsa_params")[0]
+    expect(f.severity).toBe("critical")
+    expect(f.remediation).toContain("3 1 1")
+  })
+
+  it("usable-but-not-recommended params (2 1 2) is info", () => {
+    const { findings } = analyzeHost(observe({ tlsa: { records: [rr(`2 1 2 ${SHA512}`)] } }))
+    expect(byPrefix(findings, "infra.dane_tlsa_params")[0].severity).toBe("info")
+    expect(byPrefix(findings, "infra.dane_digest_length")).toHaveLength(0)
+  })
+
+  it("a wrong-length digest for the matching type is critical (AC7)", () => {
+    const { findings } = analyzeHost(
+      observe({ tlsa: { records: [rr(`3 1 1 ${"a".repeat(40)}`)] } }),
+    )
+    const f = byPrefix(findings, "infra.dane_digest_length")[0]
+    expect(f.severity).toBe("critical")
+    expect(f.remediation).toContain("64 hex")
+  })
+
+  it("exactly one TLSA record is a rollover warning (AC6) and rolloverReady=false", () => {
+    const { findings, row } = analyzeHost(observe({ tlsa: { records: [rr(`3 1 1 ${SHA256}`)] } }))
+    const f = byPrefix(findings, "infra.dane_rollover")[0]
+    expect(f.severity).toBe("warning")
+    expect(f.remediation).toContain("BEFORE renewing")
+    expect(row.rolloverReady).toBe(false)
+  })
+
+  it("evaluates TTL sanity from the RR TTL: >24h is a warning, ≤1h is ok", () => {
+    const long = analyzeHost(observe({ tlsa: { records: [rr(`3 1 1 ${SHA256}`, 172800)] } }))
+    expect(byPrefix(long.findings, "infra.dane_ttl_sane")[0].severity).toBe("warning")
+    const sane = analyzeHost(observe({ tlsa: { records: [rr(`3 1 1 ${SHA256}`, 300)] } }))
+    expect(byPrefix(sane.findings, "infra.dane_ttl_sane")[0].severity).toBe("ok")
+    const zero = analyzeHost(observe({ tlsa: { records: [rr(`3 1 1 ${SHA256}`, 0)] } }))
+    expect(byPrefix(zero.findings, "infra.dane_ttl_sane")[0].severity).toBe("warning")
+  })
+
+  it("SERVFAIL on a signed zone is a critical validation error with probeError set (AC10)", () => {
+    const { findings, row, summary } = analyzeHost(
+      observe({ tlsa: { records: [], error: "SERVFAIL" } }),
+    )
+    const f = byPrefix(findings, "infra.dane_tlsa_present")[0]
+    expect(f.severity).toBe("critical")
+    expect(f.detail).toContain("validation failure")
+    expect(row.probeError).toBe("SERVFAIL")
+    expect(summary.lookupError).toBe(true)
+  })
+
+  it("a transient lookup error on an unsigned zone stays info, never a false critical", () => {
+    const { findings } = analyzeHost(
+      observe({
+        tlsa: { records: [], error: "timeout" },
+        dnssec: { signed: false, error: false },
+      }),
+    )
+    expect(byPrefix(findings, "infra.dane_tlsa_present")[0].severity).toBe("info")
+  })
+
+  it("MX CNAME to an unsigned target is a critical name-alignment finding", () => {
+    const { findings } = analyzeHost(
+      observe({
+        cnamed: true,
+        canonical: "mx.other.net",
+        tlsa: { records: [rr(`3 1 1 ${SHA256}`)] },
+        dnssec: { signed: false, error: false },
+      }),
+    )
+    const f = byPrefix(findings, "infra.dane_name_alignment")[0]
+    expect(f.severity).toBe("critical")
+  })
+
+  it("no TLSA on an unsigned zone is only a warning (DANE impossible until signed)", () => {
+    const { findings, row } = analyzeHost(observe({ dnssec: { signed: false, error: false } }))
+    expect(byPrefix(findings, "infra.dane_dnssec_prereq")[0].severity).toBe("warning")
+    expect(row.tlsaPresent).toBe(false)
+    expect(row.paramsOk).toBeNull()
+    expect(row.recommended311).toBeNull()
+  })
+})

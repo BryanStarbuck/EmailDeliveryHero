@@ -2,6 +2,45 @@
 
 export type Severity = "ok" | "info" | "warning" | "critical"
 
+/** One declared forwarder / mailing list a domain sends through (pm/checks/arc.mdx §4). */
+export interface ArcForwarderConfig {
+  /** Human label, e.g. "acme-users Google Group". */
+  label: string
+  /** The probe target that forwards to us. */
+  forwardAddress: string
+  /** Expected ARC signing domain (d=); absent until configured or observed from a sample. */
+  signerDomain?: string
+  /** Expected ARC signing selector (s=). */
+  signerSelector?: string
+  /** Where the forwarded copy lands for capture (future swaks probe). */
+  probeMailbox?: string
+}
+
+/** Per-domain ARC / forwarding configuration (pm/checks/arc.mdx §4 per-domain config inputs). */
+export interface ArcConfig {
+  /** Operator-declared "this domain sends through forwarders/lists" flag. */
+  usesForwarding: boolean
+  forwarders: ArcForwarderConfig[]
+}
+
+/** Per-domain BIMI configuration (pm/checks/bimi.mdx §4 per-domain config inputs). */
+export interface BimiDomainConfig {
+  /** BIMI selectors to audit beyond "default" (each checked at <selector>._bimi.<domain>). */
+  selectors: string[]
+  /** Raw sample message (headers suffice) — the checker reads its BIMI-Selector: header. */
+  sampleMessage?: string
+}
+
+/** Per-domain DNS-health expectations (pm/checks/dns_health.mdx §4 per-domain config inputs). */
+export interface DnsHealthConfig {
+  /** Extra subdomain labels to include in the dangling-CNAME scan beyond the mail defaults. */
+  extraLabels: string[]
+  /** Optional NS allow-list; the checker flags drift when the published NS set differs. */
+  expectedNs: string[]
+  /** Skip the (future) AXFR zone-transfer probe for this domain. */
+  skipAxfrProbe: boolean
+}
+
 export interface MonitoredDomain {
   id: string
   name: string
@@ -10,6 +49,12 @@ export interface MonitoredDomain {
   sendingIps: string[]
   /** Whether this domain is included in recurring scheduled checks (ANDed with the global switch). */
   scheduleEnabled: boolean
+  /** ARC / forwarding config (pm/checks/arc.mdx §4). Absent = no forwarding declared. */
+  arc?: ArcConfig
+  /** BIMI config (pm/checks/bimi.mdx §4). Absent = only the default selector is audited. */
+  bimi?: BimiDomainConfig
+  /** DNS-health expectations (pm/checks/dns_health.mdx §4). Absent = defaults only. */
+  dnsHealth?: DnsHealthConfig
   addedBy: string
   createdAt: string
   updatedAt: string
@@ -23,6 +68,16 @@ export interface Finding {
   detail: string
   remediation?: string
   evidence?: string
+  /**
+   * Regression flag (pm/engineering.mdx §8): true when this problem newly appeared — or worsened
+   * in severity — versus the domain's previous run.
+   */
+  isNew?: boolean
+  /**
+   * Evidence provenance (pm/emails.mdx §7.2/§9): "report" when the finding derives from an
+   * ingested DMARC-aggregate/TLS-RPT report email — rendered with a "from reports" chip.
+   */
+  source?: "report"
 }
 
 /** One external rua/ruf destination and its `_report._dmarc` authorization state. */
@@ -34,7 +89,7 @@ export interface DmarcExternalAuth {
   authorized: boolean
 }
 
-/** The parsed DMARC observation (`results.dmarc`, pm/checks/dmarc.mdx §5). */
+/** The parsed DMARC observation — §5's `record:` block (pm/checks/dmarc.mdx). */
 export interface DmarcResults {
   query_name: string
   record_found: boolean
@@ -55,6 +110,68 @@ export interface DmarcResults {
   is_enforcing: boolean
   external_reports_authorized: boolean | null
   external_report_auth: DmarcExternalAuth[]
+}
+
+/** One captured external-tool invocation (`dmarc.tool_runs[]`, pm/checks/dmarc.mdx §3/§5). */
+export interface DmarcToolRun {
+  tool: string
+  command: string
+  started_at: string
+  duration_ms: number
+  exit_code: number | null
+  output_format: "json" | "text"
+  parsed: unknown | null
+  error: string | null
+}
+
+/** One per-sub-test row (`dmarc.tests[]`, pm/checks/dmarc.mdx §5). */
+export interface DmarcTestRow {
+  id: string
+  title: string
+  result: "pass" | "fail" | "warn" | "info"
+  detail?: string
+  evidence?: string
+  fix?: string
+}
+
+/**
+ * The whole `dmarc:` run-YAML section (`results.dmarc`, pm/checks/dmarc.mdx §5): worst-severity
+ * status, the parsed observation, the shell-out provenance, the per-test rows, and the derived
+ * §9 problem-state ids. Runs persisted before this shape may hold the bare record instead.
+ */
+export interface DmarcSection {
+  status: Severity
+  record: DmarcResults
+  tool_runs: DmarcToolRun[]
+  tests: DmarcTestRow[]
+  problem_states: string[]
+}
+
+/**
+ * The per-run ARC observation (`results.arc`, pm/checks/arc.mdx §5). First round is advisory-only,
+ * so the sample-derived fields stay null until a forwarded message sample is captured (FUTURE).
+ */
+export interface ArcResults {
+  applicable: boolean | null
+  forwardingRisk: boolean | null
+  forwarders: {
+    label: string
+    forwardAddress: string
+    signerDomain: string | null
+    signerSelector: string | null
+    selectorResolves: boolean | null
+  }[]
+  messageSampleId: string | null
+  chainPresent: boolean | null
+  chainLength: number | null
+  cvResult: string | null
+  sealValid: boolean | null
+  amsValid: boolean | null
+  instancesOk: boolean | null
+  oldestPass: boolean | null
+  instances: unknown[] | null
+  probeSentAt: string | null
+  notes: string | null
 }
 
 /** One parsed apex-level SPF term (mechanism or redirect/exp modifier). */
@@ -125,6 +242,21 @@ export interface DkimSelectorResult {
   first_seen_at: string | null
 }
 
+/** One external tool invocation captured by a run (`results.dkim.tool_runs[]`, dkim.mdx §3/§5). */
+export interface DkimToolRun {
+  tool: string
+  /** The exact argv string with every input argument inlined — paste-and-reproduce. */
+  command: string
+  started_at: string
+  duration_ms: number
+  /** null when the tool never ran (missing binary / spawn failure / killed). */
+  exit_code: number | null
+  output_format: "json" | "text"
+  parsed: unknown
+  /** null, or the failure string (timeout, ENOENT with the brew install hint, bad JSON…). */
+  error: string | null
+}
+
 /** The parsed DKIM observation (`results.dkim`, pm/checks/dkim.mdx §5). */
 export interface DkimResults {
   selectors_configured: string[]
@@ -133,6 +265,8 @@ export interface DkimResults {
   wildcard_shadow: boolean
   duplicate_keys: { key_sha256: string; seen_on: string[] }[]
   selectors: DkimSelectorResult[]
+  /** Absent on runs persisted before the tool-runs capture landed. */
+  tool_runs?: DkimToolRun[]
 }
 
 // ---- DNS & Infrastructure snapshots (pm/checks/dns.mdx §5 — snake_case mirrors the YAML) -------
@@ -166,9 +300,29 @@ export interface ReverseDnsResults {
   ips: ReverseDnsIpResult[]
 }
 
+/** One dangling record observed this run (pm/checks/dns_health.mdx §5 `dns_health_results.dangling`). */
+export interface DnsDanglingEntry {
+  /** The owner name carrying the dangling reference. */
+  name: string
+  /** The record type holding the reference. */
+  type: "CNAME" | "SPF" | "MX" | "NS"
+  /** The dead / unclaimed target. */
+  target: string
+  kind: "cname" | "include" | "mx" | "ns"
+}
+
 /** The zone snapshot (`results["infra.dns_health"]`); null fields = probe not run yet. */
 export interface DnsHealthResults {
-  ns: { host: string; ips: string[] }[]
+  ns: {
+    host: string
+    ips: string[]
+    /** "/24 + /48" diversity key(s); absent on pre-upgrade runs. */
+    net_group?: string
+    /** NS target is itself a CNAME (RFC 2181 §10.3 violation). */
+    is_cname?: boolean
+    /** First-round inference: the NS resolves to no address. */
+    lame?: boolean
+  }[]
   ns_count: number
   network_count: number
   parent_child_match: boolean | null
@@ -184,9 +338,29 @@ export interface DnsHealthResults {
   ttls: Record<string, number> | null
   wildcard: { detected: boolean; probe: string; types: string[] }
   cname_at_apex: boolean
+  /** Dangling CNAME / SPF-include / MX / sub-delegated-NS targets; absent on pre-upgrade runs. */
+  dangling?: DnsDanglingEntry[]
+  /** Apex TXT RRset size; absent on pre-upgrade runs. */
+  txt_record_count?: number
+  /** How many v=spf1 TXT records the apex publishes (>1 = permerror); absent on pre-upgrade runs. */
+  spf_record_count?: number
 }
 
-/** The DNSSEC state (`results["infra.dnssec"]`); null = could not be determined this run. */
+/** One apex DNSKEY, parsed (pm/checks/dnssec.mdx §5 `dnskey_algos` element). */
+export interface DnssecDnskeyAlgo {
+  keyTag: number
+  flags: number
+  alg: number
+  algName: string
+  bits: number | null
+}
+
+/**
+ * The DNSSEC state (`results["infra.dnssec"]`); null = could not be determined this run.
+ * The snake_case fields are the DNS-page Zone-panel one-liner (pm/checks/dns.mdx §5); the
+ * camelCase fields are the `dnssec_check_results` row (pm/checks/dnssec.mdx §5) — optional
+ * because runs persisted before that schema shipped lack them.
+ */
 export interface DnssecResults {
   signed: boolean
   ds_present: boolean | null
@@ -194,6 +368,128 @@ export interface DnssecResults {
   algorithms: number[]
   ds_matches_dnskey: boolean | null
   dane_ready: boolean
+  dsPresent?: boolean | null
+  validates?: boolean | null
+  bogus?: boolean
+  dnskeyAlgos?: DnssecDnskeyAlgo[]
+  dsDigestType?: number | null
+  dsAlgoMatch?: boolean | null
+  nsec3?: boolean
+  nsec3Iterations?: number | null
+  nsec3Optout?: boolean | null
+  rrsigEarliestExpiry?: string | null
+  resolverUsed?: string | null
+  checkedAt?: string
+}
+
+/**
+ * One external-tool invocation the DNS & Infrastructure category made this run
+ * (`results["infra.tool_runs"]` ⇔ the run file's `dns_infra.tool_runs[]`, pm/checks/dns.mdx
+ * §3.1/§5). `command` is the verbatim argv string; a timeout stores `exit_code: null` and a
+ * non-null `error`. Append-only within a run — the evidence trail, never the verdict.
+ */
+export interface InfraToolRun {
+  tool: string
+  command: string
+  started_at: string
+  duration_ms: number
+  exit_code: number | null
+  output_format: "json" | "text"
+  parsed: unknown
+  error: string | null
+}
+
+/** One TLSA RR observed at `_25._tcp.<mx>` (pm/checks/dane_tlsa.mdx §5 `tlsa_records`). */
+export interface DaneTlsaRecord {
+  usage: number
+  selector: number
+  mtype: number
+  data: string
+  ttl: number | null
+}
+
+/**
+ * One row per MX host of the DANE audit (`results["infra.dane_tlsa"][]`, pm/checks/dane_tlsa.mdx
+ * §5 `checkResults.dane[]` — camelCase exactly as the spec's JSON example). `certMatch` and
+ * `starttlsOffered` stay null until the FUTURE :25 STARTTLS probe is enabled.
+ */
+export interface DaneHostResult {
+  mxHost: string
+  mxPreference: number | null
+  dnssecSigned: boolean
+  tlsaPresent: boolean
+  tlsaRecords: DaneTlsaRecord[]
+  paramsOk: boolean | null
+  recommended311: boolean | null
+  certMatch: boolean | null
+  rolloverReady: boolean
+  starttlsOffered: boolean | null
+  probeError: string | null
+  checkedAt: string
+}
+
+export type DaneTlsaResults = DaneHostResult[]
+
+// ---- Content scoring (pm/checks/content_scoring.mdx §5 — snake_case mirrors the backend) -------
+
+/** One fired SpamAssassin rule (`rules_fired[]`). */
+export interface ContentRuleFired {
+  rule: string
+  score: number
+  description: string
+}
+
+/** The scoring result for one run (`results["content.scoring"]` — the content_score_results row). */
+export interface ContentScoreResults {
+  schema_version: 1
+  sample_id: string
+  from_header: string | null
+  subject: string | null
+  sample_uploaded_at: string
+  total_score: number
+  threshold: number
+  passed: boolean
+  rules_fired: ContentRuleFired[]
+  sa_version: string | null
+  engine: string
+  checked_at: string
+}
+
+// ---- BIMI (pm/checks/bimi.mdx §5 — mirrors the backend BimiResults payload) --------------------
+
+/**
+ * One selector's structured BIMI observation — the JSON analog of one `bimi_check_results` row.
+ * `svgValid`/`vmcValid`/`vmcNotAfter`/`vmcIssuer` stay null until the future HTTPS/VMC round.
+ */
+export interface BimiSelectorResult {
+  selector: string
+  present: boolean
+  rawRecord: string | null
+  svgUrl: string | null
+  vmcUrl: string | null
+  dmarcEnforcing: boolean
+  svgValid: boolean | null
+  vmcValid: boolean | null
+  vmcNotAfter: string | null
+  vmcIssuer: string | null
+  checkedAt: string
+}
+
+/** `results["content.bimi"]`: the default-selector row plus every audited selector's row. */
+export interface BimiResults extends BimiSelectorResult {
+  selectors: BimiSelectorResult[]
+}
+
+/** One stored sample message (GET/PUT /audit/content-sample/:domainId). */
+export interface ContentSampleView {
+  id: string
+  domain_id: string
+  uploaded_at: string
+  from_header: string | null
+  subject: string | null
+  active: boolean
+  byte_size: number
+  raw_path: string | null
 }
 
 export interface AuditResult {
@@ -209,9 +505,15 @@ export interface AuditResult {
   status: Severity
   findings: Finding[]
   counts: Record<Severity, number>
+  /**
+   * How many findings in this run are NEW problems versus the previous run (pm/engineering.mdx §8
+   * regression detection). 0 on a domain's first run; absent on pre-history persisted data.
+   */
+  newProblemCount?: number
   /** Structured per-check payloads keyed by checker id (e.g. results.dmarc, results.spf). */
   results?: {
-    dmarc?: DmarcResults
+    dmarc?: DmarcSection | DmarcResults
+    arc?: ArcResults
     spf?: SpfResults
     dkim?: DkimResults
     blacklist?: BlacklistRunResults
@@ -219,6 +521,10 @@ export interface AuditResult {
     "infra.reverse_dns"?: ReverseDnsResults
     "infra.dns_health"?: DnsHealthResults
     "infra.dnssec"?: DnssecResults
+    "infra.dane_tlsa"?: DaneTlsaResults
+    "infra.tool_runs"?: InfraToolRun[]
+    "content.scoring"?: ContentScoreResults
+    "content.bimi"?: BimiResults
   } & Record<string, unknown>
 }
 
@@ -308,6 +614,27 @@ export interface BlacklistDiff {
   first_run: boolean
 }
 
+/** One captured tool invocation (pm/checks/blacklists.mdx §10.4 locked shape). */
+export interface BlacklistToolRun {
+  tool: string
+  command: string
+  started_at: string
+  duration_ms: number
+  exit_code: 0 | 1
+  output_format: "json" | "text"
+  parsed: unknown
+  error: string | null
+}
+
+/** One per-sub-test row of the run's `tests[]` (§12) — pass and fail alike. */
+export interface BlacklistTest {
+  id: string
+  title: string
+  result: "pass" | "fail" | "warn" | "info"
+  evidence: string
+  fix?: string
+}
+
 export interface BlacklistSummary {
   zones_enabled: number
   pairs_queried: number
@@ -327,13 +654,21 @@ export interface BlacklistRunResults {
   audit_id: string
   ran_at: string
   duration_ms: number
+  /** Worst post-weighting severity (§12 `status`) — optional on runs persisted before it existed. */
+  status?: Severity
   resolver: { mode: "system" | "custom"; server: string | null; refusals_detected: boolean }
   targets: { ips: BlacklistIpTarget[]; domains: BlacklistDomainTarget[] }
   zone_health: BlacklistZoneHealth[]
   results: BlacklistZoneResult[]
+  /** §10.4 audit trail — optional on runs persisted before it existed. */
+  tool_runs?: BlacklistToolRun[]
+  /** §12 per-sub-test rows — optional on runs persisted before it existed. */
+  tests?: BlacklistTest[]
   positive_reputation: BlacklistPositiveReputation
   provider_portals: ProviderPortal[]
   summary: BlacklistSummary
+  /** §16 states detected this run — optional on runs persisted before it existed. */
+  problem_states?: ProblemStateId[]
   diff: BlacklistDiff
 }
 
@@ -372,4 +707,87 @@ export interface BlacklistRegistryInfo {
   zones: BlocklistZoneRow[]
   dead_zones: Array<{ zone: string; name: string; died?: string | number; reason?: string }>
   aggregators: Array<{ name: string; url: string; description: string }>
+}
+
+// ---- Report-email ingestion (pm/emails.mdx §7.1 — mirrors backend modules/reports) -------------
+
+/** One merged per-source row of the expandable DMARC details table (pm/emails.mdx §7.1). */
+export interface DmarcSourceRow {
+  sourceIp: string
+  count: number
+  disposition: string
+  spfEvaluated: string
+  dkimEvaluated: string
+  spfAligned: boolean
+  dkimAligned: boolean
+  dmarcPass: boolean
+  headerFrom: string
+  envelopeSpfDomain: string
+  dkimSigningDomains: string[]
+  reporters: string[]
+}
+
+/** The DMARC-aggregate rollup over the rolling window (pm/emails.mdx §4.6). */
+export interface DmarcReportAggregate {
+  reportCount: number
+  reporters: string[]
+  window: { begin: string; end: string }
+  totalMessages: number
+  /** Dual-aligned volume — §12's "DMARC-aligned pass" figure. */
+  alignedPassMessages: number
+  dmarcPassMessages: number
+  passRatePct: number
+  policyPublished: {
+    domain: string
+    p: string
+    sp: string | null
+    adkim: string
+    aspf: string
+    pct: string | null
+    np: string | null
+  } | null
+  rows: DmarcSourceRow[]
+  totalReportsStored: number
+}
+
+/** One reporter/day row of the TLS-RPT details table (pm/emails.mdx §7.1). */
+export interface TlsRptReporterDay {
+  reporterOrg: string
+  reportDate: string
+  policyType: string
+  successCount: number
+  failureCount: number
+  failureDetails: { resultType: string; count: number }[]
+}
+
+export interface TlsRptReportAggregate {
+  reportCount: number
+  reporters: string[]
+  window: { begin: string; end: string }
+  totalSuccess: number
+  totalFailure: number
+  policyTypes: string[]
+  rows: TlsRptReporterDay[]
+  totalReportsStored: number
+}
+
+/** GET /domains/:id/reports — the per-domain Reports view (pm/emails.mdx §7.1). */
+export interface DomainReportsView {
+  domainId: string
+  domain: string
+  ingestionEnabled: boolean
+  windowDays: number
+  lastIngestAt: string | null
+  dmarc: DmarcReportAggregate
+  tlsrpt: TlsRptReportAggregate
+  findings: Finding[]
+}
+
+/** What one "Ingest now" pass did (POST /domains/:id/reports/ingest). */
+export interface ReportIngestSummary {
+  scanned: number
+  ingested: number
+  duplicates: number
+  skipped: number
+  errors: string[]
 }

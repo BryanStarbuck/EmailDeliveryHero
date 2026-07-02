@@ -1,0 +1,4 @@
+# Pre-commit (pm/engineering.mdx §1/§9): Biome on staged files via lint-staged.
+# The git repo root is the EmailDeliveryHero directory; the workspace (and lint-staged config)
+# lives in code/, so hop in before running.
+cd code && pnpm exec lint-staged

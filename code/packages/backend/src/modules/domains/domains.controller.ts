@@ -37,8 +37,8 @@ export class DomainsController {
 
   @Delete(":id")
   @HttpCode(204)
-  @ApiOperation({ summary: "Stop monitoring a domain" })
-  remove(@Param("id") id: string): void {
-    this.domains.remove(id)
+  @ApiOperation({ summary: "Stop monitoring a domain (also removes its audit history)" })
+  async remove(@Param("id") id: string): Promise<void> {
+    await this.domains.remove(id)
   }
 }

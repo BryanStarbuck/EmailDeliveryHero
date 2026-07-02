@@ -1,8 +1,10 @@
+import type { AppConfigFile, UserPreferences } from "@shared/config-store"
+
 /**
- * The Settings config model (pm/settings.mdx "Settings config model"). Global, admin-owned
- * settings and per-user preference blocks all live in a single human-readable
- * ~/.email_delivery_hero/config.yaml under the state dir — no database. Per-user blocks are keyed
- * by the OpenAuthFederated `sub` (the literal "default" for the logged-out user).
+ * The Settings surface types (pm/settings.mdx). Persistence is the hierarchical config store of
+ * pm/storage.mdx (shared/config-store.ts): global, admin-owned settings live in
+ * <state dir>/config.yaml; each user's own preferences live in users/<email>/config.yaml (the
+ * literal "default" folder for the logged-out user). No database.
  */
 
 /** The six check categories (pm/spam_checks.mdx) that §2 "Enabled categories" toggles. */
@@ -21,86 +23,6 @@ export type NotificationMode = "immediate" | "daily"
 export type Theme = "system" | "light" | "dark"
 export type Density = "comfortable" | "compact"
 
-/** §4 — one user's own notification preferences (all-users editable, own block only). */
-export interface UserNotificationPrefs {
-  desktop: boolean
-  email: boolean
-  minSeverity: NotificationSeverity
-  mode: NotificationMode
-}
-
-/** §8 — per-user, cosmetic only. */
-export interface UserAppearance {
-  theme: Theme
-  density: Density
-}
-
-/** The full on-disk config.yaml shape (pm/settings.mdx config model). */
-export interface AppConfig {
-  checks: {
-    /** §2 — which of the six categories run (admin-only). */
-    enabled: CheckCategory[]
-    spf: { maxLookups: number }
-    dkim: { defaultSelectors: string[] }
-    dnsbl: { zones: string[] }
-    /** 0–100 score → colour: score >= green → green; green > score >= amber → amber; below → red. */
-    thresholds: { green: number; amber: number }
-    /** Points deducted per finding severity — feeds score derivation. */
-    weights: { critical: number; warning: number; info: number }
-  }
-  /** §3 — summary here; the full scheduling config lives in pm/scheduled_checks.mdx. */
-  schedule: { enabled: boolean; cadence: string }
-  notifications: {
-    /** Admin-only shared channel. */
-    webhook: { enabled: boolean; url: string }
-    /** Admin-only shared channel (sent via the configured SMTP relay / swaks). */
-    smtp: { host: string; port: number; from: string }
-    /** Per-user preferences, keyed by OpenAuthFederated sub ("default" when logged out). */
-    users: Record<string, UserNotificationPrefs>
-  }
-  storage: { retentionDays: number }
-  tools: { preferCli: boolean; resolvers: string[]; timeoutMs: number }
-  /** §7 — display of the OAF-enforced access policy; the edit is applied on the OAF side. */
-  access: { allowedDomains: string[] }
-  appearance: { users: Record<string, UserAppearance> }
-}
-
-export const DEFAULT_USER_NOTIFICATIONS: UserNotificationPrefs = {
-  desktop: true,
-  email: false,
-  minSeverity: "warning",
-  mode: "immediate",
-}
-
-export const DEFAULT_USER_APPEARANCE: UserAppearance = {
-  theme: "system",
-  density: "comfortable",
-}
-
-/** Defaults straight from the pm/settings.mdx config-model example. */
-export const DEFAULT_CONFIG: AppConfig = {
-  checks: {
-    enabled: ["spf", "dkim", "dmarc", "dnsbl", "dns_infra"],
-    spf: { maxLookups: 10 },
-    dkim: { defaultSelectors: ["google", "selector1", "selector2", "k1"] },
-    dnsbl: {
-      zones: ["zen.spamhaus.org", "b.barracudacentral.org", "bl.spamcop.net"],
-    },
-    thresholds: { green: 90, amber: 70 },
-    weights: { critical: 40, warning: 15, info: 0 },
-  },
-  schedule: { enabled: true, cadence: "0 */6 * * *" },
-  notifications: {
-    webhook: { enabled: false, url: "" },
-    smtp: { host: "", port: 587, from: "edh@whitehatengineering.com" },
-    users: {},
-  },
-  storage: { retentionDays: 90 },
-  tools: { preferCli: false, resolvers: [], timeoutMs: 5000 },
-  access: { allowedDomains: ["whitehatengineering.com", "act3ai.com"] },
-  appearance: { users: {} },
-}
-
 /** Detected status of one Brew/CLI tool (§6 — probed at runtime, never persisted). */
 export interface ToolStatus {
   found: boolean
@@ -114,20 +36,43 @@ export interface ToolsDetection {
   detectedAt: string
 }
 
-/** What GET /api/settings returns: global config + the caller's per-user block + tool status. */
+/**
+ * What GET /api/settings returns: the resolved state dir, the global/admin-owned config blocks
+ * (everything is *visible* to all users — only writes are gated, pm/settings.mdx "Permissions"),
+ * the caller's own per-user block, and the last tool probe.
+ */
 export interface SettingsView {
-  /** The resolved state dir (default ~/.email_delivery_hero equivalent, or EDH_STATE_DIR). */
+  /** The active state dir (default ~/.email_delivery_hero, or EDH_STATE_DIR). Display only. */
   stateDir: string
-  /** Global/admin-owned config. Other users' per-user maps are stripped for privacy. */
-  config: Omit<AppConfig, "notifications" | "appearance"> & {
-    notifications: Omit<AppConfig["notifications"], "users">
-    appearance: Record<string, never>
+  config: {
+    checks: AppConfigFile["checks"]
+    schedule: AppConfigFile["schedule"]
+    /** Shared channels only (admin-only to edit); per-user prefs live under `me`. */
+    notifications: AppConfigFile["notifications"]
+    storage: AppConfigFile["storage"]
+    tools: AppConfigFile["tools"]
+    access: AppConfigFile["access"]
   }
-  /** The caller's own per-user block (created with defaults on first read). */
+  /** The caller's own per-user block (defaults when the user has never saved). */
   me: {
+    /** OpenAuthFederated `sub` (`user_…`), or the literal "default" when logged out. */
     sub: string
-    notifications: UserNotificationPrefs
-    appearance: UserAppearance
+    email: string
+    notifications: UserPreferences["notifications"]
+    appearance: { theme: Theme; density: Density }
   }
   toolStatus: ToolsDetection | null
+}
+
+/** POST /api/settings/notifications/test — what happened on each channel. */
+export interface TestNotificationResult {
+  desktop: { attempted: boolean; detail: string }
+  email: { attempted: boolean; ok: boolean; detail: string }
+  webhook: { attempted: boolean; ok: boolean; detail: string }
+}
+
+/** POST /api/settings/reset outcome. */
+export interface ResetResult {
+  scope: "audit_history" | "app"
+  removed: string[]
 }

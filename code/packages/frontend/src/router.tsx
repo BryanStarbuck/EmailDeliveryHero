@@ -8,17 +8,20 @@ import { AuditsPage } from "@/pages/audits/AuditsPage"
 import { BlacklistDomainPage } from "@/pages/blacklists/BlacklistDomainPage"
 import { BlacklistStatePage } from "@/pages/blacklists/BlacklistStatePage"
 import { BlacklistsPage } from "@/pages/blacklists/BlacklistsPage"
+import { ContentScoringPage } from "@/pages/domains/ContentScoringPage"
 import { DkimPage } from "@/pages/domains/DkimPage"
 import { DkimProblemPage } from "@/pages/domains/DkimProblemPage"
 import { DmarcPage } from "@/pages/domains/DmarcPage"
 import { DmarcProblemPage } from "@/pages/domains/DmarcProblemPage"
 import { DnsPage } from "@/pages/domains/DnsPage"
 import { DnsProblemPage } from "@/pages/domains/DnsProblemPage"
+import { DomainReportsPage } from "@/pages/domains/DomainReportsPage"
 import { DomainsPage } from "@/pages/domains/DomainsPage"
 import { RunDetailPage } from "@/pages/domains/RunDetailPage"
 import { SpfPage } from "@/pages/domains/SpfPage"
 import { SpfProblemPage } from "@/pages/domains/SpfProblemPage"
 import { ReportsPage } from "@/pages/reports/ReportsPage"
+import { ScheduledChecksPage } from "@/pages/scheduler/ScheduledChecksPage"
 import { SettingsPage } from "@/pages/settings/SettingsPage"
 import { SignInPage } from "@/pages/sign-in/SignInPage"
 import { SsoCallbackPage } from "@/pages/sso-callback/SsoCallbackPage"
@@ -79,9 +82,14 @@ const domainsRoute = createRoute({
   path: "/domains",
   component: DomainsPage,
   // `?edit=<domainId>` opens that domain's editor on arrival — the dashboard row-menu's
-  // "Edit domain" action (pm/dashboard.mdx §4.3).
-  validateSearch: (search: Record<string, unknown>): { edit?: string } =>
-    typeof search.edit === "string" && search.edit ? { edit: search.edit } : {},
+  // "Edit domain" action (pm/dashboard.mdx §4.3). `?new` opens the Add-domain form over the
+  // list (pm/domains.mdx §1 — the /domains/new "`?new` side panel" form).
+  validateSearch: (search: Record<string, unknown>): { edit?: string; new?: boolean } => ({
+    ...(typeof search.edit === "string" && search.edit ? { edit: search.edit } : {}),
+    ...("new" in search && search.new !== undefined && search.new !== false
+      ? { new: true }
+      : {}),
+  }),
 })
 const runDetailRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
@@ -95,6 +103,8 @@ const runReportRoute = createRoute({
   component: RunDetailPage,
 })
 // The per-technology full pages (pm/checks/*.mdx §6.2) and their problem-state drill-downs.
+// DMARC is run-scoped (pm/checks/dmarc.mdx §6.2): the canonical route carries :runId and the
+// bare /dmarc path is the newest-run alias (same page, resolved to the domain's latest run).
 const dmarcRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/domains/$id/dmarc",
@@ -105,16 +115,37 @@ const dmarcProblemRoute = createRoute({
   path: "/domains/$id/dmarc/$problemId",
   component: DmarcProblemPage,
 })
-// The DNS & Infrastructure full page (pm/checks/dns.mdx §6.2) and its problem drill-downs.
+const runDmarcRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/runs/$runId/dmarc",
+  component: DmarcPage,
+})
+const runDmarcProblemRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/runs/$runId/dmarc/$problemId",
+  component: DmarcProblemPage,
+})
+// The DNS & Infrastructure category run page (pm/checks/dns.mdx §6.2): run-scoped at
+// /domains/:id/runs/:runId/dns, with the newest-run alias /domains/:id/dns, plus the
+// problem-state drill-downs at /domains/:id/dns/:problemId.
 const dnsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/domains/$id/dns",
+  component: DnsPage,
+})
+const dnsRunRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/runs/$runId/dns",
   component: DnsPage,
 })
 const dnsProblemRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/domains/$id/dns/$problemId",
   component: DnsProblemPage,
+  // `?run=<runId>` scopes the drill-down's live data to the run being viewed (pm/checks/dns.mdx §7).
+  validateSearch: (search: Record<string, unknown>): { run?: string } => ({
+    ...(typeof search.run === "string" && search.run ? { run: search.run } : {}),
+  }),
 })
 const dkimRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
@@ -124,6 +155,18 @@ const dkimRoute = createRoute({
 const dkimProblemRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/domains/$id/dkim/$problemId",
+  component: DkimProblemPage,
+})
+// Run-scoped DKIM category page + drill-downs (pm/checks/dkim.mdx §6.2): everything rendered comes
+// from that specific run; /domains/$id/dkim above stays the newest-run alias of the same page.
+const dkimRunRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/runs/$runId/dkim",
+  component: DkimPage,
+})
+const dkimRunProblemRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/runs/$runId/dkim/$problemId",
   component: DkimProblemPage,
 })
 const spfRoute = createRoute({
@@ -136,6 +179,13 @@ const spfProblemRoute = createRoute({
   path: "/domains/$id/spf/$problemId",
   component: SpfProblemPage,
 })
+// The Content-scoring full page (pm/checks/content_scoring.mdx §4): score gauge, fired-rule rows,
+// and the Sample-message upload panel with the Re-score action.
+const contentScoringRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/content",
+  component: ContentScoringPage,
+})
 const auditsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/audits",
@@ -147,6 +197,18 @@ const blacklistsRoute = createRoute({
   component: BlacklistsPage,
 })
 // The Blacklists technology full page and its problem-state deep dives (pm/checks/blacklists.mdx §13/§16).
+// The run-scoped page (pm/checks/blacklists.mdx §13.2): /domains/$id/runs/$runId/blacklists with the
+// newest-run alias /domains/$id/blacklists; /blacklists/$domain is the left-bar redirect shorthand.
+const domainBlacklistsRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/blacklists",
+  component: BlacklistDomainPage,
+})
+const runBlacklistsRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/runs/$runId/blacklists",
+  component: BlacklistDomainPage,
+})
 const blacklistDomainRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/blacklists/$domain",
@@ -162,6 +224,20 @@ const reportsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/reports",
   component: ReportsPage,
+})
+// The per-domain ingested-report-emails view (pm/emails.mdx §7.1): DMARC aggregate (rua) +
+// TLS-RPT reports turned into problems-and-fixes, with the per-source-IP details table.
+const domainReportsRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/reports",
+  component: DomainReportsPage,
+})
+// The Scheduled Checks configuration page (pm/scheduled_checks.mdx) — opened by the dashboard
+// chevron next to the scheduled-checks toggle.
+const scheduledChecksRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/scheduled-checks",
+  component: ScheduledChecksPage,
 })
 const settingsIndexRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
@@ -184,17 +260,27 @@ const routeTree = rootRoute.addChildren([
     runReportRoute,
     dmarcRoute,
     dmarcProblemRoute,
+    runDmarcRoute,
+    runDmarcProblemRoute,
     dnsRoute,
+    dnsRunRoute,
     dnsProblemRoute,
     dkimRoute,
     dkimProblemRoute,
+    dkimRunRoute,
+    dkimRunProblemRoute,
     spfRoute,
     spfProblemRoute,
+    contentScoringRoute,
     auditsRoute,
     blacklistsRoute,
+    domainBlacklistsRoute,
+    runBlacklistsRoute,
     blacklistDomainRoute,
     blacklistStateRoute,
     reportsRoute,
+    domainReportsRoute,
+    scheduledChecksRoute,
     settingsIndexRoute,
     settingsSectionRoute,
   ]),

@@ -3,6 +3,7 @@ import { Logger, ValidationPipe } from "@nestjs/common"
 import { ConfigService } from "@nestjs/config"
 import { NestFactory } from "@nestjs/core"
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger"
+import type { NestExpressApplication } from "@nestjs/platform-express"
 import { AllExceptionsFilter } from "@shared/all-exceptions.filter"
 import { appLogger, LOG_DIR } from "@shared/logging"
 import helmet from "helmet"
@@ -10,7 +11,15 @@ import { AppModule } from "./app.module"
 import { buildAuthFrontend } from "./modules/auth/auth-frontend"
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true })
+  // bodyParser: false → re-registered below with a raised limit, because sample-message uploads
+  // (raw .eml source, pm/checks/content_scoring.mdx §4/§5) can legitimately be several MB; the
+  // sample store rejects anything over its own 10 MB cap.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bufferLogs: true,
+    bodyParser: false,
+  })
+  app.useBodyParser("json", { limit: "12mb" })
+  app.useBodyParser("urlencoded", { extended: true, limit: "12mb" })
   app.useLogger(appLogger)
   // Catch every exception thrown from any route and log it to error.err (pm/errors.mdx §3).
   app.useGlobalFilters(new AllExceptionsFilter())

@@ -6,8 +6,21 @@ import { readJson } from "@shared/json-store"
 import { logInfo } from "@shared/logging"
 import { resolveStateDir } from "@shared/state-dir"
 import { readYaml, writeYaml } from "@shared/yaml-store"
+import type {
+  ArcConfig,
+  BimiDomainConfig,
+  DnsHealthConfig,
+  DomainReputationConfig,
+} from "../audit/checks/types"
 import type { MonitoredDomain } from "./domain.types"
-import type { CreateDomainDto, UpdateDomainDto } from "./dto/domain.dto"
+import type {
+  ArcConfigDto,
+  BimiConfigDto,
+  CreateDomainDto,
+  DnsHealthConfigDto,
+  DomainReputationConfigDto,
+  UpdateDomainDto,
+} from "./dto/domain.dto"
 
 /**
  * The monitored-domain store. Persists the full list as a single human-readable YAML file
@@ -19,6 +32,18 @@ export class DomainsService {
   private readonly dir = resolveStateDir()
   private readonly file = join(this.dir, "domains.yaml")
   private readonly legacyFile = join(this.dir, "domains.json")
+
+  /**
+   * Listeners invoked after a domain is removed. Removing a domain also removes its audit history
+   * under the state dir (pm/domains.mdx §4.2); the audit store registers here so this service never
+   * has to depend on it (it already depends on us).
+   */
+  private readonly removeListeners: ((domainId: string) => void | Promise<void>)[] = []
+
+  /** Register a callback that runs whenever a monitored domain is removed. */
+  onRemoved(listener: (domainId: string) => void | Promise<void>): void {
+    this.removeListeners.push(listener)
+  }
 
   private load(): MonitoredDomain[] {
     // Prefer the YAML store; fall back to (and adopt) a legacy JSON store from an earlier install.
@@ -67,6 +92,12 @@ export class DomainsService {
       sendingIps: normalizeList(dto.sendingIps),
       // Default a new domain onto the recurring schedule (pm/domains.mdx §4.1).
       scheduleEnabled: dto.scheduleEnabled ?? true,
+      ...(dto.arc ? { arc: normalizeArc(dto.arc) } : {}),
+      ...(dto.bimi ? { bimi: normalizeBimi(dto.bimi) } : {}),
+      ...(dto.dnsHealth ? { dnsHealth: normalizeDnsHealth(dto.dnsHealth) } : {}),
+      ...(dto.domainReputation
+        ? { domainReputation: normalizeDomainReputation(dto.domainReputation) }
+        : {}),
       addedBy,
       createdAt: now,
       updatedAt: now,
@@ -89,6 +120,14 @@ export class DomainsService {
       label: dto.label !== undefined ? dto.label.trim() : current.label,
       scheduleEnabled:
         dto.scheduleEnabled !== undefined ? dto.scheduleEnabled : current.scheduleEnabled,
+      arc: dto.arc !== undefined ? normalizeArc(dto.arc) : current.arc,
+      bimi: dto.bimi !== undefined ? normalizeBimi(dto.bimi) : current.bimi,
+      dnsHealth:
+        dto.dnsHealth !== undefined ? normalizeDnsHealth(dto.dnsHealth) : current.dnsHealth,
+      domainReputation:
+        dto.domainReputation !== undefined
+          ? normalizeDomainReputation(dto.domainReputation)
+          : current.domainReputation,
       updatedAt: new Date().toISOString(),
     }
     domains[idx] = updated
@@ -96,12 +135,14 @@ export class DomainsService {
     return updated
   }
 
-  remove(id: string): void {
+  async remove(id: string): Promise<void> {
     const domains = this.load()
     const next = domains.filter((d) => d.id !== id)
     if (next.length === domains.length) throw new NotFoundException(`Domain ${id} not found`)
     this.save(next)
     logInfo(`Removed monitored domain ${id}`, "DomainsService")
+    // Cascade: let registered stores (the audit history) drop everything they hold for this domain.
+    for (const listener of this.removeListeners) await listener(id)
   }
 }
 
@@ -109,6 +150,77 @@ export class DomainsService {
 function normalizeList(list: string[] | undefined): string[] {
   if (!list) return []
   return [...new Set(list.map((s) => s.trim().toLowerCase()).filter(Boolean))]
+}
+
+/**
+ * Normalize the operator-entered BIMI config (pm/checks/bimi.mdx §4): trim/lower-case/de-dup the
+ * selector list (dropping the implicit "default", which is always audited), trim the sample
+ * message, and collapse an entirely-empty config to undefined so domains.yaml stays clean.
+ */
+function normalizeBimi(bimi: BimiConfigDto): BimiDomainConfig | undefined {
+  const selectors = normalizeList(bimi.selectors).filter((s) => s !== "default")
+  const sampleMessage = (bimi.sampleMessage ?? "").trim()
+  if (selectors.length === 0 && sampleMessage === "") return undefined
+  return { selectors, ...(sampleMessage ? { sampleMessage } : {}) }
+}
+
+/**
+ * Normalize the operator-entered ARC / forwarding config (pm/checks/arc.mdx §4): trim every field,
+ * lower-case DNS names, drop forwarder rows missing their required label/address, and strip empty
+ * optional fields so domains.yaml stays clean.
+ */
+function normalizeArc(arc: ArcConfigDto): ArcConfig {
+  const forwarders = (arc.forwarders ?? [])
+    .map((f) => ({
+      label: f.label.trim(),
+      forwardAddress: f.forwardAddress.trim(),
+      ...(f.signerDomain?.trim() ? { signerDomain: f.signerDomain.trim().toLowerCase() } : {}),
+      ...(f.signerSelector?.trim() ? { signerSelector: f.signerSelector.trim() } : {}),
+      ...(f.probeMailbox?.trim() ? { probeMailbox: f.probeMailbox.trim() } : {}),
+    }))
+    .filter((f) => f.label !== "" && f.forwardAddress !== "")
+  return { usesForwarding: arc.usesForwarding, forwarders }
+}
+
+/**
+ * Normalize the operator-entered domain-registration-reputation config
+ * (pm/checks/domain_reputation.mdx §4): trim/lower-case/de-dup the brand strings, clamp absent
+ * threshold overrides away, and collapse an entirely-default config to undefined so domains.yaml
+ * stays clean.
+ */
+function normalizeDomainReputation(
+  dto: DomainReputationConfigDto,
+): DomainReputationConfig | undefined {
+  const brands = normalizeList(dto.brands)
+  const config: DomainReputationConfig = {
+    brands,
+    ...(dto.expiryWarnDays !== undefined ? { expiryWarnDays: dto.expiryWarnDays } : {}),
+    ...(dto.ageWarnDays !== undefined ? { ageWarnDays: dto.ageWarnDays } : {}),
+    ...(dto.registrantPublicIntentional !== undefined
+      ? { registrantPublicIntentional: dto.registrantPublicIntentional }
+      : {}),
+    ...(dto.cousinScan !== undefined ? { cousinScan: dto.cousinScan } : {}),
+  }
+  const allDefault =
+    brands.length === 0 &&
+    dto.expiryWarnDays === undefined &&
+    dto.ageWarnDays === undefined &&
+    !dto.registrantPublicIntentional &&
+    !dto.cousinScan
+  return allDefault ? undefined : config
+}
+
+/**
+ * Normalize the operator-entered DNS-health expectations (pm/checks/dns_health.mdx §4): trim /
+ * lower-case / de-dup both name lists and collapse an entirely-default config to undefined so
+ * domains.yaml stays clean.
+ */
+function normalizeDnsHealth(cfg: DnsHealthConfigDto): DnsHealthConfig | undefined {
+  const extraLabels = normalizeList(cfg.extraLabels).map((l) => l.replace(/\.$/, ""))
+  const expectedNs = normalizeList(cfg.expectedNs).map((n) => n.replace(/\.$/, ""))
+  const skipAxfrProbe = cfg.skipAxfrProbe ?? false
+  if (extraLabels.length === 0 && expectedNs.length === 0 && !skipAxfrProbe) return undefined
+  return { extraLabels, expectedNs, skipAxfrProbe }
 }
 
 /**

@@ -26,6 +26,12 @@ export interface Finding {
    * when a previous run exists to diff against.
    */
   isNew?: boolean
+  /**
+   * Evidence provenance (pm/emails.mdx §9): "report" when the finding derives from an ingested
+   * DMARC-aggregate/TLS-RPT report email rather than a live DNS lookup/probe. The run-detail UI
+   * renders these with a "from reports" chip (pm/emails.mdx §7.2).
+   */
+  source?: "report"
 }
 
 /** A DKIM public-key hash observed on another monitored domain (latest audit). */
@@ -60,9 +66,100 @@ export interface ArcConfig {
   forwarders: ArcForwarderConfig[]
 }
 
+/**
+ * Per-domain DNS-health expectations/config (pm/checks/dns_health.mdx §4/§5 — the
+ * `dns_health_expectations` table mapped onto the domain store as `dnsHealth`).
+ */
+export interface DnsHealthConfig {
+  /** Extra subdomain labels to include in the dangling-CNAME scan beyond the mail defaults. */
+  extraLabels: string[]
+  /** Optional NS allow-list; the checker flags drift when the published NS set differs. */
+  expectedNs: string[]
+  /** Skip the (future) AXFR zone-transfer probe for this domain. */
+  skipAxfrProbe: boolean
+}
+
+/**
+ * Per-domain mail-routing expectations (pm/checks/mx_routing.mdx §4/§5 — the `mx_expectations`
+ * table mapped onto the domain store as `mx`): the "this domain receives mail" intent toggle that
+ * drives whether an empty/null MX is critical vs expected, an optional expected-MX allow-list
+ * (drift detection), and the skip-SMTP-probe switch for hosts whose egress blocks port 25.
+ */
+export interface MxRoutingConfig {
+  /** Declared intent: the domain is expected to receive mail (schema default TRUE). */
+  receivesMail?: boolean
+  /** Optional allow-list of MX FQDNs; the checker flags drift when the published set differs. */
+  expectedHosts?: string[]
+  /** Skip the (future) TCP/25 SMTP probes for this domain (egress-blocked hosts). */
+  skipSmtpProbe?: boolean
+}
+
+/**
+ * Per-domain Domain-Registration-Reputation config (pm/checks/domain_reputation.mdx §4 per-domain
+ * config inputs, admin-only): the org brand string(s) for `infra.name_similarity`, the expiry /
+ * age warning thresholds (both default 30 days), the "registrant is intentionally public" toggle
+ * that silences `infra.registrant_privacy`, and the (future) active cousin-domain scan toggle.
+ */
+export interface DomainReputationConfig {
+  /** Org brand string(s) compared against the apex for lookalike/cousin detection. */
+  brands: string[]
+  /** Days-to-expiry below which infra.domain_expiry warns (default 30). */
+  expiryWarnDays?: number
+  /** Registration age (days) below which infra.domain_age warns (default 30). */
+  ageWarnDays?: number
+  /** The registrant contact is deliberately public — silences infra.registrant_privacy. */
+  registrantPublicIntentional?: boolean
+  /** Enable the (future) active cousin-domain scan (default off — RDAP cost/rate limits). */
+  cousinScan?: boolean
+}
+
+/**
+ * Per-domain List-Unsubscribe / one-click configuration (pm/checks/list_unsubscribe.mdx §3/§4
+ * per-domain config inputs, stored on the domain record in domains.yaml).
+ */
+export interface ListUnsubDomainConfig {
+  /**
+   * Bulk-sender scope (> 5,000 msgs/day to Gmail/Yahoo users). When true, a missing one-click
+   * header / mailto:-only header escalates from warning to critical (§3).
+   */
+  isBulkSender: boolean
+  /**
+   * Opt-in live endpoint probe (default off — §3 Safety): when true (and globally permitted),
+   * the checker POSTs `List-Unsubscribe=One-Click` to the https URI, which MAY unsubscribe the
+   * sampled recipient. Drives content.list_unsub_reachable / _https_get_safe / _tls.
+   */
+  probeUnsubEndpoint: boolean
+}
+
+/**
+ * Per-domain BIMI configuration (pm/checks/bimi.mdx §4 per-domain config inputs): optional extra
+ * BIMI selectors beyond `default`, and an optional sample message whose `BIMI-Selector:` header
+ * names the selector the domain's mail streams actually reference.
+ */
+export interface BimiDomainConfig {
+  /** BIMI selectors to audit beyond "default" — each is looked up at `<selector>._bimi.<domain>`. */
+  selectors: string[]
+  /** Raw sample message (headers suffice) — the checker reads its `BIMI-Selector:` header. */
+  sampleMessage?: string
+}
+
+/**
+ * Per-domain MTA-STS configuration (pm/checks/mta_sts.mdx §4 per-domain config inputs, admin-only):
+ * the "Desired MTA-STS mode" target the `infra.mta_sts_mode` sub-check compares the served policy
+ * against. Absent ⇒ the default target is `enforce` (spec §5); `off` silences the comparison.
+ */
+export interface MtaStsDomainConfig {
+  desiredMode: "enforce" | "testing" | "off"
+}
+
 /** Everything a checker needs to inspect one domain. */
 export interface CheckContext {
   domain: string
+  /**
+   * The monitored domain's store id — keys per-domain stores (e.g. content sample messages and
+   * the per-domain report store `<state>/reports/<domainId>/`, pm/emails.mdx §9).
+   */
+  domainId?: string
   /** DKIM selectors to probe, e.g. ["google", "default"]. */
   dkimSelectors: string[]
   /** Sending IPs to test against DNS blacklists (optional; MX IPs are used when empty). */
@@ -73,6 +170,51 @@ export interface CheckContext {
   previousResults?: Record<string, unknown>
   /** Per-domain ARC / forwarding config — powers arc.applicable / arc.forwarding_risk / arc.selector_dns. */
   arc?: ArcConfig
+  /**
+   * Per-domain DNS-health expectations (pm/checks/dns_health.mdx §4) — extra dangling-scan labels,
+   * an optional expected-NS allow-list (drift detection), and the skip-AXFR-probe toggle.
+   */
+  dnsHealth?: DnsHealthConfig
+  /**
+   * Per-domain mail-routing expectations (pm/checks/mx_routing.mdx §4) — the receives-mail intent
+   * (infra.mx_present / infra.mx_null severity), the expected-MX allow-list (drift detection), and
+   * the skip-SMTP-probe toggle. Absent = receives mail, no allow-list, probes allowed.
+   */
+  mx?: MxRoutingConfig
+  /** Per-domain BIMI config — powers content.bimi_selector (extra selectors + BIMI-Selector header compare). */
+  bimi?: BimiDomainConfig
+  /**
+   * Per-domain list-management config (pm/checks/list_unsubscribe.mdx §3/§4): the isBulkSender
+   * severity escalator and the opt-in probeUnsubEndpoint toggle for the one-click POST probe.
+   */
+  listUnsub?: ListUnsubDomainConfig
+  /**
+   * Per-domain registration-reputation config (pm/checks/domain_reputation.mdx §4) — brand
+   * strings, expiry/age thresholds, and the registrant-public / cousin-scan toggles.
+   */
+  domainReputation?: DomainReputationConfig
+  /**
+   * Which trigger started this run — pure data (pm/run_checks.mdx §9): the run graph never
+   * branches on it. The registration checker alone reads it, to bypass its long-TTL RDAP cache on
+   * a manual run-now (pm/checks/domain_reputation.mdx §6 "a manual run always bypasses the cache").
+   */
+  trigger?: AuditTrigger
+  /**
+   * Cooperative cancellation from the per-domain run deadline (pm/run_checks.mdx §10). Checkers
+   * pass it to DNS calls and child processes so a deadline reclaims sockets and kills children.
+   */
+  signal?: AbortSignal
+  /**
+   * Stage-0 tool discovery (pm/run_checks.mdx §5.2): the external tools resolved to absolute
+   * paths once per run (null = not installed → the checker degrades, never fails).
+   */
+  tools?: Record<string, string | null>
+  /**
+   * Shared upstream outputs (pm/run_checks.mdx §2 Stage 1): the structured `results` payload of
+   * every already-finished checker in THIS run, keyed by checker id. This is how `mx_routing`'s
+   * resolved MX list is published for Stage-2/3 consumers, which must not re-derive it.
+   */
+  upstream?: Record<string, unknown>
 }
 
 /**
@@ -92,6 +234,13 @@ export interface Checker {
 }
 
 /**
+ * Who started a run (pm/run_checks.mdx §1/§9). The tag is pure DATA — `runForDomain` contains
+ * zero conditional logic on it; it only lands on the audit record and in the log lines so the
+ * history view and logs can distinguish who asked even though what ran is identical.
+ */
+export type AuditTrigger = "manual" | "scheduled-inprocess" | "scheduled-os" | "api"
+
+/**
  * The result of auditing one domain — the full finding list plus a rolled-up score/status.
  * Vocabulary (pm/dashboard.mdx §1): this is one RUN — per domain, with start/stop date-times.
  * Inside it, the six categories are TESTS and each finding belongs to a SUB-TEST.
@@ -107,6 +256,8 @@ export interface AuditResult {
   finishedAt: string
   /** Kept for older readers; always equals finishedAt. */
   ranAt: string
+  /** Which trigger started this run (pm/run_checks.mdx §9). Absent on pre-history data. */
+  trigger?: AuditTrigger
   /** 0–100, derived from finding severities. */
   score: number
   status: Severity
@@ -154,8 +305,25 @@ export function flagNewProblems(
   return flagged
 }
 
+/** Points deducted per finding severity (pm/spam_checks.mdx roll-up, pm/settings.mdx §2). */
+export interface SeverityWeights {
+  critical: number
+  warning: number
+  info: number
+}
+
+/**
+ * The built-in weights, mirroring `config.yaml → checks.weights` defaults (pm/settings.mdx §2):
+ * critical > warning > info. The audit engine passes the operator-configured weights so the
+ * roll-up reflects real-world impact (pm/spam_checks.mdx "Scoring & how categories roll up").
+ */
+export const DEFAULT_SEVERITY_WEIGHTS: SeverityWeights = { critical: 40, warning: 15, info: 0 }
+
 /** Roll a flat finding list into a 0–100 score, an overall status, and per-severity counts. */
-export function summarize(findings: Finding[]): {
+export function summarize(
+  findings: Finding[],
+  weights: SeverityWeights = DEFAULT_SEVERITY_WEIGHTS,
+): {
   score: number
   status: Severity
   counts: Record<Severity, number>
@@ -163,8 +331,9 @@ export function summarize(findings: Finding[]): {
   const counts: Record<Severity, number> = { ok: 0, info: 0, warning: 0, critical: 0 }
   for (const f of findings) counts[f.severity]++
 
-  // Each warning costs 12 points, each critical 30; floor at 0.
-  const penalty = counts.warning * 12 + counts.critical * 30
+  // Weighted deduction per finding (critical > warning > info — pm/engineering.mdx §6.2); floor at 0.
+  const penalty =
+    counts.critical * weights.critical + counts.warning * weights.warning + counts.info * weights.info
   const score = Math.max(0, 100 - penalty)
 
   const status: Severity =

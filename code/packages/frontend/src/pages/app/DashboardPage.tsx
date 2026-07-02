@@ -5,9 +5,16 @@ import { useAuditResults, useAuditRuns, useDeleteRun } from "@/api/audit"
 import { useDeleteDomain, useDomains, useUpdateDomain } from "@/api/domains"
 import { useSchedulerStatus, useSetScheduleEnabled } from "@/api/scheduler"
 import type { AuditResult, MonitoredDomain } from "@/api/types"
+import { NewProblemBadge } from "@/components/Badges"
 import { BrandHeader } from "@/components/BrandHeader"
 import { StatusCell } from "@/components/StatusCell"
-import { CATEGORIES, NEVER_CELL, rollupCategories, techPageRoute } from "@/lib/categories"
+import {
+  CATEGORIES,
+  type CellStatus,
+  NEVER_CELL,
+  rollupCategories,
+  techPageRoute,
+} from "@/lib/categories"
 import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext"
 
 /**
@@ -113,7 +120,7 @@ function DomainHealthTable({
         </thead>
         <tbody>
           {domains.map((d) => {
-            const cells = rollupCategories(byId.get(d.id)?.findings)
+            const cells = rollupCategories(byId.get(d.id)?.findings, byId.get(d.id)?.results)
             const domainScanning = progress.some((s) => s.domainId === d.id)
             return (
               <tr
@@ -121,29 +128,31 @@ function DomainHealthTable({
                 onClick={() => navigate({ to: "/domains/$id", params: { id: d.id } })}
                 className="cursor-pointer border-t border-[var(--edh-border)] hover:bg-slate-50"
               >
-                <td className="px-4 py-3 font-medium">{d.name}</td>
+                <td className="px-4 py-3 font-medium">
+                  <span className="flex items-center gap-2">
+                    {d.name}
+                    {/* Regression marker (pm/engineering.mdx §8): new problems in the newest run. */}
+                    <NewProblemBadge count={byId.get(d.id)?.newProblemCount ?? 0} />
+                  </span>
+                </td>
                 {CATEGORIES.map((c) => {
-                  // The one exception to whole-row navigation (pm/dashboard.mdx §6): tests with a
-                  // full page get a chevron that goes INSIDE that test.
+                  // Test-cell click (pm/dashboard.mdx §6.2): the WHOLE cell opens that test's
+                  // "view one category run" page for the domain's newest run. Blacklists' page
+                  // is keyed by domain NAME; tests without a page yet fall through to the row.
                   const techRoute = techPageRoute(c.key)
+                  const onOpen =
+                    c.key === "blacklists"
+                      ? () => navigate({ to: "/blacklists/$domain", params: { domain: d.name } })
+                      : techRoute
+                        ? () => navigate({ to: techRoute, params: { id: d.id } })
+                        : undefined
                   return (
                     <td key={c.key} className="px-2 py-2">
-                      {techRoute ? (
-                        <span className="group flex items-center gap-1">
-                          <StatusCell status={cells[c.key] ?? NEVER_CELL} />
-                          <Link
-                            to={techRoute}
-                            params={{ id: d.id }}
-                            onClick={(e) => e.stopPropagation()}
-                            aria-label={`Open the ${c.header} page for ${d.name}`}
-                            className="text-[var(--edh-muted)] opacity-0 transition-opacity hover:text-slate-700 group-hover:opacity-100"
-                          >
-                            <ChevronRight className="h-4 w-4" />
-                          </Link>
-                        </span>
-                      ) : (
-                        <StatusCell status={cells[c.key] ?? NEVER_CELL} />
-                      )}
+                      <TestCell
+                        status={cells[c.key] ?? NEVER_CELL}
+                        openLabel={`Open the ${c.header} results for ${d.name}`}
+                        onOpen={onOpen}
+                      />
                     </td>
                   )
                 })}
@@ -249,7 +258,7 @@ function RunsTable({ runs }: { runs: AuditResult[] }) {
             </thead>
             <tbody>
               {shown.map((r) => {
-                const cells = rollupCategories(r.findings)
+                const cells = rollupCategories(r.findings, r.results)
                 return (
                   <tr
                     key={r.runId ?? `${r.domainId}-${r.ranAt}`}
@@ -259,12 +268,43 @@ function RunsTable({ runs }: { runs: AuditResult[] }) {
                     <td className="whitespace-nowrap px-4 py-3 font-medium tabular-nums">
                       {fmtRunDate(r.startedAt ?? r.ranAt)}
                     </td>
-                    <td className="px-4 py-3">{r.domain}</td>
-                    {CATEGORIES.map((c) => (
-                      <td key={c.key} className="px-2 py-2">
-                        <StatusCell status={cells[c.key] ?? NEVER_CELL} />
-                      </td>
-                    ))}
+                    <td className="px-4 py-3">
+                      <span className="flex items-center gap-2">
+                        {r.domain}
+                        <NewProblemBadge count={r.newProblemCount ?? 0} />
+                      </span>
+                    </td>
+                    {CATEGORIES.map((c) => {
+                      // Test-cell click for a HISTORICAL run (pm/dashboard.mdx §6.2) needs the
+                      // per-run category routes (/domains/$id/runs/$runId/<slug>). DKIM has one
+                      // (pm/checks/dkim.mdx §6.1 — the Runs-table cell opens THAT run's DKIM
+                      // page), and so does DNS & Infrastructure (pm/checks/dns.mdx §6.1 — the
+                      // cell opens THAT run's DNS page); tests without a run-scoped page yet
+                      // fall through to the row.
+                      const onOpen =
+                        c.key === "dkim" && r.runId
+                          ? () =>
+                              navigate({
+                                to: "/domains/$id/runs/$runId/dkim",
+                                params: { id: r.domainId, runId: r.runId as string },
+                              })
+                          : c.key === "dnsInfra" && r.runId
+                            ? () =>
+                                navigate({
+                                  to: "/domains/$id/runs/$runId/dns",
+                                  params: { id: r.domainId, runId: r.runId as string },
+                                })
+                            : undefined
+                      return (
+                        <td key={c.key} className="px-2 py-2">
+                          <TestCell
+                            status={cells[c.key] ?? NEVER_CELL}
+                            openLabel={`Open the ${c.header} results for this ${r.domain} run`}
+                            onOpen={onOpen}
+                          />
+                        </td>
+                      )
+                    })}
                     <td className="px-2 py-2">
                       <span
                         className="flex items-center justify-end gap-1"
@@ -308,6 +348,40 @@ function RunsTable({ runs }: { runs: AuditResult[] }) {
         </div>
       )}
     </section>
+  )
+}
+
+/**
+ * One TEST cell (pm/dashboard.mdx §6.2): the WHOLE cell is its own click target that goes INSIDE
+ * that test (the "view one category run" page) instead of the whole-run report. On hover the cell
+ * — not the row — gets the highlight, and a small › appears at its right edge as the affordance.
+ * Cell clicks stop propagation so they never also trigger the row navigation (§6.3 precedence:
+ * row controls > test cell > whole row). A gray never-run cell has no test data to open, and a
+ * test whose category page isn't built yet has nowhere to go — both render as a plain cell whose
+ * click falls through to the row.
+ */
+function TestCell({
+  status,
+  openLabel,
+  onOpen,
+}: {
+  status: CellStatus
+  openLabel: string
+  onOpen?: () => void
+}) {
+  if (!onOpen || status.color === "gray") return <StatusCell status={status} />
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation()
+        onOpen()
+      }}
+      aria-label={openLabel}
+      className="group/cell block w-full cursor-pointer rounded transition-shadow hover:ring-2 hover:ring-[var(--edh-primary)]"
+    >
+      <StatusCell status={status} hoverChevron />
+    </button>
   )
 }
 
@@ -381,7 +455,8 @@ function RowMenu({
  * The toggle reflects/sets whether recurring checks are enabled through the scheduler contract
  * (GET /api/scheduler + PUT /api/scheduler/config, pm/scheduled_checks.mdx). While the scheduler
  * module isn't reachable it degrades to the client-side preference so the switch stays usable.
- * The chevron only navigates to the scheduling settings — it never flips the toggle.
+ * The chevron only navigates to the Scheduled Checks configuration page — it never flips the
+ * toggle; its tooltip shows the next scheduled run time when one is armed.
  */
 function ScheduledToggle() {
   const status = useSchedulerStatus()
@@ -416,9 +491,13 @@ function ScheduledToggle() {
         />
       </button>
       <Link
-        to="/settings/$section"
-        params={{ section: "scheduling" }}
+        to="/scheduled-checks"
         aria-label="Configure scheduled checks"
+        title={
+          status.data?.nextRunAt
+            ? `Next run: ${new Date(status.data.nextRunAt).toLocaleString()}`
+            : "Configure scheduled checks"
+        }
         className="text-[var(--edh-muted)] hover:text-slate-700"
       >
         <ChevronRight className="h-4 w-4" />

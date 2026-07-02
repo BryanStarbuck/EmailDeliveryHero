@@ -7,6 +7,7 @@ import {
   IsBoolean,
   IsIn,
   IsInt,
+  IsNumber,
   IsOptional,
   IsString,
   Max,
@@ -107,6 +108,30 @@ export class ChecksDnsblDto {
   zones?: string[]
 }
 
+/** Content-scoring admin settings (pm/checks/content_scoring.mdx §4). */
+export class ChecksContentDto {
+  @ApiPropertyOptional({ description: "SpamAssassin spam threshold override (default 5.0)" })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  threshold?: number
+
+  @ApiPropertyOptional({ description: "Inbox-safe target — totals below it are ok (default 2.0)" })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  safeTarget?: number
+
+  @ApiPropertyOptional({
+    description: "Enable SpamAssassin network content tests (URIBL/Razor/Pyzor/DCC; default off)",
+  })
+  @IsOptional()
+  @IsBoolean()
+  networkTests?: boolean
+}
+
 export class ChecksThresholdsDto {
   @ApiPropertyOptional({ description: "score >= green → green" })
   @IsOptional()
@@ -174,6 +199,12 @@ export class ChecksConfigDto {
   @ValidateNested()
   @Type(() => ChecksDnsblDto)
   dnsbl?: ChecksDnsblDto
+
+  @ApiPropertyOptional({ type: ChecksContentDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ChecksContentDto)
+  content?: ChecksContentDto
 
   @ApiPropertyOptional({ type: ChecksThresholdsDto })
   @IsOptional()

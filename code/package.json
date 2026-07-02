@@ -12,9 +12,15 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "lint": "biome check .",
-    "format": "biome check --write ."
+    "format": "biome check --write .",
+    "prepare": "cd .. && husky code/.husky || true"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,mjs,json}": "biome check --write --no-errors-on-unmatched"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.0.0"
+    "@biomejs/biome": "^2.0.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.5.0"
   }
 }

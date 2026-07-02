@@ -1,3 +1,4 @@
+import { ChevronRight } from "lucide-react"
 import type { CellStatus } from "@/lib/categories"
 import { cn } from "@/lib/utils"
 
@@ -13,16 +14,32 @@ const CELL_CLASSES: Record<CellStatus["color"], string> = {
   gray: "bg-gray-100 text-gray-500",
 }
 
-export function StatusCell({ status }: { status: CellStatus }) {
+export function StatusCell({
+  status,
+  hoverChevron = false,
+}: {
+  status: CellStatus
+  /**
+   * Show a small › at the cell's right edge while a `group/cell` ancestor is hovered — the
+   * "this cell opens up" affordance for the Dashboard's clickable test cells (pm/dashboard.mdx §6.2).
+   */
+  hoverChevron?: boolean
+}) {
   return (
     <span
       title={status.title}
       className={cn(
-        "inline-flex w-full items-center justify-center rounded px-2 py-1 text-xs font-medium",
+        "relative inline-flex w-full items-center justify-center rounded px-2 py-1 text-xs font-medium",
         CELL_CLASSES[status.color],
       )}
     >
       {status.label}
+      {hoverChevron && (
+        <ChevronRight
+          aria-hidden="true"
+          className="absolute right-0.5 h-3 w-3 opacity-0 transition-opacity group-hover/cell:opacity-100"
+        />
+      )}
     </span>
   )
 }

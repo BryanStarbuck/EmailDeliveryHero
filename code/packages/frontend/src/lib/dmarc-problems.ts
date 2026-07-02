@@ -15,6 +15,33 @@ export type DmarcProblemState = ProblemState
 
 export const DMARC_PROBLEM_STATES: DmarcProblemState[] = [
   {
+    id: "PS-00",
+    title: "Enforced and healthy",
+    hook: "One valid record, enforcing policy, subdomains covered, reports flowing.",
+    severity: "ok",
+    findingIds: [],
+    concept: [
+      "The goal state: a single valid record at p=reject (or quarantine en route), subdomains covered by sp=/np=, and aggregate reports flowing to an authorized destination.",
+      "Monitoring is permanent, not a phase — new sending streams, vendors, and key rotations keep happening, and the rua reports are how you see them before they bounce.",
+    ],
+    dataFields: [
+      "record.policy / record.subdomain_policy / record.np_policy",
+      "record.is_enforcing = true",
+      "record.external_reports_authorized = true",
+      "tests[] all pass",
+    ],
+    commands: ["dig +short TXT _dmarc.<domain>", "checkdmarc <domain> -f json"],
+    tools: ["dig for a sanity glance", "checkdmarc should agree (valid: true, empty warnings)"],
+    metrics: [
+      "The scheduled-run regression diff: policy downgrades, new duplicates, lost authorization.",
+      "Future rua ingestion adds the real aligned pass-rate trend.",
+    ],
+    pathForward: [
+      "Nothing to fix — keep the record as is.",
+      "Keep rua monitoring forever and review the regression diff after each scheduled run.",
+    ],
+  },
+  {
     id: "PS-01",
     title: "No DMARC record at all",
     hook: "Anyone can spoof your exact domain, and bulk mail is penalized.",

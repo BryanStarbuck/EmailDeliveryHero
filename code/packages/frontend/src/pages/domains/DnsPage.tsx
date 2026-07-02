@@ -2,21 +2,26 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router"
 import {
   ArrowLeft,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Info,
+  Loader2,
   Network,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
   Wrench,
 } from "lucide-react"
-import { useState } from "react"
-import { useAuditResults } from "@/api/audit"
+import { useEffect, useState } from "react"
+import { useAuditResults, useDomainRuns } from "@/api/audit"
 import { useDomains } from "@/api/domains"
 import type {
+  AuditResult,
+  DaneTlsaResults,
   DnsHealthResults,
   DnssecResults,
   Finding,
+  InfraToolRun,
   MxRoutingResults,
   ReverseDnsResults,
   Severity,
@@ -32,42 +37,76 @@ import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext"
 const ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2, ok: 3 }
 
 /**
- * The full-page DNS & Infrastructure view (pm/checks/dns.mdx §6.2/§7) — everything about one
- * domain's plumbing: the ten-chip family strip, the §8 fix-order-ladder verdict + CTA, the Mail
- * path panel (MX → IP → PTR), the Zone panel (NS/SOA/TTL/wildcard/DNSSEC), the family-grouped
- * fail-first test-results table, and problem-state cards linking to the drill-down pages.
+ * The DNS & Infrastructure category run page (pm/checks/dns.mdx §6.2/§7) — the DNS results of ONE
+ * specific run for one domain, never a blend of runs. Run-scoped at
+ * /domains/:id/runs/:runId/dns with the newest-run alias /domains/:id/dns (which rewrites itself
+ * to the canonical run URL). Top to bottom: header + run context strip (timestamp, `newest`
+ * badge, ‹ prev / next › run navigation), the ten-chip family strip, the §8 fix-order-ladder
+ * verdict + CTA, the Mail path panel (MX → IP → PTR), the Zone panel
+ * (NS/SOA/TTL/wildcard/DNSSEC), the family-grouped fail-first test-results table with tool-run
+ * traceability, and problem-state cards linking to the drill-down pages.
  */
 export function DnsPage() {
-  const { id = "" } = useParams({ strict: false }) as { id?: string }
+  const { id = "", runId } = useParams({ strict: false }) as { id?: string; runId?: string }
   const { data: domains } = useDomains()
   const { data: results } = useAuditResults()
+  const { data: runs, isLoading: runsLoading } = useDomainRuns(id)
   const runDomains = useScanRunner()
   const scanning = useScanProgress().some((s) => s.domainId === id)
   const navigate = useNavigate()
 
   const domain = (domains ?? []).find((d) => d.id === id)
-  const result = (results ?? []).find((r) => r.domainId === id)
+  // The domain's run history, newest first (the API sorts by startedAt). The latest-results cache
+  // is the fallback for pre-history data that has no run files yet.
+  const history = runs ?? []
+  const newest: AuditResult | undefined =
+    history[0] ?? (results ?? []).find((r) => r.domainId === id)
+  const result = runId ? history.find((r) => r.runId === runId) : newest
+  const unknownRun = Boolean(runId) && !runsLoading && runs !== undefined && !result
+
+  // The alias /domains/:id/dns rewrites itself to the canonical run URL so links stay stable
+  // (pm/checks/dns.mdx §6.2).
+  useEffect(() => {
+    if (!runId && newest?.runId) {
+      navigate({
+        to: "/domains/$id/runs/$runId/dns",
+        params: { id, runId: newest.runId },
+        replace: true,
+      })
+    }
+  }, [runId, newest?.runId, id, navigate])
+
   const findings = infraFindings(result?.findings)
   const families = rollupFamilies(findings)
-  const cell = rollupCategories(result?.findings).dnsInfra ?? NEVER_CELL
+  const cell = rollupCategories(result?.findings, result?.results).dnsInfra ?? NEVER_CELL
   const problems = matchDnsProblemStates(findings)
 
   const mx = result?.results?.["infra.mx_routing"] as MxRoutingResults | undefined
   const rdns = result?.results?.["infra.reverse_dns"] as ReverseDnsResults | undefined
   const zone = result?.results?.["infra.dns_health"] as DnsHealthResults | undefined
   const dnssec = result?.results?.["infra.dnssec"] as DnssecResults | undefined
+  const dane = result?.results?.["infra.dane_tlsa"] as DaneTlsaResults | undefined
+  // The category's external-tool audit trail (dns_infra.tool_runs[] — pm/checks/dns.mdx §3.1/§5):
+  // expanded rows link their evidence to the exact command that produced it.
+  const toolRuns = (result?.results?.["infra.tool_runs"] as InfraToolRun[] | undefined) ?? []
 
   const onRunAgain = () => runDomains([{ id, name: domain?.name ?? id }])
+
+  // Back link target: the run report of the run being viewed (canonical when run-scoped).
+  const onBack = () =>
+    result?.runId
+      ? navigate({ to: "/domains/$id/runs/$runId", params: { id, runId: result.runId } })
+      : navigate({ to: "/domains/$id", params: { id } })
 
   return (
     <div className="mx-auto max-w-5xl">
       <div className="mb-4 flex items-center justify-between">
         <button
           type="button"
-          onClick={() => navigate({ to: "/domains/$id", params: { id } })}
+          onClick={onBack}
           className="inline-flex items-center gap-1 text-sm text-[var(--edh-muted)] hover:text-slate-700"
         >
-          <ArrowLeft className="h-4 w-4" /> Back to {domain?.name ?? id}
+          <ArrowLeft className="h-4 w-4" /> Back to run report
         </button>
         <button
           type="button"
@@ -86,19 +125,49 @@ export function DnsPage() {
         <span className="w-32">
           <StatusCell status={cell} />
         </span>
-        {result && <span>· ran {new Date(result.ranAt).toLocaleString()}</span>}
       </div>
 
-      {!result ? (
+      {/* Run context strip (pm/checks/dns.mdx §6.2/§7): pinned above any verdict so an old run is
+          never misread as "the domain's current state". Absent when the domain has no runs. */}
+      {result && (
+        <RunContextStrip
+          domainId={id}
+          viewed={result}
+          history={history}
+          newestRunId={newest?.runId}
+          scanning={scanning}
+        />
+      )}
+
+      {unknownRun ? (
         <div className="mt-6 rounded-lg border border-dashed border-[var(--edh-border)] p-10 text-center">
-          <p className="text-slate-600">No audit yet.</p>
-          <button
-            type="button"
-            onClick={onRunAgain}
-            className="mt-2 inline-flex items-center gap-2 text-[var(--edh-primary)] underline"
+          <p className="text-slate-600">
+            This run no longer exists — runs are pruned per the retention policy.
+          </p>
+          <Link
+            to="/domains/$id/dns"
+            params={{ id }}
+            className="mt-2 inline-block text-[var(--edh-primary)] underline"
           >
-            Run checks
-          </button>
+            Open the newest run's DNS page
+          </Link>
+        </div>
+      ) : !result ? (
+        <div className="mt-6 rounded-lg border border-dashed border-[var(--edh-border)] p-10 text-center">
+          {runsLoading ? (
+            <p className="text-slate-600">Loading run history…</p>
+          ) : (
+            <>
+              <p className="text-slate-600">No audit yet — run one.</p>
+              <button
+                type="button"
+                onClick={onRunAgain}
+                className="mt-2 inline-flex items-center gap-2 text-[var(--edh-primary)] underline"
+              >
+                Run checks
+              </button>
+            </>
+          )}
         </div>
       ) : (
         <>
@@ -109,7 +178,7 @@ export function DnsPage() {
             <ZonePanel zone={zone} dnssec={dnssec} />
           </div>
 
-          <TestResultsByFamily families={families} />
+          <TestResultsByFamily families={families} dane={dane} toolRuns={toolRuns} />
 
           {problems.length > 0 && (
             <section className="mt-6">
@@ -120,6 +189,8 @@ export function DnsPage() {
                     key={ps.id}
                     to="/domains/$id/dns/$problemId"
                     params={{ id, problemId: ps.id }}
+                    // The drill-down renders from the run being viewed (pm/checks/dns.mdx §7).
+                    search={result?.runId ? { run: result.runId } : undefined}
                     className="group rounded-lg border border-[var(--edh-border)] bg-white p-4 hover:border-[var(--edh-primary)]"
                   >
                     <div className="flex items-center justify-between">
@@ -137,6 +208,100 @@ export function DnsPage() {
           )}
         </>
       )}
+    </div>
+  )
+}
+
+/** `YYYY-MM-DD HH:mm` in local time — the run context strip's timestamp (pm/checks/dns.mdx §7). */
+function fmtRunStamp(iso: string): string {
+  const d = new Date(iso)
+  const pad = (n: number) => String(n).padStart(2, "0")
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/**
+ * The run context strip (pm/checks/dns.mdx §6.2 item 2 / §7): the run's start timestamp, a
+ * `newest` badge on the domain's latest run only, and ‹ prev / next › navigation that steps
+ * through the SAME domain's runs in startedAt order, staying on the DNS category page (‹ = older,
+ * › = newer; each disabled at the ends of the history). Keyboard: `[` / `]` mirror ‹ / ›.
+ */
+function RunContextStrip({
+  domainId,
+  viewed,
+  history,
+  newestRunId,
+  scanning,
+}: {
+  domainId: string
+  viewed: AuditResult
+  history: AuditResult[]
+  newestRunId?: string
+  scanning: boolean
+}) {
+  const navigate = useNavigate()
+  // history is newest-first; ‹ prev = older (index + 1), next › = newer (index - 1).
+  const index = history.findIndex((r) => r.runId === viewed.runId)
+  const older = index >= 0 ? history[index + 1] : undefined
+  const newer = index > 0 ? history[index - 1] : undefined
+  const isNewest = Boolean(viewed.runId) && viewed.runId === newestRunId
+
+  const goTo = (run: AuditResult | undefined) => {
+    if (run?.runId) {
+      navigate({ to: "/domains/$id/runs/$runId/dns", params: { id: domainId, runId: run.runId } })
+    }
+  }
+
+  // `[` / `]` mirror the ‹ prev / next › controls (pm/checks/dns.mdx §7).
+  const olderRunId = older?.runId
+  const newerRunId = newer?.runId
+  useEffect(() => {
+    const jump = (runId: string) =>
+      navigate({ to: "/domains/$id/runs/$runId/dns", params: { id: domainId, runId } })
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
+      if (e.key === "[" && olderRunId) jump(olderRunId)
+      if (e.key === "]" && newerRunId) jump(newerRunId)
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [olderRunId, newerRunId, domainId, navigate])
+
+  return (
+    <div className="mt-4 flex items-center justify-between rounded-lg border border-[var(--edh-border)] bg-white px-3 py-2 text-sm">
+      <button
+        type="button"
+        onClick={() => goTo(older)}
+        disabled={!older?.runId}
+        title="Older run ( [ )"
+        className="inline-flex items-center gap-1 text-[var(--edh-muted)] hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <ChevronLeft className="h-4 w-4" /> prev run
+      </button>
+      <span className="flex items-center gap-2">
+        <span className="font-medium text-slate-900">
+          Run {fmtRunStamp(viewed.startedAt ?? viewed.ranAt)}
+        </span>
+        {isNewest && (
+          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-700">
+            newest
+          </span>
+        )}
+        {scanning && (
+          <span className="inline-flex items-center gap-1 text-xs text-[var(--edh-muted)]">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" /> running…
+          </span>
+        )}
+      </span>
+      <button
+        type="button"
+        onClick={() => goTo(newer)}
+        disabled={!newer?.runId}
+        title="Newer run ( ] )"
+        className="inline-flex items-center gap-1 text-[var(--edh-muted)] hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        next run <ChevronRight className="h-4 w-4" />
+      </button>
     </div>
   )
 }
@@ -452,8 +617,96 @@ function ZonePanel({ zone, dnssec }: { zone?: DnsHealthResults; dnssec?: DnssecR
   )
 }
 
+/**
+ * The per-MX DANE coverage matrix (pm/checks/dane_tlsa.mdx §4): one row per MX host showing
+ * DNSSEC / TLSA presence / params / cert-match / rollover at a glance, rendered inside the
+ * "DANE / TLSA" family group. Cert match stays "—" until the FUTURE :25 probe is enabled.
+ */
+function DaneMatrix({ rows }: { rows: DaneTlsaResults }) {
+  const ok = <span className="text-emerald-700">✔</span>
+  const bad = <span className="text-red-600">✖</span>
+  return (
+    <div className="overflow-x-auto border-t border-[var(--edh-border)] px-3 py-2">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-left text-[var(--edh-muted)]">
+            <th className="py-1 pr-2 font-medium">MX host (prio)</th>
+            <th className="py-1 pr-2 font-medium">DNSSEC</th>
+            <th className="py-1 pr-2 font-medium">TLSA</th>
+            <th className="py-1 pr-2 font-medium">Params</th>
+            <th className="py-1 pr-2 font-medium">Cert match</th>
+            <th className="py-1 font-medium">Rollover</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.mxHost} className="border-t border-[var(--edh-border)]">
+              <td className="py-1 pr-2 font-mono">
+                {r.mxHost}
+                {r.mxPreference !== null ? ` (${r.mxPreference})` : ""}
+              </td>
+              <td className="py-1 pr-2">{r.dnssecSigned ? ok : bad}</td>
+              <td className="py-1 pr-2">
+                {r.probeError ? (
+                  <span className="text-amber-600">error: {r.probeError}</span>
+                ) : r.tlsaPresent ? (
+                  `present (${r.tlsaRecords.length})`
+                ) : (
+                  <span className="text-slate-500">none</span>
+                )}
+              </td>
+              <td className="py-1 pr-2 font-mono">
+                {r.recommended311
+                  ? "3 1 1"
+                  : r.paramsOk === null
+                    ? "—"
+                    : r.paramsOk
+                      ? "usable"
+                      : "unusable"}
+              </td>
+              <td className="py-1 pr-2 text-slate-500">
+                {r.certMatch === null ? "— (probe)" : r.certMatch ? ok : bad}
+              </td>
+              <td className="py-1">
+                {r.rolloverReady ? (
+                  <span className="text-emerald-700">✔ ≥2</span>
+                ) : (
+                  <span className={r.tlsaPresent ? "text-amber-600" : "text-slate-500"}>
+                    ✖ ({r.tlsaRecords.length})
+                  </span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/**
+ * Match a finding to the tool_runs[] entry that fed it (pm/checks/dns.mdx §7 — "ran: `dig …` ·
+ * 187 ms"): the command must contain one of the evidence's DNS-name/IP-looking tokens.
+ */
+function matchToolRun(f: Finding, toolRuns: InfraToolRun[]): InfraToolRun | undefined {
+  if (toolRuns.length === 0 || !f.evidence) return undefined
+  const tokens = (f.evidence.match(/[a-zA-Z0-9_][a-zA-Z0-9_.:-]{3,}/g) ?? []).filter(
+    (t) => t.includes(".") || t.includes(":"),
+  )
+  if (tokens.length === 0) return undefined
+  return toolRuns.find((tr) => tokens.some((t) => tr.command.includes(t)))
+}
+
 /** The main table: one group per family (spec order), fail-first rows inside each group. */
-function TestResultsByFamily({ families }: { families: FamilyRollup[] }) {
+function TestResultsByFamily({
+  families,
+  dane,
+  toolRuns = [],
+}: {
+  families: FamilyRollup[]
+  dane?: DaneTlsaResults
+  toolRuns?: InfraToolRun[]
+}) {
   const all = families.flatMap((f) => f.findings)
   const counts = {
     pass: all.filter((f) => f.severity === "ok").length,
@@ -471,9 +724,7 @@ function TestResultsByFamily({ families }: { families: FamilyRollup[] }) {
       </div>
       <div className="overflow-hidden rounded-lg border border-[var(--edh-border)] bg-white">
         {all.length === 0 ? (
-          <p className="p-4 text-sm text-slate-600">
-            No DNS & Infrastructure tests in the latest run.
-          </p>
+          <p className="p-4 text-sm text-slate-600">No DNS & Infrastructure tests in this run.</p>
         ) : (
           families
             .filter((fam) => fam.findings.length > 0)
@@ -489,11 +740,18 @@ function TestResultsByFamily({ families }: { families: FamilyRollup[] }) {
                       : `${fam.findings.length} tests`}
                   </span>
                 </div>
+                {fam.def.key === "dane_tlsa" && dane && dane.length > 0 && (
+                  <DaneMatrix rows={dane} />
+                )}
                 <ul>
                   {[...fam.findings]
                     .sort((a, b) => ORDER[a.severity] - ORDER[b.severity])
                     .map((f) => (
-                      <TestRow key={f.id + f.title} finding={f} />
+                      <TestRow
+                        key={f.id + f.title}
+                        finding={f}
+                        toolRun={matchToolRun(f, toolRuns)}
+                      />
                     ))}
                 </ul>
               </div>
@@ -504,7 +762,7 @@ function TestResultsByFamily({ families }: { families: FamilyRollup[] }) {
   )
 }
 
-function TestRow({ finding: f }: { finding: Finding }) {
+function TestRow({ finding: f, toolRun }: { finding: Finding; toolRun?: InfraToolRun }) {
   const [open, setOpen] = useState(f.severity === "critical")
   const icon =
     f.severity === "ok" ? (
@@ -539,6 +797,13 @@ function TestRow({ finding: f }: { finding: Finding }) {
           {f.evidence && (
             <p className="mt-1 break-all rounded bg-slate-50 p-2 font-mono text-xs text-slate-600">
               observed: {f.evidence}
+            </p>
+          )}
+          {toolRun && (
+            // Tool-run traceability (pm/checks/dns.mdx §7): the exact command behind the evidence.
+            <p className="mt-1 break-all text-xs text-[var(--edh-muted)]">
+              ran: <code className="font-mono">{toolRun.command}</code> · {toolRun.duration_ms} ms
+              {toolRun.error ? ` · ${toolRun.error}` : ""}
             </p>
           )}
           {f.remediation && f.severity !== "ok" && (

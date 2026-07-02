@@ -1,5 +1,5 @@
 import { resolve4, resolve6, resolveCname, resolveMx } from "../dns-util"
-import type { Checker, CheckOutcome, Finding } from "../types"
+import type { Checker, CheckOutcome, Finding, MxRoutingConfig, Severity } from "../types"
 
 /**
  * MX & Mail Routing (RFC 5321 §5.1, RFC 7505 null MX, RFC 2181 §10.3). Resolves the domain's MX
@@ -12,9 +12,11 @@ import type { Checker, CheckOutcome, Finding } from "../types"
  * evaluated" info finding and never a warning/critical (spec §7).
  *
  * All finding checkId values use the "infra" prefix; sub-check ids follow the spec's MX sub-family
- * (infra.mx_present, infra.mx_resolve, ...). Since CheckContext carries no receives-mail intent, the
- * checker defaults to receivesMail=true (the schema default), so an absent/null MX is treated as a
- * problem for a mail-receiving domain.
+ * (infra.mx_present, infra.mx_resolve, ...). Per-domain intent arrives on CheckContext.mx
+ * (pm/checks/mx_routing.mdx §4): `receivesMail` (default true — the mx_expectations schema default)
+ * decides whether an absent/null MX is a problem or expected, `expectedHosts` is an optional
+ * allow-list diffed against the published MX set (infra.mx_expected_drift), and `skipSmtpProbe`
+ * keeps the future TCP/25 probes off for this domain.
  */
 
 const CHECK_ID = "infra"
@@ -91,38 +93,103 @@ interface HostInfo {
 }
 
 /**
- * The structured snapshot persisted at results["infra.mx_routing"] (pm/checks/dns.mdx §5) —
- * the MX topology the DNS page's Mail path panel renders. snake_case mirrors the spec YAML.
+ * The topology-level verdict — the JSON analog of one `mx_check_results` row
+ * (pm/checks/mx_routing.mdx §5); column names deliberately mirror these keys.
+ */
+export interface MxCheckSummary {
+  /** Number of MX RRs returned (null-MX records included). */
+  mx_count: number
+  /** RFC 7505 "." present. */
+  has_null_mx: boolean
+  distinct_priorities: number
+  /** >= 2 resolvable hosts. */
+  redundant: boolean
+  /** null until an ASN feed exists (future) — first round approximates by /24,/48 prefixes. */
+  asn_diverse: boolean | null
+  /** No MX, but the domain's A record exists (RFC 5321 implicit MX). */
+  implicit_a_fallback: boolean
+  /** null in the first round — node:dns does not expose the RRset TTL (needs dig, future). */
+  rrset_ttl: number | null
+  /** Declared intent snapshot (pm/checks/mx_routing.mdx §4 "This domain receives mail"). */
+  receives_mail: boolean
+  worst_severity: Severity
+  checked_at: string
+}
+
+/**
+ * The structured snapshot persisted at results["infra.mx_routing"] (pm/checks/mx_routing.mdx §5:
+ * `checks.infra_mx` — `summary` is the mx_check_results row, `hosts[]` are mx_records rows) — the
+ * MX topology the DNS page's Mail path panel renders. snake_case mirrors the spec YAML.
  */
 export interface MxRoutingResults {
   mx_found: boolean
   null_mx: boolean
   implicit_a_fallback: boolean
+  /** The mx_check_results row (pm/checks/mx_routing.mdx §5). */
+  summary: MxCheckSummary
   hosts: {
     host: string
     priority: number
     is_cname: boolean
     cname_target: string | null
     ips: string[]
+    /** Spec-named mirror of `ips` (the mx_records.resolved_ips column). */
+    resolved_ips: string[]
+    /** false when any resolved address is RFC1918/loopback/link-local/CGNAT/unspecified. */
+    is_public: boolean
     non_public: { ip: string; cls: IpClass }[]
+    /** null until the SMTP probe round (future). */
+    reachable: boolean | null
+    /** 220 greeting (future). */
+    banner: string | null
+    /** Resolved ASN (future). */
+    asn: number | null
   }[]
   redundancy: { host_count: number; network_count: number }
+}
+
+const SEVERITY_ORDER: Record<Severity, number> = { ok: 0, info: 1, warning: 2, critical: 3 }
+
+function worstSeverity(findings: Finding[]): Severity {
+  let worst: Severity = "ok"
+  for (const f of findings) if (SEVERITY_ORDER[f.severity] > SEVERITY_ORDER[worst]) worst = f.severity
+  return worst
 }
 
 function snapshot(
   hosts: HostInfo[],
   flags: { mx_found: boolean; null_mx: boolean; implicit_a_fallback: boolean },
   redundancy: { host_count: number; network_count: number },
+  summary: { mx_count: number; distinct_priorities: number; receives_mail: boolean },
+  findings: Finding[],
 ): MxRoutingResults {
   return {
     ...flags,
+    summary: {
+      mx_count: summary.mx_count,
+      has_null_mx: flags.null_mx,
+      distinct_priorities: summary.distinct_priorities,
+      // Redundant = >= 2 resolvable hosts (pm/checks/mx_routing.mdx §5).
+      redundant: hosts.filter((h) => h.ips.length > 0).length >= 2,
+      asn_diverse: null,
+      implicit_a_fallback: flags.implicit_a_fallback,
+      rrset_ttl: null,
+      receives_mail: summary.receives_mail,
+      worst_severity: worstSeverity(findings),
+      checked_at: new Date().toISOString(),
+    },
     hosts: hosts.map((h) => ({
       host: h.host,
       priority: h.priority,
       is_cname: h.isCname,
       cname_target: h.cnameTarget ?? null,
       ips: h.ips,
+      resolved_ips: h.ips,
+      is_public: h.nonPublic.length === 0,
       non_public: h.nonPublic,
+      reachable: null,
+      banner: null,
+      asn: null,
     })),
     redundancy,
   }
@@ -145,6 +212,10 @@ export const mxRoutingCheck: Checker = {
   async run(ctx): Promise<CheckOutcome> {
     const domain = normHost(ctx.domain)
     const findings: Finding[] = []
+    // Declared intent (pm/checks/mx_routing.mdx §4): schema default receivesMail=TRUE.
+    const mxConfig: MxRoutingConfig = ctx.mx ?? {}
+    const receivesMail = mxConfig.receivesMail ?? true
+    const skipSmtpProbe = mxConfig.skipSmtpProbe ?? false
 
     const mx = await resolveMx(ctx.domain)
     if (mx.error) {
@@ -165,15 +236,28 @@ export const mxRoutingCheck: Checker = {
     }
 
     // --- infra.mx_present: no MX at all --------------------------------------------------------
+    // Critical only when the domain is expected to receive mail; a declared sender-only domain
+    // downgrades to info (pm/checks/mx_routing.mdx §3 step 1, acceptance 1).
     if (mx.records.length === 0) {
-      findings.push({
-        id: "infra.mx_present",
-        checkId: CHECK_ID,
-        title: "No MX record",
-        severity: "critical",
-        detail: `${domain} publishes no MX record, so receiving mail servers have no host to deliver inbound mail to.`,
-        remediation: `Publish an MX record, e.g. "${domain}. IN MX 10 mail.${domain}." (or your provider's host, e.g. "1 aspmx.l.google.com.").`,
-      })
+      findings.push(
+        receivesMail
+          ? {
+              id: "infra.mx_present",
+              checkId: CHECK_ID,
+              title: "No MX record",
+              severity: "critical",
+              detail: `${domain} publishes no MX record, so receiving mail servers have no host to deliver inbound mail to.`,
+              remediation: `Publish an MX record, e.g. "${domain}. IN MX 10 mail.${domain}." (or your provider's host, e.g. "1 aspmx.l.google.com.").`,
+            }
+          : {
+              id: "infra.mx_present",
+              checkId: CHECK_ID,
+              title: "No MX record (declared sender-only)",
+              severity: "info",
+              detail: `${domain} publishes no MX record. This domain is declared as not receiving mail, so an absent MX is acceptable — but senders will still fall back to the A record instead of failing fast.`,
+              remediation: `Publish an RFC 7505 null MX so senders fail fast with a permanent error: "${domain}. IN MX 0 \\".\\"".`,
+            },
+      )
       // infra.mx_matches_a: implicit-A fallback (RFC 5321) when no MX exists.
       const a = await resolve4(ctx.domain)
       if (a.records.length > 0) {
@@ -193,6 +277,8 @@ export const mxRoutingCheck: Checker = {
           [],
           { mx_found: false, null_mx: false, implicit_a_fallback: a.records.length > 0 },
           { host_count: 0, network_count: 0 },
+          { mx_count: 0, distinct_priorities: 0, receives_mail: receivesMail },
+          findings,
         ),
       }
     }
@@ -208,27 +294,53 @@ export const mxRoutingCheck: Checker = {
     })
 
     if (nullRecords.length > 0 && realRecords.length === 0) {
-      // Pure null MX. Default receivesMail=true => this domain should receive mail, so warn.
+      // Pure null MX (pm/checks/mx_routing.mdx §2 infra.mx_null, acceptance 6): a warning when the
+      // domain is declared mail-receiving; a correct RFC 7505 declaration for a non-mail domain.
       const priorityOk = nullRecords.length === 1 && nullRecords[0].priority === 0
-      findings.push({
-        id: "infra.mx_null",
-        checkId: CHECK_ID,
-        title: "Null MX present (RFC 7505)",
-        severity: "warning",
-        detail: priorityOk
-          ? `${domain} publishes a null MX (MX 0 "."), declaring it accepts no mail. This is correct only for sending-only / parked domains; if this domain must receive bounces or replies, all inbound mail is being rejected.`
-          : `${domain} publishes a malformed null MX (RFC 7505 requires exactly one record: MX 0 ".").`,
-        remediation: `If this domain must receive mail, replace the null MX with a real host, e.g. "${domain}. IN MX 10 mail.${domain}.". If it is genuinely send-only, the correct form is exactly "${domain}. IN MX 0 \\".\\"" and this warning is expected.`,
-        evidence: nullRecords.map((r) => `${r.priority} "."`).join(" | "),
-      })
+      if (!priorityOk) {
+        findings.push({
+          id: "infra.mx_null",
+          checkId: CHECK_ID,
+          title: "Malformed null MX (RFC 7505)",
+          severity: "warning",
+          detail: `${domain} publishes a malformed null MX (RFC 7505 requires exactly one record: MX 0 ".").`,
+          remediation: `Publish exactly one null MX line: "${domain}. IN MX 0 \\".\\"" — or, if this domain must receive mail, a real host, e.g. "${domain}. IN MX 10 mail.${domain}.".`,
+          evidence: nullRecords.map((r) => `${r.priority} "."`).join(" | "),
+        })
+      } else if (receivesMail) {
+        findings.push({
+          id: "infra.mx_null",
+          checkId: CHECK_ID,
+          title: "Null MX present (RFC 7505)",
+          severity: "warning",
+          detail: `${domain} publishes a null MX (MX 0 "."), declaring it accepts no mail — but this domain is expected to receive mail, so all inbound mail (bounces, replies) is being rejected.`,
+          remediation: `Replace the null MX with a real host, e.g. "${domain}. IN MX 10 mail.${domain}." — or mark the domain as not receiving mail in its Mail-routing settings if it is genuinely send-only.`,
+          evidence: nullRecords.map((r) => `${r.priority} "."`).join(" | "),
+        })
+      } else {
+        findings.push({
+          id: "infra.mx_null",
+          checkId: CHECK_ID,
+          title: "Correct null MX (RFC 7505)",
+          severity: "ok",
+          detail: `Null MX — ${domain} correctly declares it accepts no mail (RFC 7505). Senders fail fast with a permanent error instead of falling back to the A record.`,
+          evidence: nullRecords.map((r) => `${r.priority} "."`).join(" | "),
+        })
+      }
       // Null MX short-circuits target resolution/reachability (no target to probe).
-      pushFutureFindings(findings, domain)
+      pushFutureFindings(findings, domain, skipSmtpProbe)
       return {
         findings,
         results: snapshot(
           [],
           { mx_found: true, null_mx: true, implicit_a_fallback: false },
           { host_count: 0, network_count: 0 },
+          {
+            mx_count: nullRecords.length,
+            distinct_priorities: new Set(nullRecords.map((r) => r.priority)).size,
+            receives_mail: receivesMail,
+          },
+          findings,
         ),
       }
     }

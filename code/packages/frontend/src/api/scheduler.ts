@@ -14,6 +14,9 @@ const CONFIG_KEY = ["scheduler", "config"] as const
 export type ScheduleCadence = "interval" | "daily" | "weekly"
 export type ScheduleRunner = "in-process" | "os"
 export type Weekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun"
+
+/** Monday-first, matching the backend's schedule.types.ts and the day chips (pm/settings.mdx §3.2). */
+export const WEEKDAYS: Weekday[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 export type OsSchedulerKind = "launchd" | "cron" | "systemd" | "schtasks"
 
 export interface ScheduleOsState {
@@ -35,13 +38,28 @@ export interface ScheduleConfig {
   os: ScheduleOsState
 }
 
+/** GET /api/scheduler — one read backs the dashboard toggle AND the Settings §3 status block. */
 export interface SchedulerStatus {
   enabled: boolean
-  runner?: string
+  runner?: ScheduleRunner
+  cadence?: ScheduleCadence
+  times?: string[]
+  weekdays?: Weekday[]
   nextRunAt?: string | null
   lastRunAt?: string | null
-  lastTrigger?: string | null
+  lastTrigger?: "in-process" | "os" | "manual" | null
+  running?: boolean
+  /** Scheduled-run coverage: global switch ANDed with per-domain scheduleEnabled. */
+  domainsCovered?: number
+  domainsTotal?: number
   os?: ScheduleOsState
+}
+
+/** POST /api/scheduler/run outcome — skipped triggers report why (pm/settings.mdx §3.3). */
+export interface SchedulerRunOutcome {
+  started: boolean
+  reason?: "disabled" | "already_running" | "recently_ran"
+  domains?: number
 }
 
 /** GET /api/scheduler/os/preview — the rendered native artifact, before installing. */
@@ -66,14 +84,29 @@ export function useSetScheduleEnabled() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: async (enabled: boolean) => {
-      // Read-merge-write so only the on/off flag changes (pm/scheduled_checks.mdx "Enabling").
-      const config = await api
-        .get<Record<string, unknown>>("/scheduler/config")
-        .then((r) => r.data)
-        .catch(() => ({}))
-      return (await api.put("/scheduler/config", { ...config, enabled })).data
+      // The backend merges the patch over the current block (pm/settings.mdx §3.3) — and enabling
+      // with no times configured seeds 06:00 every day, so one flip yields a working schedule.
+      return (await api.put<ScheduleConfig>("/scheduler/config", { enabled })).data
     },
-    onSettled: () => qc.invalidateQueries({ queryKey: STATUS_KEY }),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: STATUS_KEY })
+      qc.invalidateQueries({ queryKey: CONFIG_KEY })
+    },
+  })
+}
+
+/** "Run a scheduled check now" — forced, so it runs even while the master toggle is off. */
+export function useRunScheduledNow() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async () =>
+      (await api.post<SchedulerRunOutcome>("/scheduler/run", { force: true })).data,
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: STATUS_KEY })
+      // A forced run writes fresh audit results + run records.
+      qc.invalidateQueries({ queryKey: ["audit", "results"] })
+      qc.invalidateQueries({ queryKey: ["audit", "runs"] })
+    },
   })
 }
 

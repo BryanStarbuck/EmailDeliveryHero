@@ -1,0 +1,44 @@
+# EmailDeliveryHero — package the two services and mount the state dir as a volume
+# (pm/engineering.mdx §9 "Deploy"). Localhost-first: this is an optional way to run the same app.
+#
+# NOTE on the build context: the app links OpenAuthFederated from a SIBLING checkout
+# (link:../../../../OpenAuthFederated/...), so the context is the parent directory that contains
+# both the EmailDeliveryHero and OpenAuthFederated checkouts. See code/Dockerfile.
+#
+#   cd EmailDeliveryHero/code && docker compose up --build
+
+services:
+  backend:
+    build:
+      context: ../..
+      dockerfile: EmailDeliveryHero/code/Dockerfile
+    image: email-delivery-hero
+    command: ["node", "packages/backend/dist/main.js"]
+    environment:
+      # Everything the app persists lives here; the volume below keeps it across restarts —
+      # copy the state dir and you have moved the data (pm/engineering.mdx §7).
+      EDH_STATE_DIR: /state
+      # The frontend container is a distinct origin during preview; keep the allowlist explicit.
+      CORS_ORIGINS: http://localhost:4444
+    volumes:
+      - edh-state:/state
+    ports:
+      - "9312:9312"
+
+  frontend:
+    image: email-delivery-hero
+    depends_on:
+      - backend
+    # Serve the built SPA with Vite preview on 4444; its /api proxy targets the backend service.
+    command:
+      ["pnpm", "--filter", "@edh/frontend", "exec", "vite", "preview", "--host", "0.0.0.0"]
+    environment:
+      API_HOST: backend
+      API_PORT: "9312"
+      WEBAPP_PORT: "4444"
+    ports:
+      - "4444:4444"
+
+volumes:
+  # The on-disk JSON/YAML store (default ~/.email_delivery_hero on bare metal) — no database.
+  edh-state:

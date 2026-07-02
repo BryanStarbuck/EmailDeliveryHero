@@ -293,7 +293,12 @@ export function previewArtifact(cfg: ScheduleConfig): OsArtifactPreview {
   const content = `${schtasksCommands(cfg)
     .map((c) => c.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" "))
     .join("\n")}\n`
-  return { kind, path: `Task Scheduler: ${schtasksTaskNames(cfg).join(", ")}`, content, installed: cfg.os.installed }
+  return {
+    kind,
+    path: `Task Scheduler: ${schtasksTaskNames(cfg).join(", ")}`,
+    content,
+    installed: cfg.os.installed,
+  }
 }
 
 /** Write + load the artifact for the current platform. Throws with a readable message on failure. */

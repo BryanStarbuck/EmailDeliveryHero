@@ -59,5 +59,8 @@ out-of-repo under `~/.email_delivery_hero/` (override with `EDH_STATE_DIR`). No 
 
 ## Periodic audits
 
-Set `EDH_PERIODIC_AUDIT_MINUTES` (backend env) to a positive number to re-audit every domain on that
-interval; new problems surface automatically. Off by default.
+**Off by default.** Turn scheduling on from the dashboard's Scheduled toggle or Settings →
+Scheduling (`/settings/scheduling`) — enabling seeds a 06:00-daily schedule you can edit (one or
+more times of day, weekday chips). Config persists to the `schedule:` block of `config.yaml` under
+the state dir; see `pm/settings.mdx` §3. The old `EDH_PERIODIC_AUDIT_MINUTES` env interval is
+retired.

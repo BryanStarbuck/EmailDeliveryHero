@@ -1,4 +1,12 @@
-import { analyzeDmarcRecord, parseDmarcRecord, walkUpCandidates } from "./dmarc.check"
+import {
+  analyzeDmarcRecord,
+  buildTests,
+  deriveProblemStates,
+  doggoTxtValues,
+  extractDoggoAnswers,
+  parseDmarcRecord,
+  walkUpCandidates,
+} from "./dmarc.check"
 
 const ids = (a: ReturnType<typeof analyzeDmarcRecord>) => a.findings.map((f) => f.id)
 const byId = (a: ReturnType<typeof analyzeDmarcRecord>, id: string) =>
@@ -140,6 +148,8 @@ describe("analyzeDmarcRecord", () => {
       at,
     )
     expect(byId(a, "dmarc.testing")?.severity).toBe("warning")
+    // §5: is_enforcing = policy in (quarantine, reject) AND not t=y.
+    expect(a.results.is_enforcing).toBe(false)
   })
 
   it("flags obsolete ri/rf tags and unknown tags as info", () => {
@@ -172,6 +182,69 @@ describe("analyzeDmarcRecord", () => {
       at,
     )
     expect(byId(a, "dmarc.report_uri_size")?.severity).toBe("info")
+  })
+
+  it("derives §9 problem states from the finding ids", () => {
+    const monitor = analyzeDmarcRecord(
+      "example.com",
+      "v=DMARC1; p=none; rua=mailto:d@example.com",
+      at,
+    )
+    expect(deriveProblemStates(monitor.findings)).toEqual(["PS-05"])
+
+    const gaps = analyzeDmarcRecord(
+      "example.com",
+      "v=DMARC1; p=reject; sp=none; adkim=s; pct=50; rua=mailto:d@example.com",
+      at,
+    )
+    expect(deriveProblemStates(gaps.findings)).toEqual(
+      expect.arrayContaining(["PS-06", "PS-07", "PS-08"]),
+    )
+
+    const missing = [
+      {
+        id: "dmarc.missing",
+        checkId: "dmarc",
+        title: "No DMARC record",
+        severity: "critical" as const,
+        detail: "",
+      },
+    ]
+    expect(deriveProblemStates(missing, { misplacedHit: true })).toEqual(["PS-01", "PS-03"])
+  })
+
+  it("derives PS-00 only for a healthy enforcing record, and PS-13 from an unhealthy DKIM", () => {
+    const healthy = analyzeDmarcRecord(
+      "example.com",
+      "v=DMARC1; p=reject; sp=reject; np=reject; rua=mailto:d@example.com",
+      at,
+    )
+    expect(deriveProblemStates(healthy.findings, { enforcing: true })).toEqual(["PS-00"])
+    expect(
+      deriveProblemStates(healthy.findings, { enforcing: true, dkimUnhealthy: true }),
+    ).toEqual(["PS-13"])
+  })
+
+  it("maps findings to §5 tests[] rows (pass/fail/warn/info)", () => {
+    const a = analyzeDmarcRecord("example.com", "v=DMARC1; p=none; rua=mailto:d@example.com", at)
+    const tests = buildTests(a.findings)
+    expect(tests.find((t) => t.id === "dmarc.p_none")).toMatchObject({ result: "warn" })
+    expect(tests.find((t) => t.id === "dmarc.rua_ok")).toMatchObject({ result: "pass" })
+    // remediation serializes as `fix`.
+    expect(tests.find((t) => t.id === "dmarc.p_none")?.fix).toBeDefined()
+  })
+
+  it("extracts TXT answers from doggo JSON tolerantly", () => {
+    const doc = [
+      {
+        answers: [
+          { name: "_dmarc.example.com.", type: "TXT", answer: '"v=DMARC1; p=none"' },
+        ],
+      },
+    ]
+    const answers = extractDoggoAnswers(doc)
+    expect(answers).toHaveLength(1)
+    expect(doggoTxtValues(answers)).toEqual(["v=DMARC1; p=none"])
   })
 
   it("populates the structured results payload", () => {

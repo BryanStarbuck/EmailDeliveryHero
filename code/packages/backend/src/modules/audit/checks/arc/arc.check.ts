@@ -1,5 +1,5 @@
 import { resolveTxt } from "../dns-util"
-import type { Checker, Finding } from "../types"
+import type { ArcForwarderConfig, Checker, CheckOutcome, Finding } from "../types"
 
 /**
  * ARC (Authenticated Received Chain, RFC 8617) — advisory companion to DMARC. ARC lets a forwarder
@@ -8,7 +8,7 @@ import type { Checker, Finding } from "../types"
  * header fields (ARC-Seal / ARC-Message-Signature / ARC-Authentication-Results) added to a message in
  * transit, so most of ARC can only be audited from a captured forwarded message sample.
  *
- * First round (pure DNS/config, deterministic):
+ * First round (pure DNS/config, deterministic — pm/checks/arc.mdx §3/§7):
  *   - arc.applicable          — is ARC even relevant? (enforcing DMARC + declared forwarding)
  *   - arc.forwarding_risk     — enforcing DMARC + declared forwarder with no verified chain
  *   - arc.selector_dns        — the ARC signer's <selector>._domainkey.<signer> resolves
@@ -17,28 +17,86 @@ import type { Checker, Finding } from "../types"
  * Future (needs a swaks-through-forwarder capture + OpenARC/validator over a real message):
  *   arc.chain_present, arc.seal_valid, arc.ams_valid, arc.instance_ordering, arc.oldest_pass,
  *   arc.cv_at_i1, arc.aar_completeness, arc.receiver_honors — stubbed as a single `info`, never a
- *   fabricated warning/critical.
+ *   fabricated warning/critical. Their columns in the structured payload stay null until a sample
+ *   exists (the nullable arc_check_results columns, pm/checks/arc.mdx §5).
  *
  * All findings use checkId "arc" (the sub-check prefix) and roll into the DMARC dashboard cell.
  */
 
-interface ArcForwarder {
+/** One declared forwarder's first-round DNS observation (feeds `results.arc.forwarders`). */
+interface ArcForwarderObservation {
   label: string
   forwardAddress: string
-  /** Expected ARC signing domain (d=); learned from config or an observed sample. */
-  signerDomain?: string
-  /** Expected ARC signing selector (s=). */
-  signerSelector?: string
+  signerDomain: string | null
+  signerSelector: string | null
+  /** `<selector>._domainkey.<signerDomain>` resolved with a non-empty key; null when unknown. */
+  selectorResolves: boolean | null
 }
 
 /**
- * The forwarders / mailing lists a domain declares it sends through (spec §4 per-domain config,
- * `arc_forwarders` table). `CheckContext` carries no forwarder config this round, so this is empty;
- * once the store surfaces `domains.arc.forwarders` the same loop below verifies each signer. Returning
- * a typed array (not a literal) keeps the downstream logic exercised rather than narrowed to `never`.
+ * The structured per-run ARC observation persisted as `results.arc` inside the audit file —
+ * the file-store mapping of the `arc_check_results` row (pm/checks/arc.mdx §5). Almost everything
+ * is nullable: first-round runs record only applicability, forwarding risk, and the selector-DNS
+ * results; the sample-derived columns fill in once a forwarded message is captured.
  */
-function declaredForwarders(_ctx: { domain: string }): ArcForwarder[] {
-  return []
+export interface ArcResults {
+  /** DMARC enforcing AND forwarding declared; null when the DMARC policy could not be read. */
+  applicable: boolean | null
+  /** Enforcing DMARC + declared forwarding with no verified chain (the first-round warning). */
+  forwardingRisk: boolean | null
+  /** Per-declared-forwarder signer/selector DNS observations (the arc_forwarders reference). */
+  forwarders: ArcForwarderObservation[]
+  /** id/hash of the captured forwarded message; null until a sample exists (FUTURE). */
+  messageSampleId: string | null
+  /** ARC header set found on the sample (FUTURE). */
+  chainPresent: boolean | null
+  /** Highest i= observed — hop count (FUTURE). */
+  chainLength: number | null
+  /** Newest ARC-Seal cv= — "none" | "pass" | "fail" (FUTURE). */
+  cvResult: string | null
+  /** Entire seal chain verified (FUTURE). */
+  sealValid: boolean | null
+  /** Newest ARC-Message-Signature verified (FUTURE). */
+  amsValid: boolean | null
+  /** i= contiguous, ordered, complete (FUTURE). */
+  instancesOk: boolean | null
+  /** i=1 AAR shows origin dmarc/dkim/spf pass (FUTURE). */
+  oldestPass: boolean | null
+  /** Per-hop detail: [{i, d, s, ams_valid, as_cv, aar}] (FUTURE). */
+  instances: unknown[] | null
+  /** When the swaks-through-forwarder probe last ran (FUTURE, admin-gated). */
+  probeSentAt: string | null
+  /** Freeform note (e.g. why applicability could not be evaluated). */
+  notes: string | null
+}
+
+/** The all-null sample-derived columns — first round is advisory-only, no message sample exists. */
+function emptyResults(): ArcResults {
+  return {
+    applicable: null,
+    forwardingRisk: null,
+    forwarders: [],
+    messageSampleId: null,
+    chainPresent: null,
+    chainLength: null,
+    cvResult: null,
+    sealValid: null,
+    amsValid: null,
+    instancesOk: null,
+    oldestPass: null,
+    instances: null,
+    probeSentAt: null,
+    notes: null,
+  }
+}
+
+/**
+ * The forwarders / mailing lists a domain declares it sends through (pm/checks/arc.mdx §4
+ * per-domain config, the `arc_forwarders` table — stored as `arc.forwarders` on the domain record
+ * and surfaced on the CheckContext).
+ */
+function declaredForwarders(ctx: { arc?: { forwarders: ArcForwarderConfig[] } }): ArcForwarderConfig[] {
+  return ctx.arc?.forwarders ?? []
 }
 
 /** Parse the DMARC policy tag (p=) from a domain's `_dmarc` TXT records. */
@@ -75,70 +133,95 @@ function estimateRsaBits(p: string): number {
  * confirm a non-empty key is published, and sanity-check the algorithm/key strength (RFC 8301, mirrors
  * DKIM). Covers `arc.selector_dns` and `arc.signature_algorithm`.
  */
-async function inspectSigner(f: ArcForwarder): Promise<Finding[]> {
+async function inspectSigner(
+  f: ArcForwarderConfig,
+): Promise<{ findings: Finding[]; observation: ArcForwarderObservation }> {
   const key = slug(f.label)
+  const observation: ArcForwarderObservation = {
+    label: f.label,
+    forwardAddress: f.forwardAddress,
+    signerDomain: f.signerDomain ?? null,
+    signerSelector: f.signerSelector ?? null,
+    selectorResolves: null,
+  }
+
   if (!f.signerDomain || !f.signerSelector) {
-    return [
-      {
-        id: `arc.selector_dns.${key}`,
-        checkId: "arc",
-        title: `ARC signer not yet known for ${f.label}`,
-        severity: "info",
-        detail: `No ARC signing domain (d=) / selector (s=) is recorded for forwarder "${f.label}", so its ARC key cannot be verified in DNS yet. The selector is entered in the forwarder config or auto-discovered from a captured forwarded sample.`,
-        remediation: `In this domain's ARC / forwarding settings, record the ARC signing domain and selector that "${f.label}" uses, or capture a forwarded sample so EmailDeliveryHero can discover it.`,
-      },
-    ]
+    return {
+      observation,
+      findings: [
+        {
+          id: `arc.selector_dns.${key}`,
+          checkId: "arc",
+          title: `ARC signer not yet known for ${f.label}`,
+          severity: "info",
+          detail: `No ARC signing domain (d=) / selector (s=) is recorded for forwarder "${f.label}", so its ARC key cannot be verified in DNS yet. The selector is entered in the forwarder config or auto-discovered from a captured forwarded sample.`,
+          remediation: `In this domain's ARC / forwarding settings, record the ARC signing domain and selector that "${f.label}" uses, or capture a forwarded sample so EmailDeliveryHero can discover it.`,
+        },
+      ],
+    }
   }
 
   const name = `${f.signerSelector}._domainkey.${f.signerDomain}`
   const { records, empty, error } = await resolveTxt(name)
 
   if (error) {
-    return [
-      {
-        id: `arc.selector_dns.${key}`,
-        checkId: "arc",
-        title: `Could not resolve ARC signer selector for ${f.label}`,
-        severity: "info",
-        detail: `DNS lookup for TXT ${name} failed transiently (${error}); the ARC signer key could not be checked this run.`,
-        remediation:
-          "Retry the audit. If it persists, verify the signer domain's authoritative nameservers.",
-        evidence: name,
-      },
-    ]
+    return {
+      observation,
+      findings: [
+        {
+          id: `arc.selector_dns.${key}`,
+          checkId: "arc",
+          title: `Could not resolve ARC signer selector for ${f.label}`,
+          severity: "info",
+          detail: `DNS lookup for TXT ${name} failed transiently (${error}); the ARC signer key could not be checked this run.`,
+          remediation:
+            "Retry the audit. If it persists, verify the signer domain's authoritative nameservers.",
+          evidence: name,
+        },
+      ],
+    }
   }
 
   if (empty || records.length === 0) {
-    return [
-      {
-        id: `arc.selector_dns.${key}`,
-        checkId: "arc",
-        title: `ARC signer selector does not resolve for ${f.label}`,
-        severity: "critical",
-        detail: `The ARC signer's selector ${name} returned no record (NXDOMAIN / empty). The ARC-Message-Signature and ARC-Seal from "${f.label}" cannot be verified, so receivers will discard the ARC evidence and fall back to the raw DMARC failure.`,
-        remediation: `Ask "${f.label}" to publish (or repair) its ARC signing key. If you operate the sealer, publish the 2048-bit key TXT record at ${name} with "v=DKIM1; k=rsa; p=<base64 public key>".`,
-        evidence: name,
-      },
-    ]
+    observation.selectorResolves = false
+    return {
+      observation,
+      findings: [
+        {
+          id: `arc.selector_dns.${key}`,
+          checkId: "arc",
+          title: `ARC signer selector does not resolve for ${f.label}`,
+          severity: "critical",
+          detail: `The ARC signer's selector ${name} returned no record (NXDOMAIN / empty). The ARC-Message-Signature and ARC-Seal from "${f.label}" cannot be verified, so receivers will discard the ARC evidence and fall back to the raw DMARC failure.`,
+          remediation: `Ask "${f.label}" to publish (or repair) its ARC signing key. If you operate the sealer, publish the 2048-bit key TXT record at ${name} with "v=DKIM1; k=rsa; p=<base64 public key>".`,
+          evidence: name,
+        },
+      ],
+    }
   }
 
   const rec = records.find((r) => /(?:^|;)\s*p\s*=/i.test(r)) ?? records[0]
   const p = tag(rec, "p")
   if (p === null || p === "") {
-    return [
-      {
-        id: `arc.selector_dns.${key}`,
-        checkId: "arc",
-        title: `ARC signer key is revoked/empty for ${f.label}`,
-        severity: "critical",
-        detail: `The selector ${name} exists but publishes an empty p= (a revoked key). The ARC signatures from "${f.label}" cannot be verified.`,
-        remediation: `Ask "${f.label}" to republish a valid public key at ${name}. If you operate the sealer, restore the 2048-bit key: "v=DKIM1; k=rsa; p=<base64 public key>".`,
-        evidence: rec,
-      },
-    ]
+    observation.selectorResolves = false
+    return {
+      observation,
+      findings: [
+        {
+          id: `arc.selector_dns.${key}`,
+          checkId: "arc",
+          title: `ARC signer key is revoked/empty for ${f.label}`,
+          severity: "critical",
+          detail: `The selector ${name} exists but publishes an empty p= (a revoked key). The ARC signatures from "${f.label}" cannot be verified.`,
+          remediation: `Ask "${f.label}" to republish a valid public key at ${name}. If you operate the sealer, restore the 2048-bit key: "v=DKIM1; k=rsa; p=<base64 public key>".`,
+          evidence: rec,
+        },
+      ],
+    }
   }
 
-  const out: Finding[] = [
+  observation.selectorResolves = true
+  const findings: Finding[] = [
     {
       id: `arc.selector_dns.${key}`,
       checkId: "arc",
@@ -151,7 +234,7 @@ async function inspectSigner(f: ArcForwarder): Promise<Finding[]> {
 
   const k = (tag(rec, "k") ?? "rsa").toLowerCase()
   if (k !== "rsa" && k !== "ed25519") {
-    out.push({
+    findings.push({
       id: `arc.signature_algorithm.${key}`,
       checkId: "arc",
       title: `ARC signer uses a legacy key type for ${f.label}`,
@@ -163,7 +246,7 @@ async function inspectSigner(f: ArcForwarder): Promise<Finding[]> {
   } else if (k === "rsa") {
     const bits = estimateRsaBits(p)
     if (bits < 1024) {
-      out.push({
+      findings.push({
         id: `arc.signature_algorithm.${key}`,
         checkId: "arc",
         title: `ARC signer key is weak for ${f.label}`,
@@ -175,28 +258,34 @@ async function inspectSigner(f: ArcForwarder): Promise<Finding[]> {
     }
   }
 
-  return out
+  return { findings, observation }
 }
 
 export const arcCheck: Checker = {
-  id: "dmarc.arc",
+  id: "arc",
   label: "ARC (Authenticated Received Chain)",
-  async run(ctx): Promise<Finding[]> {
+  async run(ctx): Promise<CheckOutcome> {
+    const results = emptyResults()
+
     // 1. Applicability rests on the DMARC policy — resolve it ourselves (CheckContext has no policy).
     const dmarc = await resolveTxt(`_dmarc.${ctx.domain}`)
     if (dmarc.error) {
-      return [
-        {
-          id: "arc.applicable",
-          checkId: "arc",
-          title: "Could not determine ARC applicability",
-          severity: "info",
-          detail: `DNS lookup for TXT _dmarc.${ctx.domain} failed transiently (${dmarc.error}); ARC applicability depends on the DMARC policy, so it could not be evaluated this run.`,
-          remediation:
-            "Retry the audit. If it persists, check the domain's authoritative nameservers.",
-          evidence: `_dmarc.${ctx.domain}`,
-        },
-      ]
+      results.notes = `DMARC policy lookup failed transiently (${dmarc.error}); applicability not evaluated.`
+      return {
+        results,
+        findings: [
+          {
+            id: "arc.applicable",
+            checkId: "arc",
+            title: "Could not determine ARC applicability",
+            severity: "info",
+            detail: `DNS lookup for TXT _dmarc.${ctx.domain} failed transiently (${dmarc.error}); ARC applicability depends on the DMARC policy, so it could not be evaluated this run.`,
+            remediation:
+              "Retry the audit. If it persists, check the domain's authoritative nameservers.",
+            evidence: `_dmarc.${ctx.domain}`,
+          },
+        ],
+      }
     }
 
     const policy = dmarcPolicy(dmarc.records)
@@ -204,52 +293,84 @@ export const arcCheck: Checker = {
 
     // 2. Not enforcing → ARC brings nothing; a directly-sent or p=none message is never rescued by it.
     if (!enforcing) {
-      return [
-        {
-          id: "arc.applicable",
-          checkId: "arc",
-          title: "ARC not applicable — DMARC is not enforcing",
-          severity: "info",
-          detail: policy
-            ? `DMARC policy is p=${policy}. ARC only matters when a message that PASSED DMARC at origin is broken by a forwarding hop under an enforcing policy (p=quarantine/reject). At p=none there is no rejection for ARC to override.`
-            : `${ctx.domain} publishes no enforcing DMARC policy. ARC only matters under p=quarantine/reject, where forwarded mail would otherwise be rejected.`,
-          remediation:
-            "No action needed for ARC. Revisit this once you move DMARC to p=quarantine or p=reject and begin sending through mailing lists or forwarders.",
-          evidence: policy ? `p=${policy}` : undefined,
-        },
-      ]
+      results.applicable = false
+      results.forwardingRisk = false
+      return {
+        results,
+        findings: [
+          {
+            id: "arc.applicable",
+            checkId: "arc",
+            title: "ARC not applicable — DMARC is not enforcing",
+            severity: "info",
+            detail: policy
+              ? `DMARC policy is p=${policy}. ARC only matters when a message that PASSED DMARC at origin is broken by a forwarding hop under an enforcing policy (p=quarantine/reject). At p=none there is no rejection for ARC to override.`
+              : `${ctx.domain} publishes no enforcing DMARC policy. ARC only matters under p=quarantine/reject, where forwarded mail would otherwise be rejected.`,
+            remediation:
+              "No action needed for ARC. Revisit this once you move DMARC to p=quarantine or p=reject and begin sending through mailing lists or forwarders.",
+            evidence: policy ? `p=${policy}` : undefined,
+          },
+        ],
+      }
     }
 
-    // 3. Enforcing DMARC. ARC now matters only for mail routed through forwarders/lists.
+    // 3. Enforcing DMARC. ARC now matters only for mail routed through forwarders/lists — read the
+    //    operator's declared config (usesForwarding flag + forwarder list, pm/checks/arc.mdx §4).
     const forwarders = declaredForwarders(ctx)
-    if (forwarders.length === 0) {
-      return [
-        {
-          id: "arc.applicable",
-          checkId: "arc",
-          title: "ARC not applicable — no forwarding declared",
-          severity: "info",
-          detail: `DMARC is enforcing (p=${policy}), but no forwarders or mailing lists are declared for ${ctx.domain}. ARC only helps on hops that mutate the message (forwarders, listservs, .forward rules, security gateways); with none declared there is no chain to verify.`,
-          remediation:
-            "If this domain does send through any forwarder or mailing list, declare it in the domain's ARC / forwarding settings — that unlocks the signer-selector DNS check today and the forwarded-sample capture later.",
-          evidence: `p=${policy}`,
-        },
-      ]
+    const usesForwarding = (ctx.arc?.usesForwarding ?? false) || forwarders.length > 0
+    if (!usesForwarding) {
+      results.applicable = false
+      results.forwardingRisk = false
+      return {
+        results,
+        findings: [
+          {
+            id: "arc.applicable",
+            checkId: "arc",
+            title: "ARC not applicable — no forwarding declared",
+            severity: "info",
+            detail: `DMARC is enforcing (p=${policy}), but no forwarders or mailing lists are declared for ${ctx.domain}. ARC only helps on hops that mutate the message (forwarders, listservs, .forward rules, security gateways); with none declared there is no chain to verify.`,
+            remediation:
+              "If this domain does send through any forwarder or mailing list, declare it in the domain's ARC / forwarding settings — that unlocks the signer-selector DNS check today and the forwarded-sample capture later.",
+            evidence: `p=${policy}`,
+          },
+        ],
+      }
     }
 
-    // 4. Enforcing DMARC + declared forwarders: run the deterministic per-forwarder DNS/config checks.
+    // 4. Enforcing DMARC + declared forwarding: run the deterministic per-forwarder DNS/config checks.
+    //    No chain has been verified yet (no sample), so forwarding risk stands.
+    results.applicable = true
+    results.forwardingRisk = true
     const findings: Finding[] = [
       {
         id: "arc.applicable",
         checkId: "arc",
         title: "ARC applies to this domain",
         severity: "info",
-        detail: `DMARC is enforcing (p=${policy}) and ${forwarders.length} forwarder(s)/list(s) are declared, so ARC preservation matters on those paths.`,
+        detail:
+          forwarders.length > 0
+            ? `DMARC is enforcing (p=${policy}) and ${forwarders.length} forwarder(s)/list(s) are declared, so ARC preservation matters on those paths.`
+            : `DMARC is enforcing (p=${policy}) and the domain is declared to send through forwarders/mailing lists, so ARC preservation matters on those paths.`,
         remediation:
           "Confirm each declared forwarder applies a valid ARC chain (cv=pass); the sub-checks below verify each signer's DNS key.",
         evidence: `p=${policy}`,
       },
     ]
+
+    if (forwarders.length === 0) {
+      // usesForwarding is on but no individual forwarder is registered yet — the risk is declared
+      // but nothing can be verified until the operator lists the forwarders.
+      findings.push({
+        id: "arc.forwarding_risk",
+        checkId: "arc",
+        title: "Forwarding declared but no forwarders registered",
+        severity: "warning",
+        detail: `${ctx.domain} enforces DMARC (p=${policy}) and is declared to send through forwarders/mailing lists, but none are registered. Forwarding breaks SPF alignment and often the DKIM signature, so without a verified ARC chain legitimate forwarded mail is silently quarantined or rejected — and nothing can be verified until each forwarder is listed.`,
+        remediation:
+          "Register each forwarder / mailing list (label + forwarding address, plus its ARC signing domain/selector if known) in the domain's ARC / forwarding settings so its signer key can be verified in DNS and a forwarded sample can be captured later.",
+      })
+    }
 
     for (const f of forwarders) {
       findings.push({
@@ -260,11 +381,13 @@ export const arcCheck: Checker = {
         detail: `${ctx.domain} enforces DMARC (p=${policy}) and sends through "${f.label}" (${f.forwardAddress}). Forwarding breaks SPF alignment and often the DKIM signature, so unless "${f.label}" seals a valid ARC chain, legitimate mail through it is silently quarantined or rejected. No verified chain exists for it yet.`,
         remediation: `Confirm "${f.label}" applies ARC (cv=pass). For lists you run, enable ARC sealing on the MLM (e.g. Mailman 3, or mlmmj + OpenARC); for third-party forwarders, ask them to enable ARC sealing.`,
       })
-      findings.push(...(await inspectSigner(f)))
+      const { findings: signerFindings, observation } = await inspectSigner(f)
+      findings.push(...signerFindings)
+      results.forwarders.push(observation)
     }
 
     // 5. Everything about a real chain needs a captured forwarded message (FUTURE). Stub as one info;
-    //    never fabricate a chain verdict.
+    //    never fabricate a chain verdict. The sample-derived columns in `results` stay null.
     findings.push({
       id: "arc.chain_present",
       checkId: "arc",
@@ -276,6 +399,6 @@ export const arcCheck: Checker = {
         'Use the admin-only "Capture sample" probe to send a swaks test through a declared forwarder and retrieve the forwarded copy; EmailDeliveryHero will then parse and validate the ARC-Seal / ARC-Message-Signature / ARC-Authentication-Results headers.',
     })
 
-    return findings
+    return { findings, results }
   },
 }

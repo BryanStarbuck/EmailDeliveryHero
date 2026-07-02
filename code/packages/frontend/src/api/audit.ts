@@ -20,6 +20,19 @@ export function useAuditRuns() {
   })
 }
 
+/**
+ * One domain's run history, newest startedAt first — powers the category run pages' run context
+ * strip (‹ prev / next ›, `newest` badge — pm/checks/dns.mdx §6.2).
+ */
+export function useDomainRuns(domainId: string | undefined) {
+  return useQuery({
+    queryKey: ["audit", "runs", "domain", domainId] as const,
+    queryFn: async () =>
+      (await api.get<AuditResult[]>("/audit/runs", { params: { domainId } })).data,
+    enabled: !!domainId,
+  })
+}
+
 /** One historical run in full — the run report for a Runs-table row. */
 export function useAuditRun(runId: string | undefined) {
   return useQuery({

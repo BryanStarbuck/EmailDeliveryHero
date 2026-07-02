@@ -1,14 +1,20 @@
 import { Resolver } from "node:dns/promises"
-import { mapLimit } from "@shared/concurrency"
+import { mapLimit, withResource } from "@shared/concurrency"
+import { resolveMx, resolveTxt, resolve4 as utilResolve4 } from "../dns-util"
+import type { Checker, CheckOutcome, Finding, Severity } from "../types"
 import type {
   BlacklistRunResults,
+  BlacklistTest,
+  BlacklistTestResult,
   BlocklistZone,
   DomainTarget,
   IpTarget,
   PositiveReputation,
+  ToolRun,
   ZoneHealth,
   ZoneResult,
 } from "./blacklist-types"
+import { collectEmailReportIps } from "./email-targets"
 import {
   buildQueryName,
   classifyAnswer,
@@ -19,10 +25,10 @@ import {
   detectProblemStates,
   diffRuns,
   reverseIpv4,
+  SEVERITY_RANK,
   spfLiteralIps,
   worstSeverity,
 } from "./engine"
-import { collectEmailReportIps } from "./email-targets"
 import {
   applyPortalStates,
   readLatestBlacklistRun,
@@ -30,8 +36,6 @@ import {
   saveBlacklistRun,
 } from "./store"
 import { loadZones, PROVIDER_PORTALS } from "./zones"
-import { resolveMx, resolveTxt, resolve4 as utilResolve4 } from "../dns-util"
-import type { Checker, CheckOutcome, Finding, Severity } from "../types"
 
 /**
  * DNS blacklist (DNSBL/RHSBL) membership — the full pm/checks/blacklists.mdx implementation:
@@ -42,7 +46,8 @@ import type { Checker, CheckOutcome, Finding, Severity } from "../types"
  */
 
 const QUERY_CONCURRENCY = 8
-const QUERY_TIMEOUT_MS = 3000
+/** §10.4 etiquette: per-query timeout 5 s, concurrency cap 8 in-flight — locked by acceptance 19. */
+const QUERY_TIMEOUT_MS = 5000
 
 /** Dedicated resolver so operators can point DNSBL traffic at a real recursive resolver
  *  (EDH_DNS_RESOLVER=ip[,ip]) — public resolvers get refused by Spamhaus/URIBL (§3, PS-9). */
@@ -65,6 +70,63 @@ function makeResolver(): { resolver: Resolver; mode: "system" | "custom"; server
 interface Lookup {
   records: string[]
   ms: number
+}
+
+// ---- §10.4 tool_runs[] capture -----------------------------------------------------------------
+
+/**
+ * Build the replay command for a batch of in-process node:dns calls. The §12 field rule lets
+ * in-process calls log their exact call expression; wrapping it in the Resolver construction makes
+ * the whole string replayable verbatim in a terminal via `node -e '<command>'` with every input
+ * argument (query names, resolver, timeout) visible — acceptance 19.
+ */
+function nodeDnsCommand(calls: string[], server: string | null): string {
+  const setServers = server ? ` r.setServers(${JSON.stringify(server.split(","))});` : ""
+  return (
+    `const {Resolver} = require("node:dns/promises"); ` +
+    `const r = new Resolver({timeout:${QUERY_TIMEOUT_MS},tries:1});${setServers} ` +
+    `Promise.all([${calls.join(", ")}].map(p => p.catch(e => e.code))).then(a => console.log(JSON.stringify(a)))`
+  )
+}
+
+/**
+ * Run one phase and append its ToolRun entry ({tool, command, started_at, duration_ms, exit_code,
+ * output_format, parsed, error} — the locked §10.4 shape). exit_code 0 = resolved (NXDOMAIN counts
+ * — "clean" is a successful answer), 1 = library error.
+ */
+async function loggedPhase<T>(
+  log: ToolRun[],
+  command: string,
+  run: () => Promise<T>,
+  parse: (value: T) => unknown,
+): Promise<T> {
+  const startedAt = new Date()
+  const base = {
+    tool: "node:dns/promises",
+    command,
+    started_at: startedAt.toISOString(),
+    output_format: "json" as const,
+  }
+  try {
+    const value = await run()
+    log.push({
+      ...base,
+      duration_ms: Date.now() - startedAt.getTime(),
+      exit_code: 0,
+      parsed: parse(value),
+      error: null,
+    })
+    return value
+  } catch (err) {
+    log.push({
+      ...base,
+      duration_ms: Date.now() - startedAt.getTime(),
+      exit_code: 1,
+      parsed: null,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    throw err
+  }
 }
 
 /** resolve4 that treats NXDOMAIN/ENODATA (and any resolver failure) as an empty answer. */
@@ -238,10 +300,11 @@ async function probePositiveReputation(
   const first = ips.find((t) => reverseIpv4(t.ip))
   if (!first) return out
   const reversed = reverseIpv4(first.ip)
+  // Positive/reputation lists are DNSBL-family zones too — same process-global cap (pm/run_checks.mdx §3.1).
   const [dnswl, score, rep] = await Promise.all([
-    query4(resolver, `${reversed}.list.dnswl.org`),
-    query4(resolver, `${reversed}.score.senderscore.com`),
-    query4(resolver, `${reversed}.rep.mailspike.net`),
+    withResource("dnsbl", () => query4(resolver, `${reversed}.list.dnswl.org`)),
+    withResource("dnsbl", () => query4(resolver, `${reversed}.score.senderscore.com`)),
+    withResource("dnsbl", () => query4(resolver, `${reversed}.rep.mailspike.net`)),
   ])
   out.dnswl = decodeDnswl(dnswl.records)
   out.senderscore = decodeSenderScore(score.records)
@@ -288,6 +351,75 @@ function causeHint(r: ZoneResult): string {
   }
 }
 
+// ---- §12 tests[] — one row per sub-test, pass and fail alike -------------------------------------
+
+/** Stable per-zone sub-test id (`dnsbl.` prefix locked by the spec; slug derived from the zone). */
+function zoneTestId(zone: string): string {
+  return `dnsbl.${zone.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`
+}
+
+function testFor(r: ZoneResult): BlacklistTest {
+  let result: BlacklistTestResult
+  let title: string
+  if (r.inconclusive) {
+    result = "info"
+    title = `${r.name} — ${r.target} inconclusive${r.refusal_code ? " (query refused)" : " (zone unavailable)"}`
+  } else if (r.listed) {
+    result = r.severity === "critical" ? "fail" : r.severity === "warning" ? "warn" : "info"
+    title = `${r.name} — ${r.target} listed${r.sub_list ? ` (${r.sub_list})` : ""}`
+  } else {
+    result = "pass"
+    title = `${r.name} — ${r.target} clean`
+  }
+  const answer = r.return_code ?? r.refusal_code ?? "NXDOMAIN"
+  return {
+    id: zoneTestId(r.zone),
+    title,
+    result,
+    evidence: `${queryNameFor(r)} → ${answer}${r.reason_txt ? `; TXT: ${r.reason_txt}` : ""}`,
+    ...(r.listed ? { fix: delistRemediation(r) } : {}),
+  }
+}
+
+/** The per-sub-test rows plus the dnsbl.aggregate roll-up (§2 / §12 example). */
+function buildTests(
+  results: ZoneResult[],
+  status: Severity,
+  counts: { listed: number; clean: number; inconclusive: number; zones: number; targets: number },
+): BlacklistTest[] {
+  const tests = results.map(testFor)
+  const worst = results
+    .filter((r) => r.listed)
+    .sort(
+      (a, b) =>
+        SEVERITY_RANK[b.severity ?? "info"] - SEVERITY_RANK[a.severity ?? "info"] ||
+        a.zone.localeCompare(b.zone),
+    )[0]
+  const aggregateResult: BlacklistTestResult =
+    status === "critical"
+      ? "fail"
+      : status === "warning"
+        ? "warn"
+        : counts.listed > 0
+          ? "info"
+          : "pass"
+  tests.push({
+    id: "dnsbl.aggregate",
+    title:
+      counts.listed > 0
+        ? `${counts.listed} listing(s) across ${counts.zones} zones × ${counts.targets} targets`
+        : `No listings across ${counts.zones} zones × ${counts.targets} targets`,
+    result: aggregateResult,
+    evidence: `listed ${counts.listed} · clean ${counts.clean} · inconclusive ${counts.inconclusive}${worst ? ` — worst = ${worst.name} on ${worst.target}` : ""}`,
+    ...(worst
+      ? {
+          fix: "Fix the highest-weight listing first (root cause before delisting), then re-run to confirm removal.",
+        }
+      : {}),
+  })
+  return tests
+}
+
 export const blacklistCheck: Checker = {
   id: "blacklist",
   label: "DNS blacklists",
@@ -299,13 +431,42 @@ export const blacklistCheck: Checker = {
 
     const zones = loadZones().filter((z) => z.enabled)
     const sweepZones = zones.filter((z) => !z.positive)
+    const toolRuns: ToolRun[] = []
 
-    const ipTargets = await discoverIpTargets(resolver, ctx.domain, ctx.sendingIps)
+    // §11.1 target discovery (PTR/FCrDNS/ASN context probes attached — §11.7).
+    const ipTargets = await loggedPhase(
+      toolRuns,
+      nodeDnsCommand(
+        ctx.sendingIps.length > 0
+          ? ctx.sendingIps.map((ip) => `r.reverse(${JSON.stringify(ip)})`)
+          : [
+              `r.resolveMx(${JSON.stringify(ctx.domain)})`,
+              `r.resolveTxt(${JSON.stringify(ctx.domain)})`,
+            ],
+        server,
+      ),
+      () => discoverIpTargets(resolver, ctx.domain, ctx.sendingIps),
+      (targets) => targets,
+    )
     const domainTargets: DomainTarget[] = [{ domain: ctx.domain, source: "primary", created: null }]
 
     // §11.2 preflight — dead/wildcarding zones are excluded from the sweep (PS-10).
-    const zoneHealth = await mapLimit(sweepZones, QUERY_CONCURRENCY, (z) =>
-      probeZoneHealth(resolver, z),
+    const zoneHealth = await loggedPhase(
+      toolRuns,
+      nodeDnsCommand(
+        sweepZones.flatMap((z) => [
+          `r.resolve4(${JSON.stringify(`2.0.0.127.${z.zone}`)})`,
+          `r.resolve4(${JSON.stringify(`1.0.0.127.${z.zone}`)})`,
+        ]),
+        server,
+      ),
+      () =>
+        mapLimit(sweepZones, QUERY_CONCURRENCY, (z) =>
+          // The process-global `dnsbl` semaphore (pm/run_checks.mdx §3.1): with 4 domains in
+          // flight a per-check cap alone would mean 32 concurrent hits on the same mirrors.
+          withResource("dnsbl", () => probeZoneHealth(resolver, z)),
+        ),
+      (health) => health,
     )
     const healthByZone = new Map(zoneHealth.map((h) => [h.zone, h]))
     const usableZones = sweepZones.filter((z) => {
@@ -322,11 +483,45 @@ export const blacklistCheck: Checker = {
         for (const t of domainTargets) pairs.push({ zone, target: t.domain })
       }
     }
-    const results = await mapLimit(pairs, QUERY_CONCURRENCY, (p) =>
-      queryPair(resolver, p.zone, p.target),
+    const results = await loggedPhase(
+      toolRuns,
+      nodeDnsCommand(
+        pairs
+          .map((p) => buildQueryName(p.target, p.zone))
+          .filter((n): n is string => n !== null)
+          .map((n) => `r.resolve4(${JSON.stringify(n)})`),
+        server,
+      ),
+      () =>
+        mapLimit(pairs, QUERY_CONCURRENCY, (p) =>
+          // Process-global dnsbl cap shared across every in-flight domain (pm/run_checks.mdx §3.1).
+          withResource("dnsbl", () => queryPair(resolver, p.zone, p.target)),
+        ),
+      (rows) =>
+        rows.map((r) => ({
+          name: queryNameFor(r),
+          answer: r.return_code ?? r.refusal_code ?? (r.inconclusive ? "inconclusive" : "NXDOMAIN"),
+          listed: r.listed,
+          ...(r.reason_txt ? { txt: r.reason_txt } : {}),
+        })),
     )
 
-    const positive = await probePositiveReputation(resolver, ipTargets)
+    const firstReversed = ipTargets.map((t) => reverseIpv4(t.ip)).find((r) => r !== null)
+    const positive = await loggedPhase(
+      toolRuns,
+      nodeDnsCommand(
+        firstReversed
+          ? [
+              `r.resolve4(${JSON.stringify(`${firstReversed}.list.dnswl.org`)})`,
+              `r.resolve4(${JSON.stringify(`${firstReversed}.score.senderscore.com`)})`,
+              `r.resolve4(${JSON.stringify(`${firstReversed}.rep.mailspike.net`)})`,
+            ]
+          : [],
+        server,
+      ),
+      () => probePositiveReputation(resolver, ipTargets),
+      (rep) => rep,
+    )
 
     const listedRows = results.filter((r) => r.listed)
     const inconclusiveRows = results.filter((r) => r.inconclusive)
@@ -338,6 +533,16 @@ export const blacklistCheck: Checker = {
     const previous = readLatestBlacklistRun(ctx.domain)
     const diff = diffRuns(previous, results)
 
+    // §12: status = worst post-weighting severity across the run's tests.
+    const status = worstSeverity(listedRows.map((r) => r.severity))
+    const tests = buildTests(results, status, {
+      listed: listedRows.length,
+      clean: results.length - listedRows.length - inconclusiveRows.length,
+      inconclusive: inconclusiveRows.length,
+      zones: sweepZones.length,
+      targets: ipTargets.length + domainTargets.length,
+    })
+
     const run: BlacklistRunResults = {
       schema_version: 1,
       technology: "blacklists",
@@ -345,10 +550,13 @@ export const blacklistCheck: Checker = {
       audit_id: auditId,
       ran_at: ranAt.toISOString(),
       duration_ms: Date.now() - startedAt,
+      status,
       resolver: { mode, server, refusals_detected: refusalsDetected },
       targets: { ips: ipTargets, domains: domainTargets },
       zone_health: zoneHealth,
       results,
+      tool_runs: toolRuns,
+      tests,
       positive_reputation: positive,
       provider_portals: applyPortalStates(PROVIDER_PORTALS, readPortalStates(ctx.domain)),
       summary: {
@@ -358,9 +566,10 @@ export const blacklistCheck: Checker = {
         clean: results.length - listedRows.length - inconclusiveRows.length,
         inconclusive: inconclusiveRows.length,
         dead_zones_skipped: deadZones.length,
-        worst_severity: worstSeverity(listedRows.map((r) => r.severity)),
+        worst_severity: status,
         problem_states: problemStates,
       },
+      problem_states: problemStates,
       diff,
     }
 

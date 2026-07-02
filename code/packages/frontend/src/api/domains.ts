@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "./axios"
-import type { MonitoredDomain } from "./types"
+import type { ArcConfig, BimiDomainConfig, DnsHealthConfig, MonitoredDomain } from "./types"
 
 export interface CreateDomainInput {
   name: string
@@ -8,6 +8,12 @@ export interface CreateDomainInput {
   dkimSelectors?: string[]
   sendingIps?: string[]
   scheduleEnabled?: boolean
+  /** ARC / forwarding config (pm/checks/arc.mdx §4 per-domain config inputs). */
+  arc?: ArcConfig
+  /** BIMI config (pm/checks/bimi.mdx §4 per-domain config inputs). */
+  bimi?: BimiDomainConfig
+  /** DNS-health expectations (pm/checks/dns_health.mdx §4 per-domain config inputs). */
+  dnsHealth?: DnsHealthConfig
 }
 
 export interface UpdateDomainInput {
@@ -15,6 +21,12 @@ export interface UpdateDomainInput {
   dkimSelectors?: string[]
   sendingIps?: string[]
   scheduleEnabled?: boolean
+  /** ARC / forwarding config (pm/checks/arc.mdx §4 per-domain config inputs). */
+  arc?: ArcConfig
+  /** BIMI config (pm/checks/bimi.mdx §4 per-domain config inputs). */
+  bimi?: BimiDomainConfig
+  /** DNS-health expectations (pm/checks/dns_health.mdx §4 per-domain config inputs). */
+  dnsHealth?: DnsHealthConfig
 }
 
 const KEY = ["domains"] as const

@@ -8,5 +8,8 @@ import { SchedulerService } from "./scheduler.service"
   imports: [AuditModule, DomainsModule],
   controllers: [SchedulerController],
   providers: [SchedulerService],
+  // Exported for the settings module: admin writes that include a `schedule` patch delegate here
+  // so the in-process timer re-arms on save (pm/settings.mdx §3.3).
+  exports: [SchedulerService],
 })
 export class SchedulerModule {}

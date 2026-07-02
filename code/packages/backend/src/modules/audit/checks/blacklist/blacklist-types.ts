@@ -139,6 +139,35 @@ export interface BlacklistDiff {
   first_run: boolean
 }
 
+/**
+ * One captured tool invocation (pm/checks/blacklists.mdx §10.4) — the locked shape
+ * {tool, command, started_at, duration_ms, exit_code, output_format, parsed, error}.
+ * In-process node:dns calls log their exact call expression as `command` (§12 field rules);
+ * exit_code 0 = resolved (NXDOMAIN counts — "clean" is a successful answer), 1 = library error.
+ */
+export interface ToolRun {
+  tool: string
+  command: string
+  started_at: string
+  duration_ms: number
+  exit_code: 0 | 1
+  output_format: "json" | "text"
+  parsed: unknown
+  error: string | null
+}
+
+/** tests[].result ⇔ finding severity: pass|fail|warn|info ⇔ ok|critical|warning|info (§12). */
+export type BlacklistTestResult = "pass" | "fail" | "warn" | "info"
+
+/** One per-sub-test row of the run file's `tests:` block (§12) — pass and fail alike. */
+export interface BlacklistTest {
+  id: string
+  title: string
+  result: BlacklistTestResult
+  evidence: string
+  fix?: string
+}
+
 export interface BlacklistSummary {
   zones_enabled: number
   pairs_queried: number
@@ -158,13 +187,21 @@ export interface BlacklistRunResults {
   audit_id: string
   ran_at: string
   duration_ms: number
+  /** Worst post-weighting severity across the run — the §12 top-level `status`. */
+  status: Severity
   resolver: { mode: "system" | "custom"; server: string | null; refusals_detected: boolean }
   targets: { ips: IpTarget[]; domains: DomainTarget[] }
   zone_health: ZoneHealth[]
   results: ZoneResult[]
+  /** One entry per tool invocation of the run — the §10.4/§12 audit trail. */
+  tool_runs: ToolRun[]
+  /** One row per sub-test, pass and fail alike — feeds the §13.2 sub-test results table. */
+  tests: BlacklistTest[]
   positive_reputation: PositiveReputation
   provider_portals: ProviderPortal[]
   summary: BlacklistSummary
+  /** Machine-detected §16 states this run — derived, never hand-edited (§12 field rules). */
+  problem_states: ProblemStateId[]
   diff: BlacklistDiff
 }
 

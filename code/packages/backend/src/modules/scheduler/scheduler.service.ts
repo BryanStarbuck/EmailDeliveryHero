@@ -1,5 +1,6 @@
 import { join } from "node:path"
 import { AuditService } from "@module/audit/audit.service"
+import type { AuditTrigger } from "@module/audit/checks/types"
 import { DomainsService } from "@module/domains/domains.service"
 import { Injectable, type OnModuleDestroy, type OnModuleInit } from "@nestjs/common"
 import { mapLimit } from "@shared/concurrency"
@@ -7,16 +8,7 @@ import { readJson, writeJson } from "@shared/json-store"
 import { logError, logInfo } from "@shared/logging"
 import { resolveStateDir } from "@shared/state-dir"
 import { computeNextRun } from "./next-run"
-import {
-  installArtifact,
-  previewArtifact,
-  uninstallArtifact,
-} from "./os-artifact"
-import {
-  normalizeSchedule,
-  readScheduleConfig,
-  writeScheduleConfig,
-} from "./schedule-config.store"
+import { installArtifact, previewArtifact, uninstallArtifact } from "./os-artifact"
 import type {
   OsArtifactPreview,
   RunTrigger,
@@ -24,6 +16,7 @@ import type {
   SchedulerRunOutcome,
   SchedulerStatus,
 } from "./schedule.types"
+import { normalizeSchedule, readScheduleConfig, writeScheduleConfig } from "./schedule-config.store"
 
 /** How many domains a scheduled run audits concurrently (matches AuditService's manual path). */
 const SCHEDULED_RUN_CONCURRENCY = 4
@@ -66,10 +59,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   onModuleInit(): void {
     const cfg = this.getConfig()
     if (cfg.enabled) {
-      logInfo(
-        `Scheduled checks enabled (${cfg.cadence}, runner: ${cfg.runner})`,
-        "Scheduler",
-      )
+      logInfo(`Scheduled checks enabled (${cfg.cadence}, runner: ${cfg.runner})`, "Scheduler")
     } else {
       logInfo("Scheduled checks disabled (turn on from the dashboard toggle)", "Scheduler")
     }
@@ -168,7 +158,10 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     if (!force) {
       const last = Date.parse(this.loadState().lastRunAt ?? "")
       if (Number.isFinite(last) && Date.now() - last < DEDUPE_WINDOW_MS) {
-        logInfo(`Scheduled run skipped — last run was under 5 minutes ago (${trigger})`, "Scheduler")
+        logInfo(
+          `Scheduled run skipped — last run was under 5 minutes ago (${trigger})`,
+          "Scheduler",
+        )
         return { started: false, reason: "recently_ran" }
       }
     }
@@ -179,8 +172,17 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
         `Scheduled check run started (${trigger}; ${included.length}/${this.domains.list().length} domain(s))`,
         "Scheduler",
       )
+      // The audit-record trigger tag (pm/run_checks.mdx §1/§9): who asked — data only, the same
+      // runForDomain runs regardless. "manual" here is the Settings tab's "Run a scheduled check
+      // now" button hitting POST /api/scheduler/run by hand.
+      const auditTrigger: AuditTrigger =
+        trigger === "os"
+          ? "scheduled-os"
+          : trigger === "in-process"
+            ? "scheduled-inprocess"
+            : "manual"
       const results = await mapLimit(included, SCHEDULED_RUN_CONCURRENCY, (d) =>
-        this.audit.runForDomain(d.id),
+        this.audit.runForDomain(d.id, auditTrigger),
       )
       this.saveState({ lastRunAt: new Date().toISOString(), lastTrigger: trigger })
       logInfo(`Scheduled check run finished (${results.length} domain(s))`, "Scheduler")

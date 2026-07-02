@@ -317,10 +317,13 @@ describe("diffRuns (spec §8 acceptance 9)", () => {
       audit_id: "prev",
       ran_at: "2026-01-01T00:00:00Z",
       duration_ms: 1,
+      status: "ok",
       resolver: { mode: "system", server: null, refusals_detected: false },
       targets: { ips: [], domains: [] },
       zone_health: [],
       results,
+      tool_runs: [],
+      tests: [],
       positive_reputation: CLEAN_POSITIVE,
       provider_portals: [],
       summary: {
@@ -333,6 +336,7 @@ describe("diffRuns (spec §8 acceptance 9)", () => {
         worst_severity: "ok",
         problem_states: [],
       },
+      problem_states: [],
       diff: { new_listings: [], cleared: [], escalated: [], first_run: true },
     }
   }
