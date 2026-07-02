@@ -242,10 +242,10 @@ Restating the boundary, because it is the security spine of this design:
 * **OpenAuthFederated owns:** authenticating the human, enforcing the domain, issuing/revoking
   sessions, and asserting roles/permissions.
 * **If OpenAuthFederated's side is incomplete** — domain enforcement, the embedded `/api/v1`
-  middleware, `verifyToken`, session revocation, the `role:admin` claim — **fix it in
-  `~/BGit/Bryan_git/OpenAuthFederated/`**, not with a workaround in this app. See the reference
-  login use case at
-  `/Users/bryan/BGit/all/app/pm/use_cases/openauthfed_login.mdx`.
+  middleware, `verifyToken`, session revocation, the `role:admin` claim — **fix it in your local
+  OpenAuthFederated checkout** (https://github.com/BryanStarbuck/OpenAuthFederated.git), not with a
+  workaround in this app. See the reference login use case at
+  `pm/use_cases/openauthfed_login.mdx` in the internal reference app repo, when available.
 
 ---
 

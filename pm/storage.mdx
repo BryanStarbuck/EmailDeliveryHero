@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — Local Storage, Config & Settings
-description: How EmailDeliveryHero persists state on disk — the no-database state root at ~/T/_emaildeliveryhero/, the hierarchical app-level config.yaml (settings), the per-logged-in-user config under users/<email>/config.yaml, the domain list in human-editable YAML (domains.yaml) plus the machine-written audit collection (audits.json), holding the domain list and each domain's sync on/off flag, the OpenAuthFederated session store + signing secret, the two log files (log.log + error.err), the browser localStorage conventions (theme mirror + oaf_edh session, never secrets), and the store module that fronts all of it. Works identically on a developer laptop and on a server; the only thing that changes is where the state root resolves and who is logged in.
+description: How EmailDeliveryHero persists state on disk — the no-database state root at ~/.email_delivery_hero/, the hierarchical app-level config.yaml (settings), the per-logged-in-user config under users/<email>/config.yaml, the domain list in human-editable YAML (domains.yaml) plus the machine-written audit collection (audits.json), holding the domain list and each domain's sync on/off flag, the OpenAuthFederated session store + signing secret, the two log files (log.log + error.err), the browser localStorage conventions (theme mirror + oaf_edh session, never secrets), and the store module that fronts all of it. Works identically on a developer laptop and on a server; the only thing that changes is where the state root resolves and who is logged in.
 ---
 
 # EmailDeliveryHero — Local Storage, Config & Settings
@@ -24,7 +24,7 @@ and one made on a server have the same shape and can be copied between machines.
 > same idea in its `pm/local_storage.mdx`: an app-level `config.yaml` plus **per-logged-in-user**
 > config under `users/<email>/config.yaml`, all under one state root, fronted by a typed store
 > layer. EmailDeliveryHero follows that model, adapted to this app's state root
-> (`~/T/_emaildeliveryhero/`), its OpenAuthFederated auth, and its domain/audit collection stores.
+> (`~/.email_delivery_hero/`), its OpenAuthFederated auth, and its domain/audit collection stores.
 
 Related specs:
 
@@ -48,10 +48,10 @@ Related specs:
 Everything the app persists lives under a single **state root directory**:
 
 ```
-~/T/_emaildeliveryhero/
+~/.email_delivery_hero/
 ```
 
-* Default `~/T/_emaildeliveryhero/`, overridable with the **`EDH_STATE_DIR`** environment variable
+* Default `~/.email_delivery_hero/`, overridable with the **`EDH_STATE_DIR`** environment variable
   (server mode points it at a service-owned dir, e.g. `/var/lib/email_delivery_hero`).
 * The directory is created on first use (`mkdirSync(dir, { recursive: true })`, best-effort) — the
   app never crashes because the folder is missing.
@@ -74,7 +74,7 @@ runtime data (`~/BGit/Bryan_git/EmailDeliveryHero/CLAUDE.md`).
 ## 2. Directory layout
 
 ```
-~/T/_emaildeliveryhero/
+~/.email_delivery_hero/
 ├── config.yaml              # APP-LEVEL settings — install-wide, hierarchical YAML (§3)
 ├── domains.yaml             # the monitored-domains list + each domain's sync on/off flag (§5)
 ├── audits.json              # latest audit result keyed by domain id (§6)
@@ -114,14 +114,14 @@ The product rule is **"keep human-facing data in YAML unless the data type makes
 
 ## 3. App-level `config.yaml` — the settings store (hierarchical)
 
-`~/T/_emaildeliveryhero/config.yaml` is the install-wide settings file that the
+`~/.email_delivery_hero/config.yaml` is the install-wide settings file that the
 [Settings page](./settings.mdx) reads and writes. It is **default-everything**: the app boots on
 sensible defaults and writes the file only when a value is set, so a fresh install runs with no file
 present. Every value is nested under a top-level group so the tree stays **hierarchical** and one
 concern is one block.
 
 ```yaml
-# ~/T/_emaildeliveryhero/config.yaml — app-level settings (install-wide)
+# ~/.email_delivery_hero/config.yaml — app-level settings (install-wide)
 schema_version: 1
 updated_at: 2026-07-01T14:32:15.123Z
 
@@ -214,7 +214,7 @@ This is the piece that makes storage **based on the current logged-in user**. Ap
 holds the shared, admin-owned settings; each person's **personal** preferences live in their own file:
 
 ```
-~/T/_emaildeliveryhero/users/<email>/config.yaml
+~/.email_delivery_hero/users/<email>/config.yaml
 ```
 
 * `<email>` is the user's **verified** email from the OpenAuthFederated JWT (the Google Workspace
@@ -233,7 +233,7 @@ holds the shared, admin-owned settings; each person's **personal** preferences l
 ### `users/<email>/config.yaml` shape
 
 ```yaml
-# ~/T/_emaildeliveryhero/users/bryan@whitehatengineering.com/config.yaml
+# ~/.email_delivery_hero/users/bryan@whitehatengineering.com/config.yaml
 schema_version: 1
 updated_at: 2026-07-01T14:32:15.123Z
 
@@ -279,7 +279,7 @@ tables:
 ## 5. `domains.yaml` — the domain list + each domain's sync on/off flag
 
 The monitored-domains list is the source of truth for the [Domains](./domains.mdx) CRUD and persists
-to **`~/T/_emaildeliveryhero/domains.yaml`** (implemented in
+to **`~/.email_delivery_hero/domains.yaml`** (implemented in
 `code/packages/backend/src/modules/domains/domains.service.ts` via the `yaml-store` helper). It is a
 **YAML sequence** — deliberately YAML, not JSON, so an operator can read and hand-edit the domain list
 on localhost. **Each record carries its own `scheduleEnabled` flag — this is "what was turned on or
@@ -428,8 +428,8 @@ implemented in `code/packages/backend/src/shared/logging.ts` +
 `code/packages/backend/src/shared/rolling-file-writer.ts`:
 
 ```
-~/T/_emaildeliveryhero/log.log     # INFO/DEBUG/VERBOSE — the normal event trail
-~/T/_emaildeliveryhero/error.err   # WARN/ERROR/FATAL — the fault trail
+~/.email_delivery_hero/log.log     # INFO/DEBUG/VERBOSE — the normal event trail
+~/.email_delivery_hero/error.err   # WARN/ERROR/FATAL — the fault trail
 ```
 
 * One line per event: `[ISO-8601 UTC] [LEVEL] [Context] message`. WARN/ERROR/FATAL are written to
@@ -478,7 +478,7 @@ Everything EmailDeliveryHero persists, and where:
 
 Storage is correct when **all** of the following hold:
 
-1. All persisted state lives under a single **state root** (`~/T/_emaildeliveryhero/`, override
+1. All persisted state lives under a single **state root** (`~/.email_delivery_hero/`, override
    `EDH_STATE_DIR`), created on first use, never committed to the repo.
 2. App-level settings live in a **hierarchical** `config.yaml` (one nested block per concern:
    `server`, `checks`, `schedule`, `notifications`, `storage`, `tools`, `access`, `defaults`), which

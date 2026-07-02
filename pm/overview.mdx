@@ -80,7 +80,7 @@ All MDX specifications in this directory and its subdirectories:
 * [Settings](./settings.mdx) — the Settings page: checks configuration, DNSBL zones, notifications,
   storage & data, tools & environment, and the `role:admin`-gated Admin sub-section.
 * [Storage](./storage.mdx) — how state is persisted on disk (no database): the state root
-  `~/T/_emaildeliveryhero/`, the hierarchical app-level `config.yaml` (settings), the
+  `~/.email_delivery_hero/`, the hierarchical app-level `config.yaml` (settings), the
   per-logged-in-user `users/<email>/config.yaml`, the `domains.yaml` domain list + each domain's sync
   on/off flag, `audits.json`, the auth session store + signing secret, the two log files, the
   browser `localStorage` conventions (theme mirror, never secrets), and the store layer that fronts
@@ -110,7 +110,7 @@ The load-bearing constants for the app, stored here as the single reference poin
 | Runtime | Node >= 20, **TypeScript** (strict) throughout. |
 | Repo layout | pnpm workspace monorepo under `code/` (`packages/backend`, `packages/frontend`). |
 | Auth | **Login optional** — logged-out = the `default` user; sign-in is OpenAuthFederated Google Workspace SSO (no email/password). Only admin actions require a session. See [Security](./security.mdx). |
-| Storage | On-disk JSON/YAML under `~/T/_emaildeliveryhero/` — no database. |
+| Storage | On-disk JSON/YAML under `~/.email_delivery_hero/` — no database. |
 | Git remote | `https://github.com/BryanStarbuck/EmailDeliveryHero.git` |
 
 The **UI WebApp must always run on localhost on port 4444**. This is the canonical value for the
@@ -194,7 +194,7 @@ The full engine design (each checker is a pluggable module returning findings) i
   `@auth/react`) — federated Google Workspace SSO, no email/password. See
   [Authentication](./authentication.mdx).
 * **Storage:** first round uses on-disk **JSON/YAML files** under a state dir (default
-  `~/T/_emaildeliveryhero/`) — **no database**.
+  `~/.email_delivery_hero/`) — **no database**.
 * **DNS checks:** Node's native `node:dns/promises` (TXT/MX/reverse); shelling out to
   Brew-installed tools (`dig`, etc.) is noted as a future enhancement.
 

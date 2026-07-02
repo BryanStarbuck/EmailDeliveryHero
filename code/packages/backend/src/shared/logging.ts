@@ -6,7 +6,7 @@ import { resolveLogDir } from "./state-dir"
 /**
  * Centralized application logging for EmailDeliveryHero (see pm/errors.mdx).
  *
- * Two rolling files directly at the storage root (~/T/_emaildeliveryhero by default; override the
+ * Two rolling files directly at the storage root (~/.email_delivery_hero by default; override the
  * log dir with EDH_LOG_DIR), each stream capped at 5 MiB on the live file with 5 rotated backups:
  *   • log.log     — INFO / DEBUG / VERBOSE (the normal operational trail)
  *   • error.err   — WARN / ERROR / FATAL  (everything that needs attention)

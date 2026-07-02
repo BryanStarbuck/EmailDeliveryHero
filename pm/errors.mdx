@@ -1,17 +1,17 @@
 ---
 title: EmailDeliveryHero — Error Handling & Logging
-description: How EmailDeliveryHero handles errors and writes logs — the two append-only rolling files at the storage root ~/T/_emaildeliveryhero/ (log.log for the normal event trail, error.err for the fault trail), the dependency-free synchronous RollingFileWriter with size-capped rotation, the AppLogger that implements NestJS LoggerService so the whole framework flows through the same files, the global exception filter + process-level handlers that guarantee anything that can go wrong lands in error.err, and the timestamped INFO lines written whenever a manual or scheduled check runs. Learned from the reference internal app (~/BGit/all/app/), which uses the same two-file, no-external-library pattern.
+description: How EmailDeliveryHero handles errors and writes logs — the two append-only rolling files at the storage root ~/.email_delivery_hero/ (log.log for the normal event trail, error.err for the fault trail), the dependency-free synchronous RollingFileWriter with size-capped rotation, the AppLogger that implements NestJS LoggerService so the whole framework flows through the same files, the global exception filter + process-level handlers that guarantee anything that can go wrong lands in error.err, and the timestamped INFO lines written whenever a manual or scheduled check runs. Learned from the reference internal app (~/BGit/all/app/), which uses the same two-file, no-external-library pattern.
 ---
 
 # EmailDeliveryHero — Error Handling & Logging
 
 This is the spec for how EmailDeliveryHero **handles errors and writes logs**. There are exactly two
 append-only files, both at the **storage root** the app already uses for everything else
-(`~/T/_emaildeliveryhero/` — see [Storage](./storage.mdx)):
+(`~/.email_delivery_hero/` — see [Storage](./storage.mdx)):
 
 ```
-~/T/_emaildeliveryhero/log.log     # INFO / DEBUG / VERBOSE — the normal event trail
-~/T/_emaildeliveryhero/error.err   # WARN / ERROR / FATAL   — the fault trail
+~/.email_delivery_hero/log.log     # INFO / DEBUG / VERBOSE — the normal event trail
+~/.email_delivery_hero/error.err   # WARN / ERROR / FATAL   — the fault trail
 ```
 
 Two rules drive the whole design:
@@ -25,15 +25,15 @@ Two rules drive the whole design:
 
 > **Learned from the house pattern.** The reference internal app (`~/BGit/all/app/`) implements this
 > exact model in `code/packages/backend/src/shared/logging/` — a two-file trail (`log.log` +
-> `error.err`) under its own storage root (`~/T/_act3_app`), written by a **dependency-free,
+> `error.err`) under its own storage root (its own storage root), written by a **dependency-free,
 > synchronous, size-capped rolling writer** rather than winston/pino, and surfaced through an
 > `AppLogger` that implements NestJS `LoggerService`. EmailDeliveryHero follows that model verbatim,
-> adapted to this app's storage root (`~/T/_emaildeliveryhero/`). See §6 for the library decision and
+> adapted to this app's storage root (`~/.email_delivery_hero/`). See §6 for the library decision and
 > why it is dependency-free.
 
 Related specs:
 
-* [Storage](./storage.mdx) — the storage root `~/T/_emaildeliveryhero/` and everything else that
+* [Storage](./storage.mdx) — the storage root `~/.email_delivery_hero/` and everything else that
   lives under it (config, domains, audits, sessions). §10 there is the storage-side view of these
   same two log files; this document is the behavior side.
 * [Engineering](./engineering.mdx) — the NestJS module list and where the logger, the global
@@ -50,13 +50,13 @@ specified and what the reference app does:
 
 | File | Levels written | Purpose |
 | --- | --- | --- |
-| `~/T/_emaildeliveryhero/log.log` | INFO, DEBUG, VERBOSE, **and a copy of every WARN/ERROR/FATAL** | The single chronological trail of everything that happened, in order. Reading it top-to-bottom tells the whole story with errors shown inline in context. |
-| `~/T/_emaildeliveryhero/error.err` | WARN, ERROR, FATAL only | The fault trail. Everything that needs attention, with nothing else to scroll past. |
+| `~/.email_delivery_hero/log.log` | INFO, DEBUG, VERBOSE, **and a copy of every WARN/ERROR/FATAL** | The single chronological trail of everything that happened, in order. Reading it top-to-bottom tells the whole story with errors shown inline in context. |
+| `~/.email_delivery_hero/error.err` | WARN, ERROR, FATAL only | The fault trail. Everything that needs attention, with nothing else to scroll past. |
 
 * **ERROR/WARN/FATAL are written to *both* files.** `error.err` is the complete list of problems;
   `log.log` still shows each one inline so surrounding context is not lost. (This mirrors the
   reference app's `AppLogger.emit`.)
-* The **location** follows [Storage](./storage.mdx): the storage root is `~/T/_emaildeliveryhero/`
+* The **location** follows [Storage](./storage.mdx): the storage root is `~/.email_delivery_hero/`
   by default, overridable with **`EDH_STATE_DIR`** (server mode). The log directory defaults to the
   storage root and can be pointed elsewhere with **`EDH_LOG_DIR`** without moving the rest of the
   state.
@@ -229,8 +229,8 @@ single-module change; no call site would move. Until then, the dependency-free w
 
 Error handling & logging are correct when **all** of the following hold:
 
-1. There are exactly two log files, at the storage root: `~/T/_emaildeliveryhero/log.log` and
-   `~/T/_emaildeliveryhero/error.err` (dir overridable via `EDH_STATE_DIR` / `EDH_LOG_DIR`), created
+1. There are exactly two log files, at the storage root: `~/.email_delivery_hero/log.log` and
+   `~/.email_delivery_hero/error.err` (dir overridable via `EDH_STATE_DIR` / `EDH_LOG_DIR`), created
    on first write.
 2. Every line is `[<ISO-8601>] [<LEVEL>] [<Context>] <message>` with a timestamp; WARN/ERROR/FATAL
    appear in **both** files, INFO/DEBUG/VERBOSE only in `log.log`.
@@ -254,7 +254,7 @@ Error handling & logging are correct when **all** of the following hold:
 
 <!--
   errors.mdx maintenance: keep consistent with storage.mdx §10 (same two files, same root
-  ~/T/_emaildeliveryhero/), engineering.mdx (logger + global filter placement), and scheduled_checks.mdx
+  ~/.email_delivery_hero/), engineering.mdx (logger + global filter placement), and scheduled_checks.mdx
   (scheduled-run logging). Reflect the real code paths: shared/rolling-file-writer.ts (the writer),
   shared/logging.ts (AppLogger + helpers), shared/all-exceptions.filter.ts (global filter),
   main.ts (useLogger + useGlobalFilters + process handlers), json-store.ts (guarded writeJson),

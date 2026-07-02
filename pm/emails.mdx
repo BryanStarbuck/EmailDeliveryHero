@@ -338,7 +338,7 @@ There is **no database** in the first round ([engineering.mdx §7](./engineering
 [tls_rpt.mdx](./checks/tls_rpt.mdx)).
 
 ```
-~/T/_emaildeliveryhero/                       # state root (storage.mdx; EDH_STATE_DIR override)
+~/.email_delivery_hero/                       # state root (storage.mdx; EDH_STATE_DIR override)
 └── reports/
     └── <domainId>/
         ├── dmarc/<reporterOrg>-<reportId>.json     # one parsed DMARC aggregate report (deduped by reportId)
@@ -476,7 +476,7 @@ in the field what the health checks predict from DNS, and each backstops the oth
 10. The Reports UI shows each problem, an expandable **per-source-IP table** for details, and a
     **copy-to-clipboard** fix; report findings also appear in the run-detail page under the right
     category with a "from reports" chip.
-11. Parsed reports persist under `~/T/_emaildeliveryhero/reports/<domainId>/…`, mapping 1:1 to the
+11. Parsed reports persist under `~/.email_delivery_hero/reports/<domainId>/…`, mapping 1:1 to the
     future `dmarc_aggregate_reports` / `tls_rpt_reports` tables; findings carry `source:"report"`.
 12. Running against the `act3ai.com` corpus reproduces §12: 96.8% aligned pass, the SendGrid
     strict-SPF-alignment fragility warning, zero spoofing, and a healthy TLS baseline.
@@ -492,8 +492,8 @@ in the field what the health checks predict from DNS, and each backstops the oth
   * Report findings roll into the EXISTING six categories (DMARC, DNS & Infrastructure). Never add a
     seventh dashboard category (dashboard.mdx locks the six).
   * Media types: DMARC agg = application/zip | application/gzip; TLS-RPT = application/tlsrpt+gzip.
-  * State root is ~/T/_emaildeliveryhero/ (storage.mdx authority); the older ~/.email_delivery_hero/
-    path in engineering.mdx/dmarc.mdx/tls_rpt.mdx refers to the same store module — reconcile there.
+  * State root is ~/.email_delivery_hero/ (storage.mdx authority; EDH_STATE_DIR override) — the
+    same store module engineering.mdx/dmarc.mdx/tls_rpt.mdx refer to.
   * When RUF/ARF or FBL/Postmaster ingestion ships, move the relevant row from §11 future → first
     round and add a sub-check id under the correct existing category.
 -->

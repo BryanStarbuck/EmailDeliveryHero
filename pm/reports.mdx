@@ -48,7 +48,7 @@ run, read back from the run history and rendered.
 The Reports page invents **no new storage**. It reads exactly what the engine already writes when
 tests run:
 
-* **State directory** — `~/T/_emaildeliveryhero/` (override: `EDH_STATE_DIR`), per
+* **State directory** — `~/.email_delivery_hero/` (override: `EDH_STATE_DIR`), per
   [Storage §1](./storage.mdx). Resolved by `packages/backend/src/shared/state-dir.ts`.
 * **`runs.json`** — the run history. `AuditService.persistResult` **prepends every finished run**
   (manual all-domains, manual per-domain, and scheduled runs all pass through it), capped at the

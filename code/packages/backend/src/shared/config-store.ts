@@ -8,8 +8,8 @@ import { readYaml, writeYaml } from "./yaml-store"
  * The hierarchical config/settings store (pm/storage.mdx §3, §4, §8). Two scopes, both YAML under
  * the state root, both default-everything (a fresh install runs with no file present):
  *
- *   ~/T/_emaildeliveryhero/config.yaml                — APP-LEVEL settings, install-wide
- *   ~/T/_emaildeliveryhero/users/<email>/config.yaml  — PER-LOGGED-IN-USER settings, lazy-created
+ *   ~/.email_delivery_hero/config.yaml                — APP-LEVEL settings, install-wide
+ *   ~/.email_delivery_hero/users/<email>/config.yaml  — PER-LOGGED-IN-USER settings, lazy-created
  *
  * <email> is the verified email from the OpenAuthFederated JWT (or the reserved literal "default"
  * when logged out — pm/security.mdx). Reads deep-merge the on-disk file over the typed defaults and
