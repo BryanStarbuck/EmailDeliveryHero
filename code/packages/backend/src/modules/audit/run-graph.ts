@@ -1,4 +1,4 @@
-import type { Checker } from "./checks/types"
+import type { Checker } from "./checks/types";
 
 /**
  * The check dependency graph (pm/run_checks.mdx §2). One domain's run is a dependency-ordered
@@ -17,24 +17,29 @@ import type { Checker } from "./checks/types"
  *    after the pure-DNS checks (pm/checks/content_scoring.mdx §3/§6)
  */
 export const CHECK_DEPENDENCIES: Record<string, string[]> = {
-  dmarc: ["spf", "dkim"],
-  arc: ["dmarc"],
-  "content.bimi": ["dmarc"],
-  "content.scoring": ["dmarc", "infra.mx_routing", "infra.dnssec", "infra.dns_health"],
-  // The unsubscribe-host reputation cross-check reuses content.url's URI-zone answers
-  // (pm/checks/list_unsubscribe.mdx §2 content.list_unsub_url_reputation / §6 "reuses
-  // link_url_reputation"), so the list-management pass starts after the link scan publishes.
-  "content.list_unsubscribe": ["content.url"],
-  "infra.mta_sts": ["infra.mx_routing"],
-  "infra.dane_tlsa": ["infra.mx_routing", "infra.dnssec"],
-  "infra.tls_transport": ["infra.mx_routing"],
-  "infra.smtp_security": ["infra.mx_routing"],
-  // The report-email corpus scan runs FIRST, then the per-category report derivations read the
-  // store it just refreshed (pm/emails.mdx §13.1 "Ordering" / AC 14): dmarc.reports emits the §5
-  // dmarc.report_* findings, infra.tls_rpt appends infra.tls_rpt_reports_ingested.
-  "dmarc.reports": ["content.report_emails"],
-  "infra.tls_rpt": ["content.report_emails"],
-}
+	dmarc: ["spf", "dkim"],
+	arc: ["dmarc"],
+	"content.bimi": ["dmarc"],
+	"content.scoring": [
+		"dmarc",
+		"infra.mx_routing",
+		"infra.dnssec",
+		"infra.dns_health",
+	],
+	// The unsubscribe-host reputation cross-check reuses content.url's URI-zone answers
+	// (pm/checks/list_unsubscribe.mdx §2 content.list_unsub_url_reputation / §6 "reuses
+	// link_url_reputation"), so the list-management pass starts after the link scan publishes.
+	"content.list_unsubscribe": ["content.url"],
+	"infra.mta_sts": ["infra.mx_routing"],
+	"infra.dane_tlsa": ["infra.mx_routing", "infra.dnssec"],
+	"infra.tls_transport": ["infra.mx_routing"],
+	"infra.smtp_security": ["infra.mx_routing"],
+	// The report-email corpus scan runs FIRST, then the per-category report derivations read the
+	// store it just refreshed (pm/emails.mdx §13.1 "Ordering" / AC 14): dmarc.reports emits the §5
+	// dmarc.report_* findings, infra.tls_rpt appends infra.tls_rpt_reports_ingested.
+	"dmarc.reports": ["content.report_emails"],
+	"infra.tls_rpt": ["content.report_emails"],
+};
 
 /**
  * Execute the registry as a promise-graph (pm/run_checks.mdx §3.1): each check's `runOne` is
@@ -46,26 +51,29 @@ export const CHECK_DEPENDENCIES: Record<string, string[]> = {
  * silently drop the rest of its subtree, and the graph as a whole always settles.
  */
 export async function runCheckerGraph(
-  checkers: readonly Checker[],
-  runOne: (checker: Checker) => Promise<void>,
+	checkers: readonly Checker[],
+	runOne: (checker: Checker) => Promise<void>,
 ): Promise<void> {
-  const byId = new Map(checkers.map((c) => [c.id, c]))
-  const started = new Map<string, Promise<void>>()
+	const byId = new Map(checkers.map((c) => [c.id, c]));
+	const started = new Map<string, Promise<void>>();
 
-  const promiseFor = (checker: Checker, visiting: Set<string>): Promise<void> => {
-    const existing = started.get(checker.id)
-    if (existing) return existing
-    // Cycle guard: a mis-declared back edge is ignored rather than deadlocking the run.
-    const nextVisiting = new Set(visiting).add(checker.id)
-    const deps = (CHECK_DEPENDENCIES[checker.id] ?? [])
-      .filter((id) => !nextVisiting.has(id))
-      .map((id) => byId.get(id))
-      .filter((dep): dep is Checker => dep !== undefined)
-      .map((dep) => promiseFor(dep, nextVisiting))
-    const run = Promise.allSettled(deps).then(() => runOne(checker))
-    started.set(checker.id, run)
-    return run
-  }
+	const promiseFor = (
+		checker: Checker,
+		visiting: Set<string>,
+	): Promise<void> => {
+		const existing = started.get(checker.id);
+		if (existing) return existing;
+		// Cycle guard: a mis-declared back edge is ignored rather than deadlocking the run.
+		const nextVisiting = new Set(visiting).add(checker.id);
+		const deps = (CHECK_DEPENDENCIES[checker.id] ?? [])
+			.filter((id) => !nextVisiting.has(id))
+			.map((id) => byId.get(id))
+			.filter((dep): dep is Checker => dep !== undefined)
+			.map((dep) => promiseFor(dep, nextVisiting));
+		const run = Promise.allSettled(deps).then(() => runOne(checker));
+		started.set(checker.id, run);
+		return run;
+	};
 
-  await Promise.allSettled(checkers.map((c) => promiseFor(c, new Set())))
+	await Promise.allSettled(checkers.map((c) => promiseFor(c, new Set())));
 }

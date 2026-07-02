@@ -1,4 +1,4 @@
-import { logger } from "@/lib/logger"
+import { logger } from "@/lib/logger";
 
 /**
  * Theme boot + the `edh.theme` localStorage mirror (pm/storage.mdx §9). localStorage is ONLY a
@@ -10,41 +10,43 @@ import { logger } from "@/lib/logger"
  * oaf_edh cookie plus the library-owned `oaf_edh…` keys that @auth/react manages itself.
  */
 
-export type Theme = "system" | "light" | "dark"
+export type Theme = "system" | "light" | "dark";
 
 /** The one app-owned localStorage key (pm/storage.mdx §9). */
-export const THEME_STORAGE_KEY = "edh.theme"
+export const THEME_STORAGE_KEY = "edh.theme";
 
 function isTheme(value: unknown): value is Theme {
-  return value === "system" || value === "light" || value === "dark"
+	return value === "system" || value === "light" || value === "dark";
 }
 
 /** The pre-boot hint from the mirror; `system` when absent/unreadable. */
 export function storedTheme(): Theme {
-  try {
-    const raw = localStorage.getItem(THEME_STORAGE_KEY)
-    return isTheme(raw) ? raw : "system"
-  } catch {
-    return "system" // localStorage can be unavailable (privacy mode) — never let theming throw.
-  }
+	try {
+		const raw = localStorage.getItem(THEME_STORAGE_KEY);
+		return isTheme(raw) ? raw : "system";
+	} catch {
+		return "system"; // localStorage can be unavailable (privacy mode) — never let theming throw.
+	}
 }
 
 /** Resolve `system` against the OS preference. */
 function resolve(theme: Theme): "light" | "dark" {
-  if (theme !== "system") return theme
-  try {
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
-  } catch {
-    return "light"
-  }
+	if (theme !== "system") return theme;
+	try {
+		return window.matchMedia("(prefers-color-scheme: dark)").matches
+			? "dark"
+			: "light";
+	} catch {
+		return "light";
+	}
 }
 
 /** Paint the theme onto <html> (data-theme + color-scheme) — cheap and idempotent. */
 export function applyTheme(theme: Theme): void {
-  const resolved = resolve(theme)
-  const root = document.documentElement
-  root.dataset.theme = resolved
-  root.style.colorScheme = resolved
+	const resolved = resolve(theme);
+	const root = document.documentElement;
+	root.dataset.theme = resolved;
+	root.style.colorScheme = resolved;
 }
 
 /**
@@ -52,12 +54,12 @@ export function applyTheme(theme: Theme): void {
  * (the caller — the Settings page — persists via PUT /api/settings; see pm/settings.mdx).
  */
 export function setTheme(theme: Theme): void {
-  applyTheme(theme)
-  try {
-    localStorage.setItem(THEME_STORAGE_KEY, theme)
-  } catch {
-    /* mirror only — losing it costs nothing but the pre-boot hint */
-  }
+	applyTheme(theme);
+	try {
+		localStorage.setItem(THEME_STORAGE_KEY, theme);
+	} catch {
+		/* mirror only — losing it costs nothing but the pre-boot hint */
+	}
 }
 
 /**
@@ -66,17 +68,21 @@ export function setTheme(theme: Theme): void {
  * (endpoint not deployed, offline, logged-out 401) leaves the pre-boot hint in place.
  */
 export async function reconcileThemeFromServer(): Promise<void> {
-  try {
-    // Plain fetch (cookie auth) rather than the axios layer: this runs at boot, must never queue
-    // behind the auth bridge, and a miss is entirely acceptable.
-    const res = await fetch("/api/settings", { credentials: "include" })
-    if (!res.ok) return
-    const body = (await res.json()) as { theme?: unknown; ui?: { theme?: unknown } }
-    const serverTheme = body?.theme ?? body?.ui?.theme
-    if (isTheme(serverTheme) && serverTheme !== storedTheme()) setTheme(serverTheme)
-  } catch (err) {
-    logger.debug?.("Theme reconcile skipped", err)
-  }
+	try {
+		// Plain fetch (cookie auth) rather than the axios layer: this runs at boot, must never queue
+		// behind the auth bridge, and a miss is entirely acceptable.
+		const res = await fetch("/api/settings", { credentials: "include" });
+		if (!res.ok) return;
+		const body = (await res.json()) as {
+			theme?: unknown;
+			ui?: { theme?: unknown };
+		};
+		const serverTheme = body?.theme ?? body?.ui?.theme;
+		if (isTheme(serverTheme) && serverTheme !== storedTheme())
+			setTheme(serverTheme);
+	} catch (err) {
+		logger.debug?.("Theme reconcile skipped", err);
+	}
 }
 
 /**
@@ -85,13 +91,13 @@ export async function reconcileThemeFromServer(): Promise<void> {
  * background once the app is up.
  */
 export function initTheme(): void {
-  applyTheme(storedTheme())
-  try {
-    window
-      .matchMedia("(prefers-color-scheme: dark)")
-      .addEventListener("change", () => applyTheme(storedTheme()))
-  } catch {
-    /* matchMedia may be missing in odd embedders — theming stays static there */
-  }
-  void reconcileThemeFromServer()
+	applyTheme(storedTheme());
+	try {
+		window
+			.matchMedia("(prefers-color-scheme: dark)")
+			.addEventListener("change", () => applyTheme(storedTheme()));
+	} catch {
+		/* matchMedia may be missing in odd embedders — theming stays static there */
+	}
+	void reconcileThemeFromServer();
 }

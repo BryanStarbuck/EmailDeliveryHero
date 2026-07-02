@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, renameSync } from "node:fs"
-import { homedir } from "node:os"
-import { join } from "node:path"
+import { existsSync, mkdirSync, renameSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 /**
  * The single out-of-repo state directory for EmailDeliveryHero. Everything the app persists —
@@ -13,7 +13,7 @@ import { join } from "node:path"
  */
 
 /** Last-resort root when os.homedir() is unavailable. */
-const FALLBACK_STATE_DIR = "/tmp/.email_delivery_hero"
+const FALLBACK_STATE_DIR = "/tmp/.email_delivery_hero";
 
 /**
  * One-time adoption of a legacy state dir (pm/storage.mdx §16 D1): earlier installs kept their
@@ -22,46 +22,46 @@ const FALLBACK_STATE_DIR = "/tmp/.email_delivery_hero"
  * once per process, best-effort (a failed rename just means a fresh dir is created — never a
  * crash). Skipped entirely under an EDH_STATE_DIR override.
  */
-let legacyAdoptAttempted = false
+let legacyAdoptAttempted = false;
 function adoptLegacyStateDir(home: string, canonicalDir: string): void {
-  if (legacyAdoptAttempted) return
-  legacyAdoptAttempted = true
-  try {
-    if (existsSync(canonicalDir)) return
-    const legacy = join(home, "T", "_emaildeliveryhero")
-    if (!existsSync(legacy)) return
-    renameSync(legacy, canonicalDir)
-  } catch {
-    // Best-effort: never let adoption break state-root resolution. (No logger here — logging.ts
-    // resolves its paths through this module, so importing it would be circular.)
-  }
+	if (legacyAdoptAttempted) return;
+	legacyAdoptAttempted = true;
+	try {
+		if (existsSync(canonicalDir)) return;
+		const legacy = join(home, "T", "_emaildeliveryhero");
+		if (!existsSync(legacy)) return;
+		renameSync(legacy, canonicalDir);
+	} catch {
+		// Best-effort: never let adoption break state-root resolution. (No logger here — logging.ts
+		// resolves its paths through this module, so importing it would be circular.)
+	}
 }
 
 /** Resolve the state root without side effects other than the best-effort mkdir/adopt. */
 function computeStateDir(): string {
-  const override = process.env.EDH_STATE_DIR?.trim()
-  if (override && override.length > 0) return override
-  try {
-    const home = homedir()
-    if (home && home.trim() !== "") {
-      const dir = join(home, ".email_delivery_hero")
-      adoptLegacyStateDir(home, dir)
-      return dir
-    }
-  } catch {
-    // homedir() can throw on a misconfigured host — fall through to the temp dir.
-  }
-  return FALLBACK_STATE_DIR
+	const override = process.env.EDH_STATE_DIR?.trim();
+	if (override && override.length > 0) return override;
+	try {
+		const home = homedir();
+		if (home && home.trim() !== "") {
+			const dir = join(home, ".email_delivery_hero");
+			adoptLegacyStateDir(home, dir);
+			return dir;
+		}
+	} catch {
+		// homedir() can throw on a misconfigured host — fall through to the temp dir.
+	}
+	return FALLBACK_STATE_DIR;
 }
 
 export function resolveStateDir(): string {
-  const dir = computeStateDir()
-  try {
-    mkdirSync(dir, { recursive: true })
-  } catch {
-    // Best-effort: the store/logger retry the mkdir on write, and never crash on a missing folder.
-  }
-  return dir
+	const dir = computeStateDir();
+	try {
+		mkdirSync(dir, { recursive: true });
+	} catch {
+		// Best-effort: the store/logger retry the mkdir on write, and never crash on a missing folder.
+	}
+	return dir;
 }
 
 /**
@@ -69,25 +69,25 @@ export function resolveStateDir(): string {
  * override with EDH_LOG_DIR to point logs elsewhere without moving the rest of the state.
  */
 export function resolveLogDir(): string {
-  const override = process.env.EDH_LOG_DIR?.trim()
-  if (override && override.length > 0) {
-    try {
-      mkdirSync(override, { recursive: true })
-    } catch {
-      /* best-effort */
-    }
-    return override
-  }
-  return resolveStateDir()
+	const override = process.env.EDH_LOG_DIR?.trim();
+	if (override && override.length > 0) {
+		try {
+			mkdirSync(override, { recursive: true });
+		} catch {
+			/* best-effort */
+		}
+		return override;
+	}
+	return resolveStateDir();
 }
 
 /** A subdirectory under the state dir, created on demand. */
 export function stateSubdir(...parts: string[]): string {
-  const dir = join(resolveStateDir(), ...parts)
-  try {
-    mkdirSync(dir, { recursive: true })
-  } catch {
-    /* best-effort */
-  }
-  return dir
+	const dir = join(resolveStateDir(), ...parts);
+	try {
+		mkdirSync(dir, { recursive: true });
+	} catch {
+		/* best-effort */
+	}
+	return dir;
 }

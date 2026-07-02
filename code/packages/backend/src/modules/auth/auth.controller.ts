@@ -1,7 +1,12 @@
-import { Controller, Get } from "@nestjs/common"
-import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger"
-import { type AuthUser, CurrentUser } from "@shared/current-user.decorator"
-import { MeDto } from "./dto/me.dto"
+import { Controller, Get } from "@nestjs/common";
+import {
+	ApiBearerAuth,
+	ApiOkResponse,
+	ApiOperation,
+	ApiTags,
+} from "@nestjs/swagger";
+import { type AuthUser, CurrentUser } from "@shared/current-user.decorator";
+import { MeDto } from "./dto/me.dto";
 
 /**
  * There is no `/auth/login` — sign-in is a federated handoff handled entirely by
@@ -11,7 +16,7 @@ import { MeDto } from "./dto/me.dto"
 @ApiBearerAuth()
 @Controller("auth")
 export class AuthController {
-  @Get("me")
+	@Get("me")
   @ApiOperation({
     summary: "The current user — the verified identity when signed in, else the `default` user",
   })

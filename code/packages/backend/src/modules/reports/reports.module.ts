@@ -1,7 +1,7 @@
-import { DomainsModule } from "@module/domains/domains.module"
-import { Module } from "@nestjs/common"
-import { ReportsController } from "./reports.controller"
-import { ReportsService } from "./reports.service"
+import { DomainsModule } from "@module/domains/domains.module";
+import { Module } from "@nestjs/common";
+import { ReportsController } from "./reports.controller";
+import { ReportsService } from "./reports.service";
 
 /**
  * Report-email ingestion (pm/emails.mdx) — DMARC aggregate (rua) XML + TLS-RPT JSON reports:
@@ -11,9 +11,9 @@ import { ReportsService } from "./reports.service"
  * categories with no special path.
  */
 @Module({
-  imports: [DomainsModule],
-  controllers: [ReportsController],
-  providers: [ReportsService],
-  exports: [ReportsService],
+	imports: [DomainsModule],
+	controllers: [ReportsController],
+	providers: [ReportsService],
+	exports: [ReportsService],
 })
 export class ReportsModule {}

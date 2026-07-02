@@ -1,306 +1,367 @@
 import {
-  analyzeDmarcRecord,
-  buildTests,
-  deriveProblemStates,
-  doggoTxtValues,
-  extractDoggoAnswers,
-  parseDmarcRecord,
-  walkUpCandidates,
-} from "./dmarc.check"
+	analyzeDmarcRecord,
+	buildTests,
+	deriveProblemStates,
+	doggoTxtValues,
+	extractDoggoAnswers,
+	parseDmarcRecord,
+	walkUpCandidates,
+} from "./dmarc.check";
 
-const ids = (a: ReturnType<typeof analyzeDmarcRecord>) => a.findings.map((f) => f.id)
+const ids = (a: ReturnType<typeof analyzeDmarcRecord>) =>
+	a.findings.map((f) => f.id);
 const byId = (a: ReturnType<typeof analyzeDmarcRecord>, id: string) =>
-  a.findings.find((f) => f.id === id)
+	a.findings.find((f) => f.id === id);
 
 describe("parseDmarcRecord", () => {
-  it("tokenizes tag=value pairs, trimming and lower-casing names", () => {
-    expect(parseDmarcRecord("v=DMARC1; P=reject ;rua=mailto:a@b.com")).toEqual([
-      { name: "v", value: "DMARC1" },
-      { name: "p", value: "reject" },
-      { name: "rua", value: "mailto:a@b.com" },
-    ])
-  })
+	it("tokenizes tag=value pairs, trimming and lower-casing names", () => {
+		expect(parseDmarcRecord("v=DMARC1; P=reject ;rua=mailto:a@b.com")).toEqual([
+			{ name: "v", value: "DMARC1" },
+			{ name: "p", value: "reject" },
+			{ name: "rua", value: "mailto:a@b.com" },
+		]);
+	});
 
-  it("tolerates trailing semicolons and empty tokens", () => {
-    expect(parseDmarcRecord("v=DMARC1; p=none;;")).toHaveLength(2)
-  })
-})
+	it("tolerates trailing semicolons and empty tokens", () => {
+		expect(parseDmarcRecord("v=DMARC1; p=none;;")).toHaveLength(2);
+	});
+});
 
 describe("walkUpCandidates", () => {
-  it("walks toward the 2-label domain and stops there", () => {
-    expect(walkUpCandidates("a.b.example.com")).toEqual(["b.example.com", "example.com"])
-    expect(walkUpCandidates("example.com")).toEqual([])
-  })
-})
+	it("walks toward the 2-label domain and stops there", () => {
+		expect(walkUpCandidates("a.b.example.com")).toEqual([
+			"b.example.com",
+			"example.com",
+		]);
+		expect(walkUpCandidates("example.com")).toEqual([]);
+	});
+});
 
 describe("analyzeDmarcRecord", () => {
-  const at = "_dmarc.example.com"
+	const at = "_dmarc.example.com";
 
-  it("accepts a healthy enforcing record", () => {
-    const a = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; rua=mailto:dmarc@example.com; adkim=r; aspf=r",
-      at,
-    )
-    expect(byId(a, "dmarc.policy_ok")).toBeDefined()
-    expect(byId(a, "dmarc.rua_ok")).toBeDefined()
-    expect(byId(a, "dmarc.subdomain_ok")).toBeDefined()
-    expect(a.findings.every((f) => f.severity !== "critical" && f.severity !== "warning")).toBe(
-      true,
-    )
-    expect(a.results.is_enforcing).toBe(true)
-    expect(a.results.subdomain_policy).toBe("reject")
-    expect(a.externalReports).toEqual([])
-  })
+	it("accepts a healthy enforcing record", () => {
+		const a = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; rua=mailto:dmarc@example.com; adkim=r; aspf=r",
+			at,
+		);
+		expect(byId(a, "dmarc.policy_ok")).toBeDefined();
+		expect(byId(a, "dmarc.rua_ok")).toBeDefined();
+		expect(byId(a, "dmarc.subdomain_ok")).toBeDefined();
+		expect(
+			a.findings.every(
+				(f) => f.severity !== "critical" && f.severity !== "warning",
+			),
+		).toBe(true);
+		expect(a.results.is_enforcing).toBe(true);
+		expect(a.results.subdomain_policy).toBe("reject");
+		expect(a.externalReports).toEqual([]);
+	});
 
-  it("flags a record that does not start with v=DMARC1 as critical", () => {
-    const a = analyzeDmarcRecord("example.com", "p=none; v=DMARC1", at)
-    expect(byId(a, "dmarc.syntax")?.severity).toBe("critical")
-  })
+	it("flags a record that does not start with v=DMARC1 as critical", () => {
+		const a = analyzeDmarcRecord("example.com", "p=none; v=DMARC1", at);
+		expect(byId(a, "dmarc.syntax")?.severity).toBe("critical");
+	});
 
-  it("warns when p= is not the second tag", () => {
-    const a = analyzeDmarcRecord("example.com", "v=DMARC1; rua=mailto:d@example.com; p=reject", at)
-    expect(byId(a, "dmarc.syntax_p_position")?.severity).toBe("warning")
-  })
+	it("warns when p= is not the second tag", () => {
+		const a = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; rua=mailto:d@example.com; p=reject",
+			at,
+		);
+		expect(byId(a, "dmarc.syntax_p_position")?.severity).toBe("warning");
+	});
 
-  it("flags a missing policy as critical and an invalid one too", () => {
-    expect(
-      byId(
-        analyzeDmarcRecord("example.com", "v=DMARC1; rua=mailto:d@example.com", at),
-        "dmarc.no_policy",
-      )?.severity,
-    ).toBe("critical")
-    expect(
-      byId(analyzeDmarcRecord("example.com", "v=DMARC1; p=monitor", at), "dmarc.policy")?.severity,
-    ).toBe("critical")
-  })
+	it("flags a missing policy as critical and an invalid one too", () => {
+		expect(
+			byId(
+				analyzeDmarcRecord(
+					"example.com",
+					"v=DMARC1; rua=mailto:d@example.com",
+					at,
+				),
+				"dmarc.no_policy",
+			)?.severity,
+		).toBe("critical");
+		expect(
+			byId(
+				analyzeDmarcRecord("example.com", "v=DMARC1; p=monitor", at),
+				"dmarc.policy",
+			)?.severity,
+		).toBe("critical");
+	});
 
-  it("warns on p=none (monitor-only)", () => {
-    const a = analyzeDmarcRecord("example.com", "v=DMARC1; p=none; rua=mailto:d@example.com", at)
-    expect(byId(a, "dmarc.p_none")?.severity).toBe("warning")
-    expect(a.results.is_enforcing).toBe(false)
-  })
+	it("warns on p=none (monitor-only)", () => {
+		const a = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=none; rua=mailto:d@example.com",
+			at,
+		);
+		expect(byId(a, "dmarc.p_none")?.severity).toBe("warning");
+		expect(a.results.is_enforcing).toBe(false);
+	});
 
-  it("warns when sp= is weaker than an enforcing p=", () => {
-    const a = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; sp=none; rua=mailto:d@example.com",
-      at,
-    )
-    expect(byId(a, "dmarc.subdomain")?.severity).toBe("warning")
-    expect(a.results.subdomain_policy).toBe("none")
-  })
+	it("warns when sp= is weaker than an enforcing p=", () => {
+		const a = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; sp=none; rua=mailto:d@example.com",
+			at,
+		);
+		expect(byId(a, "dmarc.subdomain")?.severity).toBe("warning");
+		expect(a.results.subdomain_policy).toBe("none");
+	});
 
-  it("suggests np= on enforcing records (info)", () => {
-    const a = analyzeDmarcRecord("example.com", "v=DMARC1; p=reject; rua=mailto:d@example.com", at)
-    expect(byId(a, "dmarc.np")?.severity).toBe("info")
-  })
+	it("suggests np= on enforcing records (info)", () => {
+		const a = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; rua=mailto:d@example.com",
+			at,
+		);
+		expect(byId(a, "dmarc.np")?.severity).toBe("info");
+	});
 
-  it("warns on strict alignment modes", () => {
-    const a = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:d@example.com",
-      at,
-    )
-    expect(byId(a, "dmarc.adkim_strict")?.severity).toBe("warning")
-    expect(byId(a, "dmarc.aspf_strict")?.severity).toBe("warning")
-  })
+	it("warns on strict alignment modes", () => {
+		const a = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:d@example.com",
+			at,
+		);
+		expect(byId(a, "dmarc.adkim_strict")?.severity).toBe("warning");
+		expect(byId(a, "dmarc.aspf_strict")?.severity).toBe("warning");
+	});
 
-  it("warns on pct<100 and infos on pct=100 (obsolete)", () => {
-    expect(
-      byId(
-        analyzeDmarcRecord(
-          "example.com",
-          "v=DMARC1; p=reject; pct=50; rua=mailto:d@example.com",
-          at,
-        ),
-        "dmarc.pct",
-      )?.severity,
-    ).toBe("warning")
-    expect(
-      byId(
-        analyzeDmarcRecord(
-          "example.com",
-          "v=DMARC1; p=reject; pct=100; rua=mailto:d@example.com",
-          at,
-        ),
-        "dmarc.pct",
-      )?.severity,
-    ).toBe("info")
-  })
+	it("warns on pct<100 and infos on pct=100 (obsolete)", () => {
+		expect(
+			byId(
+				analyzeDmarcRecord(
+					"example.com",
+					"v=DMARC1; p=reject; pct=50; rua=mailto:d@example.com",
+					at,
+				),
+				"dmarc.pct",
+			)?.severity,
+		).toBe("warning");
+		expect(
+			byId(
+				analyzeDmarcRecord(
+					"example.com",
+					"v=DMARC1; p=reject; pct=100; rua=mailto:d@example.com",
+					at,
+				),
+				"dmarc.pct",
+			)?.severity,
+		).toBe("info");
+	});
 
-  it("warns when rua is missing and when a rua URI is not mailto:", () => {
-    expect(
-      byId(analyzeDmarcRecord("example.com", "v=DMARC1; p=reject", at), "dmarc.rua")?.severity,
-    ).toBe("warning")
-    expect(
-      byId(
-        analyzeDmarcRecord("example.com", "v=DMARC1; p=reject; rua=dmarc@example.com", at),
-        "dmarc.rua_invalid",
-      )?.severity,
-    ).toBe("warning")
-  })
+	it("warns when rua is missing and when a rua URI is not mailto:", () => {
+		expect(
+			byId(
+				analyzeDmarcRecord("example.com", "v=DMARC1; p=reject", at),
+				"dmarc.rua",
+			)?.severity,
+		).toBe("warning");
+		expect(
+			byId(
+				analyzeDmarcRecord(
+					"example.com",
+					"v=DMARC1; p=reject; rua=dmarc@example.com",
+					at,
+				),
+				"dmarc.rua_invalid",
+			)?.severity,
+		).toBe("warning");
+	});
 
-  it("flags t=y testing mode as a warning that disables enforcement", () => {
-    const a = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; t=y; rua=mailto:d@example.com",
-      at,
-    )
-    expect(byId(a, "dmarc.testing")?.severity).toBe("warning")
-    // §5: is_enforcing = policy in (quarantine, reject) AND not t=y.
-    expect(a.results.is_enforcing).toBe(false)
-  })
+	it("flags t=y testing mode as a warning that disables enforcement", () => {
+		const a = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; t=y; rua=mailto:d@example.com",
+			at,
+		);
+		expect(byId(a, "dmarc.testing")?.severity).toBe("warning");
+		// §5: is_enforcing = policy in (quarantine, reject) AND not t=y.
+		expect(a.results.is_enforcing).toBe(false);
+	});
 
-  it("flags obsolete ri/rf tags and unknown tags as info", () => {
-    const a = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; ri=3600; rf=afrf; foo=bar; rua=mailto:d@example.com",
-      at,
-    )
-    expect(ids(a)).toContain("dmarc.deprecated_tags")
-  })
+	it("flags obsolete ri/rf tags and unknown tags as info", () => {
+		const a = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; ri=3600; rf=afrf; foo=bar; rua=mailto:d@example.com",
+			at,
+		);
+		expect(ids(a)).toContain("dmarc.deprecated_tags");
+	});
 
-  it("collects external report destinations and strips !size suffixes", () => {
-    const a = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; rua=mailto:agg@thirdparty.net!10m,mailto:me@example.com; ruf=mailto:f@thirdparty.net",
-      at,
-    )
-    // Same-domain mailbox is never probed; the external domain is deduped per kind.
-    expect(a.externalReports).toEqual([
-      { kind: "rua", uri: "mailto:agg@thirdparty.net", domain: "thirdparty.net" },
-      { kind: "ruf", uri: "mailto:f@thirdparty.net", domain: "thirdparty.net" },
-    ])
-    expect(a.results.rua_uris).toEqual(["mailto:agg@thirdparty.net", "mailto:me@example.com"])
-  })
+	it("collects external report destinations and strips !size suffixes", () => {
+		const a = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; rua=mailto:agg@thirdparty.net!10m,mailto:me@example.com; ruf=mailto:f@thirdparty.net",
+			at,
+		);
+		// Same-domain mailbox is never probed; the external domain is deduped per kind.
+		expect(a.externalReports).toEqual([
+			{
+				kind: "rua",
+				uri: "mailto:agg@thirdparty.net",
+				domain: "thirdparty.net",
+			},
+			{ kind: "ruf", uri: "mailto:f@thirdparty.net", domain: "thirdparty.net" },
+		]);
+		expect(a.results.rua_uris).toEqual([
+			"mailto:agg@thirdparty.net",
+			"mailto:me@example.com",
+		]);
+	});
 
-  it("flags a malformed !size suffix", () => {
-    const a = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; rua=mailto:d@example.com!10mb",
-      at,
-    )
-    expect(byId(a, "dmarc.report_uri_size")?.severity).toBe("info")
-  })
+	it("flags a malformed !size suffix", () => {
+		const a = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; rua=mailto:d@example.com!10mb",
+			at,
+		);
+		expect(byId(a, "dmarc.report_uri_size")?.severity).toBe("info");
+	});
 
-  it("infos on more than 2 report URIs (§8 — the spec only guarantees two)", () => {
-    const a = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; rua=mailto:a@example.com,mailto:b@example.com,mailto:c@example.com",
-      at,
-    )
-    expect(byId(a, "dmarc.rua_limit")?.severity).toBe("info")
-    // Two destinations is fine — no finding.
-    const two = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; rua=mailto:a@example.com,mailto:b@example.com",
-      at,
-    )
-    expect(byId(two, "dmarc.rua_limit")).toBeUndefined()
-  })
+	it("infos on more than 2 report URIs (§8 — the spec only guarantees two)", () => {
+		const a = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; rua=mailto:a@example.com,mailto:b@example.com,mailto:c@example.com",
+			at,
+		);
+		expect(byId(a, "dmarc.rua_limit")?.severity).toBe("info");
+		// Two destinations is fine — no finding.
+		const two = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; rua=mailto:a@example.com,mailto:b@example.com",
+			at,
+		);
+		expect(byId(two, "dmarc.rua_limit")).toBeUndefined();
+	});
 
-  it("infos when ruf= is set with fo=0 — explicit or defaulted (both-fail reports only)", () => {
-    const explicit = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; rua=mailto:d@example.com; ruf=mailto:f@example.com; fo=0",
-      at,
-    )
-    expect(byId(explicit, "dmarc.fo")?.severity).toBe("info")
-    const defaulted = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; rua=mailto:d@example.com; ruf=mailto:f@example.com",
-      at,
-    )
-    expect(byId(defaulted, "dmarc.fo")?.severity).toBe("info")
-    // fo=1 with ruf= is the advised shape — no finding.
-    const fo1 = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; rua=mailto:d@example.com; ruf=mailto:f@example.com; fo=1",
-      at,
-    )
-    expect(byId(fo1, "dmarc.fo")).toBeUndefined()
-  })
+	it("infos when ruf= is set with fo=0 — explicit or defaulted (both-fail reports only)", () => {
+		const explicit = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; rua=mailto:d@example.com; ruf=mailto:f@example.com; fo=0",
+			at,
+		);
+		expect(byId(explicit, "dmarc.fo")?.severity).toBe("info");
+		const defaulted = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; rua=mailto:d@example.com; ruf=mailto:f@example.com",
+			at,
+		);
+		expect(byId(defaulted, "dmarc.fo")?.severity).toBe("info");
+		// fo=1 with ruf= is the advised shape — no finding.
+		const fo1 = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; rua=mailto:d@example.com; ruf=mailto:f@example.com; fo=1",
+			at,
+		);
+		expect(byId(fo1, "dmarc.fo")).toBeUndefined();
+	});
 
-  it("derives §9 problem states from the finding ids", () => {
-    const monitor = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=none; rua=mailto:d@example.com",
-      at,
-    )
-    expect(deriveProblemStates(monitor.findings)).toEqual(["PS-05"])
+	it("derives §9 problem states from the finding ids", () => {
+		const monitor = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=none; rua=mailto:d@example.com",
+			at,
+		);
+		expect(deriveProblemStates(monitor.findings)).toEqual(["PS-05"]);
 
-    const gaps = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; sp=none; adkim=s; pct=50; rua=mailto:d@example.com",
-      at,
-    )
-    expect(deriveProblemStates(gaps.findings)).toEqual(
-      expect.arrayContaining(["PS-06", "PS-07", "PS-08"]),
-    )
+		const gaps = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; sp=none; adkim=s; pct=50; rua=mailto:d@example.com",
+			at,
+		);
+		expect(deriveProblemStates(gaps.findings)).toEqual(
+			expect.arrayContaining(["PS-06", "PS-07", "PS-08"]),
+		);
 
-    const missing = [
-      {
-        id: "dmarc.missing",
-        checkId: "dmarc",
-        title: "No DMARC record",
-        severity: "critical" as const,
-        detail: "",
-      },
-    ]
-    expect(deriveProblemStates(missing, { misplacedHit: true })).toEqual(["PS-01", "PS-03"])
-  })
+		const missing = [
+			{
+				id: "dmarc.missing",
+				checkId: "dmarc",
+				title: "No DMARC record",
+				severity: "critical" as const,
+				detail: "",
+			},
+		];
+		expect(deriveProblemStates(missing, { misplacedHit: true })).toEqual([
+			"PS-01",
+			"PS-03",
+		]);
+	});
 
-  it("derives PS-00 only for a healthy enforcing record, and PS-13 from an unhealthy DKIM", () => {
-    const healthy = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=reject; sp=reject; np=reject; rua=mailto:d@example.com",
-      at,
-    )
-    expect(deriveProblemStates(healthy.findings, { enforcing: true })).toEqual(["PS-00"])
-    expect(deriveProblemStates(healthy.findings, { enforcing: true, dkimUnhealthy: true })).toEqual(
-      ["PS-13"],
-    )
-  })
+	it("derives PS-00 only for a healthy enforcing record, and PS-13 from an unhealthy DKIM", () => {
+		const healthy = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=reject; sp=reject; np=reject; rua=mailto:d@example.com",
+			at,
+		);
+		expect(deriveProblemStates(healthy.findings, { enforcing: true })).toEqual([
+			"PS-00",
+		]);
+		expect(
+			deriveProblemStates(healthy.findings, {
+				enforcing: true,
+				dkimUnhealthy: true,
+			}),
+		).toEqual(["PS-13"]);
+	});
 
-  it("maps findings to §5 tests[] rows (pass/fail/warn/info)", () => {
-    const a = analyzeDmarcRecord("example.com", "v=DMARC1; p=none; rua=mailto:d@example.com", at)
-    const tests = buildTests(a.findings)
-    expect(tests.find((t) => t.id === "dmarc.p_none")).toMatchObject({ result: "warn" })
-    expect(tests.find((t) => t.id === "dmarc.rua_ok")).toMatchObject({ result: "pass" })
-    // remediation serializes as `fix`.
-    expect(tests.find((t) => t.id === "dmarc.p_none")?.fix).toBeDefined()
-  })
+	it("maps findings to §5 tests[] rows (pass/fail/warn/info)", () => {
+		const a = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=none; rua=mailto:d@example.com",
+			at,
+		);
+		const tests = buildTests(a.findings);
+		expect(tests.find((t) => t.id === "dmarc.p_none")).toMatchObject({
+			result: "warn",
+		});
+		expect(tests.find((t) => t.id === "dmarc.rua_ok")).toMatchObject({
+			result: "pass",
+		});
+		// remediation serializes as `fix`.
+		expect(tests.find((t) => t.id === "dmarc.p_none")?.fix).toBeDefined();
+	});
 
-  it("extracts TXT answers from doggo JSON tolerantly", () => {
-    const doc = [
-      {
-        answers: [{ name: "_dmarc.example.com.", type: "TXT", answer: '"v=DMARC1; p=none"' }],
-      },
-    ]
-    const answers = extractDoggoAnswers(doc)
-    expect(answers).toHaveLength(1)
-    expect(doggoTxtValues(answers)).toEqual(["v=DMARC1; p=none"])
-  })
+	it("extracts TXT answers from doggo JSON tolerantly", () => {
+		const doc = [
+			{
+				answers: [
+					{
+						name: "_dmarc.example.com.",
+						type: "TXT",
+						answer: '"v=DMARC1; p=none"',
+					},
+				],
+			},
+		];
+		const answers = extractDoggoAnswers(doc);
+		expect(answers).toHaveLength(1);
+		expect(doggoTxtValues(answers)).toEqual(["v=DMARC1; p=none"]);
+	});
 
-  it("populates the structured results payload", () => {
-    const a = analyzeDmarcRecord(
-      "example.com",
-      "v=DMARC1; p=quarantine; sp=reject; np=reject; adkim=s; rua=mailto:d@example.com; fo=1",
-      at,
-    )
-    expect(a.results).toMatchObject({
-      query_name: "_dmarc.example.com",
-      record_found: true,
-      record_count: 1,
-      found_at: at,
-      policy: "quarantine",
-      subdomain_policy: "reject",
-      np_policy: "reject",
-      adkim: "s",
-      aspf: "r",
-      fo: "1",
-      is_enforcing: true,
-    })
-  })
-})
+	it("populates the structured results payload", () => {
+		const a = analyzeDmarcRecord(
+			"example.com",
+			"v=DMARC1; p=quarantine; sp=reject; np=reject; adkim=s; rua=mailto:d@example.com; fo=1",
+			at,
+		);
+		expect(a.results).toMatchObject({
+			query_name: "_dmarc.example.com",
+			record_found: true,
+			record_count: 1,
+			found_at: at,
+			policy: "quarantine",
+			subdomain_policy: "reject",
+			np_policy: "reject",
+			adkim: "s",
+			aspf: "r",
+			fo: "1",
+			is_enforcing: true,
+		});
+	});
+});

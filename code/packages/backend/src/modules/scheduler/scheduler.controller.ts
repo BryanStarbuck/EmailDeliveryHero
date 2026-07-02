@@ -1,13 +1,13 @@
-import { Body, Controller, Get, Post, Put } from "@nestjs/common"
-import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger"
+import { Body, Controller, Get, Post, Put } from "@nestjs/common";
+import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import type {
-  OsArtifactPreview,
-  RunTrigger,
-  ScheduleConfig,
-  SchedulerRunOutcome,
-  SchedulerStatus,
-} from "./schedule.types"
-import { SchedulerService } from "./scheduler.service"
+	OsArtifactPreview,
+	RunTrigger,
+	ScheduleConfig,
+	SchedulerRunOutcome,
+	SchedulerStatus,
+} from "./schedule.types";
+import type { SchedulerService } from "./scheduler.service";
 
 /**
  * The scheduled-checks API (pm/scheduled_checks.mdx §"API"): status + config for the dashboard
@@ -20,27 +20,32 @@ import { SchedulerService } from "./scheduler.service"
 @ApiBearerAuth()
 @Controller("scheduler")
 export class SchedulerController {
-  constructor(private readonly scheduler: SchedulerService) {}
+	constructor(private readonly scheduler: SchedulerService) {}
 
-  @Get()
-  @ApiOperation({ summary: "Scheduler status: enabled, runner, nextRunAt, lastRunAt, OS install" })
-  status(): SchedulerStatus {
-    return this.scheduler.status()
-  }
+	@Get()
+	@ApiOperation({
+		summary:
+			"Scheduler status: enabled, runner, nextRunAt, lastRunAt, OS install",
+	})
+	status(): SchedulerStatus {
+		return this.scheduler.status();
+	}
 
-  @Get("config")
-  @ApiOperation({ summary: "Read the persisted schedule: block (backs the config page)" })
-  getConfig(): ScheduleConfig {
-    return this.scheduler.getConfig()
-  }
+	@Get("config")
+	@ApiOperation({
+		summary: "Read the persisted schedule: block (backs the config page)",
+	})
+	getConfig(): ScheduleConfig {
+		return this.scheduler.getConfig();
+	}
 
-  @Put("config")
+	@Put("config")
   @ApiOperation({ summary: "Merge + persist the schedule: block; re-arms the active runner" })
   updateConfig(@Body() patch: Record<string, unknown>): Promise<ScheduleConfig> {
     return this.scheduler.updateConfig(patch ?? {})
   }
 
-  @Post("run")
+	@Post("run")
   @ApiOperation({
     summary:
       "Trigger a scheduled audit now. Honors the master switch (skips when scheduling is off) " +
@@ -51,21 +56,25 @@ export class SchedulerController {
     return this.scheduler.runNow(trigger, body?.force === true)
   }
 
-  @Get("os/preview")
-  @ApiOperation({ summary: "The rendered native schedule artifact for the detected OS" })
-  preview(): OsArtifactPreview {
-    return this.scheduler.preview()
-  }
+	@Get("os/preview")
+	@ApiOperation({
+		summary: "The rendered native schedule artifact for the detected OS",
+	})
+	preview(): OsArtifactPreview {
+		return this.scheduler.preview();
+	}
 
-  @Post("os/install")
-  @ApiOperation({ summary: "Write + load the native OS schedule; marks os.installed" })
-  install(): Promise<ScheduleConfig> {
-    return this.scheduler.install()
-  }
+	@Post("os/install")
+	@ApiOperation({
+		summary: "Write + load the native OS schedule; marks os.installed",
+	})
+	install(): Promise<ScheduleConfig> {
+		return this.scheduler.install();
+	}
 
-  @Post("os/uninstall")
-  @ApiOperation({ summary: "Unload + remove the native OS schedule" })
-  uninstall(): Promise<ScheduleConfig> {
-    return this.scheduler.uninstall()
-  }
+	@Post("os/uninstall")
+	@ApiOperation({ summary: "Unload + remove the native OS schedule" })
+	uninstall(): Promise<ScheduleConfig> {
+		return this.scheduler.uninstall();
+	}
 }

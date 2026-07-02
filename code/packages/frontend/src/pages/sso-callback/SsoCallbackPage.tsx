@@ -1,4 +1,4 @@
-import { AuthenticateWithRedirectCallback } from "@auth/react"
+import { AuthenticateWithRedirectCallback } from "@auth/react";
 
 /**
  * The OAuth/SSO return landing. After Google redirects back, the OpenAuthFederated SDK component
@@ -6,10 +6,10 @@ import { AuthenticateWithRedirectCallback } from "@auth/react"
  * token handling here — the library does it all.
  */
 export function SsoCallbackPage() {
-  return (
-    <div className="flex min-h-screen items-center justify-center text-sm text-[var(--edh-muted)]">
-      Completing sign-in…
-      <AuthenticateWithRedirectCallback signInForceRedirectUrl="/" />
-    </div>
-  )
+	return (
+		<div className="flex min-h-screen items-center justify-center text-sm text-[var(--edh-muted)]">
+			Completing sign-in…
+			<AuthenticateWithRedirectCallback signInForceRedirectUrl="/" />
+		</div>
+	);
 }

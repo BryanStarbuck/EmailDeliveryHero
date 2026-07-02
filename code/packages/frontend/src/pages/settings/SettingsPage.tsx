@@ -1,7 +1,7 @@
-import { useParams } from "@tanstack/react-router"
-import { AdminSettings } from "./AdminSettings"
-import { GeneralSettings } from "./GeneralSettings"
-import { SchedulingSettings } from "./SchedulingSettings"
+import { useParams } from "@tanstack/react-router";
+import { AdminSettings } from "./AdminSettings";
+import { GeneralSettings } from "./GeneralSettings";
+import { SchedulingSettings } from "./SchedulingSettings";
 
 /**
  * Settings (pm/settings.mdx): the right content pane behind the settings left bar
@@ -17,26 +17,26 @@ import { SchedulingSettings } from "./SchedulingSettings"
  *                          UI and enforced 403 by the backend either way.
  */
 export function SettingsPage() {
-  const params = useParams({ strict: false }) as { section?: string }
-  const section = params.section ?? "account"
+	const params = useParams({ strict: false }) as { section?: string };
+	const section = params.section ?? "account";
 
-  return (
-    <div className="mx-auto max-w-3xl">
-      <h1 className="mb-6 text-2xl font-bold">
-        {section === "scheduling"
-          ? "Settings › Scheduling"
-          : section === "admin"
-            ? "Settings › Admin"
-            : "Settings"}
-      </h1>
+	return (
+		<div className="mx-auto max-w-3xl">
+			<h1 className="mb-6 text-2xl font-bold">
+				{section === "scheduling"
+					? "Settings › Scheduling"
+					: section === "admin"
+						? "Settings › Admin"
+						: "Settings"}
+			</h1>
 
-      {section === "scheduling" ? (
-        <SchedulingSettings />
-      ) : section === "admin" ? (
-        <AdminSettings />
-      ) : (
-        <GeneralSettings />
-      )}
-    </div>
-  )
+			{section === "scheduling" ? (
+				<SchedulingSettings />
+			) : section === "admin" ? (
+				<AdminSettings />
+			) : (
+				<GeneralSettings />
+			)}
+		</div>
+	);
 }

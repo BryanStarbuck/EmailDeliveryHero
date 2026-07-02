@@ -9,9 +9,9 @@
  *
  * Effect: each Jest worker writes to a throwaway temp dir and echoes nothing to the console.
  */
-import { mkdtempSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-process.env.EDH_LOG_DIR = mkdtempSync(join(tmpdir(), "edh-jest-logs-"))
-process.env.EDH_LOG_CONSOLE = "false"
+process.env.EDH_LOG_DIR = mkdtempSync(join(tmpdir(), "edh-jest-logs-"));
+process.env.EDH_LOG_CONSOLE = "false";

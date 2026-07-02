@@ -1,7 +1,7 @@
-import { SchedulerModule } from "@module/scheduler/scheduler.module"
-import { Module } from "@nestjs/common"
-import { SettingsController } from "./settings.controller"
-import { SettingsService } from "./settings.service"
+import { SchedulerModule } from "@module/scheduler/scheduler.module";
+import { Module } from "@nestjs/common";
+import { SettingsController } from "./settings.controller";
+import { SettingsService } from "./settings.service";
 
 /**
  * The Settings concern (pm/settings.mdx): GET/PUT /api/settings, the admin-only global write, and
@@ -10,8 +10,8 @@ import { SettingsService } from "./settings.service"
  * it delegate so the in-process timer re-arms on save.
  */
 @Module({
-  imports: [SchedulerModule],
-  controllers: [SettingsController],
-  providers: [SettingsService],
+	imports: [SchedulerModule],
+	controllers: [SettingsController],
+	providers: [SettingsService],
 })
 export class SettingsModule {}

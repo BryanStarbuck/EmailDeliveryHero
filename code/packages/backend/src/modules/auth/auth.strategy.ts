@@ -1,20 +1,20 @@
-import { federatedClient } from "@auth/backend"
-import { AppConfig } from "@config/app-config"
-import { Injectable, UnauthorizedException } from "@nestjs/common"
-import { PassportStrategy } from "@nestjs/passport"
-import type { AuthUser } from "@shared/current-user.decorator"
-import { logDebug, logWarn } from "@shared/logging"
-import type { Request } from "express"
-import { Strategy } from "passport-custom"
+import { federatedClient } from "@auth/backend";
+import type { AppConfig } from "@config/app-config";
+import { Injectable, UnauthorizedException } from "@nestjs/common";
+import { PassportStrategy } from "@nestjs/passport";
+import type { AuthUser } from "@shared/current-user.decorator";
+import { logDebug, logWarn } from "@shared/logging";
+import type { Request } from "express";
+import { Strategy } from "passport-custom";
 
 /** Extract the lower-cased domain from an email address, or "" when malformed. */
 function emailDomain(email: string): string {
-  const at = email.lastIndexOf("@")
-  if (at < 0) return ""
-  return email
-    .slice(at + 1)
-    .trim()
-    .toLowerCase()
+	const at = email.lastIndexOf("@");
+	if (at < 0) return "";
+	return email
+		.slice(at + 1)
+		.trim()
+		.toLowerCase();
 }
 
 /**
@@ -23,12 +23,12 @@ function emailDomain(email: string): string {
  * literal control-char regex so the source file stays clean ASCII.
  */
 function sanitizeForLog(value: string): string {
-  let out = ""
-  for (const ch of value) {
-    const code = ch.charCodeAt(0)
-    out += code < 0x20 || code === 0x7f ? " " : ch
-  }
-  return out.slice(0, 128)
+	let out = "";
+	for (const ch of value) {
+		const code = ch.charCodeAt(0);
+		out += code < 0x20 || code === 0x7f ? " " : ch;
+	}
+	return out.slice(0, 128);
 }
 
 /**
@@ -44,53 +44,57 @@ function sanitizeForLog(value: string): string {
  */
 @Injectable()
 export class AuthFederatedStrategy extends PassportStrategy(Strategy, "jwt") {
-  constructor(private readonly appConfig: AppConfig) {
-    super()
-  }
+	constructor(private readonly appConfig: AppConfig) {
+		super();
+	}
 
-  async validate(req: Request): Promise<AuthUser | null> {
-    const header = req.headers?.authorization ?? ""
-    const token = typeof header === "string" ? header.replace(/^Bearer\s+/i, "") : ""
-    if (!token) {
-      // Normal logged-out request — not an error. Guard resolves this to the `default` user.
-      logDebug(
-        "No Authorization bearer token; continuing as the default (logged-out) user",
-        "AuthStrategy",
-      )
-      return null
-    }
+	async validate(req: Request): Promise<AuthUser | null> {
+		const header = req.headers?.authorization ?? "";
+		const token =
+			typeof header === "string" ? header.replace(/^Bearer\s+/i, "") : "";
+		if (!token) {
+			// Normal logged-out request — not an error. Guard resolves this to the `default` user.
+			logDebug(
+				"No Authorization bearer token; continuing as the default (logged-out) user",
+				"AuthStrategy",
+			);
+			return null;
+		}
 
-    try {
-      const claims = await federatedClient.verifyToken(token)
-      const email = claims.email ?? ""
+		try {
+			const claims = await federatedClient.verifyToken(token);
+			const email = claims.email ?? "";
 
-      const allowed = this.appConfig.allowedAuthDomains
-      const hd = typeof claims.hd === "string" ? claims.hd.trim().toLowerCase() : ""
-      const domain = hd || emailDomain(email)
-      if (!domain || !allowed.includes(domain)) {
-        const safeDomain = sanitizeForLog(domain || "unknown")
-        logWarn(
-          `Rejecting token: domain "${safeDomain}" is not an allowed company domain`,
-          "AuthStrategy",
-        )
-        throw new UnauthorizedException()
-      }
+			const allowed = this.appConfig.allowedAuthDomains;
+			const hd =
+				typeof claims.hd === "string" ? claims.hd.trim().toLowerCase() : "";
+			const domain = hd || emailDomain(email);
+			if (!domain || !allowed.includes(domain)) {
+				const safeDomain = sanitizeForLog(domain || "unknown");
+				logWarn(
+					`Rejecting token: domain "${safeDomain}" is not an allowed company domain`,
+					"AuthStrategy",
+				);
+				throw new UnauthorizedException();
+			}
 
-      return {
-        userId: claims.sub,
-        email,
-        sessionId: typeof claims.sid === "string" ? claims.sid : null,
-        orgId: claims.org_id ?? null,
-        roles: Array.isArray(claims.roles) ? claims.roles : [],
-        permissions: Array.isArray(claims.permissions) ? claims.permissions : [],
-        authenticated: true,
-      }
-    } catch (err) {
-      if (err instanceof UnauthorizedException) throw err
-      const name = err instanceof Error ? err.name : typeof err
-      const message = err instanceof Error ? err.message : String(err)
-      logWarn(`Token verification failed: ${name}: ${message}`, "AuthStrategy")
-      throw new UnauthorizedException()
-    }
-  }
+			return {
+				userId: claims.sub,
+				email,
+				sessionId: typeof claims.sid === "string" ? claims.sid : null,
+				orgId: claims.org_id ?? null,
+				roles: Array.isArray(claims.roles) ? claims.roles : [],
+				permissions: Array.isArray(claims.permissions)
+					? claims.permissions
+					: [],
+				authenticated: true,
+			};
+		} catch (err) {
+			if (err instanceof UnauthorizedException) throw err;
+			const name = err instanceof Error ? err.name : typeof err;
+			const message = err instanceof Error ? err.message : String(err);
+			logWarn(`Token verification failed: ${name}: ${message}`, "AuthStrategy");
+			throw new UnauthorizedException();
+		}
+	}
 }

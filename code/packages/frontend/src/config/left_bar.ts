@@ -4,84 +4,88 @@
  * (Vite `?raw`) and parse it with `yaml`; there is no in-package copy. Vite `server.fs.allow`
  * (vite.config.ts) grants the dev server read access to the repo root where pm/ lives.
  */
-import { parse } from "yaml"
-import { logger } from "@/lib/logger"
+import { parse } from "yaml";
+import { logger } from "@/lib/logger";
 // pm/left_bar.yaml lives at the EmailDeliveryHero repo root (outside the frontend package).
-import leftBarYaml from "../../../../../pm/left_bar.yaml?raw"
+import leftBarYaml from "../../../../../pm/left_bar.yaml?raw";
 
 export interface NavItem {
-  id: string
-  label: string
-  icon?: string
-  route: string
-  order?: number
-  description?: string
-  permission_gate?: string
+	id: string;
+	label: string;
+	icon?: string;
+	route: string;
+	order?: number;
+	description?: string;
+	permission_gate?: string;
 }
 
 export interface AccountMenuItem {
-  id: string
-  label: string
-  icon?: string
-  route?: string
-  action?: string
-  permission_gate?: string
+	id: string;
+	label: string;
+	icon?: string;
+	route?: string;
+	action?: string;
+	permission_gate?: string;
 }
 
 export interface SettingsGroup {
-  id: string
-  label: string
-  order?: number
-  items: NavItem[]
+	id: string;
+	label: string;
+	order?: number;
+	items: NavItem[];
 }
 
 interface RawBar {
-  Location?: string
-  header?: { label?: string; click_route?: string; back_route?: string }
-  nav_items?: NavItem[]
-  groups?: SettingsGroup[]
-  footer?: Array<{ menu_items?: AccountMenuItem[] }>
+	Location?: string;
+	header?: { label?: string; click_route?: string; back_route?: string };
+	nav_items?: NavItem[];
+	groups?: SettingsGroup[];
+	footer?: Array<{ menu_items?: AccountMenuItem[] }>;
 }
 
 interface RawRoot {
-  Left_Nav?: { Left_bars?: RawBar[] }
+	Left_Nav?: { Left_bars?: RawBar[] };
 }
 
 function bars(): RawBar[] {
-  try {
-    const root = parse(leftBarYaml) as RawRoot
-    return root.Left_Nav?.Left_bars ?? []
-  } catch (err) {
-    logger.error("Failed to parse left_bar.yaml; nav will be empty", err)
-    return []
-  }
+	try {
+		const root = parse(leftBarYaml) as RawRoot;
+		return root.Left_Nav?.Left_bars ?? [];
+	} catch (err) {
+		logger.error("Failed to parse left_bar.yaml; nav will be empty", err);
+		return [];
+	}
 }
 
 function barAt(location: string): RawBar | undefined {
-  return bars().find((b) => b.Location === location)
+	return bars().find((b) => b.Location === location);
 }
 
 /** The app bar's title (from its header) — spaced "Email Delivery Hero" (pm/leftbar.mdx §1). */
-export const appTitle: string = barAt("app")?.header?.label ?? "Email Delivery Hero"
+export const appTitle: string =
+	barAt("app")?.header?.label ?? "Email Delivery Hero";
 
 /** Where clicking the wordmark routes (yaml `header.click_route`) — the Dashboard. */
-export const appTitleRoute: string = barAt("app")?.header?.click_route ?? "/"
+export const appTitleRoute: string = barAt("app")?.header?.click_route ?? "/";
 
 /** Primary app nav items, ordered. */
 export const appNavItems: NavItem[] = [...(barAt("app")?.nav_items ?? [])].sort(
-  (a, b) => (a.order ?? 0) - (b.order ?? 0),
-)
+	(a, b) => (a.order ?? 0) - (b.order ?? 0),
+);
 
 /** Account-block menu items (footer of the app bar). */
 export const accountMenuItems: AccountMenuItem[] =
-  barAt("app")?.footer?.find((f) => Array.isArray(f.menu_items))?.menu_items ?? []
+	barAt("app")?.footer?.find((f) => Array.isArray(f.menu_items))?.menu_items ??
+	[];
 
 /** Settings-bar groups, ordered. */
-export const settingsGroups: SettingsGroup[] = [...(barAt("settings")?.groups ?? [])].sort(
-  (a, b) => (a.order ?? 0) - (b.order ?? 0),
-)
+export const settingsGroups: SettingsGroup[] = [
+	...(barAt("settings")?.groups ?? []),
+].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 
-export const settingsBackRoute: string = barAt("settings")?.header?.back_route ?? "/"
+export const settingsBackRoute: string =
+	barAt("settings")?.header?.back_route ?? "/";
 
 /** The settings bar's back-header label (yaml `header.label`) — "Settings" (pm/leftbar.mdx §4). */
-export const settingsHeaderLabel: string = barAt("settings")?.header?.label ?? "Settings"
+export const settingsHeaderLabel: string =
+	barAt("settings")?.header?.label ?? "Settings";

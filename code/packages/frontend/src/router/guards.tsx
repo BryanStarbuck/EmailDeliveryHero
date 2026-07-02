@@ -1,14 +1,14 @@
-import { useAuth } from "@auth/react"
-import { Navigate } from "@tanstack/react-router"
-import { type ReactNode, useEffect } from "react"
-import { logger } from "@/lib/logger"
+import { useAuth } from "@auth/react";
+import { Navigate } from "@tanstack/react-router";
+import { type ReactNode, useEffect } from "react";
+import { logger } from "@/lib/logger";
 
 function FullPageSpinner({ label = "Loading…" }: { label?: string }) {
-  return (
-    <div className="flex min-h-screen items-center justify-center text-sm text-[var(--edh-muted)]">
-      {label}
-    </div>
-  )
+	return (
+		<div className="flex min-h-screen items-center justify-center text-sm text-[var(--edh-muted)]">
+			{label}
+		</div>
+	);
 }
 
 /**
@@ -16,11 +16,11 @@ function FullPageSpinner({ label = "Loading…" }: { label?: string }) {
  * network blip does NOT bounce an already-signed-in user to /sign-in.
  */
 function Reconnecting({ reload }: { reload: () => Promise<boolean> }) {
-  useEffect(() => {
-    const id = setInterval(() => void reload().catch(() => {}), 2000)
-    return () => clearInterval(id)
-  }, [reload])
-  return <FullPageSpinner label="Reconnecting…" />
+	useEffect(() => {
+		const id = setInterval(() => void reload().catch(() => {}), 2000);
+		return () => clearInterval(id);
+	}, [reload]);
+	return <FullPageSpinner label="Reconnecting…" />;
 }
 
 /**
@@ -31,14 +31,14 @@ function Reconnecting({ reload }: { reload: () => Promise<boolean> }) {
  * through and use the app as the `default` user; the account slot offers a "Sign in" button.
  */
 export function AppReady({ children }: { children: ReactNode }) {
-  const { isLoaded, loadState, reloadSession } = useAuth()
-  if (!isLoaded) {
-    if (loadState === "failed" || loadState === "degraded") {
-      return <Reconnecting reload={reloadSession} />
-    }
-    return <FullPageSpinner />
-  }
-  return <>{children}</>
+	const { isLoaded, loadState, reloadSession } = useAuth();
+	if (!isLoaded) {
+		if (loadState === "failed" || loadState === "degraded") {
+			return <Reconnecting reload={reloadSession} />;
+		}
+		return <FullPageSpinner />;
+	}
+	return <>{children}</>;
 }
 
 /**
@@ -47,12 +47,12 @@ export function AppReady({ children }: { children: ReactNode }) {
  * while the backend is unreachable. Ordinary pages use <AppReady> instead and stay open logged out.
  */
 export function RequireAuth({ children }: { children: ReactNode }) {
-  const { isLoaded, isSignedIn, loadState, reloadSession } = useAuth()
-  if (!isLoaded) return <FullPageSpinner />
-  if (isSignedIn) return <>{children}</>
-  if (loadState === "failed" || loadState === "degraded") {
-    return <Reconnecting reload={reloadSession} />
-  }
-  logger.info("RequireAuth: no active session, redirecting to /sign-in")
-  return <Navigate to="/sign-in" />
+	const { isLoaded, isSignedIn, loadState, reloadSession } = useAuth();
+	if (!isLoaded) return <FullPageSpinner />;
+	if (isSignedIn) return <>{children}</>;
+	if (loadState === "failed" || loadState === "degraded") {
+		return <Reconnecting reload={reloadSession} />;
+	}
+	logger.info("RequireAuth: no active session, redirecting to /sign-in");
+	return <Navigate to="/sign-in" />;
 }

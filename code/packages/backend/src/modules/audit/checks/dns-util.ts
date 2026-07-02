@@ -1,5 +1,5 @@
-import { AsyncLocalStorage } from "node:async_hooks"
-import { promises as dns } from "node:dns"
+import { AsyncLocalStorage } from "node:async_hooks";
+import { promises as dns } from "node:dns";
 
 /**
  * Thin wrappers around node:dns/promises used by the checkers. Each returns a normalized result and
@@ -17,18 +17,18 @@ import { promises as dns } from "node:dns"
  */
 
 export interface DnsLookup<T> {
-  /** The records found (empty array when none). */
-  records: T[]
-  /** True when the name genuinely has no such record (NXDOMAIN / no data). */
-  empty: boolean
-  /**
-   * Which negative answer produced `empty` (pm/checks/dmarc.mdx §4 edge cases: both mean
-   * "no record" but checkers distinguish them in the finding detail): `nxdomain` = the name does
-   * not exist (ENOTFOUND); `nodata` = the name exists but has no record of this type (ENODATA).
-   */
-  negative?: "nxdomain" | "nodata"
-  /** Set when the lookup failed for a reason other than "no record" (timeout, servfail). */
-  error?: string
+	/** The records found (empty array when none). */
+	records: T[];
+	/** True when the name genuinely has no such record (NXDOMAIN / no data). */
+	empty: boolean;
+	/**
+	 * Which negative answer produced `empty` (pm/checks/dmarc.mdx §4 edge cases: both mean
+	 * "no record" but checkers distinguish them in the finding detail): `nxdomain` = the name does
+	 * not exist (ENOTFOUND); `nodata` = the name exists but has no record of this type (ENODATA).
+	 */
+	negative?: "nxdomain" | "nodata";
+	/** Set when the lookup failed for a reason other than "no record" (timeout, servfail). */
+	error?: string;
 }
 
 /**
@@ -39,25 +39,25 @@ export interface DnsLookup<T> {
  * failures are recorded, never silently dropped or promoted to fabricated findings.
  */
 export interface ToolRunRecord {
-  tool: string
-  command: string
-  started_at: string
-  duration_ms: number
-  exit_code: number | null
-  output_format: "json" | "text"
-  parsed: unknown
-  error: string | null
+	tool: string;
+	command: string;
+	started_at: string;
+	duration_ms: number;
+	exit_code: number | null;
+	output_format: "json" | "text";
+	parsed: unknown;
+	error: string | null;
 }
 
 /** A tool run tagged with the checker that triggered it, so categories persist only their own. */
 export interface TaggedToolRun extends ToolRunRecord {
-  check_id: string
+	check_id: string;
 }
 
 /** Per-run collector for the tool_runs audit trail. Absent outside `withToolRunLog` → no-op. */
-const toolLogStorage = new AsyncLocalStorage<TaggedToolRun[]>()
+const toolLogStorage = new AsyncLocalStorage<TaggedToolRun[]>();
 /** Which checker is currently executing (set by the audit runner around each `checker.run`). */
-const checkTagStorage = new AsyncLocalStorage<string>()
+const checkTagStorage = new AsyncLocalStorage<string>();
 
 /**
  * Run `fn` with a per-run tool-run log: every external-tool invocation made inside (dig, …)
@@ -65,65 +65,80 @@ const checkTagStorage = new AsyncLocalStorage<string>()
  * append once per actual invocation — one tool run may feed several sub-tests, but each entry
  * appears once.
  */
-export function withToolRunLog<T>(records: TaggedToolRun[], fn: () => Promise<T>): Promise<T> {
-  return toolLogStorage.run(records, fn)
+export function withToolRunLog<T>(
+	records: TaggedToolRun[],
+	fn: () => Promise<T>,
+): Promise<T> {
+	return toolLogStorage.run(records, fn);
 }
 
 /** Tag every tool run made inside `fn` with the given checker id (e.g. "infra.dnssec"). */
-export function withCheckTag<T>(checkId: string, fn: () => Promise<T>): Promise<T> {
-  return checkTagStorage.run(checkId, fn)
+export function withCheckTag<T>(
+	checkId: string,
+	fn: () => Promise<T>,
+): Promise<T> {
+	return checkTagStorage.run(checkId, fn);
 }
 
 function recordToolRun(rec: ToolRunRecord): void {
-  const log = toolLogStorage.getStore()
-  if (!log) return
-  log.push({ check_id: checkTagStorage.getStore() ?? "", ...rec })
+	const log = toolLogStorage.getStore();
+	if (!log) return;
+	log.push({ check_id: checkTagStorage.getStore() ?? "", ...rec });
 }
 
 function classify(err: unknown): {
-  empty: boolean
-  negative?: "nxdomain" | "nodata"
-  error?: string
+	empty: boolean;
+	negative?: "nxdomain" | "nodata";
+	error?: string;
 } {
-  const code = (err as NodeJS.ErrnoException)?.code
-  if (code === "ENOTFOUND" || code === "ENODATA") {
-    return { empty: true, negative: code === "ENOTFOUND" ? "nxdomain" : "nodata" }
-  }
-  return { empty: false, error: code ?? (err instanceof Error ? err.message : String(err)) }
+	const code = (err as NodeJS.ErrnoException)?.code;
+	if (code === "ENOTFOUND" || code === "ENODATA") {
+		return {
+			empty: true,
+			negative: code === "ENOTFOUND" ? "nxdomain" : "nodata",
+		};
+	}
+	return {
+		empty: false,
+		error: code ?? (err instanceof Error ? err.message : String(err)),
+	};
 }
 
 /** One DNS lookup's wall-clock budget (pm/run_checks.mdx §10). */
-const DNS_TIMEOUT_MS = 5_000
+const DNS_TIMEOUT_MS = 5_000;
 
 /** The run-scoped memo store. Absent outside `withDnsMemo` (e.g. unit tests) → no caching. */
-const memoStorage = new AsyncLocalStorage<Map<string, Promise<unknown>>>()
+const memoStorage = new AsyncLocalStorage<Map<string, Promise<unknown>>>();
 
 /**
  * Run `fn` with a fresh per-run DNS memo (pm/run_checks.mdx §2 Stage 0). Every dns-util lookup
  * made inside (across all concurrently-running checkers of one domain) is deduped by record key.
  */
 export function withDnsMemo<T>(fn: () => Promise<T>): Promise<T> {
-  return memoStorage.run(new Map(), fn)
+	return memoStorage.run(new Map(), fn);
 }
 
 function memo<T>(key: string, compute: () => Promise<T>): Promise<T> {
-  const store = memoStorage.getStore()
-  if (!store) return compute()
-  const hit = store.get(key)
-  if (hit) return hit as Promise<T>
-  const started = compute()
-  store.set(key, started)
-  return started
+	const store = memoStorage.getStore();
+	if (!store) return compute();
+	const hit = store.get(key);
+	if (hit) return hit as Promise<T>;
+	const started = compute();
+	store.set(key, started);
+	return started;
 }
 
 /** Race `compute` against the 5s budget; on expiry resolve to the caller-shaped timeout value. */
-function raceTimeout<T>(compute: () => Promise<T>, onTimeout: () => T): Promise<T> {
-  let timer: NodeJS.Timeout | undefined
-  const expiry = new Promise<T>((resolve) => {
-    timer = setTimeout(() => resolve(onTimeout()), DNS_TIMEOUT_MS)
-    timer.unref?.()
-  })
-  return Promise.race([compute(), expiry]).finally(() => clearTimeout(timer))
+function raceTimeout<T>(
+	compute: () => Promise<T>,
+	onTimeout: () => T,
+): Promise<T> {
+	let timer: NodeJS.Timeout | undefined;
+	const expiry = new Promise<T>((resolve) => {
+		timer = setTimeout(() => resolve(onTimeout()), DNS_TIMEOUT_MS);
+		timer.unref?.();
+	});
+	return Promise.race([compute(), expiry]).finally(() => clearTimeout(timer));
 }
 
 /**
@@ -132,144 +147,166 @@ function raceTimeout<T>(compute: () => Promise<T>, onTimeout: () => T): Promise<
  * never retried.
  */
 function lookup<T>(
-  key: string,
-  compute: () => Promise<DnsLookup<T>>,
-  retryable: (r: DnsLookup<T>) => boolean = (r) => Boolean(r.error),
+	key: string,
+	compute: () => Promise<DnsLookup<T>>,
+	retryable: (r: DnsLookup<T>) => boolean = (r) => Boolean(r.error),
 ): Promise<DnsLookup<T>> {
-  const timeoutValue = (): DnsLookup<T> => ({ records: [], empty: false, error: "timeout" })
-  return memo(key, async () => {
-    const once = () => raceTimeout(compute, timeoutValue)
-    const first = await once()
-    return retryable(first) ? once() : first
-  })
+	const timeoutValue = (): DnsLookup<T> => ({
+		records: [],
+		empty: false,
+		error: "timeout",
+	});
+	return memo(key, async () => {
+		const once = () => raceTimeout(compute, timeoutValue);
+		const first = await once();
+		return retryable(first) ? once() : first;
+	});
 }
 
 /** Resolve TXT records, flattening each record's string chunks into one string. */
 export function resolveTxt(name: string): Promise<DnsLookup<string>> {
-  return lookup(`TXT:${name}`, async () => {
-    try {
-      const chunks = await dns.resolveTxt(name)
-      return { records: chunks.map((parts) => parts.join("")), empty: chunks.length === 0 }
-    } catch (err) {
-      return { records: [], ...classify(err) }
-    }
-  })
+	return lookup(`TXT:${name}`, async () => {
+		try {
+			const chunks = await dns.resolveTxt(name);
+			return {
+				records: chunks.map((parts) => parts.join("")),
+				empty: chunks.length === 0,
+			};
+		} catch (err) {
+			return { records: [], ...classify(err) };
+		}
+	});
 }
 
 export interface MxRecord {
-  exchange: string
-  priority: number
+	exchange: string;
+	priority: number;
 }
 
 export function resolveMx(name: string): Promise<DnsLookup<MxRecord>> {
-  return lookup(`MX:${name}`, async () => {
-    try {
-      const records = await dns.resolveMx(name)
-      return { records, empty: records.length === 0 }
-    } catch (err) {
-      return { records: [], ...classify(err) }
-    }
-  })
+	return lookup(`MX:${name}`, async () => {
+		try {
+			const records = await dns.resolveMx(name);
+			return { records, empty: records.length === 0 };
+		} catch (err) {
+			return { records: [], ...classify(err) };
+		}
+	});
 }
 
 export function resolve4(name: string): Promise<DnsLookup<string>> {
-  return lookup(`A:${name}`, async () => {
-    try {
-      const records = await dns.resolve4(name)
-      return { records, empty: records.length === 0 }
-    } catch (err) {
-      return { records: [], ...classify(err) }
-    }
-  })
+	return lookup(`A:${name}`, async () => {
+		try {
+			const records = await dns.resolve4(name);
+			return { records, empty: records.length === 0 };
+		} catch (err) {
+			return { records: [], ...classify(err) };
+		}
+	});
 }
 
 /** Reverse-DNS (PTR) lookup for an IP. */
 export function reverse(ip: string): Promise<DnsLookup<string>> {
-  return lookup(`PTR:${ip}`, async () => {
-    try {
-      const records = await dns.reverse(ip)
-      return { records, empty: records.length === 0 }
-    } catch (err) {
-      return { records: [], ...classify(err) }
-    }
-  })
+	return lookup(`PTR:${ip}`, async () => {
+		try {
+			const records = await dns.reverse(ip);
+			return { records, empty: records.length === 0 };
+		} catch (err) {
+			return { records: [], ...classify(err) };
+		}
+	});
 }
 
 /** Reverse an IPv4 address for DNSBL queries: 1.2.3.4 → 4.3.2.1. Returns null for non-IPv4. */
 export function reverseIpv4(ip: string): string | null {
-  const parts = ip.trim().split(".")
-  if (parts.length !== 4 || parts.some((p) => !/^\d{1,3}$/.test(p) || Number(p) > 255)) return null
-  return parts.reverse().join(".")
+	const parts = ip.trim().split(".");
+	if (
+		parts.length !== 4 ||
+		parts.some((p) => !/^\d{1,3}$/.test(p) || Number(p) > 255)
+	)
+		return null;
+	return parts.reverse().join(".");
 }
 
 /** Resolve AAAA (IPv6) records. */
 export function resolve6(name: string): Promise<DnsLookup<string>> {
-  return lookup(`AAAA:${name}`, async () => {
-    try {
-      const records = await dns.resolve6(name)
-      return { records, empty: records.length === 0 }
-    } catch (err) {
-      return { records: [], ...classify(err) }
-    }
-  })
+	return lookup(`AAAA:${name}`, async () => {
+		try {
+			const records = await dns.resolve6(name);
+			return { records, empty: records.length === 0 };
+		} catch (err) {
+			return { records: [], ...classify(err) };
+		}
+	});
 }
 
 /** Resolve CNAME records for a name. */
 export function resolveCname(name: string): Promise<DnsLookup<string>> {
-  return lookup(`CNAME:${name}`, async () => {
-    try {
-      const records = await dns.resolveCname(name)
-      return { records, empty: records.length === 0 }
-    } catch (err) {
-      return { records: [], ...classify(err) }
-    }
-  })
+	return lookup(`CNAME:${name}`, async () => {
+		try {
+			const records = await dns.resolveCname(name);
+			return { records, empty: records.length === 0 };
+		} catch (err) {
+			return { records: [], ...classify(err) };
+		}
+	});
 }
 
 /** Resolve NS records for a zone. */
 export function resolveNs(name: string): Promise<DnsLookup<string>> {
-  return lookup(`NS:${name}`, async () => {
-    try {
-      const records = await dns.resolveNs(name)
-      return { records, empty: records.length === 0 }
-    } catch (err) {
-      return { records: [], ...classify(err) }
-    }
-  })
+	return lookup(`NS:${name}`, async () => {
+		try {
+			const records = await dns.resolveNs(name);
+			return { records, empty: records.length === 0 };
+		} catch (err) {
+			return { records: [], ...classify(err) };
+		}
+	});
 }
 
 /** Resolve CAA records for a name. */
-export function resolveCaa(name: string): Promise<DnsLookup<import("node:dns").CaaRecord>> {
-  return lookup(`CAA:${name}`, async () => {
-    try {
-      const records = await dns.resolveCaa(name)
-      return { records, empty: records.length === 0 }
-    } catch (err) {
-      return { records: [], ...classify(err) }
-    }
-  })
+export function resolveCaa(
+	name: string,
+): Promise<DnsLookup<import("node:dns").CaaRecord>> {
+	return lookup(`CAA:${name}`, async () => {
+		try {
+			const records = await dns.resolveCaa(name);
+			return { records, empty: records.length === 0 };
+		} catch (err) {
+			return { records: [], ...classify(err) };
+		}
+	});
 }
 
 /** Resolve the SOA record for a zone (single record, or null when absent/error). */
-export function resolveSoa(
-  name: string,
-): Promise<{ record: import("node:dns").SoaRecord | null; empty: boolean; error?: string }> {
-  type SoaResult = { record: import("node:dns").SoaRecord | null; empty: boolean; error?: string }
-  const compute = async (): Promise<SoaResult> => {
-    try {
-      const record = await dns.resolveSoa(name)
-      return { record, empty: false }
-    } catch (err) {
-      return { record: null, ...classify(err) }
-    }
-  }
-  // Same memo + budget + one-retry pipeline as `lookup`, for the single-record SOA shape.
-  return memo(`SOA:${name}`, async () => {
-    const once = () =>
-      raceTimeout(compute, (): SoaResult => ({ record: null, empty: false, error: "timeout" }))
-    const first = await once()
-    return first.error ? once() : first
-  })
+export function resolveSoa(name: string): Promise<{
+	record: import("node:dns").SoaRecord | null;
+	empty: boolean;
+	error?: string;
+}> {
+	type SoaResult = {
+		record: import("node:dns").SoaRecord | null;
+		empty: boolean;
+		error?: string;
+	};
+	const compute = async (): Promise<SoaResult> => {
+		try {
+			const record = await dns.resolveSoa(name);
+			return { record, empty: false };
+		} catch (err) {
+			return { record: null, ...classify(err) };
+		}
+	};
+	// Same memo + budget + one-retry pipeline as `lookup`, for the single-record SOA shape.
+	return memo(`SOA:${name}`, async () => {
+		const once = () =>
+			raceTimeout(
+				compute,
+				(): SoaResult => ({ record: null, empty: false, error: "timeout" }),
+			);
+		const first = await once();
+		return first.error ? once() : first;
+	});
 }
 
 /**
@@ -280,100 +317,110 @@ export function resolveSoa(
  * finding when `error` is set (transient) and treat `empty` as "no such record".
  */
 export function dig(
-  name: string,
-  type: string,
-  opts: { resolver?: string } = {},
+	name: string,
+	type: string,
+	opts: { resolver?: string } = {},
 ): Promise<DnsLookup<string>> {
-  // Same per-run memo + one-retry-on-transient pipeline as the node:dns wrappers; a missing `dig`
-  // binary (ENOENT) is a capability downgrade, not a transient — never retried. The optional
-  // resolver (`@8.8.8.8`) powers the SPF cross-resolver public-view probe (pm/checks/spf.mdx §3).
-  return lookup(
-    `DIG:${opts.resolver ?? "default"}:${type}:${name}`,
-    () => digOnce(name, type, opts.resolver),
-    (r) => Boolean(r.error) && r.error !== "ENOENT",
-  )
+	// Same per-run memo + one-retry-on-transient pipeline as the node:dns wrappers; a missing `dig`
+	// binary (ENOENT) is a capability downgrade, not a transient — never retried. The optional
+	// resolver (`@8.8.8.8`) powers the SPF cross-resolver public-view probe (pm/checks/spf.mdx §3).
+	return lookup(
+		`DIG:${opts.resolver ?? "default"}:${type}:${name}`,
+		() => digOnce(name, type, opts.resolver),
+		(r) => Boolean(r.error) && r.error !== "ENOENT",
+	);
 }
 
 /** Classify an execFile error for the tool_runs trail: numeric exit code + human error string. */
 function classifyExecError(
-  err: Error,
-  timeoutMs: number,
+	err: Error,
+	timeoutMs: number,
 ): { exitCode: number | null; error: string } {
-  const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: NodeJS.Signals | null }
-  if (e.killed === true || e.signal === "SIGTERM" || e.signal === "SIGKILL") {
-    // Timeout expiry: exit_code null + "timeout after <n> ms" (pm/checks/dns.mdx §3.1 rule 3).
-    return { exitCode: null, error: `timeout after ${timeoutMs} ms` }
-  }
-  const exitCode = typeof e.code === "number" ? e.code : null
-  return { exitCode, error: typeof e.code === "string" ? e.code : e.message }
+	const e = err as NodeJS.ErrnoException & {
+		killed?: boolean;
+		signal?: NodeJS.Signals | null;
+	};
+	if (e.killed === true || e.signal === "SIGTERM" || e.signal === "SIGKILL") {
+		// Timeout expiry: exit_code null + "timeout after <n> ms" (pm/checks/dns.mdx §3.1 rule 3).
+		return { exitCode: null, error: `timeout after ${timeoutMs} ms` };
+	}
+	const exitCode = typeof e.code === "number" ? e.code : null;
+	return { exitCode, error: typeof e.code === "string" ? e.code : e.message };
 }
 
 async function digOnce(
-  name: string,
-  type: string,
-  resolver?: string,
+	name: string,
+	type: string,
+	resolver?: string,
 ): Promise<DnsLookup<string>> {
-  const { execFile } = await import("node:child_process")
-  const args = [...(resolver ? [`@${resolver}`] : []), "+short", "+time=3", "+tries=1", type, name]
-  const command = ["dig", ...args].join(" ")
-  const startedAt = new Date().toISOString()
-  const t0 = Date.now()
-  return await new Promise<DnsLookup<string>>((resolve) => {
-    execFile(
-      "dig",
-      // Tight budget: healthy resolvers answer in well under a second; a query that stalls past ~3s
-      // is treated as transient (error set) so a single slow/hung lookup can't blow the audit budget.
-      args,
-      { timeout: 4000 },
-      (err, stdout) => {
-        if (err) {
-          // ENOENT = dig not installed; treat as transient/unknown, not "no record".
-          const code = (err as NodeJS.ErrnoException).code
-          const { exitCode, error } = classifyExecError(err, 4000)
-          recordToolRun({
-            tool: "dig",
-            command,
-            started_at: startedAt,
-            duration_ms: Date.now() - t0,
-            exit_code: exitCode,
-            output_format: "text",
-            parsed: stdout ? { raw: stdout } : null,
-            error,
-          })
-          resolve({ records: [], empty: false, error: code ?? err.message })
-          return
-        }
-        const records = stdout
-          .split("\n")
-          .map((l) => l.trim())
-          .filter(Boolean)
-          // dig may emit CNAME chase lines; keep everything, callers parse per type.
-          .filter((l) => !l.startsWith(";"))
-        recordToolRun({
-          tool: "dig",
-          command,
-          started_at: startedAt,
-          duration_ms: Date.now() - t0,
-          exit_code: 0,
-          output_format: "text",
-          parsed: { answers: records },
-          error: null,
-        })
-        resolve({ records, empty: records.length === 0 })
-      },
-    )
-  })
+	const { execFile } = await import("node:child_process");
+	const args = [
+		...(resolver ? [`@${resolver}`] : []),
+		"+short",
+		"+time=3",
+		"+tries=1",
+		type,
+		name,
+	];
+	const command = ["dig", ...args].join(" ");
+	const startedAt = new Date().toISOString();
+	const t0 = Date.now();
+	return await new Promise<DnsLookup<string>>((resolve) => {
+		execFile(
+			"dig",
+			// Tight budget: healthy resolvers answer in well under a second; a query that stalls past ~3s
+			// is treated as transient (error set) so a single slow/hung lookup can't blow the audit budget.
+			args,
+			{ timeout: 4000 },
+			(err, stdout) => {
+				if (err) {
+					// ENOENT = dig not installed; treat as transient/unknown, not "no record".
+					const code = (err as NodeJS.ErrnoException).code;
+					const { exitCode, error } = classifyExecError(err, 4000);
+					recordToolRun({
+						tool: "dig",
+						command,
+						started_at: startedAt,
+						duration_ms: Date.now() - t0,
+						exit_code: exitCode,
+						output_format: "text",
+						parsed: stdout ? { raw: stdout } : null,
+						error,
+					});
+					resolve({ records: [], empty: false, error: code ?? err.message });
+					return;
+				}
+				const records = stdout
+					.split("\n")
+					.map((l) => l.trim())
+					.filter(Boolean)
+					// dig may emit CNAME chase lines; keep everything, callers parse per type.
+					.filter((l) => !l.startsWith(";"));
+				recordToolRun({
+					tool: "dig",
+					command,
+					started_at: startedAt,
+					duration_ms: Date.now() - t0,
+					exit_code: 0,
+					output_format: "text",
+					parsed: { answers: records },
+					error: null,
+				});
+				resolve({ records, empty: records.length === 0 });
+			},
+		);
+	});
 }
 
 /** One RR from a full `dig +noall +answer` response — includes the TTL that `+short` hides. */
 export interface DigAnswer {
-  /** Owner name, trailing dot stripped. */
-  name: string
-  ttl: number
-  /** RR type as printed by dig (e.g. "TLSA"). */
-  type: string
-  /** The presentation-format RDATA, tokens re-joined with single spaces. */
-  rdata: string
+	/** Owner name, trailing dot stripped. */
+	name: string;
+	ttl: number;
+	/** RR type as printed by dig (e.g. "TLSA"). */
+	type: string;
+	/** The presentation-format RDATA, tokens re-joined with single spaces. */
+	rdata: string;
 }
 
 /**
@@ -384,58 +431,77 @@ export interface DigAnswer {
  * Only RRs of the requested type are returned (CNAME-chase lines are skipped). Same per-run memo +
  * one-retry pipeline as `dig`; a missing binary (ENOENT) is never retried.
  */
-export function digAnswer(name: string, type: string): Promise<DnsLookup<DigAnswer>> {
-  return lookup(
-    `DIGANS:${type}:${name}`,
-    () => digAnswerOnce(name, type),
-    (r) => Boolean(r.error) && r.error !== "ENOENT",
-  )
+export function digAnswer(
+	name: string,
+	type: string,
+): Promise<DnsLookup<DigAnswer>> {
+	return lookup(
+		`DIGANS:${type}:${name}`,
+		() => digAnswerOnce(name, type),
+		(r) => Boolean(r.error) && r.error !== "ENOENT",
+	);
 }
 
-async function digAnswerOnce(name: string, type: string): Promise<DnsLookup<DigAnswer>> {
-  const { execFile } = await import("node:child_process")
-  const args = ["+time=3", "+tries=1", "+noall", "+comments", "+answer", type, name]
-  const command = ["dig", ...args].join(" ")
-  const startedAt = new Date().toISOString()
-  const t0 = Date.now()
-  return await new Promise<DnsLookup<DigAnswer>>((resolve) => {
-    execFile("dig", args, { timeout: 4000 }, (err, stdout) => {
-      if (err) {
-        const code = (err as NodeJS.ErrnoException).code
-        const { exitCode, error } = classifyExecError(err, 4000)
-        recordToolRun({
-          tool: "dig",
-          command,
-          started_at: startedAt,
-          duration_ms: Date.now() - t0,
-          exit_code: exitCode,
-          output_format: "text",
-          parsed: stdout ? { raw: stdout } : null,
-          error,
-        })
-        resolve({ records: [], empty: false, error: code ?? err.message })
-        return
-      }
-      const status = /status: ([A-Z]+)/.exec(stdout)?.[1]
-      const records = parseDigAnswer(stdout, type)
-      recordToolRun({
-        tool: "dig",
-        command,
-        started_at: startedAt,
-        duration_ms: Date.now() - t0,
-        exit_code: 0,
-        output_format: "text",
-        parsed: { answers: records, ...(status ? { rcode: status } : {}) },
-        error: null,
-      })
-      if (records.length === 0 && status && status !== "NOERROR" && status !== "NXDOMAIN") {
-        // SERVFAIL / REFUSED / etc. — a lookup failure, not "no such record" (spec AC10).
-        resolve({ records: [], empty: false, error: status })
-        return
-      }
-      resolve({ records, empty: records.length === 0 })
-    })
-  })
+async function digAnswerOnce(
+	name: string,
+	type: string,
+): Promise<DnsLookup<DigAnswer>> {
+	const { execFile } = await import("node:child_process");
+	const args = [
+		"+time=3",
+		"+tries=1",
+		"+noall",
+		"+comments",
+		"+answer",
+		type,
+		name,
+	];
+	const command = ["dig", ...args].join(" ");
+	const startedAt = new Date().toISOString();
+	const t0 = Date.now();
+	return await new Promise<DnsLookup<DigAnswer>>((resolve) => {
+		execFile("dig", args, { timeout: 4000 }, (err, stdout) => {
+			if (err) {
+				const code = (err as NodeJS.ErrnoException).code;
+				const { exitCode, error } = classifyExecError(err, 4000);
+				recordToolRun({
+					tool: "dig",
+					command,
+					started_at: startedAt,
+					duration_ms: Date.now() - t0,
+					exit_code: exitCode,
+					output_format: "text",
+					parsed: stdout ? { raw: stdout } : null,
+					error,
+				});
+				resolve({ records: [], empty: false, error: code ?? err.message });
+				return;
+			}
+			const status = /status: ([A-Z]+)/.exec(stdout)?.[1];
+			const records = parseDigAnswer(stdout, type);
+			recordToolRun({
+				tool: "dig",
+				command,
+				started_at: startedAt,
+				duration_ms: Date.now() - t0,
+				exit_code: 0,
+				output_format: "text",
+				parsed: { answers: records, ...(status ? { rcode: status } : {}) },
+				error: null,
+			});
+			if (
+				records.length === 0 &&
+				status &&
+				status !== "NOERROR" &&
+				status !== "NXDOMAIN"
+			) {
+				// SERVFAIL / REFUSED / etc. — a lookup failure, not "no such record" (spec AC10).
+				resolve({ records: [], empty: false, error: status });
+				return;
+			}
+			resolve({ records, empty: records.length === 0 });
+		});
+	});
 }
 
 /**
@@ -444,33 +510,34 @@ async function digAnswerOnce(name: string, type: string): Promise<DnsLookup<DigA
  * the `+dnssec` path needs the RRSIGs that ride alongside the queried type.
  */
 export function parseDigAnswer(stdout: string, type?: string): DigAnswer[] {
-  const records: DigAnswer[] = []
-  for (const line of stdout.split("\n")) {
-    const l = line.trim()
-    if (!l || l.startsWith(";")) continue
-    const tok = l.split(/\s+/)
-    if (tok.length < 5) continue
-    const [owner, ttl, cls, rtype] = tok
-    if (cls !== "IN") continue
-    if (type !== undefined && rtype.toUpperCase() !== type.toUpperCase()) continue
-    const ttlNum = Number(ttl)
-    if (!Number.isInteger(ttlNum) || ttlNum < 0) continue
-    records.push({
-      name: owner.replace(/\.$/, ""),
-      ttl: ttlNum,
-      type: rtype,
-      rdata: tok.slice(4).join(" "),
-    })
-  }
-  return records
+	const records: DigAnswer[] = [];
+	for (const line of stdout.split("\n")) {
+		const l = line.trim();
+		if (!l || l.startsWith(";")) continue;
+		const tok = l.split(/\s+/);
+		if (tok.length < 5) continue;
+		const [owner, ttl, cls, rtype] = tok;
+		if (cls !== "IN") continue;
+		if (type !== undefined && rtype.toUpperCase() !== type.toUpperCase())
+			continue;
+		const ttlNum = Number(ttl);
+		if (!Number.isInteger(ttlNum) || ttlNum < 0) continue;
+		records.push({
+			name: owner.replace(/\.$/, ""),
+			ttl: ttlNum,
+			type: rtype,
+			rdata: tok.slice(4).join(" "),
+		});
+	}
+	return records;
 }
 
 /** Options for the DNSSEC-aware dig probe (pm/checks/dnssec.mdx §3). */
 export interface DigDnssecOptions {
-  /** Validating resolver to query (e.g. "1.1.1.1"); absent = the system default. */
-  resolver?: string
-  /** Set the CD (Checking Disabled) bit — the bogus-disambiguation probe (spec acceptance #6). */
-  cd?: boolean
+	/** Validating resolver to query (e.g. "1.1.1.1"); absent = the system default. */
+	resolver?: string;
+	/** Set the CD (Checking Disabled) bit — the bogus-disambiguation probe (spec acceptance #6). */
+	cd?: boolean;
 }
 
 /**
@@ -480,10 +547,10 @@ export interface DigDnssecOptions {
  * (bogus disambiguation). `error` is set only on an exec-level failure (dig missing, timeout).
  */
 export interface DigDnssecResponse {
-  status: string | null
-  adFlag: boolean
-  answers: DigAnswer[]
-  error?: string
+	status: string | null;
+	adFlag: boolean;
+	answers: DigAnswer[];
+	error?: string;
 }
 
 /**
@@ -493,77 +560,79 @@ export interface DigDnssecResponse {
  * + one-retry-on-transient pipeline as `dig`; a missing binary (ENOENT) is never retried.
  */
 export function digDnssec(
-  name: string,
-  type: string,
-  opts: DigDnssecOptions = {},
+	name: string,
+	type: string,
+	opts: DigDnssecOptions = {},
 ): Promise<DigDnssecResponse> {
-  const key = `DIGSEC:${opts.resolver ?? "default"}:${opts.cd ? "cd" : "nocd"}:${type}:${name}`
-  return memo(key, async () => {
-    const first = await digDnssecOnce(name, type, opts)
-    return first.error && first.error !== "ENOENT" ? digDnssecOnce(name, type, opts) : first
-  })
+	const key = `DIGSEC:${opts.resolver ?? "default"}:${opts.cd ? "cd" : "nocd"}:${type}:${name}`;
+	return memo(key, async () => {
+		const first = await digDnssecOnce(name, type, opts);
+		return first.error && first.error !== "ENOENT"
+			? digDnssecOnce(name, type, opts)
+			: first;
+	});
 }
 
 async function digDnssecOnce(
-  name: string,
-  type: string,
-  opts: DigDnssecOptions,
+	name: string,
+	type: string,
+	opts: DigDnssecOptions,
 ): Promise<DigDnssecResponse> {
-  const { execFile } = await import("node:child_process")
-  const args = [
-    ...(opts.resolver ? [`@${opts.resolver}`] : []),
-    "+dnssec",
-    ...(opts.cd ? ["+cd"] : []),
-    "+time=3",
-    "+tries=1",
-    "+noall",
-    "+comments",
-    "+answer",
-    type,
-    name,
-  ]
-  const command = ["dig", ...args].join(" ")
-  const startedAt = new Date().toISOString()
-  const t0 = Date.now()
-  return await new Promise<DigDnssecResponse>((resolve) => {
-    execFile("dig", args, { timeout: 4000 }, (err, stdout) => {
-      if (err) {
-        const code = (err as NodeJS.ErrnoException).code
-        const { exitCode, error } = classifyExecError(err, 4000)
-        recordToolRun({
-          tool: "dig",
-          command,
-          started_at: startedAt,
-          duration_ms: Date.now() - t0,
-          exit_code: exitCode,
-          output_format: "text",
-          parsed: stdout ? { raw: stdout } : null,
-          error,
-        })
-        resolve({
-          status: null,
-          adFlag: false,
-          answers: [],
-          error: typeof code === "string" ? code : err.message,
-        })
-        return
-      }
-      const status = /status: ([A-Z]+)/.exec(stdout)?.[1] ?? null
-      // Header flags line, e.g. `;; flags: qr rd ra ad; QUERY: 1, ...` — AD = validated (RFC 6840).
-      const flagsLine = /;; flags:([^;]*);/.exec(stdout)?.[1] ?? ""
-      const adFlag = flagsLine.split(/\s+/).includes("ad")
-      const answers = parseDigAnswer(stdout)
-      recordToolRun({
-        tool: "dig",
-        command,
-        started_at: startedAt,
-        duration_ms: Date.now() - t0,
-        exit_code: 0,
-        output_format: "text",
-        parsed: { answers, ...(status ? { rcode: status } : {}), ad: adFlag },
-        error: null,
-      })
-      resolve({ status, adFlag, answers })
-    })
-  })
+	const { execFile } = await import("node:child_process");
+	const args = [
+		...(opts.resolver ? [`@${opts.resolver}`] : []),
+		"+dnssec",
+		...(opts.cd ? ["+cd"] : []),
+		"+time=3",
+		"+tries=1",
+		"+noall",
+		"+comments",
+		"+answer",
+		type,
+		name,
+	];
+	const command = ["dig", ...args].join(" ");
+	const startedAt = new Date().toISOString();
+	const t0 = Date.now();
+	return await new Promise<DigDnssecResponse>((resolve) => {
+		execFile("dig", args, { timeout: 4000 }, (err, stdout) => {
+			if (err) {
+				const code = (err as NodeJS.ErrnoException).code;
+				const { exitCode, error } = classifyExecError(err, 4000);
+				recordToolRun({
+					tool: "dig",
+					command,
+					started_at: startedAt,
+					duration_ms: Date.now() - t0,
+					exit_code: exitCode,
+					output_format: "text",
+					parsed: stdout ? { raw: stdout } : null,
+					error,
+				});
+				resolve({
+					status: null,
+					adFlag: false,
+					answers: [],
+					error: typeof code === "string" ? code : err.message,
+				});
+				return;
+			}
+			const status = /status: ([A-Z]+)/.exec(stdout)?.[1] ?? null;
+			// Header flags line, e.g. `;; flags: qr rd ra ad; QUERY: 1, ...` — AD = validated (RFC 6840).
+			const flagsLine = /;; flags:([^;]*);/.exec(stdout)?.[1] ?? "";
+			const adFlag = flagsLine.split(/\s+/).includes("ad");
+			const answers = parseDigAnswer(stdout);
+			recordToolRun({
+				tool: "dig",
+				command,
+				started_at: startedAt,
+				duration_ms: Date.now() - t0,
+				exit_code: 0,
+				output_format: "text",
+				parsed: { answers, ...(status ? { rcode: status } : {}), ad: adFlag },
+				error: null,
+			});
+			resolve({ status, adFlag, answers });
+		});
+	});
 }

@@ -1,8 +1,8 @@
-import { existsSync } from "node:fs"
-import { join } from "node:path"
-import { logWarn } from "./logging"
-import { resolveStateDir, stateSubdir } from "./state-dir"
-import { readYaml, writeYaml } from "./yaml-store"
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { logWarn } from "./logging";
+import { resolveStateDir, stateSubdir } from "./state-dir";
+import { readYaml, writeYaml } from "./yaml-store";
 
 /**
  * The hierarchical config/settings store (pm/storage.mdx §3, §4, §8). Two scopes, both YAML under
@@ -23,7 +23,7 @@ import { readYaml, writeYaml } from "./yaml-store"
  * file, and the auth signing secret is its own file (pm/storage.mdx §7, pm/authentication.mdx).
  */
 
-export const CONFIG_SCHEMA_VERSION = 1
+export const CONFIG_SCHEMA_VERSION = 1;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // App-level config.yaml (pm/storage.mdx §3) — one nested block per concern.
@@ -35,11 +35,11 @@ export const CONFIG_SCHEMA_VERSION = 1
  * `issuerDnMatch` against the certificate issuer DN.
  */
 export interface BimiMvaEntry {
-  name: string
-  issuerDnMatch: string
-  /** Which mark types the MVA may issue: "vmc" (registered trademark) and/or "cmc". */
-  markTypes: string[]
-  enabled: boolean
+	name: string;
+	issuerDnMatch: string;
+	/** Which mark types the MVA may issue: "vmc" (registered trademark) and/or "cmc". */
+	markTypes: string[];
+	enabled: boolean;
 }
 
 /**
@@ -49,12 +49,12 @@ export interface BimiMvaEntry {
  * final CNAME target; `unclaimed_signature` waits for the future HTTP-probe round.
  */
 export interface TakeoverFingerprint {
-  provider: string
-  /** Suffix matched against the final CNAME target, e.g. ".herokudns.com". */
-  cname_suffix: string
-  /** HTTP body marker for the future "unclaimed endpoint" confirmation probe. */
-  unclaimed_signature?: string
-  enabled: boolean
+	provider: string;
+	/** Suffix matched against the final CNAME target, e.g. ".herokudns.com". */
+	cname_suffix: string;
+	/** HTTP body marker for the future "unclaimed endpoint" confirmation probe. */
+	unclaimed_signature?: string;
+	enabled: boolean;
 }
 
 /**
@@ -64,10 +64,10 @@ export interface TakeoverFingerprint {
  * so the UI and checker never hard-code magic numbers.
  */
 export interface DnssecAlgorithmEntry {
-  algo_num: number
-  name: string
-  deprecated: boolean
-  notes?: string
+	algo_num: number;
+	name: string;
+	deprecated: boolean;
+	notes?: string;
 }
 
 /**
@@ -77,433 +77,493 @@ export interface DnssecAlgorithmEntry {
  * self-hosted seeds, or "service" when the seed service owns and reads the mailbox).
  */
 export interface SeedMailboxEntry {
-  provider: string
-  seed_address: string
-  read_method: "imap" | "graph" | "jmap" | "service"
-  active: boolean
+	provider: string;
+	seed_address: string;
+	read_method: "imap" | "graph" | "jmap" | "service";
+	active: boolean;
 }
 
 export interface AppConfigFile {
-  schema_version: number
-  updated_at: string
-  server: {
-    frontend_port: number
-    backend_port: number
-    mode: "local" | "server"
-  }
-  checks: {
-    enabled: string[]
-    spf: { maxLookups: number }
-    /**
-     * DKIM settings: the fallback selector list, plus the key-rotation warning window in days
-     * (pm/checks/dkim.mdx §2.2 `dkim.rotation` — M3AAWG ~6-month cadence, default 180; the
-     * "approaching" info fires 30 days earlier). `rotationWindowDays` is optional so older
-     * config files stay valid; the checker falls back to 180.
-     */
-    dkim: { defaultSelectors: string[]; rotationWindowDays?: number }
-    dnsbl: { zones: string[] }
-    /**
-     * Content-scoring admin settings (pm/checks/content_scoring.mdx §4): the SpamAssassin spam
-     * threshold override (default 5.0), the inbox-safe target (default 2.0 — totals below it are
-     * `ok`), and whether network content tests (URIBL/Razor/Pyzor/DCC) are enabled (default off so
-     * scoring is deterministic). The binary path override is env: EDH_TOOL_SPAMASSASSIN/_SPAMC.
-     */
-    content: {
-      threshold: number
-      safeTarget: number
-      networkTests: boolean
-      /**
-       * Link / URL-reputation settings (pm/checks/link_url_reputation.mdx §5, admin-only): the
-       * public URL-shortener domain list matched by `content.url_shortener` (config, not code)
-       * and the Google Safe Browsing API key that enables `content.url_safe_browsing` in a
-       * future round ("" = not configured — the sub-check degrades to one info note). Optional
-       * so existing config literals / older files stay valid; the checker falls back to the
-       * bundled DEFAULT_SHORTENERS seed when absent.
-       */
-      url?: { shorteners: string[]; safeBrowsingKey: string }
-    }
-    /**
-     * List-Unsubscribe / one-click admin settings (pm/checks/list_unsubscribe.mdx §4 admin-only):
-     * the Gmail/Yahoo bulk-sender daily threshold (default 5,000 — documentation for the
-     * per-domain isBulkSender flag), the endpoint-probe timeout (default 5s), whether the live
-     * one-click POST probe is globally permitted at all, and the probe cadence (default 24h —
-     * the probe never re-fires more often than this even when audits run every tick, §6).
-     */
-    listUnsub: {
-      bulkThresholdPerDay: number
-      probeTimeoutMs: number
-      probeAllowed: boolean
-      probeCadenceHours: number
-    }
-    /**
-     * BIMI admin settings (pm/checks/bimi.mdx §5): the recognized Mark Verifying Authorities
-     * (the `bimi_mva` reference table mapped onto config.yaml). Consumed by the future VMC/CMC
-     * certificate-validation round; admin-only editing.
-     */
-    bimi: { mvaAllowList: BimiMvaEntry[] }
-    /**
-     * DANE / TLSA admin settings (pm/checks/dane_tlsa.mdx §4, admin-only): whether the FUTURE
-     * :25 STARTTLS cert-match probe is enabled at all (it opens outbound SMTP connections — off
-     * by default), the probe's per-MX timeout, and whether authoritative DNSSEC validation must
-     * see the AD bit from a validating resolver (FUTURE) rather than trusting the first-round
-     * DS/DNSKEY observation. With the probe disabled the `certMatch`/`starttlsOffered` columns
-     * stay null and no false criticals are emitted (spec AC9).
-     */
-    dane: {
-      probeEnabled: boolean
-      probeTimeoutMs: number
-      requireAdBit: boolean
-    }
-    /**
-     * MTA-STS admin settings (pm/checks/mta_sts.mdx §4 "Admin-only settings"): the HTTPS-fetch
-     * sub-checks sit behind the global `httpsProbeEnabled` feature flag (spec key
-     * `mtaSts.httpsProbe.enabled`, DEFAULT OFF until the HTTPS client ships), plus the fetch
-     * timeout (default 10 s) and max policy-body size (default 64 KB) the probe must respect
-     * (§3/§6 — one request per domain per audit, no redirects, capped body). Optional so older
-     * config files stay valid; the checker falls back to these defaults when absent.
-     */
-    mtaSts?: { httpsProbeEnabled: boolean; fetchTimeoutMs: number; maxBodyBytes: number }
-    /**
-     * DNSSEC admin settings (pm/checks/dnssec.mdx §4, admin-only): the validating resolver(s) the
-     * deep check queries (default 1.1.1.1 / 8.8.8.8), the RRSIG near-expiry lead time (default
-     * 72h), the "validate via `dig`" toggle (off = presence-only first round), and the
-     * `dnssec_algorithms` IANA reference seed (§5) the algorithm sub-check reads.
-     */
-    dnssec: {
-      resolvers: string[]
-      rrsigLeadHours: number
-      validateViaDig: boolean
-      algorithms: DnssecAlgorithmEntry[]
-    }
-    thresholds: { green: number; amber: number }
-    weights: { critical: number; warning: number; info: number }
-  }
-  schedule: {
-    enabled: boolean
-    cadence: "interval" | "daily" | "weekly"
-    everyHours: number
-    times: string[]
-    weekdays: string[]
-    timezone: string
-    domains: "all" | string[]
-    runner: "in-process" | "os"
-    os: { kind: string; installed: boolean; label: string }
-  }
-  notifications: {
-    webhook: { enabled: boolean; url: string }
-    smtp: { host: string; port: number; from: string }
-  }
-  storage: { retentionDays: number }
-  /**
-   * Domain Registration Reputation (pm/checks/domain_reputation.mdx §5/§6): the long-TTL RDAP
-   * cache (registration data is stale-tolerant — default 24h vs the 6h DNS cadence), the per-run
-   * RDAP request budget, and the admin-editable reference lists (parking-provider nameservers,
-   * high-abuse TLDs, registrar abuse-reputation watchlist — the `parking_nameservers` /
-   * `registrar_reputation` reference tables mapped onto config.yaml).
-   */
-  domain_reputation: {
-    cache_ttl_hours: number
-    rdap_request_budget: number
-    parking_nameservers: string[]
-    high_abuse_tlds: string[]
-    registrar_reputation: {
-      match_type: "registrar_iana_id" | "registrar_name" | "tld"
-      match_value: string
-      note?: string
-    }[]
-  }
-  /**
-   * DNS Zone & Nameserver Health (pm/checks/dns_health.mdx §4/§5): the bundled, admin-editable
-   * subdomain-takeover fingerprint list the dangling-CNAME sub-check matches final targets against.
-   */
-  dns_health: {
-    fingerprints: TakeoverFingerprint[]
-  }
-  /**
-   * External-tool settings. `paths` is the ToolLocator's explicit-override map
-   * (pm/run_checks.mdx §5.2 resolution step 1, Settings → Tools & environment): e.g.
-   * `paths: { dig: /opt/homebrew/bin/dig }` pins a tool to an absolute path ahead of the
-   * PATH search and the per-platform conventional locations.
-   */
-  tools: {
-    preferCli: boolean
-    resolvers: string[]
-    timeoutMs: number
-    paths: Record<string, string>
-  }
-  access: { allowedDomains: string[] }
-  /**
-   * Report-email ingestion (pm/emails.mdx §8, admin-only): the DMARC-aggregate/TLS-RPT report
-   * sources and cadence. `enabled` is the master switch — off, the two report-fed findings
-   * (dmarc.real_pass_rate / infra.tls_rpt_reports_ingested) return a single "ingestion disabled"
-   * info. `dropFolder` "" means the default `<state>/reports/inbox`. `analyzeDir` is the
-   * directory the run-time Spam & Content report_emails test scans IN PLACE on every audit run
-   * (pm/emails.mdx §13.1 — files are never moved); "" means auto-detect the repo `emails/`
-   * corpus, else fall back to the drop folder. IMAP credentials come from the out-of-repo
-   * credentials file (never stored here).
-   */
-  reports: {
-    enabled: boolean
-    dropFolder: string
-    analyzeDir: string
-    pollMinutes: number
-    windowDays: number
-    imap: { host: string; port: number; user: string; mailbox: string }
-  }
-  /**
-   * Seed-list inbox-placement testing (pm/checks/inbox_placement.mdx §4 admin-only settings, §5
-   * `seedList:` block, §6 gating). The whole placement family is FUTURE and stays dark until this
-   * block names a seed source: `service` "" = not configured (every `content.placement_*`
-   * sub-check reports "not configured", never a false ok/critical — acceptance criterion #1);
-   * a seed-service name (glockapps/mailtrap/everest/mailreach) or "self_hosted" (with active
-   * `seeds`) arms the family. The service API key / mailbox credentials come from the out-of-repo
-   * credentials file, never from here. `thresholds` are the overall inbox-rate bands (defaults
-   * 80/50), `settlePollMinutes` the read-back backoff before a Missing verdict (§3 edge cases),
-   * `monthlyBudget` the max probe sends per calendar month (§6 — each run spends a credit and
-   * sends real mail), and `cadence` the slow dedicated schedule decoupled from the 6h DNS cadence.
-   */
-  seedList: {
-    service: string
-    providers: string[]
-    cadence: "daily" | "weekly"
-    thresholds: { warnBelowPct: number; criticalBelowPct: number }
-    settlePollMinutes: number[]
-    monthlyBudget: number
-    seeds: SeedMailboxEntry[]
-  }
-  defaults: UserPreferences
+	schema_version: number;
+	updated_at: string;
+	server: {
+		frontend_port: number;
+		backend_port: number;
+		mode: "local" | "server";
+	};
+	checks: {
+		enabled: string[];
+		spf: { maxLookups: number };
+		/**
+		 * DKIM settings: the fallback selector list, plus the key-rotation warning window in days
+		 * (pm/checks/dkim.mdx §2.2 `dkim.rotation` — M3AAWG ~6-month cadence, default 180; the
+		 * "approaching" info fires 30 days earlier). `rotationWindowDays` is optional so older
+		 * config files stay valid; the checker falls back to 180.
+		 */
+		dkim: { defaultSelectors: string[]; rotationWindowDays?: number };
+		dnsbl: { zones: string[] };
+		/**
+		 * Content-scoring admin settings (pm/checks/content_scoring.mdx §4): the SpamAssassin spam
+		 * threshold override (default 5.0), the inbox-safe target (default 2.0 — totals below it are
+		 * `ok`), and whether network content tests (URIBL/Razor/Pyzor/DCC) are enabled (default off so
+		 * scoring is deterministic). The binary path override is env: EDH_TOOL_SPAMASSASSIN/_SPAMC.
+		 */
+		content: {
+			threshold: number;
+			safeTarget: number;
+			networkTests: boolean;
+			/**
+			 * Link / URL-reputation settings (pm/checks/link_url_reputation.mdx §5, admin-only): the
+			 * public URL-shortener domain list matched by `content.url_shortener` (config, not code)
+			 * and the Google Safe Browsing API key that enables `content.url_safe_browsing` in a
+			 * future round ("" = not configured — the sub-check degrades to one info note). Optional
+			 * so existing config literals / older files stay valid; the checker falls back to the
+			 * bundled DEFAULT_SHORTENERS seed when absent.
+			 */
+			url?: { shorteners: string[]; safeBrowsingKey: string };
+		};
+		/**
+		 * List-Unsubscribe / one-click admin settings (pm/checks/list_unsubscribe.mdx §4 admin-only):
+		 * the Gmail/Yahoo bulk-sender daily threshold (default 5,000 — documentation for the
+		 * per-domain isBulkSender flag), the endpoint-probe timeout (default 5s), whether the live
+		 * one-click POST probe is globally permitted at all, and the probe cadence (default 24h —
+		 * the probe never re-fires more often than this even when audits run every tick, §6).
+		 */
+		listUnsub: {
+			bulkThresholdPerDay: number;
+			probeTimeoutMs: number;
+			probeAllowed: boolean;
+			probeCadenceHours: number;
+		};
+		/**
+		 * BIMI admin settings (pm/checks/bimi.mdx §5): the recognized Mark Verifying Authorities
+		 * (the `bimi_mva` reference table mapped onto config.yaml). Consumed by the future VMC/CMC
+		 * certificate-validation round; admin-only editing.
+		 */
+		bimi: { mvaAllowList: BimiMvaEntry[] };
+		/**
+		 * DANE / TLSA admin settings (pm/checks/dane_tlsa.mdx §4, admin-only): whether the FUTURE
+		 * :25 STARTTLS cert-match probe is enabled at all (it opens outbound SMTP connections — off
+		 * by default), the probe's per-MX timeout, and whether authoritative DNSSEC validation must
+		 * see the AD bit from a validating resolver (FUTURE) rather than trusting the first-round
+		 * DS/DNSKEY observation. With the probe disabled the `certMatch`/`starttlsOffered` columns
+		 * stay null and no false criticals are emitted (spec AC9).
+		 */
+		dane: {
+			probeEnabled: boolean;
+			probeTimeoutMs: number;
+			requireAdBit: boolean;
+		};
+		/**
+		 * MTA-STS admin settings (pm/checks/mta_sts.mdx §4 "Admin-only settings"): the HTTPS-fetch
+		 * sub-checks sit behind the global `httpsProbeEnabled` feature flag (spec key
+		 * `mtaSts.httpsProbe.enabled`, DEFAULT OFF until the HTTPS client ships), plus the fetch
+		 * timeout (default 10 s) and max policy-body size (default 64 KB) the probe must respect
+		 * (§3/§6 — one request per domain per audit, no redirects, capped body). Optional so older
+		 * config files stay valid; the checker falls back to these defaults when absent.
+		 */
+		mtaSts?: {
+			httpsProbeEnabled: boolean;
+			fetchTimeoutMs: number;
+			maxBodyBytes: number;
+		};
+		/**
+		 * DNSSEC admin settings (pm/checks/dnssec.mdx §4, admin-only): the validating resolver(s) the
+		 * deep check queries (default 1.1.1.1 / 8.8.8.8), the RRSIG near-expiry lead time (default
+		 * 72h), the "validate via `dig`" toggle (off = presence-only first round), and the
+		 * `dnssec_algorithms` IANA reference seed (§5) the algorithm sub-check reads.
+		 */
+		dnssec: {
+			resolvers: string[];
+			rrsigLeadHours: number;
+			validateViaDig: boolean;
+			algorithms: DnssecAlgorithmEntry[];
+		};
+		thresholds: { green: number; amber: number };
+		weights: { critical: number; warning: number; info: number };
+	};
+	schedule: {
+		enabled: boolean;
+		cadence: "interval" | "daily" | "weekly";
+		everyHours: number;
+		times: string[];
+		weekdays: string[];
+		timezone: string;
+		domains: "all" | string[];
+		runner: "in-process" | "os";
+		os: { kind: string; installed: boolean; label: string };
+	};
+	notifications: {
+		webhook: { enabled: boolean; url: string };
+		smtp: { host: string; port: number; from: string };
+	};
+	storage: { retentionDays: number };
+	/**
+	 * Domain Registration Reputation (pm/checks/domain_reputation.mdx §5/§6): the long-TTL RDAP
+	 * cache (registration data is stale-tolerant — default 24h vs the 6h DNS cadence), the per-run
+	 * RDAP request budget, and the admin-editable reference lists (parking-provider nameservers,
+	 * high-abuse TLDs, registrar abuse-reputation watchlist — the `parking_nameservers` /
+	 * `registrar_reputation` reference tables mapped onto config.yaml).
+	 */
+	domain_reputation: {
+		cache_ttl_hours: number;
+		rdap_request_budget: number;
+		parking_nameservers: string[];
+		high_abuse_tlds: string[];
+		registrar_reputation: {
+			match_type: "registrar_iana_id" | "registrar_name" | "tld";
+			match_value: string;
+			note?: string;
+		}[];
+	};
+	/**
+	 * DNS Zone & Nameserver Health (pm/checks/dns_health.mdx §4/§5): the bundled, admin-editable
+	 * subdomain-takeover fingerprint list the dangling-CNAME sub-check matches final targets against.
+	 */
+	dns_health: {
+		fingerprints: TakeoverFingerprint[];
+	};
+	/**
+	 * External-tool settings. `paths` is the ToolLocator's explicit-override map
+	 * (pm/run_checks.mdx §5.2 resolution step 1, Settings → Tools & environment): e.g.
+	 * `paths: { dig: /opt/homebrew/bin/dig }` pins a tool to an absolute path ahead of the
+	 * PATH search and the per-platform conventional locations.
+	 */
+	tools: {
+		preferCli: boolean;
+		resolvers: string[];
+		timeoutMs: number;
+		paths: Record<string, string>;
+	};
+	access: { allowedDomains: string[] };
+	/**
+	 * Report-email ingestion (pm/emails.mdx §8, admin-only): the DMARC-aggregate/TLS-RPT report
+	 * sources and cadence. `enabled` is the master switch — off, the two report-fed findings
+	 * (dmarc.real_pass_rate / infra.tls_rpt_reports_ingested) return a single "ingestion disabled"
+	 * info. `dropFolder` "" means the default `<state>/reports/inbox`. `analyzeDir` is the
+	 * directory the run-time Spam & Content report_emails test scans IN PLACE on every audit run
+	 * (pm/emails.mdx §13.1 — files are never moved); "" means auto-detect the repo `emails/`
+	 * corpus, else fall back to the drop folder. IMAP credentials come from the out-of-repo
+	 * credentials file (never stored here).
+	 */
+	reports: {
+		enabled: boolean;
+		dropFolder: string;
+		analyzeDir: string;
+		pollMinutes: number;
+		windowDays: number;
+		imap: { host: string; port: number; user: string; mailbox: string };
+	};
+	/**
+	 * Seed-list inbox-placement testing (pm/checks/inbox_placement.mdx §4 admin-only settings, §5
+	 * `seedList:` block, §6 gating). The whole placement family is FUTURE and stays dark until this
+	 * block names a seed source: `service` "" = not configured (every `content.placement_*`
+	 * sub-check reports "not configured", never a false ok/critical — acceptance criterion #1);
+	 * a seed-service name (glockapps/mailtrap/everest/mailreach) or "self_hosted" (with active
+	 * `seeds`) arms the family. The service API key / mailbox credentials come from the out-of-repo
+	 * credentials file, never from here. `thresholds` are the overall inbox-rate bands (defaults
+	 * 80/50), `settlePollMinutes` the read-back backoff before a Missing verdict (§3 edge cases),
+	 * `monthlyBudget` the max probe sends per calendar month (§6 — each run spends a credit and
+	 * sends real mail), and `cadence` the slow dedicated schedule decoupled from the 6h DNS cadence.
+	 */
+	seedList: {
+		service: string;
+		providers: string[];
+		cadence: "daily" | "weekly";
+		thresholds: { warnBelowPct: number; criticalBelowPct: number };
+		settlePollMinutes: number[];
+		monthlyBudget: number;
+		seeds: SeedMailboxEntry[];
+	};
+	defaults: UserPreferences;
 }
 
 /** The per-user preference shape shared by `config.yaml → defaults` and each user file. */
 export interface UserPreferences {
-  theme: "system" | "light" | "dark"
-  density: "comfortable" | "compact"
-  notifications: {
-    desktop: boolean
-    email: boolean
-    minSeverity: "info" | "warning" | "critical"
-    mode: "immediate" | "daily"
-  }
+	theme: "system" | "light" | "dark";
+	density: "comfortable" | "compact";
+	notifications: {
+		desktop: boolean;
+		email: boolean;
+		minSeverity: "info" | "warning" | "critical";
+		mode: "immediate" | "daily";
+	};
 }
 
 /** Detect the OS scheduling layer for the `schedule.os.kind` default (pm/scheduled_checks.mdx). */
 function detectOsSchedulerKind(): string {
-  if (process.platform === "darwin") return "launchd"
-  if (process.platform === "win32") return "schtasks"
-  return process.platform === "linux" ? "systemd" : "cron"
+	if (process.platform === "darwin") return "launchd";
+	if (process.platform === "win32") return "schtasks";
+	return process.platform === "linux" ? "systemd" : "cron";
 }
 
 function systemTimezone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-  } catch {
-    return "UTC"
-  }
+	try {
+		return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+	} catch {
+		return "UTC";
+	}
 }
 
 /** Default-everything: the config the app boots on when no config.yaml exists (pm/storage.mdx §3). */
 export function defaultAppConfig(): AppConfigFile {
-  return {
-    schema_version: CONFIG_SCHEMA_VERSION,
-    updated_at: new Date().toISOString(),
-    server: { frontend_port: 4444, backend_port: 9312, mode: "local" },
-    checks: {
-      enabled: ["spf", "dkim", "dmarc", "blacklists", "dns_infra"],
-      spf: { maxLookups: 10 },
-      dkim: { defaultSelectors: ["google", "selector1", "selector2", "k1"] },
-      dnsbl: { zones: ["zen.spamhaus.org", "b.barracudacentral.org", "bl.spamcop.net"] },
-      content: { threshold: 5.0, safeTarget: 2.0, networkTests: false },
-      listUnsub: {
-        bulkThresholdPerDay: 5000,
-        probeTimeoutMs: 5000,
-        probeAllowed: true,
-        probeCadenceHours: 24,
-      },
-      bimi: {
-        mvaAllowList: [
-          { name: "DigiCert", issuerDnMatch: "DigiCert", markTypes: ["vmc", "cmc"], enabled: true },
-          { name: "Entrust", issuerDnMatch: "Entrust", markTypes: ["vmc", "cmc"], enabled: true },
-        ],
-      },
-      dane: {
-        // The FUTURE :25 STARTTLS cert-match probe opens outbound SMTP — off by default (§4).
-        probeEnabled: false,
-        probeTimeoutMs: 10000,
-        // ON = only trust DNSSEC via the AD bit from a validating resolver (FUTURE); OFF =
-        // first-round DS/DNSKEY observation suffices (pm/checks/dane_tlsa.mdx §3 step 4).
-        requireAdBit: false,
-      },
-      mtaSts: {
-        // The HTTPS policy-fetch sub-checks are FUTURE-round — flag DEFAULT OFF until the HTTPS
-        // probe is turned on by the admin (pm/checks/mta_sts.mdx §4 "Admin-only settings").
-        httpsProbeEnabled: false,
-        // Defensive fetch bounds (§3/§6): 10 s total timeout, 64 KB policy-body cap, no redirects.
-        fetchTimeoutMs: 10000,
-        maxBodyBytes: 65536,
-      },
-      dnssec: {
-        // Public validating resolvers the deep check queries for the AD flag (pm/checks/dnssec.mdx §4).
-        resolvers: ["1.1.1.1", "8.8.8.8"],
-        rrsigLeadHours: 72,
-        // OFF = presence-only first round; ON = shell `dig +dnssec` for AD/RRSIG/NSEC3 (§3/§7).
-        validateViaDig: false,
-        // IANA DNSSEC algorithm registry seed — the `dnssec_algorithms` reference table (§5).
-        algorithms: [
-          { algo_num: 1, name: "RSAMD5", deprecated: true, notes: "Must not be used (RFC 6725)" },
-          { algo_num: 3, name: "DSA", deprecated: true, notes: "Deprecated" },
-          {
-            algo_num: 5,
-            name: "RSASHA1",
-            deprecated: true,
-            notes: "Being removed from validators",
-          },
-          { algo_num: 6, name: "DSA-NSEC3-SHA1", deprecated: true, notes: "Deprecated" },
-          {
-            algo_num: 7,
-            name: "RSASHA1-NSEC3-SHA1",
-            deprecated: true,
-            notes: "Being removed from validators",
-          },
-          { algo_num: 8, name: "RSASHA256", deprecated: false, notes: "RSA fallback" },
-          { algo_num: 10, name: "RSASHA512", deprecated: false },
-          {
-            algo_num: 13,
-            name: "ECDSAP256SHA256",
-            deprecated: false,
-            notes: "Recommended — compact and fast",
-          },
-          { algo_num: 14, name: "ECDSAP384SHA384", deprecated: false },
-          { algo_num: 15, name: "ED25519", deprecated: false },
-          { algo_num: 16, name: "ED448", deprecated: false },
-        ],
-      },
-      thresholds: { green: 90, amber: 70 },
-      weights: { critical: 40, warning: 15, info: 0 },
-    },
-    schedule: {
-      // DEFAULT OFF (pm/settings.mdx §3.1): a fresh install never fires scheduled DNSBL/SMTP/HTTP
-      // traffic until the user flips the switch. Enabling seeds these times/weekdays: 06:00 daily.
-      enabled: false,
-      cadence: "daily",
-      everyHours: 6,
-      times: ["06:00"],
-      weekdays: [],
-      timezone: systemTimezone(),
-      domains: "all",
-      runner: "in-process",
-      os: {
-        kind: detectOsSchedulerKind(),
-        installed: false,
-        label: "com.emaildeliveryhero.scheduler",
-      },
-    },
-    notifications: {
-      webhook: { enabled: false, url: "" },
-      smtp: { host: "", port: 587, from: "edh@whitehatengineering.com" },
-    },
-    storage: { retentionDays: 90 },
-    domain_reputation: {
-      // Registration data changes over days/years — cache RDAP for 24h and skip re-querying on
-      // the frequent DNS cadence (pm/checks/domain_reputation.mdx §3 "Caching & rate limits").
-      cache_ttl_hours: 24,
-      rdap_request_budget: 5,
-      parking_nameservers: [
-        "sedoparking.com",
-        "bodis.com",
-        "above.com",
-        "parkingcrew.net",
-        "dan.com",
-        "afternic.com",
-        "cashparking.com",
-        "hugedomains.com",
-        "sedo.com",
-        "parklogic.com",
-        "namedrive.com",
-        "voodoo.com",
-      ],
-      // Spamhaus TLD abuse stats — advisory only (info findings).
-      high_abuse_tlds: [
-        "top",
-        "xyz",
-        "click",
-        "link",
-        "work",
-        "gq",
-        "ml",
-        "cf",
-        "ga",
-        "tk",
-        "zip",
-        "mov",
-        "rest",
-        "cyou",
-        "sbs",
-        "icu",
-        "buzz",
-      ],
-      // Curated abuse-tolerant registrar watchlist — empty by default, admin-editable.
-      registrar_reputation: [],
-    },
-    dns_health: {
-      // Seed = the classic takeover-prone providers; keep fresh (new SaaS endpoints appear
-      // constantly — pm/checks/dns_health.mdx maintenance notes). Admin-editable.
-      fingerprints: [
-        { provider: "Heroku", cname_suffix: ".herokudns.com", enabled: true },
-        { provider: "Heroku", cname_suffix: ".herokuapp.com", enabled: true },
-        { provider: "AWS S3", cname_suffix: ".s3.amazonaws.com", enabled: true },
-        { provider: "AWS CloudFront", cname_suffix: ".cloudfront.net", enabled: true },
-        { provider: "GitHub Pages", cname_suffix: ".github.io", enabled: true },
-        { provider: "Azure App Service", cname_suffix: ".azurewebsites.net", enabled: true },
-        { provider: "Azure Traffic Manager", cname_suffix: ".trafficmanager.net", enabled: true },
-        { provider: "WordPress.com", cname_suffix: ".wordpress.com", enabled: true },
-        { provider: "Pantheon", cname_suffix: ".pantheonsite.io", enabled: true },
-        { provider: "SendGrid", cname_suffix: ".sendgrid.net", enabled: true },
-        { provider: "Shopify", cname_suffix: ".myshopify.com", enabled: true },
-        { provider: "Fastly", cname_suffix: ".fastly.net", enabled: true },
-        { provider: "Netlify", cname_suffix: ".netlify.app", enabled: true },
-        { provider: "Vercel", cname_suffix: ".vercel.app", enabled: true },
-      ],
-    },
-    tools: { preferCli: false, resolvers: [], timeoutMs: 5000, paths: {} },
-    access: { allowedDomains: ["whitehatengineering.com", "act3ai.com"] },
-    reports: {
-      // Ingestion defaults ON: the drop folder is local-only (no network traffic), and the
-      // hourly poll is a no-op until files/an IMAP mailbox are configured (pm/emails.mdx §4.1).
-      enabled: true,
-      dropFolder: "",
-      // "" = auto-detect the repo emails/ corpus (dev), else the drop folder (pm/emails.mdx §8).
-      analyzeDir: "",
-      pollMinutes: 60,
-      windowDays: 7,
-      imap: { host: "", port: 993, user: "", mailbox: "INBOX" },
-    },
-    seedList: {
-      // "" = not configured — the entire inbox-placement family reports "not configured" and no
-      // probe can ever be sent (pm/checks/inbox_placement.mdx §6, acceptance criterion #1).
-      service: "",
-      // The providers that dominate real inbox share (spec §1) — the default test matrix.
-      providers: ["gmail", "outlook", "yahoo", "apple"],
-      // Slow dedicated cadence, decoupled from the 6h DNS cadence (spec §6 — probes cost money).
-      cadence: "weekly",
-      // Overall inbox-rate bands: ≥ 80% ok, 50–79% warning, < 50% critical (spec §3, §4 defaults).
-      thresholds: { warnBelowPct: 80, criticalBelowPct: 50 },
-      // Read-back poll backoff before a seed is declared Missing (spec §3 edge cases: 2/5/10/15).
-      settlePollMinutes: [2, 5, 10, 15],
-      // Max probe sends per calendar month (spec §6 "monthly budget cap").
-      monthlyBudget: 4,
-      // The seed_list_config reference table (spec §5) — empty until seeds are configured.
-      seeds: [],
-    },
-    defaults: {
-      theme: "system",
-      density: "comfortable",
-      notifications: { desktop: true, email: false, minSeverity: "warning", mode: "immediate" },
-    },
-  }
+	return {
+		schema_version: CONFIG_SCHEMA_VERSION,
+		updated_at: new Date().toISOString(),
+		server: { frontend_port: 4444, backend_port: 9312, mode: "local" },
+		checks: {
+			enabled: ["spf", "dkim", "dmarc", "blacklists", "dns_infra"],
+			spf: { maxLookups: 10 },
+			dkim: { defaultSelectors: ["google", "selector1", "selector2", "k1"] },
+			dnsbl: {
+				zones: ["zen.spamhaus.org", "b.barracudacentral.org", "bl.spamcop.net"],
+			},
+			content: { threshold: 5.0, safeTarget: 2.0, networkTests: false },
+			listUnsub: {
+				bulkThresholdPerDay: 5000,
+				probeTimeoutMs: 5000,
+				probeAllowed: true,
+				probeCadenceHours: 24,
+			},
+			bimi: {
+				mvaAllowList: [
+					{
+						name: "DigiCert",
+						issuerDnMatch: "DigiCert",
+						markTypes: ["vmc", "cmc"],
+						enabled: true,
+					},
+					{
+						name: "Entrust",
+						issuerDnMatch: "Entrust",
+						markTypes: ["vmc", "cmc"],
+						enabled: true,
+					},
+				],
+			},
+			dane: {
+				// The FUTURE :25 STARTTLS cert-match probe opens outbound SMTP — off by default (§4).
+				probeEnabled: false,
+				probeTimeoutMs: 10000,
+				// ON = only trust DNSSEC via the AD bit from a validating resolver (FUTURE); OFF =
+				// first-round DS/DNSKEY observation suffices (pm/checks/dane_tlsa.mdx §3 step 4).
+				requireAdBit: false,
+			},
+			mtaSts: {
+				// The HTTPS policy-fetch sub-checks are FUTURE-round — flag DEFAULT OFF until the HTTPS
+				// probe is turned on by the admin (pm/checks/mta_sts.mdx §4 "Admin-only settings").
+				httpsProbeEnabled: false,
+				// Defensive fetch bounds (§3/§6): 10 s total timeout, 64 KB policy-body cap, no redirects.
+				fetchTimeoutMs: 10000,
+				maxBodyBytes: 65536,
+			},
+			dnssec: {
+				// Public validating resolvers the deep check queries for the AD flag (pm/checks/dnssec.mdx §4).
+				resolvers: ["1.1.1.1", "8.8.8.8"],
+				rrsigLeadHours: 72,
+				// OFF = presence-only first round; ON = shell `dig +dnssec` for AD/RRSIG/NSEC3 (§3/§7).
+				validateViaDig: false,
+				// IANA DNSSEC algorithm registry seed — the `dnssec_algorithms` reference table (§5).
+				algorithms: [
+					{
+						algo_num: 1,
+						name: "RSAMD5",
+						deprecated: true,
+						notes: "Must not be used (RFC 6725)",
+					},
+					{ algo_num: 3, name: "DSA", deprecated: true, notes: "Deprecated" },
+					{
+						algo_num: 5,
+						name: "RSASHA1",
+						deprecated: true,
+						notes: "Being removed from validators",
+					},
+					{
+						algo_num: 6,
+						name: "DSA-NSEC3-SHA1",
+						deprecated: true,
+						notes: "Deprecated",
+					},
+					{
+						algo_num: 7,
+						name: "RSASHA1-NSEC3-SHA1",
+						deprecated: true,
+						notes: "Being removed from validators",
+					},
+					{
+						algo_num: 8,
+						name: "RSASHA256",
+						deprecated: false,
+						notes: "RSA fallback",
+					},
+					{ algo_num: 10, name: "RSASHA512", deprecated: false },
+					{
+						algo_num: 13,
+						name: "ECDSAP256SHA256",
+						deprecated: false,
+						notes: "Recommended — compact and fast",
+					},
+					{ algo_num: 14, name: "ECDSAP384SHA384", deprecated: false },
+					{ algo_num: 15, name: "ED25519", deprecated: false },
+					{ algo_num: 16, name: "ED448", deprecated: false },
+				],
+			},
+			thresholds: { green: 90, amber: 70 },
+			weights: { critical: 40, warning: 15, info: 0 },
+		},
+		schedule: {
+			// DEFAULT OFF (pm/settings.mdx §3.1): a fresh install never fires scheduled DNSBL/SMTP/HTTP
+			// traffic until the user flips the switch. Enabling seeds these times/weekdays: 06:00 daily.
+			enabled: false,
+			cadence: "daily",
+			everyHours: 6,
+			times: ["06:00"],
+			weekdays: [],
+			timezone: systemTimezone(),
+			domains: "all",
+			runner: "in-process",
+			os: {
+				kind: detectOsSchedulerKind(),
+				installed: false,
+				label: "com.emaildeliveryhero.scheduler",
+			},
+		},
+		notifications: {
+			webhook: { enabled: false, url: "" },
+			smtp: { host: "", port: 587, from: "edh@whitehatengineering.com" },
+		},
+		storage: { retentionDays: 90 },
+		domain_reputation: {
+			// Registration data changes over days/years — cache RDAP for 24h and skip re-querying on
+			// the frequent DNS cadence (pm/checks/domain_reputation.mdx §3 "Caching & rate limits").
+			cache_ttl_hours: 24,
+			rdap_request_budget: 5,
+			parking_nameservers: [
+				"sedoparking.com",
+				"bodis.com",
+				"above.com",
+				"parkingcrew.net",
+				"dan.com",
+				"afternic.com",
+				"cashparking.com",
+				"hugedomains.com",
+				"sedo.com",
+				"parklogic.com",
+				"namedrive.com",
+				"voodoo.com",
+			],
+			// Spamhaus TLD abuse stats — advisory only (info findings).
+			high_abuse_tlds: [
+				"top",
+				"xyz",
+				"click",
+				"link",
+				"work",
+				"gq",
+				"ml",
+				"cf",
+				"ga",
+				"tk",
+				"zip",
+				"mov",
+				"rest",
+				"cyou",
+				"sbs",
+				"icu",
+				"buzz",
+			],
+			// Curated abuse-tolerant registrar watchlist — empty by default, admin-editable.
+			registrar_reputation: [],
+		},
+		dns_health: {
+			// Seed = the classic takeover-prone providers; keep fresh (new SaaS endpoints appear
+			// constantly — pm/checks/dns_health.mdx maintenance notes). Admin-editable.
+			fingerprints: [
+				{ provider: "Heroku", cname_suffix: ".herokudns.com", enabled: true },
+				{ provider: "Heroku", cname_suffix: ".herokuapp.com", enabled: true },
+				{
+					provider: "AWS S3",
+					cname_suffix: ".s3.amazonaws.com",
+					enabled: true,
+				},
+				{
+					provider: "AWS CloudFront",
+					cname_suffix: ".cloudfront.net",
+					enabled: true,
+				},
+				{ provider: "GitHub Pages", cname_suffix: ".github.io", enabled: true },
+				{
+					provider: "Azure App Service",
+					cname_suffix: ".azurewebsites.net",
+					enabled: true,
+				},
+				{
+					provider: "Azure Traffic Manager",
+					cname_suffix: ".trafficmanager.net",
+					enabled: true,
+				},
+				{
+					provider: "WordPress.com",
+					cname_suffix: ".wordpress.com",
+					enabled: true,
+				},
+				{
+					provider: "Pantheon",
+					cname_suffix: ".pantheonsite.io",
+					enabled: true,
+				},
+				{ provider: "SendGrid", cname_suffix: ".sendgrid.net", enabled: true },
+				{ provider: "Shopify", cname_suffix: ".myshopify.com", enabled: true },
+				{ provider: "Fastly", cname_suffix: ".fastly.net", enabled: true },
+				{ provider: "Netlify", cname_suffix: ".netlify.app", enabled: true },
+				{ provider: "Vercel", cname_suffix: ".vercel.app", enabled: true },
+			],
+		},
+		tools: { preferCli: false, resolvers: [], timeoutMs: 5000, paths: {} },
+		access: { allowedDomains: ["whitehatengineering.com", "act3ai.com"] },
+		reports: {
+			// Ingestion defaults ON: the drop folder is local-only (no network traffic), and the
+			// hourly poll is a no-op until files/an IMAP mailbox are configured (pm/emails.mdx §4.1).
+			enabled: true,
+			dropFolder: "",
+			// "" = auto-detect the repo emails/ corpus (dev), else the drop folder (pm/emails.mdx §8).
+			analyzeDir: "",
+			pollMinutes: 60,
+			windowDays: 7,
+			imap: { host: "", port: 993, user: "", mailbox: "INBOX" },
+		},
+		seedList: {
+			// "" = not configured — the entire inbox-placement family reports "not configured" and no
+			// probe can ever be sent (pm/checks/inbox_placement.mdx §6, acceptance criterion #1).
+			service: "",
+			// The providers that dominate real inbox share (spec §1) — the default test matrix.
+			providers: ["gmail", "outlook", "yahoo", "apple"],
+			// Slow dedicated cadence, decoupled from the 6h DNS cadence (spec §6 — probes cost money).
+			cadence: "weekly",
+			// Overall inbox-rate bands: ≥ 80% ok, 50–79% warning, < 50% critical (spec §3, §4 defaults).
+			thresholds: { warnBelowPct: 80, criticalBelowPct: 50 },
+			// Read-back poll backoff before a seed is declared Missing (spec §3 edge cases: 2/5/10/15).
+			settlePollMinutes: [2, 5, 10, 15],
+			// Max probe sends per calendar month (spec §6 "monthly budget cap").
+			monthlyBudget: 4,
+			// The seed_list_config reference table (spec §5) — empty until seeds are configured.
+			seeds: [],
+		},
+		defaults: {
+			theme: "system",
+			density: "comfortable",
+			notifications: {
+				desktop: true,
+				email: false,
+				minSeverity: "warning",
+				mode: "immediate",
+			},
+		},
+	};
 }
 
 function appConfigPath(): string {
-  return join(resolveStateDir(), "config.yaml")
+	return join(resolveStateDir(), "config.yaml");
 }
 
 /**
@@ -512,10 +572,10 @@ function appConfigPath(): string {
  * type validation, so a hand-edit that breaks one value never takes the whole config down.
  */
 export function readAppConfig(): AppConfigFile {
-  const raw = readYaml<unknown>(appConfigPath(), null)
-  const defaults = defaultAppConfig()
-  if (raw == null) return defaults
-  return mergeValidated(defaults, raw, "config.yaml") as AppConfigFile
+	const raw = readYaml<unknown>(appConfigPath(), null);
+	const defaults = defaultAppConfig();
+	if (raw == null) return defaults;
+	return mergeValidated(defaults, raw, "config.yaml") as AppConfigFile;
 }
 
 /**
@@ -524,15 +584,15 @@ export function readAppConfig(): AppConfigFile {
  * withFileLock(appConfigFile()) from async flows that interleave their own reads.
  */
 export function updateAppConfig(
-  // biome-ignore lint/suspicious/noConfusingVoidType: `| void` lets callers mutate in place without an explicit return
-  mutate: (config: AppConfigFile) => AppConfigFile | void,
+	// biome-ignore lint/suspicious/noConfusingVoidType: `| void` lets callers mutate in place without an explicit return
+	mutate: (config: AppConfigFile) => AppConfigFile | void,
 ): AppConfigFile {
-  const current = readAppConfig()
-  const next = mutate(current) ?? current
-  next.schema_version = CONFIG_SCHEMA_VERSION
-  next.updated_at = new Date().toISOString()
-  writeYaml(appConfigPath(), next)
-  return next
+	const current = readAppConfig();
+	const next = mutate(current) ?? current;
+	next.schema_version = CONFIG_SCHEMA_VERSION;
+	next.updated_at = new Date().toISOString();
+	writeYaml(appConfigPath(), next);
+	return next;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -540,16 +600,16 @@ export function updateAppConfig(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface UserConfigFile extends UserPreferences {
-  schema_version: number
-  updated_at: string
-  /** Restore-where-you-left-off route (pm/storage.mdx §4 `ui.last_route`). */
-  lastRoute?: string
-  /** Remembered per-table sort/filter, keyed by table id (pm/storage.mdx §4 `tables.views`). */
-  tables?: { views: Record<string, unknown> }
+	schema_version: number;
+	updated_at: string;
+	/** Restore-where-you-left-off route (pm/storage.mdx §4 `ui.last_route`). */
+	lastRoute?: string;
+	/** Remembered per-table sort/filter, keyed by table id (pm/storage.mdx §4 `tables.views`). */
+	tables?: { views: Record<string, unknown> };
 }
 
 /** The reserved folder key for the logged-out user (pm/security.mdx). Never contains "@". */
-export const DEFAULT_USER_KEY = "default"
+export const DEFAULT_USER_KEY = "default";
 
 /**
  * Email → directory policy (pm/storage.mdx §4): lowercase, stored verbatim as the folder name so
@@ -558,49 +618,57 @@ export const DEFAULT_USER_KEY = "default"
  * reserved `default` key rather than throwing.
  */
 export function sanitizeUserKey(email: string | null | undefined): string {
-  const cleaned = (email ?? "")
-    .trim()
-    .toLowerCase()
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: NUL must never reach a path segment
-    .replace(/[/\\\u0000]/g, "")
-    .replace(/\.\./g, "")
-  return cleaned.length > 0 ? cleaned : DEFAULT_USER_KEY
+	const cleaned = (email ?? "")
+		.trim()
+		.toLowerCase()
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: NUL must never reach a path segment
+		.replace(/[/\\\u0000]/g, "")
+		.replace(/\.\./g, "");
+	return cleaned.length > 0 ? cleaned : DEFAULT_USER_KEY;
 }
 
 function userConfigPath(userKey: string): string {
-  // stateSubdir creates users/<key>/ on demand — the lazy per-user folder (pm/storage.mdx §4).
-  return join(stateSubdir("users", userKey), "config.yaml")
+	// stateSubdir creates users/<key>/ on demand — the lazy per-user folder (pm/storage.mdx §4).
+	return join(stateSubdir("users", userKey), "config.yaml");
 }
 
 /** The user-file defaults: the app config's `defaults` block (pm/storage.mdx §4). */
 function defaultUserConfig(): UserConfigFile {
-  const { defaults } = readAppConfig()
-  return {
-    schema_version: CONFIG_SCHEMA_VERSION,
-    updated_at: new Date().toISOString(),
-    theme: defaults.theme,
-    density: defaults.density,
-    notifications: { ...defaults.notifications },
-  }
+	const { defaults } = readAppConfig();
+	return {
+		schema_version: CONFIG_SCHEMA_VERSION,
+		updated_at: new Date().toISOString(),
+		theme: defaults.theme,
+		density: defaults.density,
+		notifications: { ...defaults.notifications },
+	};
 }
 
 /** Whether this user has ever written a config file (no folder/file yet → pure defaults). */
 export function userConfigExists(email: string | null | undefined): boolean {
-  return existsSync(join(resolveStateDir(), "users", sanitizeUserKey(email), "config.yaml"))
+	return existsSync(
+		join(resolveStateDir(), "users", sanitizeUserKey(email), "config.yaml"),
+	);
 }
 
 /**
  * Read one user's settings. A user with no file yet gets the app `defaults` block — never an
  * error, never a first-run write (pm/storage.mdx acceptance #3).
  */
-export function readUserConfig(email: string | null | undefined): UserConfigFile {
-  const key = sanitizeUserKey(email)
-  const path = join(resolveStateDir(), "users", key, "config.yaml")
-  const defaults = defaultUserConfig()
-  if (!existsSync(path)) return defaults
-  const raw = readYaml<unknown>(path, null)
-  if (raw == null) return defaults
-  return mergeValidated(defaults, raw, `users/${key}/config.yaml`) as UserConfigFile
+export function readUserConfig(
+	email: string | null | undefined,
+): UserConfigFile {
+	const key = sanitizeUserKey(email);
+	const path = join(resolveStateDir(), "users", key, "config.yaml");
+	const defaults = defaultUserConfig();
+	if (!existsSync(path)) return defaults;
+	const raw = readYaml<unknown>(path, null);
+	if (raw == null) return defaults;
+	return mergeValidated(
+		defaults,
+		raw,
+		`users/${key}/config.yaml`,
+	) as UserConfigFile;
 }
 
 /**
@@ -608,37 +676,40 @@ export function readUserConfig(email: string | null | undefined): UserConfigFile
  * stamps schema_version + updated_at, persists atomically.
  */
 export function updateUserConfig(
-  email: string | null | undefined,
-  // biome-ignore lint/suspicious/noConfusingVoidType: `| void` lets callers mutate in place without an explicit return
-  mutate: (config: UserConfigFile) => UserConfigFile | void,
+	email: string | null | undefined,
+	// biome-ignore lint/suspicious/noConfusingVoidType: `| void` lets callers mutate in place without an explicit return
+	mutate: (config: UserConfigFile) => UserConfigFile | void,
 ): UserConfigFile {
-  const key = sanitizeUserKey(email)
-  const current = readUserConfig(email)
-  const next = mutate(current) ?? current
-  next.schema_version = CONFIG_SCHEMA_VERSION
-  next.updated_at = new Date().toISOString()
-  writeYaml(userConfigPath(key), next)
-  return next
+	const key = sanitizeUserKey(email);
+	const current = readUserConfig(email);
+	const next = mutate(current) ?? current;
+	next.schema_version = CONFIG_SCHEMA_VERSION;
+	next.updated_at = new Date().toISOString();
+	writeYaml(userConfigPath(key), next);
+	return next;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-file mutex (pm/storage.mdx §8) — serialize async read-modify-write per file.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const fileLocks = new Map<string, Promise<unknown>>()
+const fileLocks = new Map<string, Promise<unknown>>();
 
 /**
  * Run `fn` with an exclusive per-file lock: calls against the same path queue in order, calls
  * against different paths run freely. Failures release the lock without poisoning the chain.
  */
-export function withFileLock<T>(path: string, fn: () => T | Promise<T>): Promise<T> {
-  const previous = fileLocks.get(path) ?? Promise.resolve()
-  const run = previous.then(() => fn())
-  fileLocks.set(
-    path,
-    run.catch(() => {}),
-  )
-  return run
+export function withFileLock<T>(
+	path: string,
+	fn: () => T | Promise<T>,
+): Promise<T> {
+	const previous = fileLocks.get(path) ?? Promise.resolve();
+	const run = previous.then(() => fn());
+	fileLocks.set(
+		path,
+		run.catch(() => {}),
+	);
+	return run;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -646,7 +717,7 @@ export function withFileLock<T>(path: string, fn: () => T | Promise<T>): Promise
 // ─────────────────────────────────────────────────────────────────────────────
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -655,43 +726,56 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * replaced by the default — rather than silently trusted. Keys the schema doesn't know (e.g. free
  * table ids under tables.views) pass through unchanged.
  */
-function mergeValidated(defaults: unknown, loaded: unknown, file: string, keyPath = ""): unknown {
-  if (defaults === undefined || defaults === null) return loaded
-  if (loaded === undefined || loaded === null) return defaults
-  if (isPlainObject(defaults)) {
-    if (!isPlainObject(loaded)) {
-      logWarn(
-        `Ignoring malformed ${file} value at "${keyPath || "<root>"}": expected a block`,
-        "ConfigStore",
-      )
-      return defaults
-    }
-    const merged: Record<string, unknown> = { ...loaded }
-    for (const [key, defaultValue] of Object.entries(defaults)) {
-      merged[key] =
-        key in loaded
-          ? mergeValidated(defaultValue, loaded[key], file, keyPath ? `${keyPath}.${key}` : key)
-          : defaultValue
-    }
-    return merged
-  }
-  if (Array.isArray(defaults)) {
-    if (!Array.isArray(loaded)) {
-      // `schedule.domains` is legitimately "all" | list — a string there is valid, not malformed.
-      if (typeof loaded === "string") return loaded
-      logWarn(`Ignoring malformed ${file} value at "${keyPath}": expected a list`, "ConfigStore")
-      return defaults
-    }
-    return loaded
-  }
-  if (typeof loaded !== typeof defaults) {
-    // Symmetric to the case above: a list where the default is the scalar "all".
-    if (Array.isArray(loaded) && typeof defaults === "string") return loaded
-    logWarn(
-      `Ignoring malformed ${file} value at "${keyPath}": expected ${typeof defaults}`,
-      "ConfigStore",
-    )
-    return defaults
-  }
-  return loaded
+function mergeValidated(
+	defaults: unknown,
+	loaded: unknown,
+	file: string,
+	keyPath = "",
+): unknown {
+	if (defaults === undefined || defaults === null) return loaded;
+	if (loaded === undefined || loaded === null) return defaults;
+	if (isPlainObject(defaults)) {
+		if (!isPlainObject(loaded)) {
+			logWarn(
+				`Ignoring malformed ${file} value at "${keyPath || "<root>"}": expected a block`,
+				"ConfigStore",
+			);
+			return defaults;
+		}
+		const merged: Record<string, unknown> = { ...loaded };
+		for (const [key, defaultValue] of Object.entries(defaults)) {
+			merged[key] =
+				key in loaded
+					? mergeValidated(
+							defaultValue,
+							loaded[key],
+							file,
+							keyPath ? `${keyPath}.${key}` : key,
+						)
+					: defaultValue;
+		}
+		return merged;
+	}
+	if (Array.isArray(defaults)) {
+		if (!Array.isArray(loaded)) {
+			// `schedule.domains` is legitimately "all" | list — a string there is valid, not malformed.
+			if (typeof loaded === "string") return loaded;
+			logWarn(
+				`Ignoring malformed ${file} value at "${keyPath}": expected a list`,
+				"ConfigStore",
+			);
+			return defaults;
+		}
+		return loaded;
+	}
+	if (typeof loaded !== typeof defaults) {
+		// Symmetric to the case above: a list where the default is the scalar "all".
+		if (Array.isArray(loaded) && typeof defaults === "string") return loaded;
+		logWarn(
+			`Ignoring malformed ${file} value at "${keyPath}": expected ${typeof defaults}`,
+			"ConfigStore",
+		);
+		return defaults;
+	}
+	return loaded;
 }

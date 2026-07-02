@@ -1,7 +1,7 @@
-import { Controller, Get, Param, Post } from "@nestjs/common"
-import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger"
-import type { IngestSummary } from "./report.types"
-import { type DomainReportsView, ReportsService } from "./reports.service"
+import { Controller, Get, Param, Post } from "@nestjs/common";
+import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
+import type { IngestSummary } from "./report.types";
+import type { DomainReportsView, ReportsService } from "./reports.service";
 
 /**
  * The report-email ingestion API (pm/emails.mdx §7.1/§10):
@@ -16,15 +16,15 @@ import { type DomainReportsView, ReportsService } from "./reports.service"
 @ApiBearerAuth()
 @Controller("domains/:id/reports")
 export class ReportsController {
-  constructor(private readonly reports: ReportsService) {}
+	constructor(private readonly reports: ReportsService) {}
 
-  @Get()
+	@Get()
   @ApiOperation({ summary: "Ingested DMARC-aggregate / TLS-RPT report view for one domain" })
   view(@Param("id") id: string): DomainReportsView {
     return this.reports.view(id)
   }
 
-  @Post("ingest")
+	@Post("ingest")
   @ApiOperation({ summary: "Ingest now — scan the report drop folder / mailbox on demand" })
   async ingest(
     @Param("id") id: string,

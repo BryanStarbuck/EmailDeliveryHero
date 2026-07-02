@@ -30,7 +30,7 @@ store, no database** — is called out explicitly.
 | Auth | **OpenAuthFederated** (`@auth/backend` + `@auth/react`), consumed as an external library |
 | Storage | On-disk **JSON/YAML** under a state dir (default `~/.email_delivery_hero/`) — **no database** |
 | DNS | Node's native **`node:dns/promises`**; shelling out to Brew tools (`dig`) is a future enhancement |
-| Lint/format | **Biome 2** (single tool); husky + lint-staged pre-commit |
+| Lint/format | None (Biome removed); rely on TypeScript compiler + editor defaults |
 
 ---
 
@@ -270,8 +270,8 @@ Scheduled re-audits re-run the same checkers on a cadence and surface **new** pr
 
 ## 9. Quality, tooling, deployment
 
-* **Lint/format:** Biome 2 (2-space indent, double quotes, semicolons); husky + lint-staged on
-  staged files. Generated API code (`src/@api/gen/`) is excluded.
+* **Lint/format:** None. Biome (and its husky + lint-staged pre-commit hook) was removed; formatting
+  is left to the TypeScript compiler and editor defaults.
 * **Tests:** Vitest for frontend units, Jest + supertest for backend; each checker gets unit tests
   with recorded DNS fixtures so audits are deterministic in CI.
 * **Run locally:** `pnpm --filter backend dev` (9312) and `pnpm --filter frontend dev` (4444); the

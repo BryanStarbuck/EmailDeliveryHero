@@ -1,4 +1,4 @@
-import { SetMetadata } from "@nestjs/common"
+import { SetMetadata } from "@nestjs/common";
 
 /**
  * Authorization decorators (pm/security.mdx §3.3). Authentication (who you are) is optional and
@@ -8,19 +8,20 @@ import { SetMetadata } from "@nestjs/common"
  * anyone (the `default` user always) who doesn't satisfy it.
  */
 
-export const REQUIRED_ROLES_KEY = "requiredRoles"
-export const REQUIRED_PERMISSIONS_KEY = "requiredPermissions"
+export const REQUIRED_ROLES_KEY = "requiredRoles";
+export const REQUIRED_PERMISSIONS_KEY = "requiredPermissions";
 
 /**
  * Require the current user to hold at least ONE of the listed roles (from the OpenAuthFederated
  * token, derived from Workspace groups). The common case is `@RequireRole("admin")`, which locks a
  * route to `role:admin` and 403s the `default` (logged-out) user.
  */
-export const RequireRole = (...roles: string[]) => SetMetadata(REQUIRED_ROLES_KEY, roles)
+export const RequireRole = (...roles: string[]) =>
+	SetMetadata(REQUIRED_ROLES_KEY, roles);
 
 /**
  * Require the current user to hold at least ONE of the listed `<feature>:<action>` permissions.
  * Combined with @RequireRole, BOTH constraints must pass (roles: any-of AND permissions: any-of).
  */
 export const RequirePermission = (...permissions: string[]) =>
-  SetMetadata(REQUIRED_PERMISSIONS_KEY, permissions)
+	SetMetadata(REQUIRED_PERMISSIONS_KEY, permissions);

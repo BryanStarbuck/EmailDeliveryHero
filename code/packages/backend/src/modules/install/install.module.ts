@@ -1,6 +1,6 @@
-import { Module } from "@nestjs/common"
-import { InstallController } from "./install.controller"
-import { InstallService } from "./install.service"
+import { Module } from "@nestjs/common";
+import { InstallController } from "./install.controller";
+import { InstallService } from "./install.service";
 
 /**
  * The Install module (pm/install_brew.mdx, pm/install_npm.mdx): detects which Brew/OS tools and
@@ -9,8 +9,8 @@ import { InstallService } from "./install.service"
  * computed fresh from the ToolLocator + node_modules resolve.
  */
 @Module({
-  controllers: [InstallController],
-  providers: [InstallService],
-  exports: [InstallService],
+	controllers: [InstallController],
+	providers: [InstallService],
+	exports: [InstallService],
 })
 export class InstallModule {}

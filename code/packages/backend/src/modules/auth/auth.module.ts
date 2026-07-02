@@ -1,7 +1,7 @@
-import { Module } from "@nestjs/common"
-import { PassportModule } from "@nestjs/passport"
-import { AuthController } from "./auth.controller"
-import { AuthFederatedStrategy } from "./auth.strategy"
+import { Module } from "@nestjs/common";
+import { PassportModule } from "@nestjs/passport";
+import { AuthController } from "./auth.controller";
+import { AuthFederatedStrategy } from "./auth.strategy";
 
 /**
  * Auth wiring. There is NO local credential store or token signing here — the app is a consumer of
@@ -10,8 +10,8 @@ import { AuthFederatedStrategy } from "./auth.strategy"
  * (registered in app.module) enforces it on every route.
  */
 @Module({
-  imports: [PassportModule],
-  controllers: [AuthController],
-  providers: [AuthFederatedStrategy],
+	imports: [PassportModule],
+	controllers: [AuthController],
+	providers: [AuthFederatedStrategy],
 })
 export class AuthModule {}

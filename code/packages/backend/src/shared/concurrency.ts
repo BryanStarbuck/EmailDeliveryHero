@@ -6,28 +6,28 @@
  * Kept in sync with the frontend copy at `frontend/src/lib/concurrency.ts`.
  */
 export async function mapLimit<T, R>(
-  items: readonly T[],
-  limit: number,
-  fn: (item: T, index: number) => Promise<R>,
+	items: readonly T[],
+	limit: number,
+	fn: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  const bound = Math.max(1, Math.min(limit, items.length))
-  let next = 0
+	const results = new Array<R>(items.length);
+	const bound = Math.max(1, Math.min(limit, items.length));
+	let next = 0;
 
-  async function worker(): Promise<void> {
-    while (true) {
-      const i = next++
-      if (i >= items.length) return
-      results[i] = await fn(items[i], i)
-    }
-  }
+	async function worker(): Promise<void> {
+		while (true) {
+			const i = next++;
+			if (i >= items.length) return;
+			results[i] = await fn(items[i], i);
+		}
+	}
 
-  await Promise.all(Array.from({ length: bound }, () => worker()))
-  return results
+	await Promise.all(Array.from({ length: bound }, () => worker()));
+	return results;
 }
 
 /** Returned by `Semaphore.acquire()`; call it exactly once to hand the slot to the next waiter. */
-export type Release = () => void
+export type Release = () => void;
 
 /**
  * A tiny FIFO counting semaphore (pm/run_checks.mdx §3.2) — the second in-repo concurrency
@@ -36,45 +36,45 @@ export type Release = () => void
  * rate-sensitive resources are guarded by semaphores shared across all in-flight domains.
  */
 export class Semaphore {
-  private available: number
-  private readonly waiters: Array<(release: Release) => void> = []
+	private available: number;
+	private readonly waiters: Array<(release: Release) => void> = [];
 
-  constructor(readonly limit: number) {
-    this.available = Math.max(1, limit)
-  }
+	constructor(readonly limit: number) {
+		this.available = Math.max(1, limit);
+	}
 
-  acquire(): Promise<Release> {
-    if (this.available > 0) {
-      this.available--
-      return Promise.resolve(this.makeRelease())
-    }
-    return new Promise((resolve) => this.waiters.push(resolve))
-  }
+	acquire(): Promise<Release> {
+		if (this.available > 0) {
+			this.available--;
+			return Promise.resolve(this.makeRelease());
+		}
+		return new Promise((resolve) => this.waiters.push(resolve));
+	}
 
-  /** Run `fn` inside one slot; the slot is released even when `fn` throws. */
-  async with<T>(fn: () => Promise<T>): Promise<T> {
-    const release = await this.acquire()
-    try {
-      return await fn()
-    } finally {
-      release()
-    }
-  }
+	/** Run `fn` inside one slot; the slot is released even when `fn` throws. */
+	async with<T>(fn: () => Promise<T>): Promise<T> {
+		const release = await this.acquire();
+		try {
+			return await fn();
+		} finally {
+			release();
+		}
+	}
 
-  private makeRelease(): Release {
-    let released = false
-    return () => {
-      if (released) return
-      released = true
-      const next = this.waiters.shift()
-      if (next) next(this.makeRelease())
-      else this.available++
-    }
-  }
+	private makeRelease(): Release {
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			const next = this.waiters.shift();
+			if (next) next(this.makeRelease());
+			else this.available++;
+		};
+	}
 }
 
 /** The external resource classes a check can hold while it works (pm/run_checks.mdx §3.1). */
-export type ResourceClass = "dnsbl" | "smtp25" | "http" | "cpu"
+export type ResourceClass = "dnsbl" | "smtp25" | "http" | "cpu";
 
 /**
  * The process-global resource semaphores (pm/run_checks.mdx §3.1). Shared by every in-flight
@@ -86,13 +86,16 @@ export type ResourceClass = "dnsbl" | "smtp25" | "http" | "cpu"
  * Plain DNS through the per-run memo is deliberately NOT guarded — cheap, cached, local resolver.
  */
 export const RESOURCE_SEMAPHORES: Record<ResourceClass, Semaphore> = {
-  dnsbl: new Semaphore(8),
-  smtp25: new Semaphore(4),
-  http: new Semaphore(4),
-  cpu: new Semaphore(2),
-}
+	dnsbl: new Semaphore(8),
+	smtp25: new Semaphore(4),
+	http: new Semaphore(4),
+	cpu: new Semaphore(2),
+};
 
 /** Run `fn` while holding one slot of the named process-global resource semaphore. */
-export function withResource<T>(resource: ResourceClass, fn: () => Promise<T>): Promise<T> {
-  return RESOURCE_SEMAPHORES[resource].with(fn)
+export function withResource<T>(
+	resource: ResourceClass,
+	fn: () => Promise<T>,
+): Promise<T> {
+	return RESOURCE_SEMAPHORES[resource].with(fn);
 }

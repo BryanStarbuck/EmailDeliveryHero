@@ -1,4 +1,4 @@
-import type { AppConfigFile, UserPreferences } from "@shared/config-store"
+import type { AppConfigFile, UserPreferences } from "@shared/config-store";
 
 /**
  * The Settings surface types (pm/settings.mdx). Persistence is the hierarchical config store of
@@ -9,31 +9,31 @@ import type { AppConfigFile, UserPreferences } from "@shared/config-store"
 
 /** The six check categories (pm/spam_checks.mdx) that §2 "Enabled categories" toggles. */
 export const CHECK_CATEGORIES = [
-  "spf",
-  "dkim",
-  "dmarc",
-  "dnsbl",
-  "dns_infra",
-  "spam_content",
-] as const
-export type CheckCategory = (typeof CHECK_CATEGORIES)[number]
+	"spf",
+	"dkim",
+	"dmarc",
+	"dnsbl",
+	"dns_infra",
+	"spam_content",
+] as const;
+export type CheckCategory = (typeof CHECK_CATEGORIES)[number];
 
-export type NotificationSeverity = "info" | "warning" | "critical"
-export type NotificationMode = "immediate" | "daily"
-export type Theme = "system" | "light" | "dark"
-export type Density = "comfortable" | "compact"
+export type NotificationSeverity = "info" | "warning" | "critical";
+export type NotificationMode = "immediate" | "daily";
+export type Theme = "system" | "light" | "dark";
+export type Density = "comfortable" | "compact";
 
 /** Detected status of one Brew/CLI tool (§6 — probed at runtime, never persisted). */
 export interface ToolStatus {
-  found: boolean
-  version: string | null
-  path: string | null
+	found: boolean;
+	version: string | null;
+	path: string | null;
 }
 
 export interface ToolsDetection {
-  dig: ToolStatus
-  swaks: ToolStatus
-  detectedAt: string
+	dig: ToolStatus;
+	swaks: ToolStatus;
+	detectedAt: string;
 }
 
 /**
@@ -42,56 +42,56 @@ export interface ToolsDetection {
  * the caller's own per-user block, and the last tool probe.
  */
 export interface SettingsView {
-  /** The active state dir (default ~/.email_delivery_hero, or EDH_STATE_DIR). Display only. */
-  stateDir: string
-  config: {
-    checks: AppConfigFile["checks"]
-    schedule: AppConfigFile["schedule"]
-    /** Shared channels only (admin-only to edit); per-user prefs live under `me`. */
-    notifications: AppConfigFile["notifications"]
-    storage: AppConfigFile["storage"]
-    tools: AppConfigFile["tools"]
-    access: AppConfigFile["access"]
-    /**
-     * DNS Zone & Nameserver Health (pm/checks/dns_health.mdx §4/§5): the bundled, admin-editable
-     * subdomain-takeover fingerprint list (`takeover_fingerprints` mapped onto config.yaml).
-     */
-    dns_health: AppConfigFile["dns_health"]
-    /**
-     * Domain Registration Reputation (pm/checks/domain_reputation.mdx §4 "Global admin settings" /
-     * §5): the RDAP cache TTL + per-run request budget and the admin-editable reference lists —
-     * parking-provider nameservers, high-abuse TLDs, and the registrar abuse-reputation watchlist
-     * (the `parking_nameservers` / `registrar_reputation` reference tables mapped onto config.yaml).
-     */
-    domain_reputation: AppConfigFile["domain_reputation"]
-    /**
-     * Seed-list inbox-placement testing (pm/checks/inbox_placement.mdx §4 "Admin-only settings"):
-     * the seed source, tested providers, slow dedicated cadence, overall inbox-rate warn/critical
-     * thresholds (defaults 80/50), settle-window poll schedule, monthly test budget, and the
-     * self-hosted seed mailboxes (`seed_list_config` mapped onto config.yaml → seedList).
-     */
-    seedList: AppConfigFile["seedList"]
-  }
-  /** The caller's own per-user block (defaults when the user has never saved). */
-  me: {
-    /** OpenAuthFederated `sub` (`user_…`), or the literal "default" when logged out. */
-    sub: string
-    email: string
-    notifications: UserPreferences["notifications"]
-    appearance: { theme: Theme; density: Density }
-  }
-  toolStatus: ToolsDetection | null
+	/** The active state dir (default ~/.email_delivery_hero, or EDH_STATE_DIR). Display only. */
+	stateDir: string;
+	config: {
+		checks: AppConfigFile["checks"];
+		schedule: AppConfigFile["schedule"];
+		/** Shared channels only (admin-only to edit); per-user prefs live under `me`. */
+		notifications: AppConfigFile["notifications"];
+		storage: AppConfigFile["storage"];
+		tools: AppConfigFile["tools"];
+		access: AppConfigFile["access"];
+		/**
+		 * DNS Zone & Nameserver Health (pm/checks/dns_health.mdx §4/§5): the bundled, admin-editable
+		 * subdomain-takeover fingerprint list (`takeover_fingerprints` mapped onto config.yaml).
+		 */
+		dns_health: AppConfigFile["dns_health"];
+		/**
+		 * Domain Registration Reputation (pm/checks/domain_reputation.mdx §4 "Global admin settings" /
+		 * §5): the RDAP cache TTL + per-run request budget and the admin-editable reference lists —
+		 * parking-provider nameservers, high-abuse TLDs, and the registrar abuse-reputation watchlist
+		 * (the `parking_nameservers` / `registrar_reputation` reference tables mapped onto config.yaml).
+		 */
+		domain_reputation: AppConfigFile["domain_reputation"];
+		/**
+		 * Seed-list inbox-placement testing (pm/checks/inbox_placement.mdx §4 "Admin-only settings"):
+		 * the seed source, tested providers, slow dedicated cadence, overall inbox-rate warn/critical
+		 * thresholds (defaults 80/50), settle-window poll schedule, monthly test budget, and the
+		 * self-hosted seed mailboxes (`seed_list_config` mapped onto config.yaml → seedList).
+		 */
+		seedList: AppConfigFile["seedList"];
+	};
+	/** The caller's own per-user block (defaults when the user has never saved). */
+	me: {
+		/** OpenAuthFederated `sub` (`user_…`), or the literal "default" when logged out. */
+		sub: string;
+		email: string;
+		notifications: UserPreferences["notifications"];
+		appearance: { theme: Theme; density: Density };
+	};
+	toolStatus: ToolsDetection | null;
 }
 
 /** POST /api/settings/notifications/test — what happened on each channel. */
 export interface TestNotificationResult {
-  desktop: { attempted: boolean; detail: string }
-  email: { attempted: boolean; ok: boolean; detail: string }
-  webhook: { attempted: boolean; ok: boolean; detail: string }
+	desktop: { attempted: boolean; detail: string };
+	email: { attempted: boolean; ok: boolean; detail: string };
+	webhook: { attempted: boolean; ok: boolean; detail: string };
 }
 
 /** POST /api/settings/reset outcome. */
 export interface ResetResult {
-  scope: "audit_history" | "app"
-  removed: string[]
+	scope: "audit_history" | "app";
+	removed: string[];
 }

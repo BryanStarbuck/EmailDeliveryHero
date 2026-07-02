@@ -1,36 +1,40 @@
-import { randomUUID } from "node:crypto"
-import { existsSync } from "node:fs"
-import { join } from "node:path"
-import { ConflictException, Injectable, NotFoundException } from "@nestjs/common"
-import { readJson } from "@shared/json-store"
-import { logInfo } from "@shared/logging"
-import { resolveStateDir } from "@shared/state-dir"
-import { readYaml, writeYaml } from "@shared/yaml-store"
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import {
+	ConflictException,
+	Injectable,
+	NotFoundException,
+} from "@nestjs/common";
+import { readJson } from "@shared/json-store";
+import { logInfo } from "@shared/logging";
+import { resolveStateDir } from "@shared/state-dir";
+import { readYaml, writeYaml } from "@shared/yaml-store";
 import type {
-  ArcConfig,
-  BimiDomainConfig,
-  DaneDomainConfig,
-  DnsHealthConfig,
-  DomainReputationConfig,
-  LinkUrlDomainConfig,
-  ListUnsubDomainConfig,
-  MtaStsDomainConfig,
-  MxRoutingConfig,
-} from "../audit/checks/types"
-import type { MonitoredDomain } from "./domain.types"
+	ArcConfig,
+	BimiDomainConfig,
+	DaneDomainConfig,
+	DnsHealthConfig,
+	DomainReputationConfig,
+	LinkUrlDomainConfig,
+	ListUnsubDomainConfig,
+	MtaStsDomainConfig,
+	MxRoutingConfig,
+} from "../audit/checks/types";
+import type { MonitoredDomain } from "./domain.types";
 import type {
-  ArcConfigDto,
-  BimiConfigDto,
-  CreateDomainDto,
-  DaneConfigDto,
-  DnsHealthConfigDto,
-  DomainReputationConfigDto,
-  LinkUrlConfigDto,
-  ListUnsubConfigDto,
-  MtaStsConfigDto,
-  MxRoutingConfigDto,
-  UpdateDomainDto,
-} from "./dto/domain.dto"
+	ArcConfigDto,
+	BimiConfigDto,
+	CreateDomainDto,
+	DaneConfigDto,
+	DnsHealthConfigDto,
+	DomainReputationConfigDto,
+	LinkUrlConfigDto,
+	ListUnsubConfigDto,
+	MtaStsConfigDto,
+	MxRoutingConfigDto,
+	UpdateDomainDto,
+} from "./dto/domain.dto";
 
 /**
  * The monitored-domain store. Persists the full list as a single human-readable YAML file
@@ -39,138 +43,159 @@ import type {
  */
 @Injectable()
 export class DomainsService {
-  private readonly dir = resolveStateDir()
-  private readonly file = join(this.dir, "domains.yaml")
-  private readonly legacyFile = join(this.dir, "domains.json")
+	private readonly dir = resolveStateDir();
+	private readonly file = join(this.dir, "domains.yaml");
+	private readonly legacyFile = join(this.dir, "domains.json");
 
-  /**
-   * Listeners invoked after a domain is removed. Removing a domain also removes its audit history
-   * under the state dir (pm/domains.mdx §4.2); the audit store registers here so this service never
-   * has to depend on it (it already depends on us).
-   */
-  private readonly removeListeners: ((domainId: string) => void | Promise<void>)[] = []
+	/**
+	 * Listeners invoked after a domain is removed. Removing a domain also removes its audit history
+	 * under the state dir (pm/domains.mdx §4.2); the audit store registers here so this service never
+	 * has to depend on it (it already depends on us).
+	 */
+	private readonly removeListeners: ((
+		domainId: string,
+	) => void | Promise<void>)[] = [];
 
-  /** Register a callback that runs whenever a monitored domain is removed. */
-  onRemoved(listener: (domainId: string) => void | Promise<void>): void {
-    this.removeListeners.push(listener)
-  }
+	/** Register a callback that runs whenever a monitored domain is removed. */
+	onRemoved(listener: (domainId: string) => void | Promise<void>): void {
+		this.removeListeners.push(listener);
+	}
 
-  private load(): MonitoredDomain[] {
-    // Prefer the YAML store; fall back to (and adopt) a legacy JSON store from an earlier install.
-    if (!existsSync(this.file) && existsSync(this.legacyFile)) {
-      const legacy = asRows(readJson<unknown>(this.legacyFile, []))
-      if (legacy.length > 0) {
-        writeYaml(this.file, legacy)
-        logInfo(
-          `Migrated ${legacy.length} domain(s) from domains.json to domains.yaml`,
-          "DomainsService",
-        )
-      }
-      return legacy
-    }
-    // domains.yaml is operator-editable, so a hand-edit could leave a non-array at the root; asRows
-    // coerces anything that isn't a list back to an empty list rather than throwing on .map().
-    return asRows(readYaml<unknown>(this.file, []))
-  }
+	private load(): MonitoredDomain[] {
+		// Prefer the YAML store; fall back to (and adopt) a legacy JSON store from an earlier install.
+		if (!existsSync(this.file) && existsSync(this.legacyFile)) {
+			const legacy = asRows(readJson<unknown>(this.legacyFile, []));
+			if (legacy.length > 0) {
+				writeYaml(this.file, legacy);
+				logInfo(
+					`Migrated ${legacy.length} domain(s) from domains.json to domains.yaml`,
+					"DomainsService",
+				);
+			}
+			return legacy;
+		}
+		// domains.yaml is operator-editable, so a hand-edit could leave a non-array at the root; asRows
+		// coerces anything that isn't a list back to an empty list rather than throwing on .map().
+		return asRows(readYaml<unknown>(this.file, []));
+	}
 
-  private save(domains: MonitoredDomain[]): void {
-    writeYaml(this.file, domains)
-  }
+	private save(domains: MonitoredDomain[]): void {
+		writeYaml(this.file, domains);
+	}
 
-  list(): MonitoredDomain[] {
-    return this.load().sort((a, b) => a.name.localeCompare(b.name))
-  }
+	list(): MonitoredDomain[] {
+		return this.load().sort((a, b) => a.name.localeCompare(b.name));
+	}
 
-  get(id: string): MonitoredDomain {
-    const found = this.load().find((d) => d.id === id)
-    if (!found) throw new NotFoundException(`Domain ${id} not found`)
-    return found
-  }
+	get(id: string): MonitoredDomain {
+		const found = this.load().find((d) => d.id === id);
+		if (!found) throw new NotFoundException(`Domain ${id} not found`);
+		return found;
+	}
 
-  create(dto: CreateDomainDto, addedBy: string): MonitoredDomain {
-    const domains = this.load()
-    const name = dto.name.trim().toLowerCase()
-    if (domains.some((d) => d.name === name)) {
-      throw new ConflictException(`Domain ${name} is already monitored`)
-    }
-    const now = new Date().toISOString()
-    const domain: MonitoredDomain = {
-      id: randomUUID(),
-      name,
-      label: (dto.label ?? "").trim(),
-      dkimSelectors: normalizeList(dto.dkimSelectors),
-      sendingIps: normalizeList(dto.sendingIps),
-      // Default a new domain onto the recurring schedule (pm/domains.mdx §4.1).
-      scheduleEnabled: dto.scheduleEnabled ?? true,
-      ...(dto.arc ? { arc: normalizeArc(dto.arc) } : {}),
-      ...(dto.bimi ? { bimi: normalizeBimi(dto.bimi) } : {}),
-      ...(dto.dnsHealth ? { dnsHealth: normalizeDnsHealth(dto.dnsHealth) } : {}),
-      ...(dto.mx ? { mx: normalizeMx(dto.mx) } : {}),
-      ...(dto.domainReputation
-        ? { domainReputation: normalizeDomainReputation(dto.domainReputation) }
-        : {}),
-      ...(dto.dane ? { dane: normalizeDane(dto.dane) } : {}),
-      ...(dto.mtaSts ? { mtaSts: normalizeMtaSts(dto.mtaSts) } : {}),
-      ...(dto.linkUrl ? { linkUrl: normalizeLinkUrl(dto.linkUrl) } : {}),
-      ...(dto.listUnsub ? { listUnsub: normalizeListUnsub(dto.listUnsub) } : {}),
-      addedBy,
-      createdAt: now,
-      updatedAt: now,
-    }
-    domains.push(domain)
-    this.save(domains)
-    logInfo(`Added monitored domain ${name} (by ${addedBy})`, "DomainsService")
-    return domain
-  }
+	create(dto: CreateDomainDto, addedBy: string): MonitoredDomain {
+		const domains = this.load();
+		const name = dto.name.trim().toLowerCase();
+		if (domains.some((d) => d.name === name)) {
+			throw new ConflictException(`Domain ${name} is already monitored`);
+		}
+		const now = new Date().toISOString();
+		const domain: MonitoredDomain = {
+			id: randomUUID(),
+			name,
+			label: (dto.label ?? "").trim(),
+			dkimSelectors: normalizeList(dto.dkimSelectors),
+			sendingIps: normalizeList(dto.sendingIps),
+			// Default a new domain onto the recurring schedule (pm/domains.mdx §4.1).
+			scheduleEnabled: dto.scheduleEnabled ?? true,
+			...(dto.arc ? { arc: normalizeArc(dto.arc) } : {}),
+			...(dto.bimi ? { bimi: normalizeBimi(dto.bimi) } : {}),
+			...(dto.dnsHealth
+				? { dnsHealth: normalizeDnsHealth(dto.dnsHealth) }
+				: {}),
+			...(dto.mx ? { mx: normalizeMx(dto.mx) } : {}),
+			...(dto.domainReputation
+				? { domainReputation: normalizeDomainReputation(dto.domainReputation) }
+				: {}),
+			...(dto.dane ? { dane: normalizeDane(dto.dane) } : {}),
+			...(dto.mtaSts ? { mtaSts: normalizeMtaSts(dto.mtaSts) } : {}),
+			...(dto.linkUrl ? { linkUrl: normalizeLinkUrl(dto.linkUrl) } : {}),
+			...(dto.listUnsub
+				? { listUnsub: normalizeListUnsub(dto.listUnsub) }
+				: {}),
+			addedBy,
+			createdAt: now,
+			updatedAt: now,
+		};
+		domains.push(domain);
+		this.save(domains);
+		logInfo(`Added monitored domain ${name} (by ${addedBy})`, "DomainsService");
+		return domain;
+	}
 
-  update(id: string, dto: UpdateDomainDto): MonitoredDomain {
-    const domains = this.load()
-    const idx = domains.findIndex((d) => d.id === id)
-    if (idx < 0) throw new NotFoundException(`Domain ${id} not found`)
-    const current = domains[idx]
-    const updated: MonitoredDomain = {
-      ...current,
-      dkimSelectors: dto.dkimSelectors ? normalizeList(dto.dkimSelectors) : current.dkimSelectors,
-      sendingIps: dto.sendingIps ? normalizeList(dto.sendingIps) : current.sendingIps,
-      label: dto.label !== undefined ? dto.label.trim() : current.label,
-      scheduleEnabled:
-        dto.scheduleEnabled !== undefined ? dto.scheduleEnabled : current.scheduleEnabled,
-      arc: dto.arc !== undefined ? normalizeArc(dto.arc) : current.arc,
-      bimi: dto.bimi !== undefined ? normalizeBimi(dto.bimi) : current.bimi,
-      dnsHealth:
-        dto.dnsHealth !== undefined ? normalizeDnsHealth(dto.dnsHealth) : current.dnsHealth,
-      mx: dto.mx !== undefined ? normalizeMx(dto.mx) : current.mx,
-      domainReputation:
-        dto.domainReputation !== undefined
-          ? normalizeDomainReputation(dto.domainReputation)
-          : current.domainReputation,
-      dane: dto.dane !== undefined ? normalizeDane(dto.dane) : current.dane,
-      mtaSts: dto.mtaSts !== undefined ? normalizeMtaSts(dto.mtaSts) : current.mtaSts,
-      linkUrl: dto.linkUrl !== undefined ? normalizeLinkUrl(dto.linkUrl) : current.linkUrl,
-      listUnsub:
-        dto.listUnsub !== undefined ? normalizeListUnsub(dto.listUnsub) : current.listUnsub,
-      updatedAt: new Date().toISOString(),
-    }
-    domains[idx] = updated
-    this.save(domains)
-    return updated
-  }
+	update(id: string, dto: UpdateDomainDto): MonitoredDomain {
+		const domains = this.load();
+		const idx = domains.findIndex((d) => d.id === id);
+		if (idx < 0) throw new NotFoundException(`Domain ${id} not found`);
+		const current = domains[idx];
+		const updated: MonitoredDomain = {
+			...current,
+			dkimSelectors: dto.dkimSelectors
+				? normalizeList(dto.dkimSelectors)
+				: current.dkimSelectors,
+			sendingIps: dto.sendingIps
+				? normalizeList(dto.sendingIps)
+				: current.sendingIps,
+			label: dto.label !== undefined ? dto.label.trim() : current.label,
+			scheduleEnabled:
+				dto.scheduleEnabled !== undefined
+					? dto.scheduleEnabled
+					: current.scheduleEnabled,
+			arc: dto.arc !== undefined ? normalizeArc(dto.arc) : current.arc,
+			bimi: dto.bimi !== undefined ? normalizeBimi(dto.bimi) : current.bimi,
+			dnsHealth:
+				dto.dnsHealth !== undefined
+					? normalizeDnsHealth(dto.dnsHealth)
+					: current.dnsHealth,
+			mx: dto.mx !== undefined ? normalizeMx(dto.mx) : current.mx,
+			domainReputation:
+				dto.domainReputation !== undefined
+					? normalizeDomainReputation(dto.domainReputation)
+					: current.domainReputation,
+			dane: dto.dane !== undefined ? normalizeDane(dto.dane) : current.dane,
+			mtaSts:
+				dto.mtaSts !== undefined ? normalizeMtaSts(dto.mtaSts) : current.mtaSts,
+			linkUrl:
+				dto.linkUrl !== undefined
+					? normalizeLinkUrl(dto.linkUrl)
+					: current.linkUrl,
+			listUnsub:
+				dto.listUnsub !== undefined
+					? normalizeListUnsub(dto.listUnsub)
+					: current.listUnsub,
+			updatedAt: new Date().toISOString(),
+		};
+		domains[idx] = updated;
+		this.save(domains);
+		return updated;
+	}
 
-  async remove(id: string): Promise<void> {
-    const domains = this.load()
-    const next = domains.filter((d) => d.id !== id)
-    if (next.length === domains.length) throw new NotFoundException(`Domain ${id} not found`)
-    this.save(next)
-    logInfo(`Removed monitored domain ${id}`, "DomainsService")
-    // Cascade: let registered stores (the audit history) drop everything they hold for this domain.
-    for (const listener of this.removeListeners) await listener(id)
-  }
+	async remove(id: string): Promise<void> {
+		const domains = this.load();
+		const next = domains.filter((d) => d.id !== id);
+		if (next.length === domains.length)
+			throw new NotFoundException(`Domain ${id} not found`);
+		this.save(next);
+		logInfo(`Removed monitored domain ${id}`, "DomainsService");
+		// Cascade: let registered stores (the audit history) drop everything they hold for this domain.
+		for (const listener of this.removeListeners) await listener(id);
+	}
 }
 
 /** Trim, lower-case, drop blanks, de-dup a string list. */
 function normalizeList(list: string[] | undefined): string[] {
-  if (!list) return []
-  return [...new Set(list.map((s) => s.trim().toLowerCase()).filter(Boolean))]
+	if (!list) return [];
+	return [...new Set(list.map((s) => s.trim().toLowerCase()).filter(Boolean))];
 }
 
 /**
@@ -178,11 +203,13 @@ function normalizeList(list: string[] | undefined): string[] {
  * (pm/checks/list_unsubscribe.mdx §3/§4): both toggles default off; an all-default block
  * collapses back to undefined so domains.yaml stays clean.
  */
-function normalizeListUnsub(dto: ListUnsubConfigDto): ListUnsubDomainConfig | undefined {
-  const isBulkSender = dto.isBulkSender ?? false
-  const probeUnsubEndpoint = dto.probeUnsubEndpoint ?? false
-  if (!isBulkSender && !probeUnsubEndpoint) return undefined
-  return { isBulkSender, probeUnsubEndpoint }
+function normalizeListUnsub(
+	dto: ListUnsubConfigDto,
+): ListUnsubDomainConfig | undefined {
+	const isBulkSender = dto.isBulkSender ?? false;
+	const probeUnsubEndpoint = dto.probeUnsubEndpoint ?? false;
+	if (!isBulkSender && !probeUnsubEndpoint) return undefined;
+	return { isBulkSender, probeUnsubEndpoint };
 }
 
 /**
@@ -191,10 +218,12 @@ function normalizeListUnsub(dto: ListUnsubConfigDto): ListUnsubDomainConfig | un
  * message, and collapse an entirely-empty config to undefined so domains.yaml stays clean.
  */
 function normalizeBimi(bimi: BimiConfigDto): BimiDomainConfig | undefined {
-  const selectors = normalizeList(bimi.selectors).filter((s) => s !== "default")
-  const sampleMessage = (bimi.sampleMessage ?? "").trim()
-  if (selectors.length === 0 && sampleMessage === "") return undefined
-  return { selectors, ...(sampleMessage ? { sampleMessage } : {}) }
+	const selectors = normalizeList(bimi.selectors).filter(
+		(s) => s !== "default",
+	);
+	const sampleMessage = (bimi.sampleMessage ?? "").trim();
+	if (selectors.length === 0 && sampleMessage === "") return undefined;
+	return { selectors, ...(sampleMessage ? { sampleMessage } : {}) };
 }
 
 /**
@@ -203,16 +232,22 @@ function normalizeBimi(bimi: BimiConfigDto): BimiDomainConfig | undefined {
  * optional fields so domains.yaml stays clean.
  */
 function normalizeArc(arc: ArcConfigDto): ArcConfig {
-  const forwarders = (arc.forwarders ?? [])
-    .map((f) => ({
-      label: f.label.trim(),
-      forwardAddress: f.forwardAddress.trim(),
-      ...(f.signerDomain?.trim() ? { signerDomain: f.signerDomain.trim().toLowerCase() } : {}),
-      ...(f.signerSelector?.trim() ? { signerSelector: f.signerSelector.trim() } : {}),
-      ...(f.probeMailbox?.trim() ? { probeMailbox: f.probeMailbox.trim() } : {}),
-    }))
-    .filter((f) => f.label !== "" && f.forwardAddress !== "")
-  return { usesForwarding: arc.usesForwarding, forwarders }
+	const forwarders = (arc.forwarders ?? [])
+		.map((f) => ({
+			label: f.label.trim(),
+			forwardAddress: f.forwardAddress.trim(),
+			...(f.signerDomain?.trim()
+				? { signerDomain: f.signerDomain.trim().toLowerCase() }
+				: {}),
+			...(f.signerSelector?.trim()
+				? { signerSelector: f.signerSelector.trim() }
+				: {}),
+			...(f.probeMailbox?.trim()
+				? { probeMailbox: f.probeMailbox.trim() }
+				: {}),
+		}))
+		.filter((f) => f.label !== "" && f.forwardAddress !== "");
+	return { usesForwarding: arc.usesForwarding, forwarders };
 }
 
 /**
@@ -222,25 +257,27 @@ function normalizeArc(arc: ArcConfigDto): ArcConfig {
  * stays clean.
  */
 function normalizeDomainReputation(
-  dto: DomainReputationConfigDto,
+	dto: DomainReputationConfigDto,
 ): DomainReputationConfig | undefined {
-  const brands = normalizeList(dto.brands)
-  const config: DomainReputationConfig = {
-    brands,
-    ...(dto.expiryWarnDays !== undefined ? { expiryWarnDays: dto.expiryWarnDays } : {}),
-    ...(dto.ageWarnDays !== undefined ? { ageWarnDays: dto.ageWarnDays } : {}),
-    ...(dto.registrantPublicIntentional !== undefined
-      ? { registrantPublicIntentional: dto.registrantPublicIntentional }
-      : {}),
-    ...(dto.cousinScan !== undefined ? { cousinScan: dto.cousinScan } : {}),
-  }
-  const allDefault =
-    brands.length === 0 &&
-    dto.expiryWarnDays === undefined &&
-    dto.ageWarnDays === undefined &&
-    !dto.registrantPublicIntentional &&
-    !dto.cousinScan
-  return allDefault ? undefined : config
+	const brands = normalizeList(dto.brands);
+	const config: DomainReputationConfig = {
+		brands,
+		...(dto.expiryWarnDays !== undefined
+			? { expiryWarnDays: dto.expiryWarnDays }
+			: {}),
+		...(dto.ageWarnDays !== undefined ? { ageWarnDays: dto.ageWarnDays } : {}),
+		...(dto.registrantPublicIntentional !== undefined
+			? { registrantPublicIntentional: dto.registrantPublicIntentional }
+			: {}),
+		...(dto.cousinScan !== undefined ? { cousinScan: dto.cousinScan } : {}),
+	};
+	const allDefault =
+		brands.length === 0 &&
+		dto.expiryWarnDays === undefined &&
+		dto.ageWarnDays === undefined &&
+		!dto.registrantPublicIntentional &&
+		!dto.cousinScan;
+	return allDefault ? undefined : config;
 }
 
 /**
@@ -248,12 +285,19 @@ function normalizeDomainReputation(
  * lower-case / de-dup both name lists and collapse an entirely-default config to undefined so
  * domains.yaml stays clean.
  */
-function normalizeDnsHealth(cfg: DnsHealthConfigDto): DnsHealthConfig | undefined {
-  const extraLabels = normalizeList(cfg.extraLabels).map((l) => l.replace(/\.$/, ""))
-  const expectedNs = normalizeList(cfg.expectedNs).map((n) => n.replace(/\.$/, ""))
-  const skipAxfrProbe = cfg.skipAxfrProbe ?? false
-  if (extraLabels.length === 0 && expectedNs.length === 0 && !skipAxfrProbe) return undefined
-  return { extraLabels, expectedNs, skipAxfrProbe }
+function normalizeDnsHealth(
+	cfg: DnsHealthConfigDto,
+): DnsHealthConfig | undefined {
+	const extraLabels = normalizeList(cfg.extraLabels).map((l) =>
+		l.replace(/\.$/, ""),
+	);
+	const expectedNs = normalizeList(cfg.expectedNs).map((n) =>
+		n.replace(/\.$/, ""),
+	);
+	const skipAxfrProbe = cfg.skipAxfrProbe ?? false;
+	if (extraLabels.length === 0 && expectedNs.length === 0 && !skipAxfrProbe)
+		return undefined;
+	return { extraLabels, expectedNs, skipAxfrProbe };
 }
 
 /**
@@ -263,11 +307,14 @@ function normalizeDnsHealth(cfg: DnsHealthConfigDto): DnsHealthConfig | undefine
  * and collapse an entirely-default config to undefined so domains.yaml stays clean.
  */
 function normalizeMx(cfg: MxRoutingConfigDto): MxRoutingConfig | undefined {
-  const receivesMail = cfg.receivesMail ?? true
-  const expectedHosts = normalizeList(cfg.expectedHosts).map((h) => h.replace(/\.$/, ""))
-  const skipSmtpProbe = cfg.skipSmtpProbe ?? false
-  if (receivesMail && expectedHosts.length === 0 && !skipSmtpProbe) return undefined
-  return { receivesMail, expectedHosts, skipSmtpProbe }
+	const receivesMail = cfg.receivesMail ?? true;
+	const expectedHosts = normalizeList(cfg.expectedHosts).map((h) =>
+		h.replace(/\.$/, ""),
+	);
+	const skipSmtpProbe = cfg.skipSmtpProbe ?? false;
+	if (receivesMail && expectedHosts.length === 0 && !skipSmtpProbe)
+		return undefined;
+	return { receivesMail, expectedHosts, skipSmtpProbe };
 }
 
 /**
@@ -276,9 +323,9 @@ function normalizeMx(cfg: MxRoutingConfigDto): MxRoutingConfig | undefined {
  * undefined so domains.yaml stays clean — the checker defaults to `enforce` anyway.
  */
 function normalizeMtaSts(cfg: MtaStsConfigDto): MtaStsDomainConfig | undefined {
-  const desiredMode = cfg.desiredMode
-  if (desiredMode === undefined || desiredMode === "enforce") return undefined
-  return { desiredMode }
+	const desiredMode = cfg.desiredMode;
+	if (desiredMode === undefined || desiredMode === "enforce") return undefined;
+	return { desiredMode };
 }
 
 /**
@@ -286,9 +333,9 @@ function normalizeMtaSts(cfg: MtaStsConfigDto): MtaStsDomainConfig | undefined {
  * next-cert SPKI digest and collapse an empty config to undefined so domains.yaml stays clean.
  */
 function normalizeDane(cfg: DaneConfigDto): DaneDomainConfig | undefined {
-  const expectedNextSpki = (cfg.expectedNextSpki ?? "").trim().toLowerCase()
-  if (expectedNextSpki === "") return undefined
-  return { expectedNextSpki }
+	const expectedNextSpki = (cfg.expectedNextSpki ?? "").trim().toLowerCase();
+	if (expectedNextSpki === "") return undefined;
+	return { expectedNextSpki };
 }
 
 /**
@@ -296,10 +343,14 @@ function normalizeDane(cfg: DaneConfigDto): DaneDomainConfig | undefined {
  * §4): trim / lower-case / de-dup the aligned link-domain allow-list and collapse an empty config
  * to undefined so domains.yaml stays clean.
  */
-function normalizeLinkUrl(cfg: LinkUrlConfigDto): LinkUrlDomainConfig | undefined {
-  const allowedDomains = normalizeList(cfg.allowedDomains).map((d) => d.replace(/\.$/, ""))
-  if (allowedDomains.length === 0) return undefined
-  return { allowedDomains }
+function normalizeLinkUrl(
+	cfg: LinkUrlConfigDto,
+): LinkUrlDomainConfig | undefined {
+	const allowedDomains = normalizeList(cfg.allowedDomains).map((d) =>
+		d.replace(/\.$/, ""),
+	);
+	if (allowedDomains.length === 0) return undefined;
+	return { allowedDomains };
 }
 
 /**
@@ -307,10 +358,10 @@ function normalizeLinkUrl(cfg: LinkUrlConfigDto): LinkUrlDomainConfig | undefine
  * YAML root that became a mapping/scalar) or an object element, then backfill missing fields.
  */
 function asRows(parsed: unknown): MonitoredDomain[] {
-  if (!Array.isArray(parsed)) return []
-  return parsed
-    .filter((d): d is MonitoredDomain => typeof d === "object" && d !== null)
-    .map(withDefaults)
+	if (!Array.isArray(parsed)) return [];
+	return parsed
+		.filter((d): d is MonitoredDomain => typeof d === "object" && d !== null)
+		.map(withDefaults);
 }
 
 /**
@@ -318,9 +369,9 @@ function asRows(parsed: unknown): MonitoredDomain[] {
  * earlier version reads cleanly. Defaults match create(): scheduleEnabled on, empty label.
  */
 function withDefaults(d: MonitoredDomain): MonitoredDomain {
-  return {
-    ...d,
-    label: d.label ?? "",
-    scheduleEnabled: d.scheduleEnabled ?? true,
-  }
+	return {
+		...d,
+		label: d.label ?? "",
+		scheduleEnabled: d.scheduleEnabled ?? true,
+	};
 }

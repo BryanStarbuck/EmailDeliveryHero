@@ -1,22 +1,22 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "module": "commonjs",
-    "moduleResolution": "node",
-    "target": "ES2022",
-    "outDir": "./dist",
-    "baseUrl": "./src",
-    "experimentalDecorators": true,
-    "emitDecoratorMetadata": true,
-    "declaration": false,
-    "noUnusedLocals": false,
-    "noUnusedParameters": false,
-    "paths": {
-      "@config/*": ["config/*"],
-      "@module/*": ["modules/*"],
-      "@shared/*": ["shared/*"]
-    }
-  },
-  "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist"]
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"module": "commonjs",
+		"moduleResolution": "node",
+		"target": "ES2022",
+		"outDir": "./dist",
+		"baseUrl": "./src",
+		"experimentalDecorators": true,
+		"emitDecoratorMetadata": true,
+		"declaration": false,
+		"noUnusedLocals": false,
+		"noUnusedParameters": false,
+		"paths": {
+			"@config/*": ["config/*"],
+			"@module/*": ["modules/*"],
+			"@shared/*": ["shared/*"]
+		}
+	},
+	"include": ["src/**/*.ts"],
+	"exclude": ["node_modules", "dist"]
 }

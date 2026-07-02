@@ -1,54 +1,54 @@
-import { randomUUID } from "node:crypto"
-import { RequireRole } from "@module/auth/roles.decorator"
-import { DomainsService } from "@module/domains/domains.service"
+import { randomUUID } from "node:crypto";
+import { RequireRole } from "@module/auth/roles.decorator";
+import type { DomainsService } from "@module/domains/domains.service";
 import {
-  Body,
-  ConflictException,
-  Controller,
-  Get,
-  HttpException,
-  HttpStatus,
-  NotImplementedException,
-  Param,
-  Post,
-} from "@nestjs/common"
+	Body,
+	ConflictException,
+	Controller,
+	Get,
+	HttpException,
+	HttpStatus,
+	NotImplementedException,
+	Param,
+	Post,
+} from "@nestjs/common";
 import {
-  ApiBearerAuth,
-  ApiOperation,
-  ApiProperty,
-  ApiPropertyOptional,
-  ApiTags,
-} from "@nestjs/swagger"
-import { readAppConfig } from "@shared/config-store"
-import { Type } from "class-transformer"
+	ApiBearerAuth,
+	ApiOperation,
+	ApiProperty,
+	ApiPropertyOptional,
+	ApiTags,
+} from "@nestjs/swagger";
+import { readAppConfig } from "@shared/config-store";
+import { Type } from "class-transformer";
 import {
-  IsArray,
-  IsBoolean,
-  IsIn,
-  IsInt,
-  IsISO8601,
-  IsOptional,
-  IsString,
-  MaxLength,
-  Min,
-  MinLength,
-  ValidateNested,
-} from "class-validator"
+	IsArray,
+	IsBoolean,
+	IsIn,
+	IsInt,
+	IsISO8601,
+	IsOptional,
+	IsString,
+	MaxLength,
+	Min,
+	MinLength,
+	ValidateNested,
+} from "class-validator";
 import {
-  aggregateOverall,
-  type GmailTab,
-  type InboxPlacementTest,
-  type PlacementFolder,
-  trendSeries,
-} from "./checks/inbox-placement/placement"
+	aggregateOverall,
+	type GmailTab,
+	type InboxPlacementTest,
+	type PlacementFolder,
+	trendSeries,
+} from "./checks/inbox-placement/placement";
 import {
-  canSendSeedTest,
-  listPlacementTests,
-  recordPlacementTest,
-  type SeedTestGate,
-  seedListConfigured,
-  testsSentInMonth,
-} from "./checks/inbox-placement/placement-store"
+	canSendSeedTest,
+	listPlacementTests,
+	recordPlacementTest,
+	type SeedTestGate,
+	seedListConfigured,
+	testsSentInMonth,
+} from "./checks/inbox-placement/placement-store";
 
 /**
  * The per-domain Inbox Placement API (pm/checks/inbox_placement.mdx §4/§6):
@@ -72,158 +72,159 @@ import {
 
 /** One per-seed verdict row (spec §5 `inbox_placement_results`). */
 export class SeedResultDto {
-  @ApiProperty({ description: "Mailbox provider key", example: "gmail" })
-  @IsString()
-  @MinLength(1)
-  @MaxLength(100)
-  provider!: string
+	@ApiProperty({ description: "Mailbox provider key", example: "gmail" })
+	@IsString()
+	@MinLength(1)
+	@MaxLength(100)
+	provider!: string;
 
-  @ApiProperty({ enum: ["inbox", "spam", "promotions", "missing"] })
-  @IsIn(["inbox", "spam", "promotions", "missing"])
-  folder!: PlacementFolder
+	@ApiProperty({ enum: ["inbox", "spam", "promotions", "missing"] })
+	@IsIn(["inbox", "spam", "promotions", "missing"])
+	folder!: PlacementFolder;
 
-  @ApiPropertyOptional({
-    enum: ["primary", "promotions", "social", "updates", "forums"],
-    nullable: true,
-  })
-  @IsOptional()
-  @IsIn(["primary", "promotions", "social", "updates", "forums"])
-  gmailTab?: GmailTab | null
+	@ApiPropertyOptional({
+		enum: ["primary", "promotions", "social", "updates", "forums"],
+		nullable: true,
+	})
+	@IsOptional()
+	@IsIn(["primary", "promotions", "social", "updates", "forums"])
+	gmailTab?: GmailTab | null;
 
-  @ApiPropertyOptional({
-    description: "Receiver-observed spf= verdict (null = not parsed)",
-    nullable: true,
-  })
-  @IsOptional()
-  @IsBoolean()
-  spfPass?: boolean | null
+	@ApiPropertyOptional({
+		description: "Receiver-observed spf= verdict (null = not parsed)",
+		nullable: true,
+	})
+	@IsOptional()
+	@IsBoolean()
+	spfPass?: boolean | null;
 
-  @ApiPropertyOptional({ nullable: true })
-  @IsOptional()
-  @IsBoolean()
-  dkimPass?: boolean | null
+	@ApiPropertyOptional({ nullable: true })
+	@IsOptional()
+	@IsBoolean()
+	dkimPass?: boolean | null;
 
-  @ApiPropertyOptional({ nullable: true })
-  @IsOptional()
-  @IsBoolean()
-  dmarcPass?: boolean | null
+	@ApiPropertyOptional({ nullable: true })
+	@IsOptional()
+	@IsBoolean()
+	dmarcPass?: boolean | null;
 
-  @ApiPropertyOptional({
-    description: "Send → arrival in seconds (null when missing)",
-    nullable: true,
-  })
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  latencySecs?: number | null
+	@ApiPropertyOptional({
+		description: "Send → arrival in seconds (null when missing)",
+		nullable: true,
+	})
+	@IsOptional()
+	@IsInt()
+	@Min(0)
+	latencySecs?: number | null;
 
-  @ApiPropertyOptional({
-    description: "The seed mailbox address (or a privacy hash)",
-    nullable: true,
-  })
-  @IsOptional()
-  @IsString()
-  @MaxLength(320)
-  seedAddress?: string | null
+	@ApiPropertyOptional({
+		description: "The seed mailbox address (or a privacy hash)",
+		nullable: true,
+	})
+	@IsOptional()
+	@IsString()
+	@MaxLength(320)
+	seedAddress?: string | null;
 
-  @ApiPropertyOptional({
-    description: "Why a missing seed never arrived: hard 5xx bounce vs accepted-then-dropped",
-    enum: ["bounced", "dropped"],
-    nullable: true,
-  })
-  @IsOptional()
-  @IsIn(["bounced", "dropped"])
-  missingReason?: "bounced" | "dropped" | null
+	@ApiPropertyOptional({
+		description:
+			"Why a missing seed never arrived: hard 5xx bounce vs accepted-then-dropped",
+		enum: ["bounced", "dropped"],
+		nullable: true,
+	})
+	@IsOptional()
+	@IsIn(["bounced", "dropped"])
+	missingReason?: "bounced" | "dropped" | null;
 }
 
 /** One completed seed test (spec §5 `inbox_placement_tests` + children). */
 export class RecordSeedTestDto {
-  @ApiPropertyOptional({
-    description:
-      "Seed source ('glockapps' | 'mailtrap' | 'self_hosted' | …); defaults to the configured service",
-  })
-  @IsOptional()
-  @IsString()
-  @MaxLength(100)
-  seedService?: string
+	@ApiPropertyOptional({
+		description:
+			"Seed source ('glockapps' | 'mailtrap' | 'self_hosted' | …); defaults to the configured service",
+	})
+	@IsOptional()
+	@IsString()
+	@MaxLength(100)
+	seedService?: string;
 
-  @ApiPropertyOptional({
-    description: "The audited campaign sample tested (null = default template)",
-    nullable: true,
-  })
-  @IsOptional()
-  @IsString()
-  @MaxLength(200)
-  sampleId?: string | null
+	@ApiPropertyOptional({
+		description: "The audited campaign sample tested (null = default template)",
+		nullable: true,
+	})
+	@IsOptional()
+	@IsString()
+	@MaxLength(200)
+	sampleId?: string | null;
 
-  @ApiPropertyOptional({
-    description:
-      "The unique per-test tag (plus-address / X-EDH-Test-Id / subject suffix); generated when absent",
-  })
-  @IsOptional()
-  @IsString()
-  @MinLength(1)
-  @MaxLength(200)
-  testToken?: string
+	@ApiPropertyOptional({
+		description:
+			"The unique per-test tag (plus-address / X-EDH-Test-Id / subject suffix); generated when absent",
+	})
+	@IsOptional()
+	@IsString()
+	@MinLength(1)
+	@MaxLength(200)
+	testToken?: string;
 
-  @ApiProperty({ description: "ISO date-time the probe was sent" })
-  @IsISO8601()
-  sentAt!: string
+	@ApiProperty({ description: "ISO date-time the probe was sent" })
+	@IsISO8601()
+	sentAt!: string;
 
-  @ApiPropertyOptional({
-    description: "ISO date-time read-back completed (null while polling)",
-    nullable: true,
-  })
-  @IsOptional()
-  @IsISO8601()
-  settledAt?: string | null
+	@ApiPropertyOptional({
+		description: "ISO date-time read-back completed (null while polling)",
+		nullable: true,
+	})
+	@IsOptional()
+	@IsISO8601()
+	settledAt?: string | null;
 
-  @ApiProperty({
-    type: [SeedResultDto],
-    description: "One row per seed — folder + receiver auth verdict",
-  })
-  @IsArray()
-  @ValidateNested({ each: true })
-  @Type(() => SeedResultDto)
-  results!: SeedResultDto[]
+	@ApiProperty({
+		type: [SeedResultDto],
+		description: "One row per seed — folder + receiver auth verdict",
+	})
+	@IsArray()
+	@ValidateNested({ each: true })
+	@Type(() => SeedResultDto)
+	results!: SeedResultDto[];
 }
 
 /** Compact latest-test summary for the panel header ("overall inbox 82% · 40 seeds"). */
 interface PlacementTestSummary {
-  testToken: string
-  seedService: string
-  sampleId: string | null
-  sentAt: string
-  settledAt: string | null
-  seedCount: number
-  deliveredCount: number
-  overallInbox: number | null
+	testToken: string;
+	seedService: string;
+	sampleId: string | null;
+	sentAt: string;
+	settledAt: string | null;
+	seedCount: number;
+	deliveredCount: number;
+	overallInbox: number | null;
 }
 
 function summarize(test: InboxPlacementTest): PlacementTestSummary {
-  const overall = aggregateOverall(test.results)
-  return {
-    testToken: test.testToken,
-    seedService: test.seedService,
-    sampleId: test.sampleId,
-    sentAt: test.sentAt,
-    settledAt: test.settledAt,
-    seedCount: overall.seedCount,
-    deliveredCount: overall.delivered,
-    overallInbox:
-      overall.inboxOfDeliveredPct === null
-        ? null
-        : Math.round(overall.inboxOfDeliveredPct * 100) / 100,
-  }
+	const overall = aggregateOverall(test.results);
+	return {
+		testToken: test.testToken,
+		seedService: test.seedService,
+		sampleId: test.sampleId,
+		sentAt: test.sentAt,
+		settledAt: test.settledAt,
+		seedCount: overall.seedCount,
+		deliveredCount: overall.delivered,
+		overallInbox:
+			overall.inboxOfDeliveredPct === null
+				? null
+				: Math.round(overall.inboxOfDeliveredPct * 100) / 100,
+	};
 }
 
 @ApiTags("audit")
 @ApiBearerAuth()
 @Controller("audit/placement")
 export class PlacementController {
-  constructor(private readonly domains: DomainsService) {}
+	constructor(private readonly domains: DomainsService) {}
 
-  @Get(":domainId")
+	@Get(":domainId")
   @ApiOperation({ summary: "Inbox Placement panel status: config, budget, latest test, trend" })
   status(@Param("domainId") domainId: string): {
     configured: boolean
@@ -259,7 +260,7 @@ export class PlacementController {
     }
   }
 
-  @Post(":domainId/send-test")
+	@Post(":domainId/send-test")
   @RequireRole("admin")
   @ApiOperation({
     summary:
@@ -283,46 +284,46 @@ export class PlacementController {
     )
   }
 
-  @Post(":domainId/tests")
-  @RequireRole("admin")
-  @ApiOperation({
-    summary:
-      "Record one completed seed-test read-back (the test envelope + per-seed folder/auth rows)",
-  })
-  record(
-    @Param("domainId") domainId: string,
-    @Body() body: RecordSeedTestDto,
-  ): { test: PlacementTestSummary } {
-    this.domains.get(domainId)
-    const cfg = readAppConfig().seedList
-    if (!seedListConfigured(cfg)) {
-      throw new ConflictException(
-        "Seed-list integration not configured — set config.yaml → seedList.service before recording seed tests.",
-      )
-    }
-    const test: InboxPlacementTest = {
-      id: randomUUID(),
-      seedService: body.seedService?.trim() || cfg.service,
-      sampleId: body.sampleId ?? null,
-      // Belt-and-suspenders token (spec §3): generated here when the import omits one.
-      testToken: body.testToken?.trim() || `edh-${randomUUID().slice(0, 8)}`,
-      sentAt: new Date(body.sentAt).toISOString(),
-      settledAt: body.settledAt ? new Date(body.settledAt).toISOString() : null,
-      seedCount: body.results.length,
-      deliveredCount: body.results.filter((r) => r.folder !== "missing").length,
-      overallInbox: null, // recomputed at scoring time — idempotent (spec §3)
-      results: body.results.map((r) => ({
-        provider: r.provider,
-        folder: r.folder,
-        gmailTab: r.gmailTab ?? null,
-        spfPass: r.spfPass ?? null,
-        dkimPass: r.dkimPass ?? null,
-        dmarcPass: r.dmarcPass ?? null,
-        latencySecs: r.latencySecs ?? null,
-        seedAddress: r.seedAddress ?? null,
-        missingReason: r.missingReason ?? null,
-      })),
-    }
-    return { test: summarize(recordPlacementTest(domainId, test)) }
-  }
+	@Post(":domainId/tests")
+	@RequireRole("admin")
+	@ApiOperation({
+		summary:
+			"Record one completed seed-test read-back (the test envelope + per-seed folder/auth rows)",
+	})
+	record(
+		@Param("domainId") domainId: string,
+		@Body() body: RecordSeedTestDto,
+	): { test: PlacementTestSummary } {
+		this.domains.get(domainId);
+		const cfg = readAppConfig().seedList;
+		if (!seedListConfigured(cfg)) {
+			throw new ConflictException(
+				"Seed-list integration not configured — set config.yaml → seedList.service before recording seed tests.",
+			);
+		}
+		const test: InboxPlacementTest = {
+			id: randomUUID(),
+			seedService: body.seedService?.trim() || cfg.service,
+			sampleId: body.sampleId ?? null,
+			// Belt-and-suspenders token (spec §3): generated here when the import omits one.
+			testToken: body.testToken?.trim() || `edh-${randomUUID().slice(0, 8)}`,
+			sentAt: new Date(body.sentAt).toISOString(),
+			settledAt: body.settledAt ? new Date(body.settledAt).toISOString() : null,
+			seedCount: body.results.length,
+			deliveredCount: body.results.filter((r) => r.folder !== "missing").length,
+			overallInbox: null, // recomputed at scoring time — idempotent (spec §3)
+			results: body.results.map((r) => ({
+				provider: r.provider,
+				folder: r.folder,
+				gmailTab: r.gmailTab ?? null,
+				spfPass: r.spfPass ?? null,
+				dkimPass: r.dkimPass ?? null,
+				dmarcPass: r.dmarcPass ?? null,
+				latencySecs: r.latencySecs ?? null,
+				seedAddress: r.seedAddress ?? null,
+				missingReason: r.missingReason ?? null,
+			})),
+		};
+		return { test: summarize(recordPlacementTest(domainId, test)) };
+	}
 }

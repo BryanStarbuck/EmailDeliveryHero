@@ -1,4 +1,4 @@
-import { createParamDecorator, type ExecutionContext } from "@nestjs/common"
+import { createParamDecorator, type ExecutionContext } from "@nestjs/common";
 
 /**
  * The current principal attached to the request by the federated auth strategy.
@@ -9,24 +9,24 @@ import { createParamDecorator, type ExecutionContext } from "@nestjs/common"
  * `default` user. `authenticated` distinguishes the two.
  */
 export interface AuthUser {
-  /** OpenAuthFederated user id (`user_…`) from the token `sub`, or `"default"` when logged out. */
-  userId: string
-  /** Verified Workspace email when signed in; the literal `"default"` when logged out. */
-  email: string
-  /** Server-side session id (`sess_…`) from the token `sid`, or null. */
-  sessionId: string | null
-  /** Active organization/tenant id (`org_…`), or null. */
-  orgId: string | null
-  /** Mapped RBAC roles (from Google Workspace groups). Empty for the `default` user. */
-  roles: string[]
-  /** Mapped `<feature>:<action>` permissions. Empty for the `default` user. */
-  permissions: string[]
-  /** true for a verified signed-in identity; false for the `default` (logged-out) user. */
-  authenticated: boolean
+	/** OpenAuthFederated user id (`user_…`) from the token `sub`, or `"default"` when logged out. */
+	userId: string;
+	/** Verified Workspace email when signed in; the literal `"default"` when logged out. */
+	email: string;
+	/** Server-side session id (`sess_…`) from the token `sid`, or null. */
+	sessionId: string | null;
+	/** Active organization/tenant id (`org_…`), or null. */
+	orgId: string | null;
+	/** Mapped RBAC roles (from Google Workspace groups). Empty for the `default` user. */
+	roles: string[];
+	/** Mapped `<feature>:<action>` permissions. Empty for the `default` user. */
+	permissions: string[];
+	/** true for a verified signed-in identity; false for the `default` (logged-out) user. */
+	authenticated: boolean;
 }
 
 /** Reserved username/key for the logged-out user. Verified emails always contain `@`, so no clash. */
-export const DEFAULT_USER_ID = "default"
+export const DEFAULT_USER_ID = "default";
 
 /**
  * The single logged-out principal. Used whenever no valid session is present, so controllers always
@@ -34,14 +34,14 @@ export const DEFAULT_USER_ID = "default"
  * Frozen because it is a shared singleton — never mutate it.
  */
 export const DEFAULT_USER: AuthUser = Object.freeze({
-  userId: DEFAULT_USER_ID,
-  email: DEFAULT_USER_ID,
-  sessionId: null,
-  orgId: null,
-  roles: [],
-  permissions: [],
-  authenticated: false,
-})
+	userId: DEFAULT_USER_ID,
+	email: DEFAULT_USER_ID,
+	sessionId: null,
+	orgId: null,
+	roles: [],
+	permissions: [],
+	authenticated: false,
+});
 
 /**
  * @CurrentUser() — inject the current user into a controller handler. The global JwtAuthGuard runs
@@ -50,8 +50,8 @@ export const DEFAULT_USER: AuthUser = Object.freeze({
  * `undefined` even on a route that somehow skipped the guard.
  */
 export const CurrentUser = createParamDecorator(
-  (_data: unknown, ctx: ExecutionContext): AuthUser => {
-    const request = ctx.switchToHttp().getRequest<{ user?: AuthUser }>()
-    return request.user ?? DEFAULT_USER
-  },
-)
+	(_data: unknown, ctx: ExecutionContext): AuthUser => {
+		const request = ctx.switchToHttp().getRequest<{ user?: AuthUser }>();
+		return request.user ?? DEFAULT_USER;
+	},
+);
