@@ -5,6 +5,7 @@ import {
   analyzeHost,
   domainZonePrereqFindings,
   type HostObservation,
+  isNoDaneProviderMx,
   parseTlsa,
 } from "./dane-tlsa.check"
 
@@ -195,6 +196,18 @@ describe("analyzeHost", () => {
     expect(row.recommended311).toBeNull()
   })
 
+  it("stays silent per host for a Google MX with no TLSA (provider does not support DANE)", () => {
+    const { findings, row } = analyzeHost(
+      observe({
+        host: "aspmx.l.google.com",
+        canonical: "aspmx.l.google.com",
+        dnssec: { signed: false, error: false },
+      }),
+    )
+    expect(findings).toHaveLength(0)
+    expect(row.tlsaPresent).toBe(false)
+  })
+
   it("warns when the admin-pinned expected next-cert digest is not staged (spec §4)", () => {
     const pin = "d".repeat(64)
     const { findings } = analyzeHost(
@@ -223,6 +236,16 @@ describe("analyzeHost", () => {
   })
 })
 
+describe("isNoDaneProviderMx", () => {
+  it("matches Google MX hosts (trailing dot / case insensitive) but not lookalikes", () => {
+    expect(isNoDaneProviderMx("aspmx.l.google.com")).toBe(true)
+    expect(isNoDaneProviderMx("ALT1.ASPMX.L.GOOGLE.COM.")).toBe(true)
+    expect(isNoDaneProviderMx("aspmx2.googlemail.com")).toBe(true)
+    expect(isNoDaneProviderMx("notgoogle.com")).toBe(false)
+    expect(isNoDaneProviderMx("mail.example.com")).toBe(false)
+  })
+})
+
 describe("domainZonePrereqFindings", () => {
   const dnssec = (signed: boolean): DnssecResults => ({ signed }) as unknown as DnssecResults
 
@@ -242,6 +265,10 @@ describe("domainZonePrereqFindings", () => {
     expect(f.id).toBe("infra.dane_dnssec_prereq.domain_zone")
     expect(f.severity).toBe("warning")
     expect(f.remediation).toContain("3 1 1")
+  })
+
+  it("suppresses the no-DANE domain-zone warning when all MX are a no-DANE provider (Google)", () => {
+    expect(domainZonePrereqFindings("example.com", dnssec(false), false, true)).toHaveLength(0)
   })
 
   it("signed domain zone with TLSA present is ok (AC2: never turns the cell amber/red)", () => {

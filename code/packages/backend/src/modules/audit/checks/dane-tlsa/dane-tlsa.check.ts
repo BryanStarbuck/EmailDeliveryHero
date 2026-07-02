@@ -116,6 +116,19 @@ async function canonicalName(host: string): Promise<{ canonical: string; cnamed:
   return { canonical: current, cnamed }
 }
 
+/**
+ * MX hostname suffixes of providers that categorically do not support inbound DANE — their MX
+ * zones are unsigned by design and publish no TLSA, so "no DANE" findings on these hosts are
+ * unactionable noise for the domain owner. Google Workspace (aspmx.l.google.com,
+ * alt*.aspmx.l.google.com, *.googlemail.com) is the notable case; Google supports MTA-STS instead.
+ */
+const NO_DANE_PROVIDER_SUFFIXES = [".google.com", ".googlemail.com"]
+
+export function isNoDaneProviderMx(host: string): boolean {
+  const h = host.replace(/\.$/, "").toLowerCase()
+  return NO_DANE_PROVIDER_SUFFIXES.some((s) => h.endsWith(s))
+}
+
 /** The last two labels of a hostname — a first-round heuristic for the zone apex to probe for DNSSEC. */
 function parentZone(host: string): string {
   const labels = host.replace(/\.$/, "").split(".")
@@ -266,6 +279,10 @@ export function analyzeHost(obs: HostObservation): {
   // --- infra.dane_tlsa_present ------------------------------------------------------------
   if (records.length === 0) {
     // Absence is rolled up by infra.dane_all_mx; note DNSSEC readiness per host when transient.
+    // Known no-DANE providers (Google) stay silent per host — the rollup emits one info instead.
+    if (isNoDaneProviderMx(canonical)) {
+      return { findings, summary, row }
+    }
     if (dnssec.error) {
       findings.push({
         id: `infra.dane_dnssec_prereq.${tag}`,
@@ -527,6 +544,8 @@ export function domainZonePrereqFindings(
   domain: string,
   dnssec: DnssecResults | undefined,
   anyTlsaPresent: boolean,
+  /** All MX hosts belong to a known no-DANE provider (Google) — the "sign your zone to enable DANE" advice is moot. */
+  mxProviderNoDane = false,
 ): Finding[] {
   if (!dnssec) return []
   if (dnssec.signed) {
@@ -554,6 +573,9 @@ export function domainZonePrereqFindings(
       },
     ]
   }
+  // Signing the domain zone cannot enable DANE when the provider's MX side never will (Google) —
+  // the domain's own DNSSEC posture is still covered by the infra.dnssec check.
+  if (mxProviderNoDane) return []
   return [
     {
       id: "infra.dane_dnssec_prereq.domain_zone",
@@ -673,17 +695,32 @@ export const daneTlsaCheck: Checker = {
     // --- infra.dane_all_mx (coverage rollup) --------------------------------------------------
     const known = summaries.filter((s) => !s.lookupError)
     const withDane = known.filter((s) => s.usableDane)
+    const allNoDaneProvider =
+      known.length > 0 && known.every((s) => isNoDaneProviderMx(s.canonical))
     if (known.length > 0) {
       if (withDane.length === 0) {
-        findings.push({
-          id: "infra.dane_all_mx",
-          checkId: "infra",
-          title: "No MX host publishes DANE",
-          severity: "warning",
-          detail: `None of the ${known.length} MX host(s) for ${ctx.domain} publish a usable TLSA record, so inbound mail is not DANE-protected.`,
-          remediation: REM_ALL_MX_NONE,
-          evidence: known.map((s) => s.canonical).join(", "),
-        })
+        findings.push(
+          allNoDaneProvider
+            ? {
+                id: "infra.dane_all_mx",
+                checkId: "infra",
+                title: "DANE not supported by the MX provider (Google)",
+                severity: "info",
+                detail: `All ${known.length} MX host(s) for ${ctx.domain} are Google MX hosts. Google does not sign these zones or publish TLSA records, so inbound DANE is not available on Google-hosted mail — there is nothing for the domain owner to fix.`,
+                remediation:
+                  "No action possible while inbound mail is hosted on Google. For downgrade-resistant inbound TLS rely on MTA-STS (see the MTA-STS check), which Google does support.",
+                evidence: known.map((s) => s.canonical).join(", "),
+              }
+            : {
+                id: "infra.dane_all_mx",
+                checkId: "infra",
+                title: "No MX host publishes DANE",
+                severity: "warning",
+                detail: `None of the ${known.length} MX host(s) for ${ctx.domain} publish a usable TLSA record, so inbound mail is not DANE-protected.`,
+                remediation: REM_ALL_MX_NONE,
+                evidence: known.map((s) => s.canonical).join(", "),
+              },
+        )
       } else if (withDane.length < known.length) {
         const missing = known.filter((s) => !s.usableDane).map((s) => s.canonical)
         findings.push({
@@ -717,6 +754,7 @@ export const daneTlsaCheck: Checker = {
         ctx.domain,
         domainDnssec,
         rows.some((r) => r.tlsaPresent),
+        allNoDaneProvider,
       ),
     )
 
