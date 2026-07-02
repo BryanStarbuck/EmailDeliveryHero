@@ -21,9 +21,10 @@ tmpl    := code / "deploy/launchd/com.emaildeliveryhero.scheduler.plist.tmpl"
 trigger := code / "deploy/launchd/trigger-scheduler.mjs"
 
 # App ports (keep in sync with pm/overview.mdx, code/packages/frontend/vite.config.ts and backend .env).
-# web_port is the UI WebApp — always localhost:4444 (per pm/overview.mdx "Key facts").
-web_port := "4444"
-api_port := "9312"
+# web_port is the UI WebApp — localhost:4444 by default (per pm/overview.mdx "Key facts").
+# Overridable so the justfile agrees with the app when WEBAPP_PORT / API_PORT are set.
+web_port := env_var_or_default("WEBAPP_PORT", "4444")
+api_port := env_var_or_default("API_PORT", "9312")
 
 # Background `run`: combined dev log + launcher pid. Kept in /tmp under the same
 # `edh.` prefix as the scheduler's logs (see install-agent) so nothing lands in the repo.
