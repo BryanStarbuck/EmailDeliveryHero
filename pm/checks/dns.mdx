@@ -1073,44 +1073,55 @@ single-module change.
    `~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml` (path, filename format,
    and `run:` block per [../storage.mdx](../storage.mdx); `<domain>` lowercased, filename = run
    start time, local tz, 12-hour clock, zero-padded, AM/PM suffix).
-2a. Every external-tool invocation the category makes appends one `dns_infra.tool_runs[]` entry
+3. Every external-tool invocation the category makes appends one `dns_infra.tool_runs[]` entry
    with exactly `{tool, command, started_at, duration_ms, exit_code, output_format, parsed,
    error}` (§3.1/§5): `command` is the verbatim argv string including every input argument
    (domain, MX host, IP, port); JSON output is requested wherever the tool supports it; a
    timeout stores `exit_code: null` and a non-null `error`; failures are recorded, never
    silently dropped or promoted to fabricated findings.
-3. An MX target that is a CNAME, resolves to non-public space, or fails to resolve yields a
+4. An MX target that is a CNAME, resolves to non-public space, or fails to resolve yields a
    **critical** with the offending host and IP in the evidence; a healthy set yields explicit
    `ok` findings including redundancy (`host_count`, `network_count` ≥ 2 → ok; 1 → warning).
-4. A mail IP (v4 **or** v6) with no PTR, or whose PTR fails forward confirmation, yields a
+5. A mail IP (v4 **or** v6) with no PTR, or whose PTR fails forward confirmation, yields a
    **critical**; a generic-pattern PTR yields a **warning**; the IPv6-only gap is detected even
    when IPv4 FCrDNS is perfect.
-5. Signed-but-broken DNSSEC (DS present, DNSKEY mismatch/deprecated algorithm) yields
+6. Signed-but-broken DNSSEC (DS present, DNSKEY mismatch/deprecated algorithm) yields
    **critical**; an unsigned zone yields **info** only; `dane_ready` is true exactly when signed
    with DS present.
-6. Parent/child NS mismatch, single-network NS set, lame delegation, open recursion, and
+7. Parent/child NS mismatch, single-network NS set, lame delegation, open recursion, and
    SOA/TTL values outside the §2 ranges each yield **warnings** with observed vs expected values
    in the evidence.
-7. A wildcard answering the random-label probe yields a **warning** naming the record types it
+8. A wildcard answering the random-label probe yields a **warning** naming the record types it
    answers; explicit mail-path records (`_dmarc`, `_mta-sts`, `_smtp._tls`, selectors) are noted
    as masking or exposed.
-8. Registration: `clientHold`/`pendingDelete`/expired → **critical**; expiry < 90 days, missing
+9. Registration: `clientHold`/`pendingDelete`/expired → **critical**; expiry < 90 days, missing
    transfer lock, age < 90 days, parked nameservers → **warning**; privacy/proxy → **info** only.
-9. The Dashboard `dnsInfra` cell reflects worst severity with the `K of M fail` label;
-   `info`-only never turns it amber; cell and run-detail category chip expose a chevron routing
-   to `/domains/:id/dns`.
-10. The full DNS page renders: the ten-chip family strip with anchor links, the verdict line +
-    single §8-ladder CTA, the Mail path panel (MX → IP → PTR with per-hop status), the Zone panel
+10. The Dashboard `dnsInfra` cell reflects worst severity with the `K of M fail` label;
+   `info`-only never turns it amber. Clicking the cell on a **Domain-health** row opens the
+   domain's **newest** run's DNS page (`/domains/:domainId/dns`); clicking it on a **Runs** row
+   opens **that run's** page (`/domains/:domainId/runs/:runId/dns`); clicking anywhere else in
+   either row opens the whole run report; the run report's DNS section chevron routes to the
+   same run-scoped page.
+11. The DNS category run page renders, for **one specific run**: the run context strip (run
+    start timestamp, `newest` badge on the latest run only, **‹ prev / › next** navigation
+    across the same domain's runs that stays on the DNS page and disables at both ends of the
+    history), the ten-chip family strip with anchor links, the verdict line + single §8-ladder
+    CTA, the Mail path panel (MX → IP → PTR with per-hop status), the Zone panel
     (NS/parent-child/SOA-with-ranges/TTL/wildcard/DNSSEC line), the family-grouped fail-first
-    test table with observed/expected evidence and copyable fixes, and the matched problem-state
-    cards.
-11. Problem-state drill-down pages (`/domains/:id/dns/:problemId`) render concept, live data
-    fields, copyable diagnose-commands (domain substituted), tools, metrics, and the numbered
-    path forward for PS-01…PS-11; PS-12 is absent in the first round.
-12. The primary recommendation is computed by the §8 fix-order ladder (first matching rung), so
+    sub-test table with observed/expected evidence, copyable fixes, and tool-run traceability,
+    and the matched problem-state cards.
+12. The alias `/domains/:domainId/dns` resolves to the newest run's page; a never-audited
+    domain shows the never-run state without a run strip; an unknown `:runId` shows "run no
+    longer exists" with a link to the newest run; an in-progress run skeleton-loads as checkers
+    finish.
+13. Problem-state drill-down pages (`/domains/:domainId/dns/:problemId`) render concept, data
+    fields live from the run being viewed, copyable diagnose-commands (domain substituted),
+    tools, metrics, and the numbered path forward for PS-01…PS-11; PS-12 is absent in the first
+    round.
+14. The primary recommendation is computed by the §8 fix-order ladder (first matching rung), so
     a registration hold outranks an MX problem, which outranks rDNS, and DANE advice never
     appears while FCrDNS is failing.
-13. A second scheduled run that sees a lost PTR, NS drift, a dropped MX, a registrar status
+15. A second scheduled run that sees a lost PTR, NS drift, a dropped MX, a registrar status
     change, or `network_count` falling flags each as a **new problem** via the regression diff.
 
 <!--
@@ -1127,13 +1138,27 @@ single-module change.
   * Standards refs: RFC 5321/2181/7505 (MX), RFC 1912 + RIPE-203 (SOA ranges), RFC 1034/2182
     (NS), RFC 8624 as updated by RFC 9904 (DNSSEC algorithms — Nov 2025), RFC 8461/8460 (MTA-STS/
     TLS-RPT), RFC 6698/7672 (DANE), RFC 4592 (wildcards), RDAP (gTLD WHOIS sunset Jan 2025).
-  * Toolbox verified against formulae.brew.sh 2026-07: bind, knot, ldns, doggo, q, dnsx,
-    dnstracer, dnsviz, whois, rdap, asn, swaks, testssl, sslscan, gnutls, certigo, nmap,
-    dnstwist, checkdmarc all present. `dog` is GONE (use doggo); `fpdns` is archived upstream;
-    zonemaster-cli is NOT on brew. Do not re-add dead formulas.
-  * Routes /domains/:id/dns and /domains/:id/dns/:problemId mirror the DMARC pattern
-    (DnsPage.tsx, DnsProblemPage.tsx, lib/dns-problems.ts). The four snapshot payload shapes in
-    §5 are the frontend's contract — change them in lockstep with api/types.ts.
+  * Toolbox re-verified against formulae.brew.sh + registry.npmjs.org 2026-07-01: bind, knot,
+    ldns, doggo, q, dnsx, dnstracer, dnsviz, whois, rdap, asn, swaks, testssl, sslscan, gnutls,
+    certigo, nmap, dnstwist, checkdmarc, socat, dnsperf, massdns, ipcalc all present (200);
+    npm mailauth present. Confirmed 404/absent: `dog` (use doggo), `zonemaster-cli`,
+    `posttls-finger`, `zdns`, `dnslookup`; `fpdns` installs but is archived upstream. Do not
+    re-add dead formulas or invent lookalikes. §3.1 owns the exact argv per tool — keep it in
+    sync with the ToolRunner invocations in code and with the `tool_runs[]` contract in §5.
+  * Storage: this category writes the top-level `dns_infra` key (checkId prefix stays `infra.`)
+    of the per-run YAML at ~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml.
+    ../storage.mdx owns the path/filename/`run:` block/retention — reference it, never redefine
+    it here. tool_runs[] shape: {tool, command, started_at, duration_ms, exit_code,
+    output_format, parsed, error} — append-only within a run, excluded from the regression diff.
+  * Routes: the category page is run-scoped — /domains/:domainId/runs/:runId/dns with newest
+    alias /domains/:domainId/dns (run report: /domains/:domainId/runs/:runId, newest alias
+    /domains/:domainId); drill-downs at /domains/:domainId/dns/:problemId. Dashboard cell-click:
+    Domain-health cell → newest run's DNS page; Runs-row cell → that run's DNS page; anywhere
+    else in a row → the whole run report. Mirrors the DMARC pattern (DnsPage.tsx,
+    DnsProblemPage.tsx, lib/dns-problems.ts). The four snapshot payload shapes in §5 are the
+    frontend's contract — change them in lockstep with api/types.ts. The run context strip
+    (timestamp, newest badge, ‹ prev / › next across the same domain's runs) is shared chrome
+    across all six category pages — keep the six specs in lockstep.
   * PS-11 (dangling/takeover) is first-round PARTIAL (apex-CNAME + SPF-include liveness via the
     dns_health checker's dangling_* findings); the full subdomain sweep and PS-12 (split answers)
     stay FUTURE until those probes land; the §8 ladder gains rungs for them then.

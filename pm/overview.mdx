@@ -46,7 +46,9 @@ All MDX specifications in this directory and its subdirectories:
 * [Per-check engineering specs](./checks/overview.mdx) — the `checks/` subdirectory: one deep spec
   per check topic (SPF, DKIM, DMARC, ARC, Blacklists, MX, PTR, TLS/STARTTLS, MTA-STS, TLS-RPT,
   DANE/TLSA, DNSSEC, DNS health, domain reputation, SMTP security, BIMI, content scoring,
-  List-Unsubscribe, link/URL reputation, reputation metrics, inbox placement). Each expands a slice
+  List-Unsubscribe, link/URL reputation, reputation metrics, inbox placement), plus category-level
+  roll-up specs for [DNS & Infrastructure](./checks/dns.mdx) and
+  [Spam & Content](./checks/spam_content.mdx). Each expands a slice
   of the catalog with its sub-checks, detection method, a **User Interface** section, an
   **Information Schema (database schema)** section, and when the check runs.
 * [Reports](./reports.mdx) — the report library at `/reports`: one stacked table of the newest 10

@@ -984,9 +984,24 @@ file→DB move is a single-module change.
     Walk. Parse legacy tags but flag them obsolete.
   * Keep finding ids in sync with code/packages/backend/src/modules/audit/checks/dmarc.check.ts
     (the authoritative id list is §2) and with ../spam_checks.mdx (category 3, dmarc prefix).
-  * Toolbox (§3) verified against formulae.brew.sh 2026-07: bind, doggo, q, dnsx, ldns, knot,
-    checkdmarc, parsedmarc, swaks all present; `dog` and `opendmarc` are GONE from Homebrew —
-    do not re-add them.
+  * RUN STORAGE is owned by ../storage.mdx — one YAML file per run at
+    ~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml (domain lowercased,
+    filename = run START time, local tz, 12-hour zero-padded, AM/PM). This spec owns only the
+    top-level `dmarc:` key (§5): status, record, tool_runs[], tests[], problem_states. Do NOT
+    redefine the run: block here; if storage.mdx changes the path/shape, update §5/§10/§13.
+  * tool_runs[] entry shape is LOCKED across all six category specs:
+    {tool, command (exact argv), started_at, duration_ms, exit_code, output_format: json|text,
+    parsed, error}. Keep §3's "How a test run executes the tools" table as the single source for
+    commands/timeouts; §5's example and §13 #15-16 must match it.
+  * ROUTES are run-scoped and LOCKED: category page /domains/:domainId/runs/:runId/dmarc (newest
+    alias /domains/:domainId/dmarc); drill-down appends /:problemId; run report is
+    /domains/:domainId/runs/:runId (newest alias /domains/:domainId). DMARC CELL click opens the
+    category page (Domain-health cell = newest run, Runs-row cell = that run); anywhere else in
+    a row opens the whole run report. Keep in sync with ../dashboard.mdx §6.
+  * Toolbox (§3) re-verified against formulae.brew.sh + npm registry 2026-07: brew checkdmarc
+    5.17.3, brew parsedmarc 10.2.0, npm mailauth 4.13.3 (2026-05); bind, doggo, q, dnsx, ldns,
+    knot, swaks all present. `dog` and `opendmarc` are GONE from Homebrew; npm `dmarc-parse`
+    (2020) and npm `dmarc` (2019) are abandoned — do not add any of them.
   * Problem states PS-11/PS-12 stay FUTURE until the rua ingestion pipeline (../emails.mdx) +
     dmarc_aggregate_reports land. The §8 promotion gates tighten once real pass rates exist.
   * DMARC alignment depends on ./spf.mdx (aspf) and ./dkim.mdx (adkim); ./arc.mdx explains how

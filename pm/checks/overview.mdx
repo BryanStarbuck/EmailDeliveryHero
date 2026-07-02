@@ -88,6 +88,13 @@ parentheses). The specs are grouped that way below.
 
 ## 6. Spam & Content (`content`)
 
+* [Spam & Content — category spec](./spam_content.mdx) — the category-level roll-up over the six
+  topic specs below: the six test families and their finding-id prefixes, the verified Brew/npm
+  testing toolbox with the exact command line per tool, the per-run test-results YAML (the
+  `spam_content` key with structured snapshots + `tool_runs[]` inside the run file under
+  `~/.email_delivery_hero/runs/`), the run-scoped category page
+  (`/domains/:domainId/runs/:runId/spam-content`) with the inbox-placement hero, the fix-order
+  ladder, and the problem-state catalog with drill-down pages.
 * [BIMI](./bimi.mdx) — the brand-logo record, its DMARC-enforcement prerequisite, and SVG + VMC/CMC
   validation.
 * [Message Content Spam Scoring](./content_scoring.mdx) — SpamAssassin-style scoring of a sample

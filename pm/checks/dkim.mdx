@@ -1202,18 +1202,43 @@ so the Dashboard, store, and scheduler never change as the message and observati
     publish, an exact `t=`/`k=`/`h=` edit, or the exact CNAME target to set) — never generic.
 14. The checker returns a `CheckOutcome` whose `results` payload matches §5's `selectors[]` +
     `wildcard_shadow` + `duplicate_keys` shape, one entry per probed selector, and it is persisted
-    as `results.dkim` on the audit run.
+    under the top-level **`dkim`** key of the run's YAML file at
+    `~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml` (domain lowercased;
+    filename = run start time, local timezone, 12-hour clock, zero-padded, `AM`/`PM` suffix —
+    e.g. `.../runs/whitehatengineering.com/2026_07_01_09_14AM.yaml`), alongside the file's `run:`
+    block and sibling category keys per [../storage.mdx](../storage.mdx). The `dkim` section
+    carries `status`, the structured observation, `tool_runs[]`, `tests[]`, and `problem_states`.
 15. Transient DNS failures (`ESERVFAIL`/timeout) never produce a `critical` "missing" finding; they
     surface as a `warning "could not determine"` so the scheduler's regression diff is not poisoned.
 16. The DKIM Dashboard cell shows the worst DKIM severity and a working-selectors/key-strength
-    label, and exposes a **chevron** that navigates to `/domains/:id/dkim`; an `info`-only result
-    does not turn the cell amber.
-17. The full DKIM page renders (top to bottom) the key-health hero, per-selector cards with the raw
-    record/resolution chain/key badges, the fail-first test-results table with observed evidence and
-    copyable fixes, the selectors editor with discovery import, and matched problem-state cards
-    linking to `/domains/:id/dkim/:problemId` drill-downs per §7.
-18. Each §9 problem state PS-01…PS-12 is matched from finding-id prefixes and its drill-down page
-    renders concept, live data fields, diagnose-it-yourself commands (§3 tools), and the numbered
+    label; clicking the **cell** on a Domain-health row opens the domain's **newest run's** DKIM
+    page (`/domains/:domainId/dkim`), clicking it on a **Runs-table row** opens **that run's** DKIM
+    page (`/domains/:domainId/runs/:runId/dkim`), and clicking anywhere else in a row opens the
+    whole run report; an `info`-only result does not turn the cell amber.
+17. The DKIM category run page is **run-scoped** (`/domains/:domainId/runs/:runId/dkim`, newest-run
+    alias `/domains/:domainId/dkim`): everything it renders comes from that run's YAML file, and
+    its header carries the domain, the DKIM title, the category status cell, the run's start
+    timestamp, **‹ prev / next ›** navigation across the domain's runs (disabled at the ends,
+    staying inside DKIM), a **Re-run** button, and a back link to the same run's report; a
+    non-newest run shows the "newer run exists → newest ›" banner, and a deleted `runId` renders
+    the run-not-found state.
+18. The page renders (top to bottom) the key-health hero, the per-selector overview panel with the
+    raw record/resolution chain/key badges, the fail-first sub-test results table (from `tests[]`)
+    with observed evidence and
+    copyable fixes, the collapsed **tool-runs evidence accordion** (from `tool_runs[]` — exact
+    copyable commands, durations, exit codes, parsed output), the selectors editor with discovery
+    import, and matched problem-state cards
+    linking to `/domains/:domainId/runs/:runId/dkim/:problemId` drill-downs per §7. It is also
+    reachable from the run report's DKIM section chevron.
+19. Every external tool invocation a run makes is recorded as one `dkim.tool_runs[]` entry —
+    `tool`, `command` (the exact argv string with every input argument, terminal-reproducible),
+    `started_at`, `duration_ms`, `exit_code`, `output_format: json|text`, `parsed`,
+    `error: null|string` — per the §3 execution contract (timeouts, ENOENT degradation to
+    `node:dns/promises`, cross-check disagreement surfaced as a propagation note, never a verdict
+    change).
+20. Each §9 problem state PS-01…PS-12 is matched from finding-id prefixes and its drill-down page
+    renders concept, the data fields from this run's YAML, diagnose-it-yourself commands (§3
+    tools), and the numbered
     path forward.
 
 <!--
@@ -1232,4 +1257,19 @@ so the Dashboard, store, and scheduler never change as the message and observati
   - dkim_check_results extends the shared core tables (audit_runs, domains, findings) and READS the
     shared dkim_selectors list — do not redefine core tables here.
   - Problem-state ids PS-00…PS-16 are stable API for the frontend drill-down routes — never renumber.
+  - LOCKED shared conventions (identical across all six category specs — do not deviate):
+    Run → Test → Sub-test vocabulary (../dashboard.mdx §1); run storage = ONE YAML per run at
+    ~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml (owned by ../storage.mdx —
+    this file defines ONLY the top-level `dkim` key); tool_runs[] entry shape
+    {tool, command (exact argv with every input arg), started_at, duration_ms, exit_code,
+    output_format: json|text, parsed, error: null|string}; routes
+    /domains/:domainId/runs/:runId/dkim with newest-run alias /domains/:domainId/dkim (drill-downs
+    nest :problemId under both); Dashboard DKIM-cell click = newest run's DKIM page from the
+    Domain-health table, that run's from the Runs table; severity colors dark green / dark red /
+    amber / light gray.
+  - Toolbox verified 2026-07 against formulae.brew.sh + npm/PyPI (doggo 1.2.0, dnsx 1.2.3,
+    knot 3.5.5, checkdmarc 5.17.3, parsedmarc 10.2.0, mailpit 1.30.3, swaks 20240103.0,
+    dnsviz 0.11.1, mailauth 4.13.3 npm, dkimpy 1.1.8 PyPI); opendkim / rspamd / spamassassin are
+    NOT in homebrew-core (verified 404) — re-verify before editing §3, and keep the §3 "How a test
+    run executes the tools" command lines byte-identical to what dkim.check.ts actually spawns.
 -->
