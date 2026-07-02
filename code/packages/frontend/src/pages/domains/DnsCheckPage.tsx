@@ -191,6 +191,8 @@ export function DnsCheckPage() {
             <Section title="History across runs">
               <ul className="space-y-1">
                 {history.map((r) => {
+                  // Pre-history persisted runs lack a runId and cannot be linked to.
+                  if (!r.runId) return null
                   const worst = worstFor(r, checkKey)
                   const isViewed = r.runId === run?.runId
                   return (

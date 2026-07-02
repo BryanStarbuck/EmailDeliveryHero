@@ -1,6 +1,6 @@
 import { deriveTlsRptFindings } from "@module/reports/derive-findings"
 import { resolve4, resolve6, resolveMx, resolveTxt } from "../dns-util"
-import type { Checker, CheckOutcome, Finding } from "../types"
+import type { Checker, Finding } from "../types"
 
 /**
  * TLS-RPT (SMTP TLS Reporting, RFC 8460). Inspects the TXT record at `_smtp._tls.<domain>` that tells
@@ -427,6 +427,7 @@ export const tlsRptCheck: Checker = {
           host: d,
           sizeLimit,
           external: isExternal(d, domain),
+          reachable: null,
         })
       } else if (scheme === "https") {
         let host = ""
@@ -455,6 +456,7 @@ export const tlsRptCheck: Checker = {
           host,
           sizeLimit,
           external: isExternal(host, domain),
+          reachable: null,
         })
       } else if (scheme) {
         malformed++

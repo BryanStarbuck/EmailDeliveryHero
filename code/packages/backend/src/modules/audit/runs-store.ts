@@ -55,10 +55,10 @@ interface RunBlock {
   counts: Record<Severity, number>
   new_problem_count?: number
   /**
-   * Category scope (pm/checks/blacklists.mdx §21/AC 26): "blacklists" on a category-scoped
-   * re-run; absent on a full run of all six categories.
+   * Category scope (pm/checks/blacklists.mdx §21/AC 26): "blacklists" / "dkim" on a
+   * category-scoped re-run; absent on a full run of all six categories.
    */
-  scope?: "blacklists"
+  scope?: "blacklists" | "dkim"
   /**
    * Category prefixes a scoped re-run executed (pm/checks/spf.mdx §6.5 — `checks: [spf]` on a
    * `?checks=spf` run); absent on a full run. Powers the Runs-table "SPF only" badge.

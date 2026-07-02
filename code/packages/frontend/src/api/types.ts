@@ -840,16 +840,10 @@ export interface AuditResult {
   newProblemCount?: number
   /**
    * Category scope of the run (pm/checks/blacklists.mdx §21 / AC 26): absent = a full run of all
-   * six categories; "blacklists" = a category-scoped re-run (run.scope: blacklists) — the UI
-   * chip-tags it `blacklists-only` wherever the run is named so a partial run is never mistaken
-   * for a full audit.
+   * six categories; "blacklists" / "dkim" = a category-scoped re-run (run.scope) — the UI
+   * chip-tags it wherever the run is named so a partial run is never mistaken for a full audit.
    */
-  scope?: "blacklists"
-  /**
-   * Category scope of the run (pm/checks/blacklists.mdx §21 / AC 26): absent = a full run;
-   * "blacklists" = a category-scoped re-run (chip-tagged `blacklists-only` in run history).
-   */
-  scope?: "blacklists"
+  scope?: "blacklists" | "dkim"
   /** Structured per-check payloads keyed by checker id (e.g. results.dmarc, results.spf). */
   results?: {
     dmarc?: DmarcSection | DmarcResults

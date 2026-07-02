@@ -227,6 +227,28 @@ const blacklistStateRoute = createRoute({
   path: "/blacklists/$domain/state/$psId",
   component: BlacklistStatePage,
 })
+// The zone/target explainer pages (pm/checks/blacklists.mdx §20.3/§20.4, AC 23/24): run-scoped
+// canonical routes with newest-run aliases.
+const runBlacklistZoneRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/runs/$runId/blacklists/zone/$zoneId",
+  component: BlacklistZonePage,
+})
+const blacklistZoneRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/blacklists/zone/$zoneId",
+  component: BlacklistZonePage,
+})
+const runBlacklistTargetRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/runs/$runId/blacklists/target/$target",
+  component: BlacklistTargetPage,
+})
+const blacklistTargetRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/blacklists/target/$target",
+  component: BlacklistTargetPage,
+})
 // The report library (pm/reports.mdx) — the left bar's Reports item lands here.
 const reportsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
@@ -287,6 +309,10 @@ const routeTree = rootRoute.addChildren([
     runBlacklistsRoute,
     blacklistDomainRoute,
     blacklistStateRoute,
+    runBlacklistZoneRoute,
+    blacklistZoneRoute,
+    runBlacklistTargetRoute,
+    blacklistTargetRoute,
     reportsRoute,
     domainReportsRoute,
     scheduledChecksRoute,
