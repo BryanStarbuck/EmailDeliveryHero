@@ -1006,27 +1006,29 @@ refetch); a toast summarizes the delta from the previous run — "DKIM re-checke
 While a full scan for the domain is already in flight the button is disabled with a tooltip
 ("a full run is in progress").
 
-**Backend.** Today only the full-audit endpoint exists (`POST /api/audit/run/:domainId` →
-`AuditService.runForDomain`, which executes every registered checker). The precedent for a scoped
-re-run already ships in `content-sample.controller.ts` ("Re-score just the content check — no full
-re-audit"). Needed: one small endpoint —
+**Backend.** The category-scoped re-run mechanism **already ships for Blacklists**
+(`POST /api/audit/run/:domainId/blacklists` → `AuditService.runBlacklistsForDomain`, with
+`scope?: "blacklists"` on `AuditResult` and `run.scope` in the run YAML — see
+`audit.service.ts`/`runs-store.ts`); DKIM reuses that exact convention rather than inventing a
+second one. Needed: one small endpoint —
 
 ```
-POST /api/audit/run/:domainId/checks/dkim        → AuditResult (the new run, in full)
+POST /api/audit/run/:domainId/dkim        → AuditResult (the new scoped run, in full)
 ```
 
-Semantics (locked): the audit service filters the checker registry to `checkId: "dkim"`, executes
-just that checker, and **persists a new run YAML** in which the `dkim` key (status, selectors,
-`tool_runs[]`, `tests[]`, `problem_states`) is fresh while the other five category keys are
-**copied unchanged from the domain's previous newest run**; the `run:` block records
-`trigger: "scoped"` and a `partial: [dkim]` marker naming the re-executed categories
-(coordinate the `partial` field with [../storage.mdx](../storage.mdx), which owns the `run:`
-block). Because a scoped re-run is **just a new run**, immutability, ‹ prev / next › navigation,
-the newest-run aliases, and the YAML file layout all keep working with zero special cases. The
-Runs table renders partial runs with a slate **"DKIM only"** chip; the scheduler's regression
-differ diffs **only** the re-executed categories of a partial run. Returns `409` when a run for
-the domain is already in progress. **No prior run** → the endpoint falls back to a full audit
-(nothing to carry forward) and the band-5 copy says so ("first run checks everything").
+Semantics (locked, identical to the Blacklists precedent): the audit service picks the registered
+checker with `id: "dkim"`, executes just it (passing `dkimSelectors`, `previousResults`, resolved
+`tools`), diffs regressions against **only** the previous run's DKIM findings, and **persists a new
+immutable run YAML** whose `run:` block carries `scope: dkim` and whose `results` holds only the
+fresh `dkim` key (status, selectors, `tool_runs[]`, `tests[]`, `problem_states`). The domain's
+latest-result cache is **merged surgically** — DKIM findings/payload swap in, the other five
+categories' state survives untouched — so the Dashboard cell refreshes without degrading anything
+else. Because a scoped run is just a new run, immutability, ‹ prev / next › navigation, the
+newest-run aliases, and the file layout keep working with zero special cases; the Runs table
+renders `scope: dkim` runs with a slate **"DKIM only"** chip. A run already in flight for the
+domain is **joined**, not rejected (same as Blacklists — the UI's disabled-while-scanning button
+makes a 409 unnecessary). **No prior run** → fall back to a full audit (nothing to merge into) and
+the band-5 copy says so ("first run checks everything").
 
 ### 7.8 Loading / empty / error states — locked for all grown surfaces
 
@@ -1036,7 +1038,7 @@ the domain is already in progress. **No prior run** → the endpoint falls back 
 | Selector detail (§7.3) | skeleton header + table | "not probed in this run" band 2 + links to runs where it was | unknown selector (never probed in any run) → "No run has probed `<selector>`" + selectors-editor link |
 | Tag panel (§7.4) | sheet skeleton | absent tag → "(not set — default)" explainer of the default behavior | unknown `?tag=` → "unknown tag" education (still useful) |
 | History band/strip (§7.5) | sparkline skeletons | < 2 runs → "History appears after the next run" | degrade to current run + inline retry; never blocks the page |
-| Scoped re-run (§7.7) | button spinner + "Checking DKIM…" | — | error toast + button re-enabled; `409` while scanning → disabled + tooltip |
+| Scoped re-run (§7.7) | button spinner + "Checking DKIM…" | — | error toast + button re-enabled; while a run for the domain is in flight the button is disabled with a tooltip (the backend joins an in-flight run rather than double-running) |
 
 ---
 
@@ -1057,6 +1059,8 @@ match wins):
 | `t=y` in production (PS-05) | Remove the test flag — until then receivers treat your mail as unsigned. |
 | Ed25519-only (PS-11) | Add an RSA-2048 selector and dual-sign — Gmail/Microsoft/Yahoo cannot verify Ed25519 alone. |
 | Multiple TXT / wildcard / oversize (PS-08) | Clean the DNS: one record per selector, no wildcard shadowing `_domainkey`, ≤255-byte strings. |
+| Resolver split view (PS-18) | If you just edited DNS, wait out the TTL; if the split persists, make every authoritative NS serve the same `_domainkey` data and drop split-horizon overrides. |
+| ADSP `dkim=discardable` leftover (PS-17) | Delete the `_adsp._domainkey` record now — implementations that still honor ADSP may silently discard your forwarded mail. |
 | Only 1 working selector (PS-09) | Stage a second selector now so the next rotation is a cutover, not an outage. |
 | Key older than the rotation window (PS-09) | Rotate per M3AAWG: new key ≥48 h ahead → switch → keep old 7–30 days → revoke (empty `p=`). |
 | Duplicate key across domains (PS-10) | Generate a unique key pair per domain — one compromise (or one bad neighbor) must not spoof every brand. |
@@ -1076,7 +1080,8 @@ The health situations a domain can be in for DKIM. Each maps from finding ids (d
 automatic — per-selector ids are matched on their `dkim.<subcheck>` prefix), and each has a
 deep-dive below and a drill-down UI page (§7). PS-00 is the healthy goal state; the rest are
 unhealthy in descending typical severity. PS-13…PS-16 are future (message/rua layers) and listed so
-the catalog is stable when those rounds land.
+the catalog is stable when those rounds land; PS-17 and PS-18 are first-round DNS-layer states
+appended after the future block (ids are append-only — never renumber).
 
 | Id | Problem state | Detected by | Severity |
 | --- | --- | --- | --- |
@@ -1097,6 +1102,8 @@ the catalog is stable when those rounds land.
 | PS-14 | Verification failing in transit (body-hash / canonicalization) *(future)* | `dkim.signature_verify` | critical |
 | PS-15 | Replay exposure (no `x=`, no oversigning) *(future)* | `dkim.replay_hardening` | warning |
 | PS-16 | `l=` body-length tag present *(future)* | `dkim.length_tag` | critical |
+| PS-17 | Legacy ADSP / DomainKeys leftovers | `dkim.adsp_legacy` | warning (`dkim=discardable`) / info |
+| PS-18 | Resolver split view — public resolvers disagree | `dkim.resolver_agreement` | warning |
 
 ### PS-00 — Signed and healthy
 
@@ -1337,6 +1344,58 @@ window, no key shared with another domain.
   passing. Never use it; several providers now treat `l=`-signed mail as unsigned.
 - **Diagnose/debug:** grep observed `DKIM-Signature` headers for `l=`.
 - **Fix:** remove `l=` from the signer; fix footer ordering properly (PS-14), never with `l=`.
+
+### PS-17 — Legacy ADSP / DomainKeys leftovers
+
+- **Concept:** before DMARC there were two now-dead policy mechanisms: **DomainKeys** (RFC 4870,
+  2007 — a policy TXT at `_domainkey.<domain>` with `o=-`/`o=~`) and **ADSP** (RFC 5617, 2009 — a
+  TXT at `_adsp._domainkey.<domain>` with `dkim=unknown|all|discardable`, formally moved to
+  **Historic** status in 2013). Records left at those names date the zone, confuse audits and
+  tooling, and one value still has teeth: `dkim=discardable` tells any implementation that still
+  honors ADSP to **silently discard** mail that arrives without a valid first-party signature —
+  which is exactly what happens to legitimate mail after most forwarding. DMARC (`_dmarc.<domain>`)
+  replaced both; there is no reason to keep either record.
+- **Data fields:** `adsp.present` / `adsp.record` / `adsp.practice`, `legacy_domainkeys.present` /
+  `legacy_domainkeys.record`.
+- **Diagnose/debug:** `dig +short TXT _adsp._domainkey.<domain>` (any answer is a leftover);
+  `dig +short TXT _domainkey.<domain>` (an `o=` answer is a DomainKeys policy leftover; a
+  `v=DKIM1`/`p=` answer is a **key at the wrong name** — the selector label was forgotten, see
+  PS-01); confirm your DMARC record exists at `_dmarc.<domain>` before deleting.
+- **Tools:** dig/doggo; the DNS console (deletion is a one-record edit); the run's own doggo
+  captures (§3 rows 7–8) hold the observed answers.
+- **More health metrics:** the regression diff flags an ADSP/DomainKeys record *appearing* (someone
+  restored an old zone file backup — a classic way stale records resurrect).
+- **UI:** the finding row carries the raw leftover record as evidence; the fix strip is the
+  deletion instruction plus a link to the DMARC page (policy lives there now); drill-down tells the
+  ADSP history and the discardable-discard failure mode.
+
+### PS-18 — Resolver split view — public resolvers disagree
+
+- **Concept:** receivers verify DKIM through *their* resolvers, not yours. When the local view of
+  `<selector>._domainkey.<domain>` differs from what Google Public DNS (8.8.8.8) or Cloudflare
+  (1.1.1.1) sees, part of the world is already verifying against a different key — or no key. The
+  benign cause is **propagation lag** right after a DNS edit (self-heals within the old record's
+  TTL). The persistent causes are real faults: **authoritative nameservers serving divergent zone
+  data** (a secondary that missed the zone transfer), or **split-horizon DNS** leaking an internal
+  view. Symptom at receivers: intermittent `permerror`/`temperror` that depends on which resolver a
+  receiver used — maddening to debug from bounce reports alone.
+- **Data fields:** `selectors[].resolvers_agree` (`true` / `false` / `null` = could not
+  cross-check), the finding's evidence (both views verbatim), plus the kdig `tool_runs[]` entry
+  (`agrees_with_local`) as corroborating capture.
+- **Diagnose/debug:** `dig +short TXT <selector>._domainkey.<domain>` vs
+  `dig @8.8.8.8 +short TXT <selector>._domainkey.<domain>` vs
+  `dig @1.1.1.1 +short TXT <selector>._domainkey.<domain>`; then query **each authoritative NS
+  directly** — `dig +short NS <domain>` and `dig @<each-ns> +short TXT
+  <selector>._domainkey.<domain>` — identical answers there mean plain propagation lag; divergent
+  answers there mean broken zone replication.
+- **Tools:** dig/kdig/doggo (`@resolver` selection is the whole technique); `q` for DoH/DoT views;
+  your DNS host's zone-transfer status page.
+- **More health metrics:** the regression diff — a split view that persists across two scheduled
+  runs (≥ the record TTL apart) is a fault, not propagation; watch for `temperror` clusters in
+  future `rua` data.
+- **UI:** amber "resolver split view" chip on the affected selector card; the finding row's
+  evidence shows the local and public answers side by side; the drill-down explains
+  TTL-vs-replication triage with the per-NS dig loop as copyable commands.
 
 ---
 

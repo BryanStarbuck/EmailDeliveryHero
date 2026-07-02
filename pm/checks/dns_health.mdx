@@ -231,6 +231,296 @@ When the store moves to PostgreSQL, this is a single-module change: the store ad
 12. A full audit persists one `dns_health_results` summary row and one `dns_nameservers` row per NS (JSON-store shape `checks.infra_dns_health` today), with `domain_id` indexed.
 13. The audit-detail UI renders the delegation + SOA snapshot table plus per-finding rows with severity badges and working copy-to-clipboard of each fix, and the DNS & Infrastructure dashboard cell rolls up to the worst DNS-health severity.
 14. On a scheduled re-run, a CNAME that changes from resolvable to dangling (or an NS that goes lame, or an apex that becomes a CNAME) is diffed and surfaced as a **new problem**; a fixed record clears its prior finding.
+15. The check-detail explainer renders at `/domains/:domainId/runs/:runId/dns/check/dns-health` (newest alias `/domains/:domainId/dns/check/dns-health`) with the five blocks of [./dns.mdx](./dns.mdx) §14.2 in locked order; blocks 1/3/4's static copy and the references footer render even when the run data is still loading or absent.
+16. Block 2 lists **every** finding this family emitted in the viewed run — pass, fail, and info alike — grouped Delegation / SOA & serial / Zone content / Dangling & takeover (§9.2), fail rows pre-expanded, and the eight probe-gated "not evaluated" infos collapsed into one muted `⏳ future (8)` group row.
+17. The parsed breakdown (§9.3) renders the per-nameserver table and all seven SOA fields with their sane ranges and per-field ✓/✗/⚠/ⓘ chips; fields the run did not capture (`ttls`, `parent_child_match`, `glue_ok`, `axfr_open`, ASN) render **"not captured this run"** — the page never re-queries DNS and never invents data.
+18. The raw panel shows the observed RRsets as zone-file-style lines sourced from the run's snapshot (plus `tool_runs[]` when the doggo cross-check ran), each with a working copy button.
+19. Every fix step in block 4 carries a copy button with an exact record, registrar step, or verify command (§9.5); dangling fixes lead with the takeover framing and link the PS-11 drill-down's decommission checklist.
+20. Block 5's button POSTs `/api/audit/run/:domainId/check/dns/dns-health`, which writes a **new** run file tagged `run.scope: dns.dns_health`; on completion the page navigates to the new run with a ~2 s diff flash on every sub-test whose severity changed, and the cross-run SOA-serial compare uses the most recent **earlier run whose scope included this family**.
+21. The history strip renders ≤30 cells (oldest → newest) and shows a change marker whenever `ns_count`, `network_count`, the SOA serial, or the dangling-entry count changed in a run even if severity did not (§11).
+22. Every `#concept-<term>` anchor assigned to this family by [./dns.mdx](./dns.mdx) §14.6 (NS, delegation, lame delegation, glue, SOA, TTL, wildcard, dangling CNAME) exists in block 1, and inbound links from the category page / run report / drill-downs resolve run-scoped (preserving `:runId`).
+23. Each block-2 finding row shows its problem-state chip (PS-03/PS-04/PS-05/PS-11 per §10.1) linking to `/domains/:domainId/dns/<PS-id>`, and those drill-downs' mechanism terms link back to this explainer's anchors — no dead-end concept term in either direction.
+24. Unknown `:checkKey`, unknown `:runId`, never-audited domain, and the **no-own-delegation** variant (§9.8) all render their specified states — never a blank page or a false failure.
+
+## 9. Check-detail explainer page — `/domains/:domainId/runs/:runId/dns/check/dns-health`
+
+[./dns.mdx](./dns.mdx) §14 owns the **shell** of this page (routes, run strip, the five locked
+blocks, the raw+parsed frame, history strip, references frame, generic states). This section owns
+the **interior**: the concept copy and anchors, the sub-test rows and their grouping, the parsed
+field rows, the conditional impact copy, the fix recipes, and this family's references. The page
+is the per-family *reference*; the PS drill-downs (§10) stay the cross-family *stories*.
+
+### 9.1 Routes and entry points
+
+| Page | Route |
+| --- | --- |
+| DNS-health explainer, one specific run | `/domains/:domainId/runs/:runId/dns/check/dns-health` |
+| DNS-health explainer, newest run (alias) | `/domains/:domainId/dns/check/dns-health` |
+
+`:checkKey = dns-health` — fixed, equal to the backend check directory
+`code/packages/backend/src/modules/audit/checks/dns-health/`. Row label everywhere this family
+renders as a row: **"Zone & nameserver health"**; one-line meaning: *"Will every receiver's
+resolver get a fast, consistent, honest answer?"* (both fixed by [./dns.mdx](./dns.mdx) §14.1,
+never re-worded locally). Entry points: the category page's family strip and the
+"DNS Zone & Nameserver Health" group header's `details ›`; the run report's ten-family list row;
+every underlined concept term in §9.7's anchor map; the PS-03/04/05/11 drill-downs' mechanism
+links; a history-strip cell click (same page, different `:runId`).
+
+### 9.2 Block 1 — What this is · Block 2 — Is it healthy right now?
+
+**Block 1 (static concept copy).** 3-4 short paragraphs, plain language first: (a) *delegation* —
+the parent zone points at your nameservers, and every SPF/DKIM/DMARC verification any receiver
+ever performs is a live query against them; (b) the *SOA* record as the zone's metronome
+(serial + timers govern how secondaries stay in sync and how long "no such record" answers are
+cached); (c) *zone content hazards* — apex CNAME, wildcards, TXT bloat — records that silently
+change how mail lookups resolve; (d) *dangling records* — the SubdoMailing-class takeover vector
+and why it is the highest-severity modern DNS risk for a mail domain. Each paragraph carries the
+anchored sub-headings of §9.7 so any term can be deep-linked mid-page.
+
+**Block 2 (this run).** Header: the family StatusCell + one verdict sentence derived from the
+snapshot, worded per state — critical: *"N of M sub-tests fail — the delegation itself is a
+deliverability risk"*; warning: *"delegation works but is fragile — K warnings"*; ok:
+*"delegation is redundant, consistent, and free of dangling records"*; no-own-delegation: the
+§9.8 variant. Below it, **every finding of this family from this run** (`checkId =
+infra.dns_health`), pass rows included, in four fixed groups with fail rows pre-expanded:
+
+| Group | Finding ids rendered (from code — suffixed ids collapse under their prefix) | PS chip |
+| --- | --- | --- |
+| **Delegation** | `infra.ns_sanity`, `infra.ns_lame.<host>`, `infra.ns_no_cname.<host>`, `infra.ns_expected_drift`, `infra.ns_parent_child` (first-round resolver-drift approximation) | PS-03 |
+| **SOA & serial** | `infra.soa_sanity`, `infra.soa_serial`, `infra.soa_mname_ns`, `infra.soa_rname` | PS-04 |
+| **Zone content** | `infra.cname_at_apex`, `infra.wildcard`, `infra.multi_txt_spf`, `infra.txt_bloat` + `infra.txt_bloat.<name>` (per mail name) | PS-05 |
+| **Dangling & takeover** | `infra.dangling_cname.<label>` (incl. the CNAME-loop warning variant), `infra.dangling_include.<target>`, `infra.dangling_include.mx.<host>`, `infra.dangling_ns.<label>` | PS-11 |
+
+The eight probe-gated infos (`infra.ns_lame` precise, `infra.ns_parent_child` authoritative,
+`infra.ns_all_answer`, `infra.glue_records`, `infra.ttl_sanity`, `infra.zone_transfer`,
+`infra.ns_response_time`, `infra.recursion_open`) collapse into one muted `⏳ future (8)` group
+row at the bottom — expandable, each row keeping its "not evaluated" detail and remediation, and
+the `infra.zone_transfer` row showing *"skipped by domain settings"* when `skip_axfr_probe` is
+set. Row anatomy is the category page's (severity chip, title, observed `detail`, `evidence`,
+`remediation`, copy button); the transient-lookup info rows (`Transient DNS lookup failure`)
+render with a retry hint pointing at block 5.
+
+### 9.3 The raw + parsed breakdown
+
+**Raw.** Zone-file-style lines reconstructed from the run's `results["infra.dns_health"]`
+snapshot (plus the doggo `tool_runs[]` entry when the category's cross-check ran), monospace,
+one copy button per sub-panel — never re-queried at render time:
+
+```
+;; delegation (as resolved this run)
+example.com.        IN NS   ns1.provider-a.net.   ; 198.51.100.2 · net 198.51.100 · lame: no
+example.com.        IN NS   ns2.provider-a.net.   ; 198.51.100.3 · net 198.51.100 · lame: no
+;; SOA
+example.com.        IN SOA  ns1.provider-a.net. hostmaster.example.com. (
+                            2026063001 7200 3600 1209600 3600 )
+;; apex TXT (4 records, 612 octets · 1 × v=spf1)
+;; CNAME chains observed (dangling sweep, 14 labels scanned)
+links.example.com.  IN CNAME app.herokudns.com.   ; NXDOMAIN ← dangling
+;; wildcard probe: nonce-x7f3q….example.com → no answer
+```
+
+**Parsed.** The field-by-field table (**Field | Observed | Expected / sane range | Verdict**),
+rows fixed here:
+
+| Field | Observed (snapshot key) | Expected / sane range | Verdict chip |
+| --- | --- | --- | --- |
+| Nameservers (one row per NS) | `ns[]` — host, `ips`, `net_group`, `is_cname`, `lame` | ≥2 NS, ≥2 networks, no CNAME, none lame | ✓/✗ per NS |
+| NS count / network groups | `ns_count`, `network_count` | 2-4 NS on ≥2 networks (RFC 2182) | ✓/⚠/✗ |
+| ASN diversity | `ns_asn_diverse` | true (future ASN feed; `/24`+`/48` proxy today) | ⚠ when false; ⓘ "not captured this run" when null |
+| Parent ↔ child NS match | `parent_child_match` | true | ⓘ "not captured this run" (null until the parent probe) |
+| SOA serial | `soa.serial` / `soa_serial` | non-zero, monotonic vs previous in-scope run | ✓/⚠ |
+| SOA refresh | `soa.refresh` | 1200-86400 s | ✓/⚠ |
+| SOA retry | `soa.retry` | < refresh | ✓/⚠ |
+| SOA expire | `soa.expire` | ≥ 604800 s and ≥ refresh | ✓/⚠ |
+| SOA minimum (neg. TTL) | `soa.min_ttl` | ≤ 86400 s | ✓/⚠ |
+| SOA MNAME / RNAME | `soa.mname`, `soa.rname` | MNAME resolves & in NS set; RNAME a monitored mailbox | ✓/⚠/ⓘ |
+| Apex CNAME | `apex_is_cname` | false | ✓/✗ |
+| Wildcard | `wildcard.detected` + `wildcard_types` (probe label shown) | not detected | ✓/⚠ |
+| Apex TXT set | `txt_record_count` (+ octets, §12) | small enough for one UDP response, no duplicates | ✓/⚠ |
+| SPF record count | `spf_record_count` | exactly 1 `v=spf1` (RFC 7208 §3.2) | ✓/⚠ |
+| Dangling entries (one row each) | `dangling[]` — name, type, target, kind | empty | ✗ per entry (takeover badge) |
+| Record TTLs | `ttls` | 300-86400 s steady-state | ⓘ "not captured this run" (null until dig) |
+| Glue / AXFR | `glue_ok`, `axfr_open` | true / false | ⓘ "not captured this run" (null until probes) |
+
+Null-until-probe fields always render the muted ⓘ row — the breakdown never invents data
+(no-fabrication rule, [./dns.mdx](./dns.mdx) §14.3).
+
+### 9.4 Block 3 — What it means
+
+Conditional copy keyed on the observed state (only matching paragraphs render, worst first):
+
+- **Dangling entry present (critical)** — *"Someone can claim `<target>` and own
+  `<name>` — host phishing under your name, mint a TLS cert for it, or send SPF-passing mail as
+  `<domain>`. This is the SubdoMailing attack (2024): thousands of reputable domains spammed
+  through exactly this hole, then landed on the Spamhaus DBL."* Names the freed target verbatim.
+- **Apex CNAME / <2 NS / nothing resolves (critical)** — *"Your zone's answers are unreliable at
+  the root. Receivers that can't resolve your SPF/DKIM/DMARC score the mail as unauthenticated —
+  the spam-folder pattern follows the receiver's resolver, not your content."*
+- **Lame NS / parent-child drift / single network (warning)** — the coin-flip framing: some
+  fraction of the world's resolvers intermittently gets SERVFAIL → `temperror` → softened
+  DMARC enforcement and deferred legitimate mail; one provider outage takes all mail auth dark
+  (post-Dyn-2016 practice: two providers).
+- **SOA/serial problems (warning/info)** — stale secondaries keep serving *old* SPF/DKIM after a
+  rotation: the fix you just published may not exist for part of the internet.
+- **Zone-content warnings (wildcard, multi-SPF, TXT bloat)** — wildcard MX/TXT corrupts
+  authentication discovery for names you never pinned; two SPF records = permerror = no SPF at
+  all; a bloated TXT set risks the exact lookups receivers make while authenticating.
+- **All ok** — infra rots quietly: providers change PTR/NS, secondaries fall out of sync,
+  targets get deprovisioned. The scheduled re-run (§6) is the value; nothing to fix today.
+
+Enforcement anchors named inline: Gmail/Yahoo/Microsoft evaluate authentication on every message,
+and authentication is only as available as this delegation (the [./dns.mdx](./dns.mdx) §1 floor).
+
+### 9.5 Block 4 — What you can do about it
+
+Numbered steps per failing finding, each with a copy button carrying a record, registrar step, or
+verify command — never prose. Recipe sources are the §2 remediation column; representative shapes:
+
+- **Dangling CNAME** — 1. `Delete the CNAME on <name> at your DNS provider` (or re-provision the
+  target); 2. verify: `dig CNAME <name> +short` (copy) must go empty; 3. link: PS-11 drill-down's
+  decommission checklist. Dead SPF include → the exact token to remove from the `v=spf1` record
+  (copy), cross-linked to [./spf.mdx](./spf.mdx); dead MX → repoint recipe cross-linked to
+  [./mx_routing.mdx](./mx_routing.mdx).
+- **Delegation** — the two-provider pattern as paste-ready zone lines
+  (`example.com. IN NS ns1.provider-b.net.`), the registrar NS-list edit for parent↔child drift,
+  `Remove <host> from the delegation` for a lame NS, and the expected-NS settings link for
+  intentional drift (`infra.ns_expected_drift`).
+- **SOA** — the one-line modern default `refresh 14400 retry 3600 expire 1209600 minimum 3600`
+  (copy) plus the serial convention (`YYYYMMDDnn`, bump on every edit).
+- **Zone content** — remove/scope the wildcard and *pin* `_dmarc`, `_mta-sts`, `_smtp._tls`, and
+  DKIM-selector records explicitly; merge to one `v=spf1 … -all`; delete stale verification TXT.
+
+When the failing rung is higher up the [./dns.mdx](./dns.mdx) §8 fix ladder (e.g. MX routing
+itself is broken, rung 1), this block leads with the cross-link: *"Fix mail routing first — zone
+tuning is premature until the MX set resolves."* Fix order within this family: dangling entries
+first (takeover window is open **now**), then critical delegation/apex, then warnings, then
+info hygiene.
+
+### 9.6 Block 5 — Run this check now
+
+Primary button: **`⟳ Run dns-health only`** — labeled *"re-runs 1 of 10 families · DNS queries
+only, ~2-5 s (scans the delegation, SOA, apex TXT, and ~14 dangling-sweep labels) · last ran
+<timestamp of the newest run that included this family>"*. POST
+`/api/audit/run/:domainId/check/dns/dns-health` ([./dns.mdx](./dns.mdx) §15.1); executes only the
+`infra.dns_health` checker; writes a **new** run file tagged `run.scope: dns.dns_health`; state
+machine idle → running → done-with-diff-flash → error exactly per §15.2. Family notes: the
+wildcard probe uses a **fresh nonce label** every run (a spot-check is never satisfied from
+cache); the SOA-serial monotonic compare diffs against the most recent earlier run **whose scope
+included this family**, so spot-check runs chain correctly into serial history; no `.pending`
+gating applies (this family is pure first-round DNS — the button is never probe-disabled).
+The category-scoped variant (`POST …/check/dns`, scope `dns`) and the full-audit Re-run remain
+distinct, labeled affordances.
+
+### 9.7 Clickable concepts — anchors this page owns, and where its own links go
+
+Anchors **owned here** (block 1 sub-headings) — the [./dns.mdx](./dns.mdx) §14.6 assignment for
+this family, plus family-internal terms; every inbound link preserves the viewed `:runId`:
+
+| Anchor | Term(s) that link to it from any surface |
+| --- | --- |
+| `#concept-ns` | NS, nameserver, NS RRset |
+| `#concept-delegation` | delegation, parent zone, registrar delegation, sub-delegation |
+| `#concept-lame-delegation` | lame delegation, lame NS |
+| `#concept-glue` | glue, glue record, in-bailiwick |
+| `#concept-soa` | SOA, serial, refresh/retry/expire/minimum, MNAME, RNAME |
+| `#concept-ttl` | TTL, negative TTL |
+| `#concept-wildcard` | wildcard, `*.example.com`, catch-all |
+| `#concept-dangling-cname` | dangling CNAME, dangling record, subdomain takeover, takeover fingerprint, unclaimed endpoint |
+| `#concept-apex-cname` | apex CNAME, CNAME at the apex, ALIAS/ANAME/flattening |
+| `#concept-txt-bloat` | TXT bloat, multiple SPF records, UDP fragmentation |
+
+Outbound links **from** this page: MX terms → `…/dns/check/mx-routing#concept-…`; DNSSEC terms →
+`…/dns/check/dnssec#concept-…`; SPF-mechanism terms (`include:`, `redirect=`, permerror) → the
+SPF family's own explainer in its category once it lands, until then the SPF problem drill-down
+(this page owns only the *dead-target* aspect); the narrative term "SubdoMailing" → the PS-11
+drill-down (stories go to drill-downs, mechanisms to explainers — §14.6 rule).
+
+### 9.8 References and states
+
+**References footer** (Standard / doc | Why it matters here | Link): RFC 1034/1035 (zone
+structure, delegation, glue, apex-CNAME rule), RFC 1912 (operational errors — lame delegation,
+SOA sanity), RFC 2181 (authority, NS/MX-not-CNAME, TTL rules), RFC 2182 (≥2 diverse
+secondaries), RIPE-203 (SOA value guidance), RFC 7766 (DNS over TCP), RFC 5936 (AXFR), RFC 7208
+§3.2 (single SPF record), RFC 4592 (wildcards), CISA AA25-093A (fast-flux TTL heuristic),
+Zonemaster + intoDNS + DNSViz (the §3 online validators), and the three category-common receiver
+rows (Gmail / Yahoo / Microsoft sender requirements). Plain anchors, new tab, never proxied.
+
+**States** (deltas from the [./dns.mdx](./dns.mdx) §14.5 shell):
+
+- *Loading* — blocks 1/3/4 static copy + references render immediately; block 2, the verdict
+  sentence, and the history strip skeleton-load.
+- *Never-audited (alias, no runs)* — blocks 1/3/4 render fully as reference material; block 2
+  shows the gray never-run cell + "Run an audit" CTA; block 5 stays active and creates the
+  domain's first (scoped) run.
+- *No own delegation* — when the run's only delegation finding is the `infra.ns_sanity` info
+  ("served by parent zone"), block 2 collapses the Delegation and SOA groups into that single
+  info row, the parsed table renders only the rows that apply (apex/TXT/wildcard/dangling), and
+  block 3 explains that the parent zone's health governs this name — with a link to audit the
+  parent domain if it is registered in the app.
+- *Transient-failure run* — when sub-checks emitted `Transient DNS lookup failure` infos, the
+  verdict sentence says "partially evaluated" and block 5 is highlighted as the retry path.
+- *Unknown `:runId` / unknown `:checkKey` / run-in-progress* — exactly the shell's states.
+
+## 10. Findings → problem drill-downs, and back
+
+### 10.1 The mapping
+
+Problem-state chips on block-2 rows (and the same mapping the category page uses) — detection by
+finding-id **prefix**, matching [./dns.mdx](./dns.mdx) §9:
+
+| Finding-id prefix (`infra.` elided) | Problem state | Drill-down route |
+| --- | --- | --- |
+| `ns_sanity`, `ns_lame`, `ns_parent_child`, `ns_all_answer`, `ns_no_cname`, `ns_expected_drift`, `ns_response_time`, `glue_records`, `recursion_open`, `zone_transfer` | PS-03 Fragile delegation | `/domains/:domainId/dns/PS-03` |
+| `soa_sanity`, `soa_serial`, `soa_mname_ns`, `soa_rname`, `ttl_sanity` | PS-04 SOA & TTL out of range | `/domains/:domainId/dns/PS-04` |
+| `wildcard`, `cname_at_apex`, `multi_txt_spf`, `txt_bloat` | PS-05 Wildcard & zone bleed | `/domains/:domainId/dns/PS-05` |
+| `dangling_cname`, `dangling_include`, `dangling_ns` | PS-11 Dangling records / takeover | `/domains/:domainId/dns/PS-11` |
+
+A state chip renders on a row only at warning/critical (matching the §9 detection rule); ok/info
+rows carry no chip. `infra.ns_expected_drift` and `infra.dangling_ns` are listed under PS-03 and
+PS-11 here as the code-true additions — keep `lib/dns-problems.ts` prefix lists in sync.
+
+### 10.2 Two-way linking
+
+Drill-downs tell the cross-family story; this explainer is the mechanism reference. From here →
+drill-down: the PS chip on each row, and block 4's "decommission checklist" (PS-11) /
+"two-provider pattern explained" (PS-03) deep links. From drill-down → here: every mechanism
+term in the PS-03/04/05/11 pages (lame delegation, glue, SOA serial, wildcard, dangling CNAME…)
+links to the §9.7 anchors, run-scoped to the run the drill-down was reached from (`?run=`
+preserved). Neither page duplicates the other's copy.
+
+## 11. History & trends — this family's fields
+
+The shell ([./dns.mdx](./dns.mdx) §16) renders the strip and glyph; this family contributes:
+
+- **Trend glyph** (▲/▼/=/·): worst severity of `infra.dns_health` findings vs the most recent
+  earlier run whose scope included this family; tooltip names the exact delta ("1 new critical:
+  `infra.dangling_cname.links.example.com` — target resolved in the 2026-06-30 run").
+- **Trended snapshot fields** (change marker under a cell even at unchanged severity):
+  `ns_count`, `network_count`, `parent_child_match`, SOA `serial`, observed `ttls` (the §16.3
+  baseline) **plus** the family additions: the `dangling[]` entry count and membership (the
+  headline regression — a takeover window opening), `apex_is_cname`, `wildcard.detected`,
+  `spf_record_count`, `txt_record_count`, and the NS host set itself (delegation drift is
+  trend-worthy even before it triggers `ns_expected_drift`).
+- **Sparklines** (≥2 data points): `ns_count`, `network_count`, `txt_record_count`, and apex TXT
+  octets (§12). The SOA serial renders as change markers, not a sparkline (its magnitude is
+  meaningless; its movement is everything).
+
+All render-time derivations from `GET /api/audit/runs` — no new endpoint, nothing persisted.
+
+## 12. Small additions to what the check records
+
+To let §9.3's raw panel and §11's trends render without re-querying, the checker's snapshot
+(`results["infra.dns_health"]`, §5 shape) gains four small fields — additive, snake_case, mirrored
+into the future `dns_health_results` columns:
+
+| New field | Shape | Powers |
+| --- | --- | --- |
+| `txt_total_octets` | `INT` — apex TXT set size in octets (already computed for the bloat check, today only in evidence text) | parsed-table row + the octets sparkline |
+| `scanned_labels` | `JSONB string[]` — the labels the dangling sweep actually resolved this run (base set + DKIM selectors + MX hosts + operator extras) | block 2's "14 labels scanned" line; explains scope changes across runs |
+| `cname_chains` | `JSONB [{ name, chain[], final, status: live\|dead\|loop }]` — every CNAME chain observed, live ones included | the raw panel's chain lines; trend detection when a chain re-points before it dangles |
+| `raw` | `JSONB { ns_lines[], soa_line, apex_txt_meta }` — zone-file-style render strings built at check time (apex TXT summarized as count/octets/spf-count, never full verification-token values) | the raw panel verbatim, no render-time reconstruction drift |
+
+No existing field changes shape; readers of the current snapshot are unaffected.
 
 <!--
 MAINTENANCE NOTES

@@ -30,6 +30,40 @@ export interface DnsProblemState {
 
 export const DNS_PROBLEM_STATES: DnsProblemState[] = [
   {
+    id: "PS-00",
+    title: "Plumbing healthy end to end",
+    hook: "The goal state — now the job is keeping it, because infrastructure rots quietly.",
+    severity: "ok",
+    // The healthy state matches by ABSENCE of warning/critical findings (pm/checks/dns.mdx §9),
+    // not by prefix — matchDnsProblemStates special-cases it.
+    findingPrefixes: [],
+    concept: [
+      "Routable redundant MX, FCrDNS closed on every IP in both address families, TLS on every MX, diverse honest nameservers, sane SOA/TTLs, a signed zone, and a locked mature registration — every hard receiver gate passes and nothing is eroding reputation.",
+      "Infrastructure rots quietly: certificates expire, providers change PTRs during migrations, secondaries fall out of sync, RRSIGs slide toward expiry, and registrar changes drift the parent NS set. The scheduled-run regression diff exists to catch exactly these silent regressions.",
+    ],
+    dataFields: [
+      "families.*.status = ok — every family chip green",
+      "mx_routing / reverse_dns / dns_health / dnssec snapshots all clean",
+    ],
+    commands: [
+      "dig MX <domain> +short   # the sanity glance",
+      "checkdmarc <domain> -f json   # the cross-validation oracle should agree",
+    ],
+    tools: [
+      "checkdmarc (brew install checkdmarc)",
+      "Zonemaster (zonemaster.net) and internet.nl for the public scorecards",
+    ],
+    metrics: [
+      "The scheduled-run regression diff — a lost PTR, an expired cert, NS drift, or RRSIG expiry are all silent regressions.",
+      "The registrar expiry countdown.",
+    ],
+    pathForward: [
+      "Keep registrar auto-renew and the transfer lock on.",
+      "Keep scheduled re-runs enabled — regressions are the real enemy now.",
+      "Watch RRSIG expiry and certificate renewals; verify DANE TLSA records after every cert rotation.",
+    ],
+  },
+  {
     id: "PS-01",
     title: "Broken inbound mail routing",
     hook: "MX records are the world's route to you — and to your bounces and DMARC reports.",

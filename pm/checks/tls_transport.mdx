@@ -360,6 +360,341 @@ No part of it is first-round.
     [./mta_sts.mdx](./mta_sts.mdx) and [./dane_tlsa.mdx](./dane_tlsa.mdx), and reuses the MX host
     list from [./mx_routing.mdx](./mx_routing.mdx).
 
+**Explainer-layer criteria (§9-§12):**
+
+13. `/domains/:domainId/runs/:runId/dns/check/tls-transport` renders the five locked blocks in
+    order (what it is / healthy this run / what it means / what you can do / run now) plus the
+    history strip and references footer; the newest alias
+    `/domains/:domainId/dns/check/tls-transport` rewrites to the canonical run URL; the static
+    `check` segment outranks the `:problemId` drill-down route ([./dns.mdx](./dns.mdx) §14.1).
+14. The page header uses the fixed row label **"STARTTLS & MX certificates"** and one-line meaning
+    from [./dns.mdx](./dns.mdx) §14.1's table, sourced from the single frontend mapping module —
+    never re-declared locally.
+15. In today's `.pending` state, block 2 renders the single `infra.tls_transport.pending` info
+    finding (title, detail, MX-host `evidence`), the parsed table shows **"not captured this
+    run"** for every probe field (never fabricated cert data), and block 5 reads **"Run probe
+    now"** when the probe is enableable or is disabled with the stated reason when it is not.
+16. All four required concept anchors (`#concept-starttls`, `#concept-mx-certificate`,
+    `#concept-san`, `#concept-tls-version`) exist as rendered headings in block 1, so every
+    underlined term on the run report, category page, and drill-downs lands on real content.
+17. In the probe-live state, block 2 renders one parsed section per MX host with the §9.3
+    field-by-field rows and per-field verdict chips, and the raw pane shows the linked
+    `tool_runs[]` output (openssl/certigo/swaks) with a copy button — sourced from the run file,
+    never re-queried at render time.
+18. Block 4's fix steps are state-conditional and copy-pasteable (exact MTA directives, certbot
+    commands, verification one-liners — never generic prose), and lead with the
+    [./mx_routing.mdx](./mx_routing.mdx) cross-link when the MX set itself is failing.
+19. `POST /api/audit/run/:domainId/check/dns/tls-transport` writes a **new** run file tagged
+    `run.scope: dns.tls_transport` (never mutating an existing run); on done the page navigates
+    to the new run's explainer with the ~2 s diff flash; a spot-check with the probe disabled
+    still yields `.pending` and block 5 said so before the click.
+20. The history strip shows ≤ 30 cells (only runs whose scope included this family), pending-era
+    cells render info-gray, and once the probe persists payloads with ≥ 2 data points a per-MX
+    days-to-expiry sparkline appears with §16.3 change markers.
+21. Every finding row on the explainer deep-links to the **PS-08** drill-down
+    (`/domains/:domainId/dns/PS-08`), and PS-08's mechanism terms link back to this page's
+    anchors — no navigational dead ends in either direction.
+22. Probe-era finding ids carry the `infra.tls_transport.` family prefix (§9.1 mapping) so
+    PS-08's `findingPrefixes` grouping, the family strip, and the scoped-run diff all keep
+    working without frontend changes.
+
+---
+
+## 9. The check-detail explainer page — `/domains/:domainId/runs/:runId/dns/check/tls-transport`
+
+The per-family reference page between the category page and the PS-08 drill-down story. The
+**shell** — header chrome, run context strip, the five locked blocks, the raw+parsed frame, the
+history strip, the references frame, and the loading/empty/error skeletons — is owned by
+[./dns.mdx](./dns.mdx) §14 and is **not** redefined here. This section owns everything
+tls-transport-specific that renders *inside* that shell.
+
+| Page | Route |
+| --- | --- |
+| This family's explainer, one specific run | `/domains/:domainId/runs/:runId/dns/check/tls-transport` |
+| Newest run (alias, rewrites to canonical) | `/domains/:domainId/dns/check/tls-transport` |
+
+Fixed identity (from [./dns.mdx](./dns.mdx) §14.1, single frontend mapping module — never
+re-derived): family key `tls_transport` · `:checkKey` **`tls-transport`** (= the backend check
+directory `code/packages/backend/src/modules/audit/checks/tls-transport/`) · checker id
+`infra.tls_transport` · row label **"STARTTLS & MX certificates"** · one-line meaning **"Is mail
+to this domain encrypted in transit with a valid, matching certificate?"**
+
+Reached from: the DNS category page's "Transport Security (TLS)" group header `details ›` and its
+compact ⟳; the run report's ten-family status list ([./dns.mdx](./dns.mdx) §17); the per-family
+history-strip cells; the PS-08 drill-down's mechanism-term links; and every underlined
+STARTTLS/MX-certificate/SAN/TLS-version term anywhere in the app (§9.2).
+
+### 9.1 Finding ids as actually emitted — code ↔ spec reconciliation
+
+**Today** the checker (`tls-transport.check.ts`) emits exactly **one** finding in all three of its
+paths: id `infra.tls_transport.pending`, `checkId: "infra"`, severity `info`, with a
+title/detail variant for *probe pending*, *MX lookup failed*, and *no MX records*, and (in the
+happy path) `evidence` = the comma-joined priority-sorted MX host list. The explainer must render
+truthfully from that — nothing else exists yet.
+
+**Probe era:** the §2 sub-check ids are re-homed under the family prefix so that PS-08's
+`findingPrefixes: ["tls_transport", …]` grouping, the family strip roll-up, and the scoped-run
+diff keep working unchanged. Per-host findings append the `.<mx-host>` suffix
+([./dns.mdx](./dns.mdx) §9 convention):
+
+| §2 legacy id | Canonical probe-era id |
+| --- | --- |
+| `infra.starttls_offered` | `infra.tls_transport.starttls_offered.<mx-host>` |
+| `infra.tls_cert_valid` | `infra.tls_transport.cert_valid.<mx-host>` |
+| `infra.tls_cert_expiry_soon` | `infra.tls_transport.cert_expiry_soon.<mx-host>` |
+| `infra.tls_cert_name_match` | `infra.tls_transport.cert_name_match.<mx-host>` |
+| `infra.tls_cert_chain` | `infra.tls_transport.cert_chain.<mx-host>` |
+| `infra.tls_version` | `infra.tls_transport.version.<mx-host>` |
+| `infra.tls_cipher` | `infra.tls_transport.cipher.<mx-host>` |
+| `infra.tls_downgrade` | `infra.tls_transport.downgrade.<mx-host>` |
+| `infra.tls_sni` | `infra.tls_transport.sni.<mx-host>` |
+| `infra.tls_ocsp` | `infra.tls_transport.ocsp.<mx-host>` |
+| `infra.tls_key_strength` | `infra.tls_transport.key_strength.<mx-host>` |
+| `infra.tls_sig_algorithm` | `infra.tls_transport.sig_algorithm.<mx-host>` |
+| `infra.tls_consistency` | `infra.tls_transport.consistency` (domain-level, no host suffix) |
+
+### 9.2 Block 1 — WHAT THIS IS: concept copy and anchors
+
+Two to four short paragraphs, plain language first (the §1 "SMTP is plaintext by default;
+STARTTLS upgrades it; receivers now demand it; this check audits *offered and healthy*, not
+*enforced*" narrative, compressed), rendering instantly and independent of run data. Every
+underlined term the app produces for this family lands on an anchored sub-heading here.
+
+**Required anchors** (targeted from other pages per the [./dns.mdx](./dns.mdx) §14.6 map — these
+four may never be renamed):
+
+| Anchor | Term | Copy (one paragraph each) |
+| --- | --- | --- |
+| `#concept-starttls` | STARTTLS | The RFC 3207 SMTP command that upgrades a plaintext port-25 session to TLS after `EHLO`. Opportunistic by default — offered, not required — which is why MTA-STS and DANE exist to make it downgrade-proof. |
+| `#concept-mx-certificate` | MX certificate | The TLS certificate the MX host presents during the STARTTLS handshake. To count as healthy it must be within its validity window, publicly trusted (full chain, not self-signed), and name the MX hostname. |
+| `#concept-san` | SAN | Subject Alternative Names — the DNS names a certificate is valid for. RFC 6125 matching: exact entry or left-most wildcard; CN is a fallback only. If the MX hostname is not in the SAN, verifying senders (MTA-STS `enforce`, DANE PKIX modes) treat the session as unauthenticated. |
+| `#concept-tls-version` | TLS version | The negotiated protocol. TLS 1.2 is the floor, 1.3 preferred; SSLv3/TLS 1.0/1.1 are deprecated and treated as critical here. |
+
+**Family-internal anchors** (linked only from within this page and the PS-08 drill-down; may
+grow without touching the §14.6 map): `#concept-opportunistic-tls` (offered vs enforced — the
+audit/enforce boundary with MTA-STS/DANE), `#concept-certificate-chain` (leaf + intermediates +
+root; the missing-intermediate failure), `#concept-expiry-runway` (the 14/30-day thresholds),
+`#concept-pfs-cipher` (forward secrecy, AEAD, the banned RC4/3DES/export/NULL suites),
+`#concept-sni` (per-hostname certs on shared MX platforms), `#concept-ocsp-stapling`
+(revocation signal, advisory here).
+
+The frontend already carries a first cut of this copy in
+`code/packages/frontend/src/lib/dns-check-explainers.ts` (`tls_transport` entry: `starttls` and
+`san` anchors); this section grows that entry to the full required + internal anchor set above —
+the `.ts` module is the render source, this spec is the copy source of truth.
+
+### 9.3 Block 2 — IS IT HEALTHY RIGHT NOW: sub-test rows and the raw + parsed breakdown
+
+Top of block: the family StatusCell + one verdict sentence, then every finding of this family
+from **this run** (same row anatomy as the category page; fail rows pre-expanded; each row's
+evidence links to its `tool_runs[]` entry). Then the raw + parsed frame, which has **two
+renderings**:
+
+**A. `.pending` rendering (today, and whenever the probe is off).** States plainly that the
+SMTP+TLS probe has not run and why (`pending_reason`), what the DNS side already shows (the MX
+host list this probe would connect to, reused from [./mx_routing.mdx](./mx_routing.mdx)), and
+the enable path (the §4 admin "TLS probe" toggle / `smtp25` opt-in). Never renders fabricated
+cert fields.
+
+- **Raw:** the pending finding's `detail` sentence and its `evidence` MX-host list, monospace,
+  copy button.
+- **Parsed:**
+
+| Field | Observed | Expected / sane | Verdict |
+| --- | --- | --- | --- |
+| SMTP+TLS probe | not run (`probe_not_enabled` \| `mx_lookup_failed` \| `no_mx` \| `port25_blocked`) | probe enabled, outbound :25 open | ⓘ |
+| MX hosts to probe | `mx1.example.com, mx2.example.com` (from evidence / mx-routing snapshot) | ≥ 1 resolvable MX | ✓ / ⓘ |
+| STARTTLS offered | **not captured this run** | `250-STARTTLS` on every MX | ⓘ |
+| Certificate | **not captured this run** | valid, trusted, SAN covers MX host | ⓘ |
+
+**B. Probe-live rendering (future round).** One parsed section **per MX host** (priority order,
+worst-severity host first on ties), sourced from the run file's persisted per-host payload
+(§9.7) and the linked `tool_runs[]` — never re-queried at render time ("now" is block 5's job).
+
+- **Raw** (tabbed per source, copy button each): the `openssl s_client -starttls smtp … -brief`
+  output, the `certigo connect --start-tls smtp --json` excerpt, and/or the `swaks` SMTP
+  transcript ([./dns.mdx](./dns.mdx) §3.1 owns the exact argv).
+- **Parsed**, per MX host — Field | Observed | Expected / sane | Verdict chip (✓/✗/⚠/ⓘ):
+
+| Field | Expected / sane range |
+| --- | --- |
+| STARTTLS offered | `250-STARTTLS` advertised |
+| Handshake | completed (else `probe_error` shown) |
+| TLS version | ≥ TLS 1.2, prefer 1.3 |
+| Cipher + PFS | ECDHE/DHE AEAD; no RC4/3DES/EXPORT/NULL |
+| Cert subject / issuer | publicly-trusted CA |
+| SAN list vs MX host | RFC 6125 match (exact or left-most wildcard) |
+| notBefore / notAfter / days-to-expiry | in window; > 30 days runway (⚠ < 14) |
+| Chain trusted / self-signed | chains to Mozilla root; not self-signed |
+| Key type / bits | RSA ≥ 2048 or EC ≥ 256 |
+| Signature algorithm | SHA-256+; no SHA-1/MD5 |
+| OCSP status | `good` (staple present is a bonus; `revoked` = ✗) |
+| SNI behavior | correct cert with SNI; sane default without |
+
+A field the run file did not capture renders as **"not captured this run"** — the breakdown never
+invents data ([./dns.mdx](./dns.mdx) §14.3 rule).
+
+### 9.4 Block 3 — WHAT IT MEANS: state-conditional impact copy
+
+| Observed state | Copy the block leads with |
+| --- | --- |
+| `.pending` (probe off) | "Nothing is asserted either way yet: this run did not open a connection to your MX hosts. The DNS side (MX set) is audited by MX routing; encryption in transit is unmeasured until the probe runs." |
+| All ok | "Mail to this domain is encrypted in transit with a trustworthy certificate. This is the *offered* half — to make it downgrade-proof, pair it with MTA-STS `enforce` or DANE." (links to those explainers) |
+| Warning (expiry soon / SNI / downgrade / consistency) | "Nothing is being refused yet, but the runway is short: a cert that expires (or one lagging MX host) flips this to hard bounces at TLS-enforcing receivers with no other warning." |
+| Critical (no STARTTLS / expired / mismatched / untrusted / legacy protocol) | "Receivers that require TLS — Gmail, Yahoo, Microsoft per their bulk-sender rules, and any sender honoring your MTA-STS/DANE policy — will defer then bounce mail to this domain; everyone else delivers your mail readable on the wire." |
+
+Always closes with the audit-vs-enforce boundary sentence (§1) and *who enforces it*: the
+Gmail/Yahoo 2024 bulk-sender TLS requirements and Microsoft's 2025 requirements
+([./dns.mdx](./dns.mdx) §1 enforcement floor).
+
+### 9.5 Block 4 — WHAT YOU CAN DO: fix recipes (copy buttons, never prose)
+
+Rendered conditionally on the worst open finding; each numbered step carries a copy button with
+the exact text. When [./mx_routing.mdx](./mx_routing.mdx) itself is failing, the block **leads
+with the ladder cross-link**: "Fix your MX records first — TLS advice is premature until mail can
+route." When `.pending`, the block leads with the enable path (settings → TLS probe toggle) and
+the self-serve verification commands below so the user can check by hand today.
+
+| Failing finding family | Copy-paste fix steps |
+| --- | --- |
+| `starttls_offered` | Postfix: `smtpd_tls_security_level = may` + `smtpd_tls_chain_files = /etc/ssl/mx.pem` · Exim: `tls_advertise_hosts = *` + `tls_certificate`/`tls_privatekey` · then `systemctl reload postfix` |
+| `cert_valid` / `cert_expiry_soon` | `certbot certonly --standalone -d mx.<domain> --deploy-hook "systemctl reload postfix"` — automate so renewal happens ≥ 30 days out |
+| `cert_name_match` | Reissue with the exact MX hostname in the SAN: `certbot certonly -d mx.<domain>` — do not rely on the provider's default platform cert name |
+| `cert_chain` | Install leaf **+ intermediates** in one file (`fullchain.pem`, not `cert.pem`); replace self-signed certs with a CA-issued cert |
+| `version` / `cipher` | Postfix: `smtpd_tls_protocols = >=TLSv1.2` + `smtpd_tls_mandatory_ciphers = high`; drop RC4/3DES/export suites |
+| `downgrade` / `sni` / `consistency` | Fix the handshake error in the MTA log; configure per-hostname (SNI) certs; bring every MX host to parity — then pin with MTA-STS/DANE (cross-links) |
+| verification (always last step) | `openssl s_client -starttls smtp -connect <mx>:25 -servername <mx> -brief` and `certigo connect --start-tls smtp --json <mx>:25` — or click block 5 |
+
+Hosted-mail note: on Google Workspace / Microsoft 365 / etc. the MX cert is the provider's to
+renew; the fix step becomes "confirm your MX targets are the provider's canonical hostnames"
+(cross-link to [./mx_routing.mdx](./mx_routing.mdx)) rather than a certbot command.
+
+### 9.6 Block 5 — RUN THIS CHECK NOW: the family-scoped spot-check
+
+Endpoint (shell + mechanics owned by [./dns.mdx](./dns.mdx) §15): 
+`POST /api/audit/run/:domainId/check/dns/tls-transport` → a **new** run file tagged
+`run.scope: dns.tls_transport`, containing only this family's findings, snapshot, and
+`tool_runs[]`. Never mutates an existing run. 404 unknown domain/checkKey; 409 when a run for
+the domain is already in flight.
+
+Button states (the family-specific gating on top of the §15.2 idle→running→done→error machine):
+
+| Condition | Button |
+| --- | --- |
+| Probe enabled, no run in flight | **`⟳ Run tls-transport only`** — sublabel "1 of 10 families · live SMTP+TLS handshake to each MX host · ~5-30 s · last ran <timestamp>" |
+| Probe disabled but enableable (toggle off) | **`Run probe now`** — first hop is the §4 TLS-probe settings toggle; the sublabel warns "with the probe off this yields the same `.pending` result" *before* the click |
+| Probe not enableable (outbound :25 confirmed blocked) | Disabled, reason inline: "outbound port 25 is blocked from this host" |
+| Any run for this domain in flight | Disabled + "an audit is already running" (`useScanProgress`) |
+
+On **done**: navigate to the new scoped run's explainer (`:runId` swaps) with the ~2 s diff
+flash — any sub-test whose severity changed vs the previously viewed run shows a "was ⚠ · now ✓"
+chip. Timeouts and courtesy caps are §3's: 10 s connect + one retry, host concurrency ≤ 4, one
+handshake per host per run.
+
+### 9.7 What the run file must record (small checker additions this spec proposes)
+
+So the parsed table, history strip, and trend markers never string-parse `detail` text:
+
+1. **Now (pending era):** persist a structured snapshot under the run YAML's
+   `dns_infra.tls_transport` key ([./dns.mdx](./dns.mdx) §5 / [../storage.mdx](../storage.mdx)
+   own the file shape):
+
+   ```yaml
+   tls_transport:
+     status: info
+     tests: 1
+     snapshot:
+       probe_available: false
+       pending_reason: probe_not_enabled   # | mx_lookup_failed | no_mx | port25_blocked
+       mx_hosts: [mx1.example.com, mx2.example.com]   # priority-sorted, from resolveMx
+   ```
+
+   This is a two-field addition to the existing checker (it already computes `hosts` and the
+   reason branch) — no behavior change to its findings.
+
+2. **Probe era:** the per-host objects of §5 (`checkData.tls[]` fields: `mxHost`, `mxIp`,
+   `starttlsOffered`, `handshakeOk`, `tlsVersion`, `cipher`, `forwardSecrecy`, `certSubject`,
+   `certIssuer`, `certSans`, `certNotBefore`, `certNotAfter`, `certNameMatch`, `chainTrusted`,
+   `selfSigned`, `keyType`, `keyBits`, `sigAlgorithm`, `ocspStatus`, `probeError`, `checkedAt`)
+   persist as `snapshot.hosts[]` (snake_case per the run-YAML convention) — one object per MX
+   host, the direct source for §9.3-B and the §10 trends.
+
+---
+
+## 10. History & trends for this family
+
+All render-time derivations from `GET /api/audit/runs` — no new endpoint, no persisted
+aggregates ([./dns.mdx](./dns.mdx) §16 owns the machinery).
+
+- **History strip** (explainer footer): ≤ 30 cells, oldest → newest, one per run whose scope
+  included `tls_transport`; cell color = the family's worst severity that run; viewed run
+  ringed; scoped runs dotted-underlined. **Pending-era runs render info-gray** — a long gray
+  strip is itself the message "this has never actually been probed."
+- **Trend glyph** (▲/▼/=/·) on the family's group header and the run report row: compares
+  against the most recent earlier run whose scope included this family. In the pending era it is
+  always `=` (info vs info) — the glyph only becomes meaningful once the probe ships.
+- **Trended snapshot fields** with §16.3 change markers, once `snapshot.hosts[]` persists:
+  per-MX **days-to-expiry** (the headline — renders as a small sparkline under the strip when
+  ≥ 2 data points, so the user can watch the runway shrink), `starttls_offered`, `tls_version`,
+  `chain_trusted`, `cert_name_match`, and the cert `issuer` (an issuer change marks a cert
+  rotation even when severity never moved). A host disappearing from `snapshot.hosts[]` is a
+  change marker too (MX set drift — cross-marked with mx-routing's trend).
+- The §6 regression story (expiry crossing 30 → 14 days, a chain that stopped validating, a
+  host that stopped offering STARTTLS) is exactly what these markers make visible between the
+  scheduler's diff notifications.
+
+---
+
+## 11. Navigation map — where every click on this surface goes
+
+**Findings → problem drill-down.** Every finding this check emits (today
+`infra.tls_transport.pending`; probe-era the §9.1 ids) belongs to **PS-08 "Encryption-in-transit
+gaps"** ([./dns.mdx](./dns.mdx) §9, `findingPrefixes: ["tls_transport", "mta_sts", "tls_rpt"]`).
+Finding rows on the category page, the run report, and this explainer deep-link to
+`/domains/:domainId/dns/PS-08` (run-preserving query param). The drill-down tells the
+cross-family *story* (STARTTLS + MTA-STS + TLS-RPT together); this explainer is the per-family
+*reference* — they link to each other, never duplicate ([./dns.mdx](./dns.mdx) §14). One
+exception: probe-era `infra.tls_transport.consistency` also cross-references PS-01's MX-set
+table when the inconsistency is caused by MX drift.
+
+**Clickable sub-concepts on this page → where they navigate:**
+
+| Term on this page | Destination |
+| --- | --- |
+| STARTTLS, MX certificate, SAN, TLS version | this page's own `#concept-<term>` anchors (§9.2) |
+| MTA-STS, `mode: enforce` | `…/dns/check/mta-sts#concept-mode-enforce` ([./mta_sts.mdx](./mta_sts.mdx)) |
+| DANE, TLSA, "3 1 1" | `…/dns/check/dane-tlsa#concept-…` ([./dane_tlsa.mdx](./dane_tlsa.mdx)) |
+| TLS-RPT, reporting mailbox | `…/dns/check/tls-rpt#concept-…` ([./tls_rpt.mdx](./tls_rpt.mdx)) |
+| MX record, MX priority (host names in block 2) | `…/dns/check/mx-routing#concept-mx` ([./mx_routing.mdx](./mx_routing.mdx)) |
+| PTR / reverse DNS (when a probe error implicates FCrDNS) | `…/dns/check/reverse-dns#concept-fcrdns` |
+| "Encryption in transit" (the narrative phrase) | the PS-08 drill-down (stories → drill-downs, mechanisms → explainers) |
+| each MX host row | expands in place; its `tool_runs` chip opens the raw evidence pane |
+
+All explainer-to-explainer links are **run-scoped** — they preserve the `:runId` being viewed.
+
+---
+
+## 12. Loading / empty / error / pending states (family specifics)
+
+The shell's states ([./dns.mdx](./dns.mdx) §14.5) apply; tls-transport specifics:
+
+- **Loading:** blocks 1/3-static and references render immediately; block 2, block 4's
+  conditional lead-in, and the history strip skeleton-load (one skeleton per known MX host when
+  the mx-routing snapshot is already cached).
+- **Never-audited domain (alias route):** blocks 1/3/4 render fully as reference material;
+  block 2 shows the gray never-run cell + "Run an audit"; block 5 stays active and creates the
+  domain's first (scoped) run — which, probe off, is a `.pending` run and says so first.
+- **`.pending` (the named §14.5 case — this family is its primary citizen):** block 2 uses the
+  §9.3-A rendering; block 5 uses the "Run probe now" / disabled-with-reason gating of §9.6.
+  Never a false critical, never fabricated cert fields.
+- **Unknown `:runId` / unknown `:checkKey`:** shell-owned ("run no longer exists" → newest run's
+  tls-transport explainer; "no such check" → the ten valid keys).
+- **Run in progress:** the page keeps showing the viewed run; skeletons only inside block 2 as
+  this family's checker finishes.
+- **Probe ran but a host was unreachable:** that host's parsed section renders with
+  `probe_error` as the raw evidence and ⓘ verdicts (mirrors §3's greylisting/blocked-port edge
+  cases) — unreachable ≠ failing.
+
 <!--
   Maintenance notes:
   - Keep RFC refs current: STARTTLS RFC 3207, SMTP RFC 5321, RFC 6125 (name matching). Cross-check

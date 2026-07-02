@@ -105,6 +105,15 @@ export class AuditController {
     return this.audit.runBlacklistsForDomain(domainId, "manual")
   }
 
+  @Post("run/:domainId/checks/dkim")
+  @ApiOperation({
+    summary:
+      "Category-scoped re-run: execute only the DKIM checker and persist a new run whose other five categories are carried forward unchanged (pm/checks/dkim.mdx §7.7 — 'Run DKIM now')",
+  })
+  runDkim(@Param("domainId") domainId: string): Promise<AuditResult> {
+    return this.audit.runDkimForDomain(domainId, "manual")
+  }
+
   @Post("spot-check/:domainId/:checkKey")
   @ApiOperation({
     summary:

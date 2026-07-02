@@ -193,6 +193,12 @@ export interface CheckContext {
   sendingIps: string[]
   /** sha256(decoded p=) per selector across the OTHER monitored domains — powers dkim.duplicate_key. */
   peerDkimKeys?: PeerDkimKey[]
+  /**
+   * Every monitored domain (id + name) — powers the report-email corpus test's per-domain
+   * attribution (pm/emails.mdx §13.1): each report names its own policy domain, and the scanner
+   * routes it to the matching monitored domain's store, never to the domain being audited.
+   */
+  monitoredDomains?: { id: string; name: string }[]
   /** The previous audit's structured results for this domain — powers dkim.rotation first-seen carry-forward. */
   previousResults?: Record<string, unknown>
   /** Per-domain ARC / forwarding config — powers arc.applicable / arc.forwarding_risk / arc.selector_dns. */

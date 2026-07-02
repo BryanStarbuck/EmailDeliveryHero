@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "./axios"
-import type { AuditResult, DnsSpotCheckResult } from "./types"
+import type { AuditResult, DnsSpotCheckResult, GeneratedTlsaRecord } from "./types"
 
 const RESULTS_KEY = ["audit", "results"] as const
 
@@ -70,6 +70,18 @@ export function useDnsSpotCheck() {
   return useMutation({
     mutationFn: async ({ domainId, checkKey }: { domainId: string; checkKey: string }) =>
       (await api.post<DnsSpotCheckResult>(`/audit/spot-check/${domainId}/${checkKey}`)).data,
+  })
+}
+
+/**
+ * The DANE subsection's one-click TLSA generator (pm/checks/dane_tlsa.mdx §4): paste a PEM
+ * certificate, get back the exact `3 1 1` record to publish at `_25._tcp.<mx-host>`. Pure
+ * computation on the backend — nothing persisted, no queries to invalidate.
+ */
+export function useGenerateTlsaRecord() {
+  return useMutation({
+    mutationFn: async (input: { mxHost: string; pem: string; ttl?: number }) =>
+      (await api.post<GeneratedTlsaRecord>("/audit/tlsa-record", input)).data,
   })
 }
 

@@ -236,6 +236,260 @@ When the store moves to PostgreSQL, this is a single-module change: the store ad
 23. Every warning/critical finding row on the explainer and category page deep-links to the PS-01 drill-down `/domains/:domainId/dns/PS-01?run=<runId>` preserving the viewed run; every resolved IP in the topology table links to the same run's reverse-dns explainer.
 24. The references footer renders the §9.8 rows (RFC 5321/7505/2181/1918+6598, provider MX docs, validators) plus the three category-common receiver-requirement rows, as plain external anchors opening a new tab.
 
+## 9. Check-detail explainer page — `/domains/:domainId/runs/:runId/dns/check/mx-routing`
+
+The per-family reference page for MX routing, per the shell contract in
+[./dns.mdx](./dns.mdx) §14: **that spec owns the shell** (routes, run strip, the five-block
+order, the raw+parsed frame, the history strip and references frames, the generic
+loading/empty/error states); **this section owns the interior copy** — the concept text and
+anchors, the parsed-field rows, the conditional what-it-means copy, the per-finding fix
+recipes, and the references rows. Nothing here reorders or removes the five blocks.
+
+### 9.1 Route, entry points, identity
+
+- **Canonical:** `/domains/:domainId/runs/:runId/dns/check/mx-routing` — describes **that run**.
+- **Newest alias:** `/domains/:domainId/dns/check/mx-routing` — rewrites itself to the newest
+  run's canonical URL ([./dns.mdx](./dns.mdx) §14.1).
+- **Identity mapping (1:1:1, fixed):** `:checkKey` `mx-routing` ↔ family key `mx_routing` ↔
+  checker id `infra.mx_routing` ↔ backend directory
+  `code/packages/backend/src/modules/audit/checks/mx-routing/`. Row label: **MX routing**;
+  one-line meaning: *"Can the world route mail to this domain — and bounces and reports back
+  to you?"* ([./dns.mdx](./dns.mdx) §14.1 — the single source; never re-derive).
+- **Reached from:** the DNS category page's family strip and the "MX Records & Mail Routing"
+  group header `details ›`; the run report's ten-family list ([./dns.mdx](./dns.mdx) §17);
+  every underlined MX concept term product-wide (§9.2 anchors); the PS-01 drill-down's
+  mechanism cross-links; history-strip cells of this page for other runs.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Back to DNS & Infrastructure     MX routing                  [⟳ Run now]   │
+│ example.com · [ red: 2 of 9 fail ]                                           │
+│  ‹ prev run     Run 2026-07-01 09:14  [ newest ]                 next run ›  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 1 WHAT THIS IS                                                               │
+│   MX records are how the world routes mail to your domain — and how bounces, │
+│   FBL complaints, and DMARC reports route back to you… (#concept-mx,         │
+│   #concept-null-mx, #concept-implicit-mx, #concept-mx-priority,              │
+│   #concept-backup-mx, #concept-dangling-mx, #concept-expected-mx)            │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 2 IS IT HEALTHY RIGHT NOW?                     [ ✗ critical — 2 of 9 fail ]  │
+│   ✗ infra.mx_resolve.mail2.example.com  Dangling MX: does not resolve   [v]  │
+│   ▲ infra.mx_redundancy   Both live MX hosts share one /24 network      [v]  │
+│   ✓ infra.mx_present      example.com publishes 2 MX host(s)            [>]  │
+│   RAW   10 mail.example.com. → 203.0.113.10 · 20 mail2.example.com. →        │
+│         (no address)                        (doggo MX · 143 ms)       [copy] │
+│   PARSED  Pref  Target              CNAME?  IPs            Public  Verdict   │
+│            10   mail.example.com.   no      203.0.113.10   ✓        ✓        │
+│            20   mail2.example.com.  no      — (dangling)   —        ✗        │
+│   SUMMARY mx_count 2 · distinct_priorities 2 · redundant ✗ · networks 1 ·    │
+│           rrset_ttl not captured this run · receives_mail true               │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 3 WHAT IT MEANS   Half your inbound capacity is a black hole: senders that   │
+│   pick MX 20 queue for days, then bounce. Bounces & DMARC reports are lost.  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 4 WHAT YOU CAN DO  1. Publish A for mail2.example.com — or delete the MX 20  │
+│   line: "example.com. IN MX 20 mail2.example.com."                    [copy] │
+│                    2. Add a second MX on a different network …        [copy] │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 5 RUN THIS CHECK NOW  [⟳ Run mx-routing only]  1 of 10 families; DNS queries │
+│   only, ~1–2 s · last ran 2026-07-01 09:14                                   │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ HISTORY    ▢▢▢▢■▢▢●  8 runs · click a cell to open that run                  │
+│ REFERENCES RFC 5321 §5.1 · RFC 7505 · RFC 2181 §10.3 · Gmail guidelines · …  │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 9.2 Block 1 — What this is (concept copy + anchors)
+
+Two to four short paragraphs, plain language first, standards second — the §1 narrative
+compressed: MX = the routing table for your inbound mail *and* the return path for bounces,
+FBL complaints, and DMARC aggregate reports; receivers also verify the `From:` domain has a
+valid MX or A before accepting mail, so a broken MX set damages *outbound* deliverability
+too. Static content — renders instantly, independent of run data.
+
+Every underlined MX term product-wide anchors into this block. Anchor slugs are **fixed**
+(the first three already exist in `lib/dns-check-explainers.ts` — keep them stable):
+
+| Term ([./dns.mdx](./dns.mdx) §14.6 map) | Anchor | Section copy covers |
+|---|---|---|
+| MX record | `#concept-mx` | The `(preference, exchange)` tuple; lower tried first; the target must be an FQDN with its own A/AAAA — never a CNAME (RFC 2181 §10.3), never an IP literal |
+| null MX | `#concept-null-mx` | RFC 7505: exactly one `MX 0 "."`, only on no-mail domains; makes senders fail fast instead of falling back to the A record; pairs with `v=spf1 -all` + DMARC `p=reject` |
+| implicit MX | `#concept-implicit-mx` | RFC 5321 fallback to the apex A record when no MX exists — works, but fragile and a "mail setup never finished" signal |
+| MX priority | `#concept-mx-priority` | Preference ordering, equal-value load-balancing, why all-identical priorities defeat primary/backup intent; tiered 10/20/30 convention |
+| backup MX | `#concept-backup-mx` | Higher-preference hosts as failover; why a backup on the same /24 or ASN is not redundancy; why an unmaintained backup becomes the spammers' front door (→ future `infra.backup_mx_hygiene`) |
+| dangling MX *(family extra)* | `#concept-dangling-mx` | A target with no A/AAAA: mail queues behind the sender's retry window (hours–5 days), then bounces; how decommissions and typos cause it |
+| expected-MX allow-list *(family extra)* | `#concept-expected-mx` | The §4 declared-intent allow-list; drift as a change-detection and DNS-compromise tripwire (`infra.mx_expected_drift`) |
+
+### 9.3 Block 2 — Is it healthy right now? (this run's evidence)
+
+Top: the family StatusCell + one verdict sentence ("2 of 9 MX sub-tests fail — inbound
+routing is broken"). Then **every finding this family emitted in this run** — ok rows
+included — fail-first, fail rows pre-expanded; row anatomy identical to the category page
+(severity badge, title, `detail`, `remediation` + copy, `evidence` linking to the matching
+`tool_runs[]` entry). Then the raw + parsed breakdown ([./dns.mdx](./dns.mdx) §14.3 frame):
+
+**Raw.** The MX RRset exactly as observed plus the per-target answer lines
+(`A`/`AAAA`/`CNAME` answers, `NXDOMAIN`/empty markers), monospace, one copy button — sourced
+from the run's `results["infra.mx_routing"]` snapshot and the linked `tool_runs[]`
+(doggo/dig MX cross-check when present). **Never re-queried at render time** — this page
+describes the run being viewed; "now" is block 5. *Small schema addition (proposed):* persist
+`hosts[].exchange_raw` — the exchange string exactly as the resolver returned it,
+pre-normalization — so the raw pane and the `infra.mx_trailing_dot` evidence can show the
+verbatim RRset without depending on a tool run; today the pane reconstructs
+`<priority> <host>.` from the normalized snapshot and falls back to `tool_runs[].parsed`.
+
+**Parsed — topology table**, one row per `hosts[]` entry, per-field verdict chips:
+
+| Column | Observed (snapshot field) | Expected / sane | Verdict source |
+|---|---|---|---|
+| Pref | `priority` | 0–65535, distinct across hosts, tiered | `infra.mx_priority` |
+| Target | `host` (+ `cname_target` when set) | FQDN, not a CNAME, not a relative-name artifact | `infra.mx_not_cname.<host>`, `infra.mx_trailing_dot.<host>` |
+| CNAME? | `is_cname` | `false` | `infra.mx_not_cname.<host>` |
+| Resolved IPs | `resolved_ips` (v4 + v6) | ≥1 address; both families consistent | `infra.mx_resolve.<host>`, `infra.mx_a_consistency.<host>` |
+| Public? | `is_public` / `non_public[]` (ip + class) | all `public` — no private/loopback/link-local/CGNAT/unspecified | `infra.mx_public_ip.<host>`, `infra.mx_localhost.<host>` |
+| Network | derived /24 (v4) / /48 (v6) prefix | ≥2 distinct across the host set | `infra.mx_redundancy` |
+| Reach (25) | `reachable` (null today) | 220 banner | "not captured this run" until the probe round (`infra.mx_reachable`) |
+
+**Parsed — summary table**, field-by-field from the `summary` object (`mx_check_results`
+row, §5): `mx_count` (expected 1–10, 2–4 typical), `has_null_mx` (`true` only correct on a
+declared no-mail domain), `distinct_priorities` (≥2 when multiple hosts),
+`redundant` (`true`), `asn_diverse` (**"not captured this run"** — future ASN feed;
+first-round proxy is `redundancy.network_count`), `implicit_a_fallback` (`false`),
+`rrset_ttl` (**"not captured this run"** — needs `dig`, future), `receives_mail` (the §4
+declared intent this run judged against), `worst_severity`, `checked_at`. A field the run
+file did not capture always renders as "not captured this run" — the breakdown never invents
+data.
+
+### 9.4 Block 3 — What it means (conditional impact copy)
+
+Copy is selected by the worst observed state, most-severe first; each bullet is the full
+plain-language paragraph the page renders:
+
+| Observed state (finding prefixes) | Impact copy renders |
+|---|---|
+| `mx_present` critical / `mx_resolve` / `mx_localhost` / `mx_public_ip` | **Rejected now.** Inbound mail to this domain queues on every sender and bounces after their retry window (typically 4 hours–5 days of silence first). You are also invisibly losing bounces, FBL complaints, and DMARC reports — the feedback channels every other fix depends on. Gmail additionally requires the `From:` domain to have a valid MX or A record, so outbound acceptance suffers too. |
+| `mx_not_cname` critical | **Partially rejected now.** Strict receivers (per RFC 5321 §5.1 / RFC 2181 §10.3) refuse to follow an MX that points at a CNAME — some of your inbound mail is bouncing even though "it works" from providers that tolerate it. |
+| `mx_null` warning (null on a mail-receiving domain, malformed null, or mixed null+real) | **All inbound refused by design-error.** A null MX tells every sender "this domain accepts no mail" — replies and bounces are being permanently rejected with `556`. If that is not intended, this is the single highest-impact record on the page. |
+| `mx_redundancy` / `mx_priority` / `mx_a_consistency` / `mx_trailing_dot` / `mx_target_count` warning | **Fragile — reputation eroding.** Mail flows today, but one host/network outage defers everything inbound; a broken AAAA silently fails IPv6-preferring senders (Gmail); odd priorities and oversized RRsets look misoperated to receiver heuristics. |
+| `mx_expected_drift` warning | **Unplanned change.** The published MX differs from what you declared. If you didn't make this change, treat it as a possible DNS compromise — MX hijack is a mail-interception primitive. |
+| `mx_matches_a` / `mx_dup_targets` / `mx_ttl` info | **Works, but unfinished.** Implicit-A routing and duplicate lines deliver mail today; they read as an incomplete setup and give you no failover story. |
+| all ok (including correct null MX) | **Healthy — keep it that way.** Routing rots quietly: hosts get decommissioned, providers renumber, zones get migrated. The scheduled diff (§6) plus the §9.7 change markers are what catch it; set the expected-MX allow-list to make drift explicit. |
+
+Who enforces what: Gmail (valid MX/A on the From: domain; IPv6-path behavior), the RFC 5321
+retry semantics that turn a dangling MX into days of silent delay, and RFC 7505's `556`
+fail-fast — named inline with links into §9.8.
+
+### 9.5 Block 4 — What you can do (per-finding fix recipes)
+
+Numbered steps per finding, each step's copy button carrying a complete publishable payload —
+never prose. MX routing is **rung 1** of the category fix ladder ([./dns.mdx](./dns.mdx) §8):
+no upstream cross-link ever preempts it; sibling explainers (reverse-dns, tls-transport,
+dane-tlsa) lead with "fix your MX first" links **back to here** when this family is red.
+
+| Finding | Fix recipe (each step = one copy payload) |
+|---|---|
+| `infra.mx_present` (critical) | 1. `example.com. IN MX 10 mail.example.com.` + `mail.example.com. IN A 203.0.113.10` 2. Provider variants: Google Workspace `example.com. IN MX 1 smtp.google.com.`; Microsoft 365 `example.com. IN MX 0 example-com.mail.protection.outlook.com.` (tenant-specific value from the M365 admin DNS page) |
+| `infra.mx_present` (info, sender-only) | `example.com. IN MX 0 "."` — plus the no-mail deny set cross-linked: SPF `v=spf1 -all`, DMARC `p=reject` |
+| `infra.mx_resolve.<host>` | Either `mail2.example.com. IN A <public-ip>` or delete the dangling line `example.com. IN MX 20 mail2.example.com.` |
+| `infra.mx_not_cname.<host>` | Flatten: `mail.example.com. IN A 203.0.113.10` (copy the CNAME chain's final address) and keep the MX pointing at that name |
+| `infra.mx_public_ip.<host>` / `infra.mx_localhost.<host>` | `mail.example.com. IN A <public-ip>` replacing the RFC1918/loopback address; firewall/NAT note for exposing the real listener |
+| `infra.mx_priority` | Replace equal preferences: `example.com. IN MX 10 mail.example.com.` + `example.com. IN MX 20 mail2.example.com.` |
+| `infra.mx_redundancy` | `example.com. IN MX 20 mail2.otherprovider.net.` — with the guidance line "different provider **and** network; a second host on the same /24 doesn't count" |
+| `infra.mx_a_consistency.<host>` | Fix or delete the broken AAAA: `mail.example.com. IN AAAA <public-v6>` / delete-AAAA instruction if IPv6 SMTP isn't run |
+| `infra.mx_null` (warning states) | Replace with a real host (`IN MX 10 mail.example.com.`), or remove the extra `MX 0 "."` line (mixed case), or — if genuinely send-only — flip **"This domain receives mail"** off in Mail-routing settings (deep link, §4) |
+| `infra.mx_trailing_dot.<host>` | Republish with the trailing dot: `example.com. IN MX 10 mail.example.com.` (zone-file origin note) |
+| `infra.mx_dup_targets` / `infra.mx_target_count` | The exact `IN MX` line(s) to delete, enumerated from the snapshot |
+| `infra.mx_expected_drift` | Both payloads: the missing `IN MX` line(s) to publish and the unexpected line(s) to delete — plus "update the allow-list" (deep link into Mail-routing settings) if intentional |
+| `infra.mx_matches_a` | `example.com. IN MX 10 mail.example.com.` to replace implicit-A routing |
+| future infos (`mx_reachable`, `mx_banner`, `mx_greylash`, `backup_mx_hygiene`, `mx_ttl`) | No action; one line each on what the probe round will verify, and the `skipSmtpProbe` opt-out pointer |
+
+### 9.6 Block 5 — Run this check now
+
+The family-scoped spot-check per [./dns.mdx](./dns.mdx) §15: button label **"⟳ Run mx-routing
+only"**, caption "1 of 10 families · DNS queries only, ~1–2 s · last ran <timestamp>".
+`POST /api/audit/run/:domainId/check/dns/mx-routing` → a **new** run file tagged
+`run.scope = dns.mx_routing`, containing only this family's `tests[]`, snapshot, and
+`tool_runs[]`. State machine (idle → running → done-with-diff-flash → error) and the
+merge-per-category dashboard roll-up are exactly §15.2/§15.3 — no family deviation. Because
+mx-routing is pure DNS (no port-25 probe in the first round), the button is **never**
+`.pending`-disabled; it works on a never-audited domain and creates its first (scoped) run.
+The diff flash is the point: publish the missing A record, click, watch
+`infra.mx_resolve.mail2.example.com` flip "was ✗ · now ✓".
+
+### 9.7 History strip & trended fields
+
+The footer strip per [./dns.mdx](./dns.mdx) §16.2 (≤30 cells, oldest → newest, runs whose
+scope included mx-routing; viewed run ringed; scoped runs dotted; click swaps `:runId`).
+Family-specific trend content (§16.3): change markers fire when the **MX target set**,
+`redundancy.host_count`, or `redundancy.network_count` changed in a run even at unchanged
+severity — the silent-provider-migration / MX-hijack detector. `host_count` and
+`network_count` render as sparkline rows under the strip at ≥2 data points. The §6
+regression rules (ok→dangling, redundant→single-host = new problem) are the same diff,
+surfaced as the ▲ glyph on every family-row surface (§16.1).
+
+### 9.8 References (footer rows this spec owns)
+
+| Standard / doc | Why it matters here |
+|---|---|
+| RFC 5321 §5.1 | MX semantics, implicit-MX fallback, target-must-resolve-to-address rule |
+| RFC 7505 | Null MX — declaring a no-mail domain, `556` fail-fast |
+| RFC 2181 §10.3 | An MX target must not be a CNAME |
+| RFC 1035 | MX record wire format, preference field |
+| RFC 1918 / RFC 6598 / RFC 4193 | The private/CGNAT/unique-local ranges behind `infra.mx_public_ip` |
+| Google Workspace MX setup doc | The `smtp.google.com` (and legacy aspmx) values used in fix recipes |
+| Microsoft 365 DNS records doc | The `*.mail.protection.outlook.com` tenant MX value |
+| intoDNS · MXToolbox MX lookup | Independent online cross-checks of the same topology |
+
+Plus the three category-common rows on every explainer (Gmail sender guidelines, Yahoo
+sender requirements, Microsoft/Outlook requirements — [./dns.mdx](./dns.mdx) §14.4). Plain
+anchors, new tab, never proxied.
+
+### 9.9 Loading / empty / error states (family specifics)
+
+Generic states (unknown `:checkKey`, unknown `:runId`, never-audited alias, run-in-progress
+skeletons) are the shell's ([./dns.mdx](./dns.mdx) §14.5). MX-routing adds:
+
+- **Transient lookup failure** — the run holds only `infra.mx_present.lookup_failed` and **no
+  snapshot**: block 2 renders that info row and *omits the topology and summary tables
+  entirely* (never render false topology); block 3 shows the works-but-unknown copy; block 5
+  is highlighted as the retry path.
+- **Null MX short-circuit** — `hosts[]` is empty by design: the topology table is replaced by
+  the one-line "Null MX — no targets to resolve (RFC 7505)"; the resolution/reachability
+  sub-checks list as "skipped — no target", explicitly not failures.
+- **No MX + implicit A** — the topology table renders the implicit-A pseudo-row (the apex A
+  addresses from the `infra.mx_matches_a` evidence) visibly tagged *implicit — not a real MX*.
+- **`skipSmtpProbe` domains** — the Reach (25) column and the four SMTP-gated future rows are
+  absent (not "pending"), with one footnote naming the opt-out and where to flip it (§4).
+
+## 10. Finding → drill-down mapping & the click-through map
+
+**Problem drill-down.** Every `infra.mx_*` finding at warning/critical maps by **id prefix**
+to problem state **PS-01 — Broken inbound mail routing** ([./dns.mdx](./dns.mdx) §9;
+`lib/dns-problems.ts`), drill-down at `/domains/:domainId/dns/PS-01?run=<runId>` — the
+cross-family *story* page (routing + the null-MX deny set + Mail-path panel). The division of
+labor is fixed: **stories → the PS-01 drill-down; mechanisms → this explainer.** The
+drill-down's underlined mechanism terms (MX record, null MX, implicit MX, …) deep-link to the
+§9.2 anchors run-scoped; this explainer's finding rows deep-link to PS-01 preserving
+`?run=`. Two special cases: `infra.mx_expected_drift` participates in PS-01 (it is broken
+*intent* even when routing works — the prefix list in [./dns.mdx](./dns.mdx) §9 must gain
+`mx_expected_drift`), and `infra.mx_present.lookup_failed` maps to no problem state (info,
+transient).
+
+**Everything clickable on the explainer navigates** ([./dns.mdx](./dns.mdx) §6.2 item 8):
+
+| Clickable element | Destination |
+|---|---|
+| Finding row (warning/critical) | PS-01 drill-down, `?run=` preserved |
+| A resolved IP in the topology table | Same-run **reverse-dns** explainer (`…/dns/check/reverse-dns`) — the PTR/FCrDNS view of that address |
+| The Reach (25) column header / future-probe rows | Same-run **tls-transport** explainer (STARTTLS on these hosts); backup-MX hygiene row → **smtp-security** explainer |
+| "FCrDNS", "PTR" terms in copy | `…/dns/check/reverse-dns#concept-fcrdns` / `#concept-ptr` |
+| "STARTTLS" term in copy | `…/dns/check/tls-transport#concept-starttls` |
+| SPF `-all` / DMARC `p=reject` in the no-mail deny set | The SPF / DMARC category pages ([../spf.mdx](../spf.mdx), [../dmarc.mdx](../dmarc.mdx) surfaces) |
+| "Mail-routing settings" mentions (receives-mail toggle, allow-list, skipSmtpProbe) | The domain settings panel of §4 |
+| Evidence chip on any finding row | The matching `tool_runs[]` entry (command, duration, parsed output) |
+| History-strip cell | This explainer at that run's `:runId` |
+| Row label anywhere else in the product (category page, run report family list) | This explainer, run-scoped |
+
 <!--
 MAINTENANCE NOTES
 - Keep RFC references current: RFC 5321 (SMTP, implicit MX, target-must-be-A rule), RFC 7505 (null MX),

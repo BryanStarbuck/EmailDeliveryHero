@@ -350,6 +350,489 @@ A developer can verify the ARC check is correct when **all** of the following ho
 10. The UI renders ARC as an advisory sub-group inside the DMARC audit-detail group, with severity
     badges, parsed chain detail, copy-to-clipboard remediation, a "Capture sample…" action, and clear
     empty / not-applicable / never-sampled states, built on React 19 + shadcn/ui.
+11. The **ARC explainer page** (§9) renders at the canonical run-scoped route
+    `/domains/:domainId/runs/:runId/dmarc/check/arc` **and** the newest-run alias
+    `/domains/:domainId/dmarc/check/arc`, using the shared category-page header row + run context
+    strip, the five locked blocks of [dmarc.mdx §6.4](./dmarc.mdx) in order, and a status chip
+    derived as the **worst severity among this run's `checkId === "arc"` findings** (gray "not
+    measured" when the run has none). Paging / history clicks swap `:runId` only.
+12. Block 2 renders **only this run's data**: the applicability panel (DMARC policy + enforcing
+    verdict from the run's `dmarc` section, `usesForwarding`, forwarder count), the finding rows
+    sorted fail → warn → info → pass with monospace evidence, one **signer-key raw-record card per
+    declared forwarder** (query name + raw TXT with `p=`/`k=` highlighted; "signer unknown"
+    placeholder when d=/s= are unrecorded), and the **scoped parsed-field table** over
+    `results.arc` in which every sample-derived field renders grayed as "— not yet sampled" while
+    null (§9.3).
+13. Block 4's fixes are **keyed to the current state** (§9.5): each fix step's copy button carries
+    a **publishable value** (the exact TXT record, the `openssl` key-generation commands, the
+    Mailman 3 `[ARC]` config block, or the verify command) — never prose — and the healthy state
+    collapses to the single "nothing to do" line plus the standing recommendation.
+14. Block 5's **Run this check now** wires v1 to the existing `POST /api/audit/run/:domainId`
+    (navigating to the newest alias on completion, toast + stay on error), upgrades later to
+    `POST /api/audit/run/:domainId/check/dmarc` (which runs `dmarc` **and** `arc` per the run
+    graph), honors keyboard `r`, and keeps the admin-gated **Capture sample…** probe as a visually
+    distinct secondary action that is never triggered by the re-run button (§9.6).
+15. The **unit-scoped history strip** colors each of the last 10 runs by that run's worst `arc.*`
+    severity, renders gray for runs where the ARC checker did not run, outlines the viewed run,
+    and clicking a chip swaps `:runId` on the explainer route (§9.7).
+16. Every `arc.*` finding id maps to **exactly one** `ARC-nn` problem state (§10 table), the
+    drill-downs render at `/domains/:domainId/runs/:runId/dmarc/:problemId` (alias without
+    `/runs/:runId`) with ids disjoint from the DMARC spec's `PS-nn` namespace and from the literal
+    `check/` segment, and each uses the five-part drill-down chrome (Concept / Your data / Diagnose
+    it yourself / Path forward / further reading) of [dmarc.mdx §7](./dmarc.mdx).
+17. Every clickable element on the explainer navigates per the §9.9 map — DMARC policy chip →
+    `…/dmarc/check/policy`, DKIM key concept → the run's DKIM category page, forwarder card edit →
+    the domain's ARC / forwarding settings editor, finding rows → their `ARC-nn` drill-down,
+    references → external links in a new tab — and nothing clickable is a dead end.
+18. The §9.11 recorded-data additions (`keyType`, `keyBits`, `rawKeyRecord` on each forwarder
+    observation; `dmarcPolicy` + `policySource` on `results.arc`) persist as nullable fields, map
+    onto nullable `arc_check_results` columns, and the explainer renders block 2 entirely from
+    `results.arc` + `findings[]` without re-querying DNS.
+
+---
+
+## 9. The ARC explainer page — `/dmarc/check/arc`
+
+The DMARC category spec ([dmarc.mdx §6.3–§6.5](./dmarc.mdx)) locks a shared route pattern and a
+five-block page contract for every sub-test unit in the category, and registers **`arc`** as a
+sibling-owned `checkKey`. **This spec owns the content of that page.** The chrome (header row, run
+context strip, back link, pager, skeletons, unknown-key panel) is the category's; everything inside
+the blocks is defined here.
+
+```
+/domains/:domainId/runs/:runId/dmarc/check/arc     (canonical, run-scoped)
+/domains/:domainId/dmarc/check/arc                 (newest-run alias)
+```
+
+### 9.1 Entry points & status-chip derivation
+
+The page is reachable from every surface that mentions ARC:
+
+| Entry point | Surface | Link |
+| --- | --- | --- |
+| Sub-tests band row "ARC chain" | DMARC category page ([dmarc.mdx §6.3](./dmarc.mdx)) | whole-row → run-scoped explainer |
+| ARC sub-group heading + finding-row chevrons | Run report's DMARC section (RunDetailPage, [dmarc.mdx §6.6](./dmarc.mdx)) | `…/runs/:runId/dmarc/check/arc` |
+| ARC mini-row in the per-unit mini-list | Run report's DMARC section | same |
+| "ARC" mentions in DMARC explainer block 3 copy (e.g. the `policy` unit's forwarding caveat) | sibling explainers | newest alias |
+| History-strip chips on this page | the explainer itself | same route, other `:runId` |
+
+**Status chip (block 2 headline + band row + mini-row).** One rule, shared by all three surfaces:
+the **worst severity among the viewed run's `checkId === "arc"` findings** — `critical` → ✗ red,
+`warning` → ⚠ amber, `info` → ⓘ slate, all-`ok` → ✓ green; **no `arc.*` findings in the run** →
+gray "not measured" (the checker was disabled, errored before emitting, or the run predates ARC).
+Because first round is advisory-heavy, the common healthy-ish states are slate (`arc.applicable`
+N/A) and amber (`arc.forwarding_risk` open) — the chip label spells it out: `ⓘ N/A`,
+`⚠ unverified`, `✗ signer key`, `✓ verified` (future, requires a `cv=pass` sample).
+
+### 9.2 Block 1 — What this is
+
+Static concept copy (2–4 short paragraphs, per the category contract), independent of run data so
+it renders even for "not measured":
+
+1. **The mechanism.** ARC (Authenticated Received Chain, RFC 8617) lets a forwarder or mailing
+   list record "this message passed SPF/DKIM/DMARC when it reached me," sign that record, and pass
+   it downstream. Gloss the three headers in one line each: `ARC-Authentication-Results` (the
+   snapshot), `ARC-Message-Signature` (a DKIM-style signature over the message as received),
+   `ARC-Seal` (a signature over the whole chain so far, carrying `cv=`).
+2. **Why it exists.** Forwarding breaks DMARC: the envelope changes (SPF alignment lost) and the
+   body/subject often change (DKIM signature broken). Concrete example: mail from
+   `billing@example.com` to a Google Group arrives at Gmail failing both — under `p=reject` it is
+   rejected even though it is legitimate.
+3. **The crucial caveat.** ARC is **not a DNS record you publish** and **not a guarantee** —
+   intermediaries add it in transit, and receivers *may* honor a valid chain (`cv=pass`) from a
+   forwarder they trust. That is why this unit is advisory: EmailDeliveryHero can verify the
+   pieces that live in DNS/config today and the chain itself only from a captured forwarded
+   message (§3).
+
+### 9.3 Block 2 — Your current state
+
+Everything renders from the **viewed run's** persisted data — `results.arc` (§5) plus the run's
+`checkId === "arc"` findings — never from a live lookup; an older run stays a snapshot. Top to
+bottom:
+
+1. **Status chip** (large, per §9.1) with a one-line verdict sentence, e.g. *"ARC applies
+   (p=reject + 2 forwarders declared) but no chain has been verified yet."*
+2. **Applicability panel** — three labeled rows that explain how the verdict was reached, each with
+   observed value and provenance:
+   * *DMARC policy*: `p=<policy>` → enforcing yes/no, sourced from the run's `dmarc` section (the
+     sibling result the checker consumed — run graph `arc ← dmarc`); the value chips link to the
+     `policy` explainer (§9.9).
+   * *Forwarding declared*: the `usesForwarding` flag + declared-forwarder count, sourced from the
+     domain's ARC / forwarding settings at run time.
+   * *Verdict*: `applicable` / `forwardingRisk` from `results.arc`.
+3. **Finding rows** — the run's `arc.*` findings sorted fail → warn → info → pass (same row
+   anatomy as the category's test-results table): status icon, finding id in small caps,
+   plain-language title, chevron accordion expanding to *observed* (the `evidence` string,
+   monospace), *why it matters* (one sentence), and the remediation with a `[copy fix]` button.
+   Each expanded row ends with a **"Full drill-down ›"** link to its ARC-nn problem page (§10).
+4. **Raw record slot — signer-key cards.** ARC has no DNS record of its own, so the category
+   contract's "raw record" slot renders **one card per declared forwarder**:
+   * Signer known (`d=`/`s=` recorded): the query name
+     `<selector>._domainkey.<signer-domain>` as the card title, the **raw TXT answer** beneath it
+     in monospace with the `p=` and `k=` tags visually highlighted (the unit's "owned tags"), a
+     resolve badge (✓ resolves / ✗ NXDOMAIN / ✗ revoked `p=` / ⓘ lookup failed), and `[copy]` for
+     the raw value. Rendered from `rawKeyRecord` (§9.11) with the finding `evidence` string as the
+     fallback for runs that predate it.
+   * Signer unknown: a muted placeholder card — *"ARC signer not yet known for <label> — record
+     its d=/s= in settings or capture a forwarded sample"* — linking to the settings editor.
+   * Future, when a sample exists: a final card shows the captured `ARC-Seal` /
+     `ARC-Message-Signature` / `ARC-Authentication-Results` header block (monospace, `cv=` and
+     `i=` highlighted) from `messageSampleId`.
+5. **Scoped parsed-field table** — the fields this unit reads, exactly the `results.arc` shape
+   (§5), one row each with published value, meaning, and grayed rendering when null:
+
+   | field | value (example) | meaning |
+   | --- | --- | --- |
+   | `applicable` | `true` | enforcing DMARC + forwarding declared → ARC matters here |
+   | `forwardingRisk` | `true` | a declared path could drop mail until a chain is verified |
+   | `forwarders[]` | 2 rows | sub-table: label · forward address · signer `d=` · `s=` · resolves · key type · key bits |
+   | `messageSampleId` | — not yet sampled | the captured forwarded message the chain checks need |
+   | `chainPresent` / `chainLength` | — not yet sampled | ARC header set found / highest `i=` (hop count) |
+   | `cvResult` / `sealValid` / `amsValid` | — not yet sampled | newest seal's `cv=` / seal chain verified / newest AMS verified |
+   | `instancesOk` / `oldestPass` | — not yet sampled | `i=` contiguous & ordered / origin passed at `i=1` |
+   | `probeSentAt` | — never | last swaks-through-forwarder probe |
+
+   The `forwarders[]` sub-table's key-type/bits columns come from §9.11; grayed "— not yet
+   sampled" rows are rendered (not hidden) so the user sees what a future capture will add.
+6. **Per-hop instances table (future).** When `instances` is non-null: `i= | signer (d=) | s= |
+   AMS | AS cv= | AAR verdict`, one row per hop, the failing hop's row tinted red — the compact
+   chain table already specified in §4.
+
+### 9.4 Block 3 — What it means
+
+Impact copy keyed to the current state (one short paragraph shown per state, passing state first
+when healthy):
+
+* **N/A — DMARC not enforcing** (`arc.applicable` info, `p=none`/absent): nothing is being
+  rejected, so there is nothing for ARC to rescue; the real work is on the DMARC `policy` ladder.
+  Deliverability impact today: none from ARC.
+* **N/A — no forwarding declared**: directly-sent mail never needs ARC. Impact: none — *unless*
+  the domain actually does send through lists it hasn't declared, in which case losses are
+  invisible; the copy says exactly that.
+* **Unverified forwarding path** (`arc.forwarding_risk` warning): the classic silent failure —
+  "some recipients never get our mail, but only via list X." Under `p=quarantine/reject`,
+  forwarded legitimate mail is being spam-foldered or rejected at strict receivers until each
+  forwarder demonstrably seals a valid chain. This is the §1 failure mode restated for this
+  domain's declared paths, naming them.
+* **Signer key broken** (`arc.selector_dns` critical): the forwarder may be sealing, but receivers
+  cannot verify the seal — cryptographically equivalent to no ARC at all; the ARC evidence is
+  discarded and mail falls back to the raw DMARC failure.
+* **Weak/legacy signer key** (`arc.signature_algorithm` warning): verifiers increasingly refuse
+  <1024-bit or non-rsa/ed25519 keys (RFC 8301), so the chain's protection erodes receiver by
+  receiver.
+* **Healthy / verified (future)**: a `cv=pass` chain was captured on every declared path — the
+  paragraph explains what that protects (forwarded mail surviving `p=reject`) and the residual
+  caveat (honoring is per-receiver trust, `arc.receiver_honors`).
+
+Where a state maps to a §10 problem page, this block reuses that page's concept copy (single
+source, same rule as the category's PS-nn reuse).
+
+### 9.5 Block 4 — What you can do about it
+
+Numbered, copy-pasteable steps, keyed to the same states. Copy buttons always carry the
+publishable value / runnable command, never prose:
+
+* **N/A (either reason)** — the healthy collapse line: *"Nothing to do for ARC right now."* plus
+  the standing recommendation: revisit when moving to `p=quarantine`/`reject` or when mail starts
+  flowing through a list/forwarder; if forwarding exists but was never declared, step 1 links to
+  the domain's **ARC / forwarding settings** editor (label + forwarding address + signer `d=`/`s=`
+  if known — the §4 config inputs).
+* **Forwarding declared but no forwarders registered** (`arc.forwarding_risk` warning, empty
+  list): one step — register each forwarder in settings; the panel enumerates the fields and links
+  to the editor.
+* **Unverified forwarding path (per forwarder)**:
+  1. If you **run the list** (Mailman 3): enable ARC sealing — `[copy]` carries the config block:
+     ```ini
+     # /etc/mailman3/mailman.cfg
+     [ARC]
+     enabled: yes
+     authserv_id: lists.example.org
+     domain: lists.example.org
+     selector: arc1
+     privkey: /etc/mailman3/arc.private.pem
+     ```
+  2. Generate the signing key — `[copy]` carries:
+     ```
+     openssl genrsa -out arc.private.pem 2048
+     openssl rsa -in arc.private.pem -pubout -outform der | openssl base64 -A
+     ```
+  3. Publish the public key — `[copy]` carries the exact TXT record
+     `arc1._domainkey.lists.example.org TXT "v=DKIM1; k=rsa; p=<base64-from-step-2>"`.
+  4. If it is a **third-party forwarder** (Google Groups, a listserv you don't run): ask them to
+     enable ARC sealing and tell you the `d=`/`s=` they sign with; record those in settings so the
+     key check runs here. (Google Groups and Microsoft 365 seal by default — the step says to
+     simply record their observed signer once a sample is captured.)
+  5. Verify with the capture probe once available (§9.6), or manually: forward a test message
+     through the path and inspect its headers for `ARC-Seal: … cv=pass`.
+* **Signer key broken** (`arc.selector_dns` critical): steps 2–3 above scoped to the failing
+  `<selector>._domainkey.<signer-domain>` (the copy button carries that exact name), plus the
+  verify command `[copy]`: `doggo <selector>._domainkey.<signer-domain> TXT --json` — and the
+  propagation note (TTL wait) shared with the category pages. When the signer is third-party, step
+  1 becomes "report the broken key to <label>" with the evidence line to paste to them.
+* **Weak/legacy key** (`arc.signature_algorithm` warning): reissue at 2048-bit RSA or ed25519 —
+  same key-generation + TXT snippets, prefixed with "ask <label> to…" for third-party signers.
+* **Future chain failures** (`cv=fail`, AMS invalid, ordering, `cv≠none` at `i=1`, origin already
+  failing): each carries the §2 remediation verbatim, with the failing hop identified from the
+  per-hop table; "origin already failed" cross-links to the [DKIM](./dkim.mdx) and
+  [DMARC](./dmarc.mdx) categories since ARC cannot rescue mail that never passed.
+
+### 9.6 Block 5 — Run this check now (and the Capture sample probe)
+
+Two affordances, deliberately distinct:
+
+* **Run this check now** — the category-standard re-run ([dmarc.mdx §6.5](./dmarc.mdx)). **v1:**
+  calls the existing `POST /api/audit/run/:domainId` (full six-category run; tooltip "Re-runs all
+  checks for <domain>"); the button spins/disables in flight; on completion the page navigates to
+  the **newest alias** `/domains/:domainId/dmarc/check/arc`; on failure a toast reports the error
+  and the page stays on the viewed run. **Target:** `POST /api/audit/run/:domainId/check/dmarc` —
+  the scoped endpoint runs the `dmarc` checker **and** this `arc` checker together (the run graph
+  orders `arc ← dmarc`, and ARC's applicability is derived from the sibling result, so the two are
+  never re-run separately); sibling category sections carry forward with the `carried_from` marker
+  (gated on the [../storage.mdx](../storage.mdx) amendment, per the category spec). Keyboard `r`
+  triggers it. The caption under the button states the scope plainly: *"Re-runs the DMARC + ARC
+  checks for example.com and refreshes this page."*
+* **Capture sample… (FUTURE, admin-only)** — a **secondary** button beside it, never triggered by
+  the re-run: opens the §4 probe panel (pick a declared forwarder, confirm the destination
+  mailbox, send the swaks probe, then parse/validate the forwarded copy). It sends **real mail**,
+  so it is gated `role:admin` (non-admins see it disabled with a tooltip saying why), throttled
+  per §3/§6, and records `probeSentAt`. Until the probe ships, the button renders in its disabled
+  future state with a "coming soon" tooltip — the affordance is specified now so the layout does
+  not shift later.
+
+### 9.7 History strip & references footer
+
+* **History strip** — the category's reusable ten-chip element ([dmarc.mdx §6.7](./dmarc.mdx))
+  scoped to this unit: each chip = one run, colored by that run's **worst `arc.*` severity**, gray
+  for runs where the ARC checker did not run, the viewed run outlined, oldest → newest. Hover
+  shows the run timestamp plus a one-line delta versus the previous run — ARC-specific delta
+  examples: *"ARC became applicable — p moved to reject"*, *"signer arc1.lists.example.org stopped
+  resolving"*, *"forwarder 'acme-users' declared"*, *"cv=pass captured"* (future). Click swaps
+  `:runId`. Data derives client-side from `GET /api/audit/runs` + cached run results, upgrading to
+  the optional `GET /api/audit/history/:domainId?category=dmarc&unit=arc` endpoint identically to
+  the category.
+* **References footer** — external links, new tab, the only external navigation on the page:
+  RFC 8617 (ARC), RFC 8301 (key strength), RFC 6376 (DKIM signatures, which AMS/AS mirror),
+  RFC 9989 (DMARCbis — the policy ARC overrides), the dmarc.org ARC overview / arc-spec.org,
+  Google Workspace admin doc "ARC authentication in Gmail", the Mailman 3 ARC configuration docs,
+  the OpenARC project, and the M3AAWG forwarding best-practices paper.
+
+### 9.8 States
+
+* **Loading** — five skeleton blocks (category chrome).
+* **Unknown `checkKey`** — owned by the category chrome ("No such sub-test" panel); not repeated
+  here.
+* **Not applicable** (`arc.applicable` info fired) — this is a *real result*, not an empty state:
+  block 2 shows the ⓘ slate `N/A` chip with the applicability panel explaining which gate failed
+  (policy or forwarding); blocks 1/3/4 render their N/A copy. Never rendered as gray.
+* **Not measured** (no `arc.*` findings in the viewed run) — blocks 1 and 3 render normally (the
+  concept never disappears), block 2 shows the gray chip with one line ("The ARC checker did not
+  run in this audit"), block 4 shows only the standing recommendation, block 5 stays active (a
+  re-run is exactly the fix).
+* **Applicability unknown** (the checker's transient-DNS `info` — "Could not determine ARC
+  applicability"): block 2 shows the ⓘ chip with the lookup-failure evidence and block 4's first
+  step is "Retry the audit" (block 5's button).
+* **Run-fetch error** — error strip with Retry above block 1 (category chrome).
+
+### 9.9 Clickable sub-concepts — where every click goes
+
+Nothing on the page is a dead end. The full navigation map:
+
+| Clickable element | Destination |
+| --- | --- |
+| Back link (header) | the run's DMARC category page `/domains/:domainId/runs/:runId/dmarc` |
+| ‹ prev / next › pager, history-strip chips | same explainer, other `:runId` |
+| DMARC policy value in the applicability panel (`p=…` chip) | `…/dmarc/check/policy` (run-scoped) |
+| "breaks the DKIM signature" / key-strength concept links in blocks 1/3 | the run's DKIM category page `/domains/:domainId/runs/:runId/dkim` |
+| Forwarder card title / "edit" affordance / settings links in block 4 | the domain's ARC / forwarding settings editor (the §4 config inputs on the domain edit surface, [../domains.mdx](../domains.mdx)) |
+| Finding row "Full drill-down ›" | that finding's ARC-nn problem page (§10) |
+| `[copy]` buttons | clipboard only (no navigation) — value confirmed by a toast |
+| Run this check now | re-run then the newest alias of this page (§9.6) |
+| Capture sample… (admin, future) | in-page probe panel (no route change) |
+| References footer links | external, new tab |
+| Sibling mentions of the origin problem ("fix DMARC/DKIM first") | `…/dmarc/check/policy`, `/domains/:domainId/runs/:runId/dkim` |
+
+### 9.10 Wireframe
+
+The category's five-block skeleton ([dmarc.mdx §7](./dmarc.mdx) explainer wireframe) filled in for
+ARC in the common first-round state (enforcing DMARC, one declared forwarder, signer key broken):
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Back to DMARC     ARC (Authenticated Received Chain)       [Re-run ⟳]   │  header row
+│ example.com  ·  DMARC › sub-test  ·  [advisory]                            │
+│ Run 2026-07-01 09:14  ·  [‹ prev]  [next ›]  ·  ★ newest  ·  ▪▪▪▪▪▪▪▪▪▣    │  run context strip
+├────────────────────────────────────────────────────────────────────────────┤
+│  WHAT THIS IS                                                               │  block 1
+│  Forwarders and mailing lists break DMARC: the envelope changes (SPF) and  │
+│  the body often changes (DKIM). ARC (RFC 8617) lets the forwarder seal     │
+│  "this passed when it reached me" so the final receiver can honor it…      │
+├────────────────────────────────────────────────────────────────────────────┤
+│  YOUR CURRENT STATE                                  [ ✗ FAIL — signer key ]│  block 2
+│  DMARC policy      p=reject → enforcing          (from this run's DMARC)   │
+│  Forwarding        declared · 1 forwarder        (domain settings)         │
+│  Verdict           ARC applies; no verified chain yet                      │
+│  ✗ arc.selector_dns.acme-users   signer key does not resolve        [v]    │
+│  ⚠ arc.forwarding_risk.acme-users unverified path                   [v]    │
+│  ⓘ arc.applicable · ⓘ arc.chain_present (not yet sampled)           [v]    │
+│  ┌ SIGNER KEY — arc1._domainkey.lists.example.org ──────── ✗ NXDOMAIN ┐    │
+│  │ (no TXT answer)                                   [copy expected]  │    │
+│  └──────────────────────────────────────────────────────────────────── ┘    │
+│  ┌ field ───────── value ───────────── meaning ──────────────────────┐    │
+│  │ applicable      true               enforcing + forwarding declared │    │
+│  │ forwarders[0]   acme-users · arc1@lists.example.org · resolves: ✗  │    │
+│  │ cvResult        — not yet sampled  newest ARC-Seal cv=             │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+├────────────────────────────────────────────────────────────────────────────┤
+│  WHAT IT MEANS                                                              │  block 3
+│  Mail sent through acme-users fails DMARC at delivery; because the ARC     │
+│  signer's key cannot be verified, receivers discard the ARC evidence and   │
+│  reject under p=reject — silent losses on that path.                       │
+├────────────────────────────────────────────────────────────────────────────┤
+│  WHAT YOU CAN DO ABOUT IT                                                   │  block 4
+│  1. Publish the signer key:                                                 │
+│     arc1._domainkey.lists.example.org TXT "v=DKIM1; k=rsa; p=…"    [copy]  │
+│  2. Or generate a new 2048-bit key:  openssl genrsa …               [copy]  │
+│  3. Verify:  doggo arc1._domainkey.lists.example.org TXT --json     [copy]  │
+├────────────────────────────────────────────────────────────────────────────┤
+│  RUN THIS CHECK NOW                    [ Run check ⟳ ]  [ Capture sample…] │  block 5
+│  Re-runs the DMARC + ARC checks for example.com and refreshes this page.   │
+├────────────────────────────────────────────────────────────────────────────┤
+│  HISTORY   ▪▪▪▪▪▪▪▪▪▣   (ARC, last 10 runs — click to view)                │  history strip
+│  REFERENCES  RFC 8617 · RFC 8301 · Gmail ARC · Mailman 3 · OpenARC         │  references footer
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 9.11 Small additions to what the check records
+
+So block 2 renders entirely from persisted run data (never scraping prose out of finding strings),
+the checker records three small, nullable additions — same `Checker`/`Finding` contract, no schema
+break:
+
+* **Per-forwarder observation** (`results.arc.forwarders[]`, today `label` / `forwardAddress` /
+  `signerDomain` / `signerSelector` / `selectorResolves`) gains:
+  * `rawKeyRecord: string | null` — the raw TXT answer at `<selector>._domainkey.<signer>` (the
+    signer-key card's body; the checker already holds it as `rec`).
+  * `keyType: string | null` — the parsed `k=` (defaulted `"rsa"` when the record resolves).
+  * `keyBits: number | null` — the estimated RSA modulus bits (null for ed25519/unresolved).
+* **`results.arc`** gains:
+  * `dmarcPolicy: string | null` — the `p=` the applicability verdict used.
+  * `policySource: "sibling" | "dns" | null` — whether it came from the sibling `dmarc` result or
+    the checker's own fallback lookup (the applicability panel's provenance line).
+
+Database mapping: three nullable columns on `arc_check_results`' `instances`-style JSON (the
+`forwarders` observation array already lives inside the per-run `arc` object) plus
+`dmarc_policy TEXT` / `policy_source TEXT` columns — all nullable, consistent with §5's
+advisory-first posture. Older persisted runs simply render the fallbacks (finding `evidence` for
+the card body, "—" for key type/bits, provenance omitted).
+
+---
+
+## 10. Problem states & drill-down pages (ARC-nn)
+
+Each finding the checker emits maps to exactly **one** problem drill-down, rendered at the
+category's problem route with the same chrome as the DMARC spec's PS-nn pages ([dmarc.mdx
+§7](./dmarc.mdx) drill-down layout: **Concept → Your data → Diagnose it yourself → Path forward →
+further reading**, with header row + run context strip):
+
+```
+/domains/:domainId/runs/:runId/dmarc/:problemId    (canonical, run-scoped)
+/domains/:domainId/dmarc/:problemId                (newest-run alias)
+```
+
+**Id namespace.** ARC problem ids use the **`ARC-nn`** prefix — disjoint from the DMARC spec's
+`PS-nn` ids (that spec's registry is untouched) and, like them, disjoint from the literal `check/`
+segment. The frontend problem-state registry (today `lib/dmarc-problems.ts`) gains the ARC entries
+below, with this spec as their content source; matching stays "which ids fired in this run."
+Matched ARC-nn cards append to the category page's PROBLEM STATES band **after** the PS-nn cards,
+same card anatomy (title + one-line hook + chevron).
+
+**Finding → problem → explainer map** (every id the checker emits today, plus the future ids):
+
+| Finding id (pattern) | Severity | Problem page | Explainer state (§9) |
+| --- | --- | --- | --- |
+| `arc.applicable` ("not applicable", either gate) | info | ARC-04 | N/A |
+| `arc.applicable` ("could not determine") | info | ARC-04 | applicability unknown |
+| `arc.applicable` ("ARC applies") | info | — (no card; context row only) | applicable |
+| `arc.forwarding_risk` / `arc.forwarding_risk.<slug>` | warning | ARC-03 | unverified path |
+| `arc.selector_dns.<slug>` (NXDOMAIN / revoked `p=`) | critical | ARC-01 | signer key broken |
+| `arc.selector_dns.<slug>` (signer unknown / transient) | info | ARC-03 (unknown) / ARC-04 (transient) | — |
+| `arc.selector_dns.<slug>` (resolves) | ok | — | healthy row |
+| `arc.signature_algorithm.<slug>` | warning | ARC-02 | weak key |
+| `arc.chain_present` (stub: "not yet sampled") | info | ARC-05 | not sampled |
+| *(future)* `arc.chain_present` (sample, no headers) | warning | ARC-05 | chain absent |
+| *(future)* `arc.seal_valid`, `arc.ams_valid`, `arc.instance_ordering`, `arc.cv_at_i1` | critical/warning | ARC-06 | broken chain |
+| *(future)* `arc.oldest_pass` | warning | ARC-06 | origin already failed |
+| *(future)* `arc.aar_completeness`, `arc.receiver_honors` | info | ARC-06 (notes) | advisory |
+
+### ARC-01 — Signer key unresolvable
+
+* **Matches:** any `arc.selector_dns.<slug>` critical (NXDOMAIN/empty answer, or revoked/empty
+  `p=`). **Concept:** the ARC seal is a DKIM-style signature; without the public key at
+  `<selector>._domainkey.<signer>`, no receiver can verify it — the chain is cryptographically
+  worthless, so the forwarded mail falls back to its raw DMARC failure. **Your data:** the failing
+  forwarder's observation row (label, address, `d=`, `s=`, `selectorResolves=false`,
+  `rawKeyRecord` when revoked-not-missing) plus the finding evidence. **Diagnose:**
+  `doggo <selector>._domainkey.<signer> TXT --json`, `dig +short TXT <name>`,
+  `kdig @8.8.8.8 +short TXT <name>` (copyable). **Path forward:** the §9.5 key-publication steps
+  scoped to this signer (third-party: the report-to-forwarder variant). **Further reading:**
+  RFC 8617 §4.1.2–4.1.3, RFC 6376 key records.
+
+### ARC-02 — Weak or legacy signer key
+
+* **Matches:** `arc.signature_algorithm.<slug>` warning (`k=` not rsa/ed25519, or RSA <1024-bit).
+  **Concept:** RFC 8301 minimums; verifiers increasingly hard-fail weak keys, eroding the chain
+  receiver-by-receiver. **Your data:** the observation's `keyType`/`keyBits` + raw record.
+  **Diagnose:** the same TXT lookups plus decoding the modulus
+  (`… | openssl base64 -d -A | openssl rsa -pubin -inform der -noout -text`). **Path forward:**
+  reissue at 2048-bit / ed25519 (the §9.5 snippets). **Further reading:** RFC 8301.
+
+### ARC-03 — Unverified forwarding path
+
+* **Matches:** `arc.forwarding_risk` (declared-but-none-registered) and every
+  `arc.forwarding_risk.<slug>`; also hosts the "signer not yet known" info. **Concept:** the §1
+  failure mode — enforcing DMARC + forwarding, ARC status unknown → silent losses on that path.
+  **Your data:** the declared-forwarder list with per-row verification status; the DMARC policy
+  context. **Diagnose:** send a message through the path manually and inspect the delivered copy's
+  headers for `ARC-Seal … cv=`; `swaks` command shape from §3 (copyable, with the "sends real
+  mail" caution). **Path forward:** the §9.5 per-forwarder steps (Mailman config / third-party
+  request / record the signer). **Further reading:** RFC 8617, M3AAWG forwarding paper, Mailman 3
+  docs.
+
+### ARC-04 — Not applicable / not yet determined
+
+* **Matches:** `arc.applicable` info in its N/A and could-not-determine variants, and transient
+  selector-lookup infos. **Concept:** when ARC does and does not matter (the two gates: enforcing
+  policy, forwarding). **Your data:** the applicability panel rows. **Diagnose:**
+  `doggo _dmarc.<domain> TXT --json`. **Path forward:** none today; the revisit triggers, plus
+  "declare your forwarders" when the gate is forwarding. **Further reading:** RFC 9989 policy,
+  RFC 8617 §1.
+
+### ARC-05 — Chain not yet sampled / chain absent
+
+* **Matches:** the first-round `arc.chain_present` info stub; future: the warning when a captured
+  sample carries no ARC headers. **Concept:** why the chain checks need a real forwarded message
+  and what the capture probe does (§3). **Your data:** `messageSampleId`/`probeSentAt` (null
+  today), the declared probe targets. **Diagnose:** the manual forward-and-inspect procedure.
+  **Path forward:** run the admin Capture sample probe when available; meanwhile ARC-03's
+  confirmation steps. **Further reading:** RFC 8617 §5.
+
+### ARC-06 — Broken or invalid chain *(future)*
+
+* **Matches:** the sample-derived criticals/warnings — `arc.seal_valid` (`cv=fail`),
+  `arc.ams_valid`, `arc.instance_ordering`, `arc.cv_at_i1`, `arc.oldest_pass`, plus the
+  `arc.aar_completeness`/`arc.receiver_honors` advisories as context rows. **Concept:** what each
+  structural failure means per RFC 8617 §5.2 and why receivers discard a broken chain. **Your
+  data:** the per-hop instances table with the failing hop tinted; `cvResult`, `sealValid`,
+  `amsValid`, `instancesOk`, `oldestPass`. **Diagnose:** re-verify the captured `.eml` with
+  OpenARC (`arcverify`) / `npx mailauth report <sample.eml>` (copyable). **Path forward:** the §2
+  remediations for the specific failing sub-check; origin failures route to the DKIM/DMARC
+  categories first. **Further reading:** RFC 8617 §5.2, OpenARC.
+
+**Drill-down ↔ explainer linking.** Every ARC-nn page's Concept block ends with *"Full ARC
+sub-test explainer ›"* → `…/dmarc/check/arc` (run-scoped), and the explainer's finding rows link
+back per §9.3 item 3 — the two page kinds answer different questions (one problem deeply vs. the
+whole unit) and must cross-link both ways. Back chevron returns to the run's DMARC page anchor,
+exactly like PS-nn.
 
 <!--
   Maintenance: ARC is RFC 8617. Keep this in sync with ../spam_checks.mdx (where arc.present is the
@@ -361,4 +844,18 @@ A developer can verify the ARC check is correct when **all** of the following ho
   message (swaks-through-a-forwarder + OpenARC/validator). Keep RFC refs current (ARC 8617; DKIM 6376
   / key strength 8301; DMARC 7489 -> DMARCbis 9989/9990/9991) and keep the arc_check_results columns
   nullable while first round stays advisory-only.
+
+  Explainer & drill-downs (added with the grow-every-click pass): §9 owns the CONTENT of the arc
+  explainer at /domains/:domainId/runs/:runId/dmarc/check/arc (newest alias without /runs/:runId);
+  the ROUTE pattern, page chrome, five-block contract, history strip, and scoped re-run endpoint
+  are LOCKED by pm/checks/dmarc.mdx §6.3–§6.7 — never fork them here, and never renumber §1–§8 of
+  this file (arc.check.ts and the frontend reference those section numbers in comments). The status
+  chip rule (worst checkId==="arc" finding in the viewed run; gray when none) must match the dmarc
+  band row and the RunDetailPage mini-row. Problem drill-downs use the ARC-nn id namespace at the
+  shared /dmarc/:problemId route — keep it disjoint from dmarc.mdx's PS-nn registry and keep the
+  §10 finding→problem map total over every id the checker emits (update it whenever arc.check.ts
+  adds/renames a finding id). The §9.11 recorded-data additions (rawKeyRecord/keyType/keyBits per
+  forwarder observation; dmarcPolicy/policySource on results.arc) stay nullable and
+  backward-compatible: older runs render fallbacks, never errors. The Capture sample probe stays
+  admin-gated, throttled, and SEPARATE from the Run-this-check-now button at every surface.
 -->

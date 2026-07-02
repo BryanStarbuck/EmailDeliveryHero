@@ -1,6 +1,6 @@
 import { deriveTlsRptFindings } from "@module/reports/derive-findings"
 import { resolve4, resolve6, resolveMx, resolveTxt } from "../dns-util"
-import type { Checker, Finding } from "../types"
+import type { Checker, CheckOutcome, Finding } from "../types"
 
 /**
  * TLS-RPT (SMTP TLS Reporting, RFC 8460). Inspects the TXT record at `_smtp._tls.<domain>` that tells
@@ -9,6 +9,12 @@ import type { Checker, Finding } from "../types"
  * endpoint grammar + scheme, unknown-tag and stray-TXT hygiene, plus an advisory MX/A reachability
  * probe of each `rua` target. Actually ingesting and parsing the JSON reports (and TTL sanity, which
  * needs a full `dig` answer) are future capabilities that emit a single muted `info` each.
+ *
+ * The structured observation (spec §5 `tls_rpt_check_results` — today the `checks.tls_rpt` object
+ * embedded in the audit JSON) is returned as this checker's `results` payload and lands at
+ * `AuditResult.results["infra.tls_rpt"]`, one per (run, domain). The scheduler's regression diff
+ * (spec §6) compares each run's findings against the previous snapshot to flag record
+ * disappearance, new duplicates, and rua breakage as new problems.
  */
 
 const CHECK_ID = "infra.tls_rpt"
@@ -21,6 +27,46 @@ interface RuaEndpoint {
   host: string
   sizeLimit: string | null
   external: boolean
+  /** Advisory MX/A reachability: true/false once probed, null when the probe was transient. */
+  reachable: boolean | null
+}
+
+/**
+ * One parsed rua endpoint as persisted in the results payload (spec §5 `rua_endpoints` JSONB —
+ * `[{ "uri", "scheme", "domain", "size_limit", "reachable", "external" }]`, camelCase here per the
+ * file-store mapping).
+ */
+export interface TlsRptRuaEndpoint {
+  uri: string
+  scheme: "mailto" | "https"
+  domain: string
+  sizeLimit: string | null
+  reachable: boolean | null
+  external: boolean
+}
+
+/**
+ * The structured, parsed TLS-RPT observation for one domain in one audit run — the JSON-file
+ * projection of the spec §5 `tls_rpt_check_results` row (`checks.tls_rpt`, camelCase exactly as
+ * the spec's file-store mapping). When storage graduates to Postgres this object becomes one row
+ * keyed by (audit_run_id, domain_id) — a store-only change, no checker changes.
+ */
+export interface TlsRptResults {
+  /** A TLSRPTv1 record exists at `_smtp._tls.<domain>`. */
+  present: boolean
+  /** Number of TLSRPTv1 TXT strings found (singleton check). */
+  recordCount: number
+  /** Reassembled TXT string as published (the single record when present). */
+  rawRecord: string | null
+  /** Record starts with exactly `v=TLSRPTv1`. */
+  versionOk: boolean
+  /** Parsed rua reporting endpoints with scheme/domain/size-limit/reachability/externality. */
+  ruaEndpoints: TlsRptRuaEndpoint[]
+  /** Syntactically valid AND has ≥1 well-formed rua (spec §5). */
+  valid: boolean
+  /** Tags outside {v, rua} observed on the record (e.g. a typo'd `ruf`). */
+  unknownTags: string[]
+  checkedAt: string
 }
 
 /** A TXT string that is (or is trying to be) a TLS-RPT record — caught loosely so broken ones surface. */
@@ -97,6 +143,7 @@ async function checkEndpoints(endpoints: RuaEndpoint[], domain: string): Promise
     if (ep.scheme === "mailto") {
       const mx = await resolveMx(ep.domain)
       if (mx.error) {
+        ep.reachable = null
         findings.push({
           id: `infra.tls_rpt_endpoint_reachable.${i}`,
           checkId: CHECK_ID,

@@ -445,6 +445,16 @@ export class CreateDomainDto {
   @ValidateNested()
   @Type(() => LinkUrlConfigDto)
   linkUrl?: LinkUrlConfigDto
+
+  @ApiPropertyOptional({
+    type: ListUnsubConfigDto,
+    description:
+      "List-Unsubscribe / one-click config (pm/checks/list_unsubscribe.mdx §3/§4) — isBulkSender escalator + opt-in endpoint probe",
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListUnsubConfigDto)
+  listUnsub?: ListUnsubConfigDto
 }
 
 export class UpdateDomainDto {
@@ -545,4 +555,14 @@ export class UpdateDomainDto {
   @ValidateNested()
   @Type(() => LinkUrlConfigDto)
   linkUrl?: LinkUrlConfigDto
+
+  @ApiPropertyOptional({
+    type: ListUnsubConfigDto,
+    description:
+      "List-Unsubscribe / one-click config (pm/checks/list_unsubscribe.mdx §3/§4) — isBulkSender escalator + opt-in endpoint probe",
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListUnsubConfigDto)
+  listUnsub?: ListUnsubConfigDto
 }

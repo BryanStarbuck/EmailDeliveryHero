@@ -643,8 +643,11 @@ test" state (below) — never a crash. A test that did not run in this run (e.g.
 | `lookup-limit` | The 10-DNS-lookup budget (§4.6.4) | The lookup gauge (hero + summary strips + run-report strip) | `lookup_count` n/10, the gauge full-size, the heaviest `include_tree` branches ranked |
 | `void-lookups` | The 2-void budget | The voids counter | `void_count`, the `is_void` tree nodes listed |
 | `eval-result` | `none`/`neutral`/`pass`/`fail`/`softfail`/`temperror`/`permerror` | The eval-result chip | This run's `eval_result` and the §4 rule(s) that produced it |
-| `pass-set` | The expanded set of authorized CIDRs | Coverage-panel rows; pass-set entries in the tree | `pass_set[]` with sources; `ip_coverage[]` verdicts |
-| `alignment` | SPF↔DMARC alignment (`aspf`) | The PS-11 card (future); cross-link from [./dmarc.mdx](./dmarc.mdx) | Future (message data) — until then, section 2 explains what would be measured and links the ESP bounce-domain fix |
+| `pass-set` | The expanded set of authorized CIDRs | Coverage-panel rows; pass-set entries in the tree | `pass_set[]` with sources; `ip_coverage[]` verdicts; the `ipv6` posture line |
+| `alignment` | SPF↔DMARC alignment (`aspf`) | The alignment posture chip; the PS-11 card; cross-link from [./dmarc.mdx](./dmarc.mdx) | `record.alignment` (`dmarc_found`, `aspf`) and the `spf.alignment_prep` row — the DNS half today; the message-level half (per-stream envelope-from) stays future |
+| `ttl` | DNS TTL & propagation | The TTL posture chip; `spf.ttl` rows | `record.ttl`, the §3 row-2 dig `tool_runs[]` entry verbatim |
+| `resolvers` | Resolver views & propagation lag | The cross-resolver chip; `spf.cross_resolver` rows | `record.cross_resolver` — local and 8.8.8.8 `v=spf1` answers side by side |
+| `mail-posture` | Non-sending / send-only posture (RFC 7505) | `spf.mail_posture` rows; the §8 parked-domain ladder row | `record.mail_posture` (`has_mx`, `null_mx`, `non_sending_record`) |
 | `type-99` | The deprecated SPF RR type | The `spf.dns_type` row; the dig tool-run row | The dig probe's `tool_runs[]` entry verbatim |
 
 **Click map — what navigates where** (the §6.2 panels, top to bottom):
@@ -655,6 +658,10 @@ test" state (below) — never a crash. A test that did not run in this run (e.g.
 | Voids counter | `concepts/void-lookups` |
 | `all`-qualifier chip | `concepts/qualifiers` |
 | `eval_result` chip | `concepts/eval-result` |
+| TTL posture chip | Failing → the PS-13 drill-down for this run; healthy → `concepts/ttl` |
+| Cross-resolver chip | Failing → the PS-14 drill-down; healthy → `concepts/resolvers` |
+| Alignment (`aspf`) chip | `aspf=s` → the PS-11 drill-down; healthy → `concepts/alignment` |
+| IPv6 posture line (coverage panel) | Gap → the PS-16 drill-down; healthy → `concepts/pass-set` |
 | Published-record panel ⓘ | `concepts/spf-record` |
 | Mechanism-table row (term or meaning cell) | The term type's `concepts/mechanism-*` / `concepts/modifier-*` page |
 | Include-tree node term | Its type's mechanism concept page (the node's own data highlighted in section 2) |
@@ -743,6 +750,7 @@ first, evidence second, work items third, education last.
 │ RUN   ‹ prev    2026-07-01 09:30 AM    next ›              [ NEWEST ]      │  run context strip
 ├────────────────────────────────────────────────────────────────────────────┤
 │  LOOKUP BUDGET   ▓▓▓▓▓▓▓▓▓▓▓ 11/10   voids 1/2    [ ~all ]                │  hero band
+│  [ ttl 3600s ]  [ resolvers ✓ ]  [ aspf=s ⚠ ]  [ ipv6 — ]     permerror   │  posture chips
 │  "permerror — receivers ignore this record; ALL mail fails SPF."           │
 │  Next step: drop include:old-vendor.com, replace mx/a with ip4 ranges [→]  │
 ├────────────────────────────────────────────────────────────────────────────┤
@@ -784,6 +792,11 @@ Placement rules and rationale:
 - **Highest: the verdict.** The header row carries identity + status; the **budget hero** directly
   under it is the one visual a non-expert needs — am I `valid` or `permerror`, how close to the
   10-lookup cliff, and what's my next move. One accent CTA maximum on the page.
+- **Posture chips** — the hero's second line: TTL, cross-resolver agreement, `aspf` alignment
+  posture, and IPv6 coverage, each a small rounded chip (green/amber/red by its §2 severity,
+  muted "—" when not measured, e.g. `dig` absent). Chips are secondary to the gauge — smaller
+  type, no icons — and every chip click-navigates per the §6.4 click map (failing → the §9
+  drill-down, healthy → the concept page).
 - **Run context strip** — directly under the identity row, before any results. It makes it
   unmistakable that everything below belongs to **one run**: the run's `started_at` in local time
   (matching the run-file name, §5), **‹ prev / next ›** stepping chronologically through this
@@ -898,13 +911,20 @@ match wins):
 | Over the lookup/void limits (PS-03/04) | Cut lookups: delete dead/unused includes first (free wins), then replace `a`/`mx` with explicit `ip4:`/`ip6:`, then consider **dynamically maintained** flattening — never a static IP dump. |
 | `+all` or `/0` (PS-06) | Remove it immediately — the domain is open to the entire internet. |
 | Uncovered sending IP (PS-08) | Add the exact `ip4:`/`ip6:` line (copy button holds it) before the `all` term. |
+| Macro-less `exists:` / `-include:` (PS-15) | Replace the trap term with the `ip4:`/`include:` you actually meant — these two read like protection and behave like the opposite. |
 | `?all` / no `all` | Append `~all`. |
+| Strict alignment defeating SPF (PS-11, `aspf=s`) | Set relaxed alignment (`aspf=r` or drop the tag) in the `_dmarc` record — otherwise every ESP return-path subdomain contributes nothing to DMARC (the act3ai.com rua reports show exactly this). |
+| Resolver disagreement (PS-14) | Wait out the TTL after an edit; persistent disagreement = split-horizon or mismatched authoritative servers — fix the zone, not the record. |
+| No IPv6 coverage with v6 mail infrastructure (PS-16) | Add the sending hosts' `ip6:` ranges before Gmail's v6-preferring MTAs softfail you. |
 | Healthy `~all`, DMARC enforcing | Keep `~all` — with DMARC at quarantine/reject, softfail lets forwarded mail still be evaluated by DKIM/DMARC instead of being rejected at SMTP time. |
 | Healthy `~all`, **no** DMARC | Consider `-all` (stronger without DMARC), or better: deploy DMARC ([./dmarc.mdx](./dmarc.mdx)). |
 | Parked / non-sending domain | Publish exactly `v=spf1 -all`, a Null MX (`0 .`, RFC 7505), and DMARC `p=reject`. |
 
 Additional standing recommendations surfaced as `info` when applicable: keep the record under ~450
-bytes; subdomains that send mail need their own records (no inheritance); recognized ESP includes
+bytes; keep the TTL near 3600 s (PS-13 — a day-long TTL makes every emergency fix a day-long
+outage); subdomains that send mail need their own records (no inheritance) — **including ESP
+return-path subdomains** like `em2598.<domain>`, which carry their own CNAME-provided SPF and are
+the aligned-SPF path when `aspf` is relaxed; recognized ESP includes
 (Google `_spf.google.com` — flattened by Google to direct `ip4`/`ip6` blocks, 1 lookup as verified
 2026-07, Microsoft `spf.protection.outlook.com` ≈2–3, SendGrid `sendgrid.net`, Mailchimp
 `servers.mcsv.net`, Amazon SES `amazonses.com`) each have a live lookup cost — shown next to the

@@ -1,6 +1,6 @@
 ---
 title: Domain Registration Reputation (WHOIS/RDAP)
-description: Audits a sending domain's registration record — WHOIS/RDAP age, expiry, registrar lock, DNSSEC-at-registrar, privacy, parked/abuse and lookalike signals — to catch freshly-registered, soon-expiring, or poorly-locked domains that raise spam scores or silently break all mail.
+description: Audits a sending domain's registration record — WHOIS/RDAP age, expiry, registrar lock, DNSSEC-at-registrar, privacy, parked/abuse and lookalike signals — to catch freshly-registered, soon-expiring, or poorly-locked domains that raise spam scores or silently break all mail. Also specs the run-scoped check-detail explainer page at /domains/:domainId/runs/:runId/dns/check/domain-reputation (what registration reputation is, whether this run is healthy, what it means, exact fixes, run-this-check-now), the raw RDAP + parsed field-by-field breakdown, per-finding drill-down mapping, run-over-run history (days-to-expiry sparkline, EPP status change markers), and the #concept anchors for RDAP / EPP status / clientHold / transfer lock / NRD / parked domain.
 ---
 
 # Domain Registration Reputation (WHOIS/RDAP)

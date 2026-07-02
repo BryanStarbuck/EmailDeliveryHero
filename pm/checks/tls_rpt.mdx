@@ -255,8 +255,9 @@ registered non-scoring future stub (node:dns exposes no TTL).
 | `infra.tls_rpt_unknown_tags` | First round | tag whitelist |
 | `infra.tls_rpt_endpoint_reachable` | First round (advisory) | `resolveMx`/`resolve4/6` of rua target |
 | `infra.tls_rpt_rua_external_authorized` | First round (advisory) | domain comparison |
-| `infra.tls_rpt_ttl_sane` | Future | needs `dig` (TTL not exposed by node:dns) |
-| `infra.tls_rpt_reports_ingested` | Future | mailbox/HTTPS endpoint + JSON report parser |
+| `infra.tls_rpt_ttl_sane` | Future | needs `dig` (TTL not exposed by node:dns); emits a muted `info` stub each run |
+| `infra.tls_rpt_reports_ingested` | **Shipped** | report-email ingestion pipeline ([../emails.mdx](../emails.mdx) §4) + `deriveTlsRptFindings` at audit time |
+| `infra.tls_rpt_no_policy_found` | **Shipped** | cross-reporter `policy-type` comparison over the ingested window |
 
 ## 8. Acceptance criteria
 
@@ -279,10 +280,372 @@ registered non-scoring future stub (node:dns exposes no TTL).
    retry-advisory instead.
 10. Every non-`ok` finding carries a concrete `remediation` string (the exact record or step), never a
     generic message.
-11. `infra.tls_rpt_reports_ingested` is registered but returns a single `info` "future" finding and
-    contributes zero to the domain score until ingestion ships.
+11. `infra.tls_rpt_reports_ingested` is live: with ingestion disabled it returns the muted `info`
+    "ingestion disabled" finding (zero score impact); with zero reports it returns the `info`
+    "no TLS reports ingested yet" CTA; with ingested reports it is `info` at zero failure sessions
+    (healthy baseline, reporters + window named) and `warning` on any `failure-details` volume,
+    naming each result type and its layer-specific fix. `infra.tls_rpt_no_policy_found` fires
+    `warning` when one reporter saw `no-policy-found` while another saw `sts`/`tlsa` in the window.
 12. The scheduler diff flags record disappearance, new duplicates, and rua breakage as new problems
     against the prior `checks.tls_rpt` snapshot.
+13. The explainer page `/domains/:domainId/runs/:runId/dns/check/tls-rpt` (newest alias
+    `/domains/:domainId/dns/check/tls-rpt`) renders the five locked blocks of
+    [dns.mdx §14.2](./dns.mdx) in order, with this spec's interior copy (§9), and the alias
+    rewrites itself to the canonical run URL.
+14. Block 1 contains the anchored sub-headings `#concept-tls-rpt`, `#concept-rua`, and
+    `#concept-reporting-mailbox`; every underlined "TLS-RPT" / "rua (TLS)" / "reporting mailbox"
+    term anywhere in the app deep-links to them run-scoped (§10.2).
+15. Block 2 shows every `infra.tls_rpt_*` sub-test row from the viewed run (fail rows
+    pre-expanded), the raw pane with the reassembled TXT string (or `_smtp._tls.<domain> →
+    NXDOMAIN` when absent) with a copy button and `tool_runs[]` traceability, and the §9.3 parsed
+    field-by-field table with a per-field ✓/✗/⚠/ⓘ verdict chip; uncaptured fields render "not
+    captured this run", never invented data.
+16. Block 2's ingested-reports panel renders one row per reporter/day from `aggregateTlsRpt`
+    (reporter, date, policy-type, ok/failed sessions, failure result types) with the window and
+    totals chips — for the real act3ai.com corpus that is the Microsoft Corporation daily `sts`
+    rows with 2-3 ok / 0 failed sessions — and never counts a DMARC attachment (`application/zip`
+    from google.com) as a TLS report.
+17. Blocks 3 and 4 are conditional on the observed state per the §9.4 copy table and the §9.5 fix
+    recipes; every fix step carries a copy button with the exact record/text, never prose-only.
+18. Block 5's button posts `POST /api/audit/run/:domainId/check/dns/tls-rpt`, which writes a NEW
+    run file tagged `run.scope: dns.tls_rpt`, follows the idle→running→done-with-diff-flash→error
+    state machine of [dns.mdx §15.2](./dns.mdx), and is labeled with its exact scope and ~2 s
+    cost; it re-derives the report-side finding from the store but never triggers email ingestion.
+19. The footer history strip (≤30 cells) and the ▲/▼/= trend glyph derive at render time from
+    `GET /api/audit/runs` per [dns.mdx §16](./dns.mdx); the `rua` destination set is trended with
+    change markers, and the failed-session count renders as a sparkline when ≥2 windows exist.
+20. Every non-`ok` finding row links to its §10.1 drill-down (PS-08 unless mapped otherwise) and
+    the drill-down cross-links back to this explainer's anchors — no dead ends in either
+    direction.
+21. The references footer renders the §9.7 rows plus the three category-common receiver rows, all
+    as plain new-tab anchors.
+22. Unknown `:checkKey`, unknown `:runId`, never-audited domain, ingestion-disabled, and
+    run-in-progress states render per §9.8 — never a blank page; blocks 1/3/4 render even with no
+    run data.
+
+## 9. The check-detail explainer page — `/domains/:domainId/runs/:runId/dns/check/tls-rpt`
+
+This section owns the **interior copy** of the TLS-RPT family explainer page. The **shell** —
+routes, the five locked blocks, the raw+parsed frame, the history strip, the references frame,
+and the generic loading/empty/error states — is owned by [dns.mdx §14](./dns.mdx) and is never
+redefined here. `:checkKey` is fixed at **`tls-rpt`** (equal to the backend directory
+`code/packages/backend/src/modules/audit/checks/tls-rpt/`); the newest-run alias is
+`/domains/:domainId/dns/check/tls-rpt`. Everywhere the family renders as a clickable row it uses
+the [dns.mdx §14.1](./dns.mdx) row label **"TLS-RPT"** and one-line meaning **"Will anyone tell
+you when senders can't negotiate TLS with your MX?"** — quoted, never paraphrased.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Back to DNS & Infrastructure        TLS-RPT                  [⟳ Run now]   │
+│ act3ai.com · [ ✓ ok — 0 of 11 fail ]                                          │
+│  ‹ prev run     Run 2026-07-01 09:14  [ newest ]                  next run ›  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 1 WHAT THIS IS   TLS-RPT is the feedback loop for encrypted mail delivery …  │
+│   #concept-tls-rpt · #concept-rua · #concept-reporting-mailbox               │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 2 IS IT HEALTHY RIGHT NOW?                              [ ✓ ok — 0 fail ]    │
+│   ✓ infra.tls_rpt_present / _single / _syntax / _version / _rua …            │
+│   RAW  "v=TLSRPTv1; rua=mailto:tls-reports@act3ai.com"   (tool run)  [copy]  │
+│   PARSED  field       observed                    expected          verdict  │
+│           records     1                           exactly 1            ✓     │
+│           v           TLSRPTv1                    TLSRPTv1             ✓     │
+│           rua[0]      mailto:tls-reports@act3ai…  mailto:/https:       ✓     │
+│           ↳ mailbox   MX found (1 record)         deliverable          ✓     │
+│   ── INGESTED REPORTS (last 30 days) ── 7 ok · 0 failed · 1 reporter ──────  │
+│   Microsoft Corporation  2026-06-29  sts   3 ok  0 failed   —                │
+│   Microsoft Corporation  2026-06-28  sts   2 ok  0 failed   —                │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 3 WHAT IT MEANS   Receivers are reporting in and every TLS session …         │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 4 WHAT YOU CAN DO   Nothing is broken. Optional hardening: …        [copy]   │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 5 RUN THIS CHECK NOW  [⟳ Run tls-rpt only]  1 of 10 families; DNS only       │
+│   (1 TXT + a few MX/A), ~2 s · last ran 2026-07-01 09:14                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ HISTORY   ▢▢▢▢▢▢■■■  30 runs · rua-set change markers · failure sparkline    │
+│ REFERENCES  RFC 8460 · Google Admin TLS reports · Gmail/Yahoo/MS floors      │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 9.1 Block 1 — What this is (concept copy and anchors)
+
+Three short paragraphs, plain language first, standards second. Static content — renders
+instantly, independent of run data:
+
+1. **The feedback loop** (`#concept-tls-rpt`). TLS-RPT is how you find out when other mail
+   servers *couldn't* speak TLS to yours. One TXT record at `_smtp._tls.<domain>` names an
+   address; participating receivers (Google, Microsoft) then mail you one report per day
+   describing every TLS session they attempted against your MX — how many succeeded, how many
+   failed, and why. It enforces nothing itself; it is the smoke detector for MTA-STS, DANE, and
+   STARTTLS (each term deep-links per §10.2).
+2. **The reporting address** (`#concept-rua`). The `rua=` tag lists where reports go: one or
+   more comma-separated `mailto:` or `https:` URIs, optionally with a `!10m`-style size cap
+   (`#concept-size-limit`). Explicitly contrast with DMARC's `rua` — same tag name, different
+   record, and TLS-RPT has **no** `ruf`/`pct`/`sp` and needs no external-authorization record.
+3. **The reporting mailbox and the daily report** (`#concept-reporting-mailbox`,
+   `#concept-report-json`). What actually arrives: a gzip'd JSON attachment
+   (`application/tlsrpt+gzip`) with `organization-name`, a one-day `date-range`, and per-policy
+   `summary` counts plus `failure-details[]`. Show the real-world shape using the act3ai.com
+   corpus: Microsoft's daily report echoing back the domain's own MTA-STS policy
+   (`policy-type: sts`, `mode: enforce`, the five Google MX lines) with
+   `total-successful-session-count`. This app can *be* that mailbox — the
+   [../emails.mdx](../emails.mdx) ingestion pipeline parses these reports into the panel in §9.3.
+
+Anchor contract (fixed by the [dns.mdx §14.6](./dns.mdx) concept map — the first three are the
+category-wide destinations; the last two are page-local extras):
+
+| Anchor | Term(s) that link here from anywhere in the app |
+|---|---|
+| `#concept-tls-rpt` | TLS-RPT, SMTP TLS Reporting, `_smtp._tls` |
+| `#concept-rua` | `rua` (TLS), reporting URI, reporting endpoint |
+| `#concept-reporting-mailbox` | reporting mailbox, report collector |
+| `#concept-size-limit` | `!10m` size suffix (page-local) |
+| `#concept-report-json` | TLS report JSON, `failure-details`, `result-type` (page-local) |
+
+### 9.2 Block 2 — Is it healthy right now? (sub-test rows)
+
+The family StatusCell plus one verdict sentence, pattern per state:
+
+- all ok → "The TLS-RPT record is published, valid, and reports are arriving — N ok / 0 failed
+  sessions in the last W days."
+- missing → "No TLS-RPT record — nobody can tell you when TLS to your MX breaks."
+- present-but-broken → "A TLS-RPT record exists but receivers discard it: *worst finding title*."
+- ok record + report failures → "Receivers report N failed TLS session(s) — see the failure
+  types below."
+
+Then **every sub-test row of this family from the viewed run**, fail rows pre-expanded, same row
+anatomy as the category page. The row inventory below is the code-true contract
+(`tls-rpt.check.ts` + `deriveTlsRptFindings`) — note the **indexed ids**: per-URI findings are
+emitted as `infra.tls_rpt_rua.0`, `infra.tls_rpt_endpoint_reachable.1`, etc., and the UI must
+group them under their base id:
+
+| Finding id (as emitted) | ok state shown | Non-ok severity | Evidence carried |
+|---|---|---|---|
+| `infra.tls_rpt_present` | (implied by later rows) | warning missing; **info** on transient DNS error ("unknown, not confirmed absent") | query name |
+| `infra.tls_rpt_no_extra_txt` | "Only the TLS-RPT record is present" | info: stray TXT | stray strings joined with `\|` |
+| `infra.tls_rpt_single` | "Exactly one TLSRPTv1 record" | critical: duplicates (parse stops) | all candidate strings |
+| `infra.tls_rpt_syntax` | "begins v=TLSRPTv1, parses" | critical: `v=` not first (parse stops) | raw record |
+| `infra.tls_rpt_version` | "version is TLSRPTv1" | critical: wrong/case-mismatched value (parse stops) | raw record |
+| `infra.tls_rpt_unknown_tags` | (row absent when clean) | info: tags outside {`v`,`rua`} | raw record |
+| `infra.tls_rpt_rua_present` | "rua endpoint declared" | critical: no `rua` (parse stops) | raw record |
+| `infra.tls_rpt_rua.<i>` | "All rua endpoints well-formed" (single unindexed ok row) | warning: malformed mailto/https/bare address | the URI |
+| `infra.tls_rpt_rua_scheme.<i>` | (covered by the ok row above) | warning: `http:`/`ftp:`/other scheme | the URI |
+| `infra.tls_rpt_endpoint_reachable.<i>` | "mailbox domain reachable (N MX)" / "HTTPS host resolves" | warning: no MX / NXDOMAIN; **info** on transient lookup error | the URI |
+| `infra.tls_rpt_rua_external_authorized.<i>` | (row absent when rua is same-org) | info: reports go to a third party | the URI |
+| `infra.tls_rpt_ttl_sane` | — | info: permanent future stub (muted) | — |
+| `infra.tls_rpt_reports_ingested` | info: healthy baseline "N ok / 0 failed" | warning: any failed sessions; info: none ingested / ingestion disabled | result types |
+| `infra.tls_rpt_no_policy_found` | (row absent) | warning: policy invisible to some reporters | — |
+
+Note the early-exit ladder: missing record, duplicates, malformed `v=`, wrong version, and
+missing `rua` each stop the parse, so downstream rows legitimately do not exist in that run —
+block 2 renders the absent rows as "not evaluated this run (blocked by *finding title*)", never
+as passes.
+
+### 9.3 Block 2 — raw + parsed breakdown, and the ingested-reports panel
+
+**Raw pane.** The reassembled TXT string exactly as published (multi-chunk records joined),
+monospace, copy button, and the `tool_runs[]` link (tool, duration, exit code) per
+[dns.mdx §14.3](./dns.mdx). When absent: `_smtp._tls.<domain> → NXDOMAIN (no TXT)`. Sourced from
+the run snapshot — never re-queried at render time.
+
+**Parsed table** (Field | Observed | Expected / sane | Verdict — per-field ✓/✗/⚠/ⓘ chip). This
+spec owns the rows:
+
+| Field | Observed (example) | Expected / sane | Verdict source |
+|---|---|---|---|
+| TLSRPTv1 records at name | `1` | exactly 1 | `_present` + `_single` |
+| `v` | `TLSRPTv1` | literal `TLSRPTv1`, first tag | `_syntax` + `_version` |
+| `rua[i]` — one row per URI | `mailto:tls-reports@act3ai.com` | `mailto:` or `https:` grammar | `_rua.<i>` / `_rua_scheme.<i>` |
+| ↳ target | `act3ai.com` (same-org) | — (ⓘ chip when external) | `_rua_external_authorized.<i>` |
+| ↳ size limit | `—` or `10m` | optional `!<n>[kmgt]` | parse only, always ⓘ |
+| ↳ deliverability | `MX found (1 record)` / `host resolves` | mailto domain has MX / https host has A/AAAA | `_endpoint_reachable.<i>` |
+| unknown tags | `—` | only `v`, `rua` | `_unknown_tags` |
+| stray TXT at name | `—` | none | `_no_extra_txt` |
+| TTL | not captured this run | 3600–86400 | `_ttl_sane` (future) |
+
+Any field the run file did not capture renders **"not captured this run"** — no fabrication.
+
+**Ingested-reports panel** (family-specific panel allowed inside block 2 by the
+[dns.mdx §14](./dns.mdx) ownership rule). Header: the analysis window (`begin→end`, from
+`aggregateTlsRpt`), totals chips (`N ok`, `M failed`, `K reporter(s)`), then one row per
+reporter/day: **Reporter | Day | Policy type | OK sessions | Failed sessions | Failure result
+types**. Grounded in the real corpus at `emails/`: Microsoft Corporation rows dated 2026-06-26 /
+-28 / -29, `policy-type: sts`, 2-3 ok / 0 failed each. A failed row expands to its
+`failure-details[]` (result type, count, and when present `receiving-mx-hostname` /
+`sending-mta-ip`) and each result type chips to its §9.5 fix. The panel's four states mirror §4:
+**ingestion disabled** (muted, link to Settings → Admin), **none ingested yet** (CTA to the
+Reports page's **Ingest now**), **healthy baseline**, **failures**. Classification guard: only
+`application/tlsrpt+gzip` / `application/gzip`-wrapped **TLS-RPT JSON** feeds this panel — the
+DMARC `application/zip` XML attachments that share the same mailbox (the google.com and
+protection.outlook.com files in the corpus) belong to the DMARC panel and must never be counted
+here (mis-filing is an ingestion-pipeline bug, [../emails.mdx](../emails.mdx) §4).
+
+### 9.4 Block 3 — What it means (conditional copy)
+
+| Observed state | Copy direction (plain language) |
+|---|---|
+| Record missing (`_present` warning) | You are flying blind: if STARTTLS, MTA-STS, or DANE breaks, mail silently downgrades to cleartext or bounces for days before you notice via complaints. TLS-RPT never blocks mail itself — this is a *visibility* gap, not a delivery gate. |
+| Record present but broken (`_single`/`_syntax`/`_version`/`_rua_present` critical) | Worse than absent: RFC 8460 makes receivers treat a duplicate/malformed record as *no policy*, so you believe you have a smoke detector and you don't. |
+| rua unreachable (`_endpoint_reachable` warning) | Receivers generate the reports and they bounce — same blindness, one hop later. |
+| Healthy record, reports arriving, 0 failures | The full loop works: your record, the receiver's reporter, and your mailbox. This baseline is what makes a later regression detectable (§11). |
+| Failures reported (`_reports_ingested` warning) | Real senders failed TLS to your MX in the window. Under `mode: enforce` (MTA-STS) or DANE those sessions are *bounced*, not downgraded — this is active mail loss, and the result types name the broken layer. |
+| `_no_policy_found` warning | Part of the internet can't see your TLS policy — propagation, split answers, or a broken policy fetch; enforcement is inconsistent. |
+
+Enforcement framing per the category ladder: TLS-RPT is *hardening/visibility* (nobody rejects
+mail for lacking it), but the failures it reports are the *rejected now* class.
+
+### 9.5 Block 4 — What you can do (fix recipes)
+
+Numbered steps, every step with a copy button carrying the exact text — never prose-only.
+Conditional on state:
+
+1. **No record** → publish (copy button):
+   `_smtp._tls.<domain>. 3600 IN TXT "v=TLSRPTv1; rua=mailto:tls-reports@<domain>"`
+   plus the provider path (registrar/DNS console → TXT → host `_smtp._tls`).
+2. **Duplicate records** → delete all but one; the kept record is offered on the copy button.
+3. **Malformed / wrong version / missing rua** → the full corrected record string (the checker's
+   `remediation` already carries it verbatim — render it, don't re-generate).
+4. **Bad scheme / bare address** → the per-URI rewrite (`mailto:` prefix or `https://` URL).
+5. **Mailbox undeliverable** → point `rua` at a domain with MX, or fix the mailbox domain's MX.
+6. **Reports not being read** → make this app the reader: Settings → Admin (mailbox/drop-folder,
+   [../emails.mdx](../emails.mdx) §8), then Reports → **Ingest now**.
+7. **Failure result types** (the code-true fix table — one row per reported `result-type`):
+
+| `result-type` in `failure-details[]` | Fix (copy-button text) |
+|---|---|
+| `starttls-not-supported` | Ensure every MX offers STARTTLS |
+| `certificate-host-mismatch` | Replace the MX certificate so its name matches the MX host |
+| `certificate-expired` | Renew the expired MX certificate |
+| `validation-failure` | Install a certificate from a trusted CA on the MX |
+| `tlsa-invalid` | Repair the TLSA record after the key roll |
+| `dnssec-invalid` | Fix the DNSSEC chain for the TLSA record |
+| `sts-policy-fetch-error` | Make `https://mta-sts.<domain>/.well-known/mta-sts.txt` reachable |
+| `sts-policy-invalid` | Correct the MTA-STS policy file syntax |
+| `sts-webpki-invalid` | Fix the certificate on the mta-sts policy host |
+| *(unknown type)* | "investigate `<type>`" + link to RFC 8460 §6.6 |
+
+Ladder cross-links lead the block when relevant: MX routing broken → "fix MX first — nobody can
+even connect"; failures naming `sts-*` → the [MTA-STS explainer](./mta_sts.mdx); `tlsa-*`/
+`dnssec-*` → the [DANE](./dane_tlsa.mdx) / DNSSEC explainers; `starttls-*`/`certificate-*` →
+the [STARTTLS & MX certificates](./tls_transport.mdx) explainer.
+
+### 9.6 Block 5 — Run this check now
+
+The [dns.mdx §15](./dns.mdx) spot-check, family scope: **`POST
+/api/audit/run/:domainId/check/dns/tls-rpt`**, which writes a **new** run file tagged
+`run.scope: dns.tls_rpt`. Button label states scope and cost exactly: *"Runs tls-rpt only — 1 of
+10 families; DNS queries only (1 TXT + a few MX/A lookups), ~2 s."* State machine, diff flash,
+409-while-running, and history-merge semantics are the shared §15.2/§15.3 contract. One
+TLS-RPT-specific clarification rendered next to the button: the re-run re-resolves DNS **and**
+re-derives `infra.tls_rpt_reports_ingested` from the already-ingested report store — it does
+**not** fetch new report emails; "Ingest now" on the Reports page does that (link).
+
+### 9.7 References (this family's rows)
+
+| Standard / doc | Why it matters here |
+|---|---|
+| RFC 8460 — SMTP TLS Reporting | The record grammar (§3), the one-record rule (§3.1), the report JSON schema (§4), result types (§6.6) |
+| RFC 8461 — MTA-STS | The policy most reports describe (`policy-type: sts`) |
+| RFC 6698 / 7672 — DANE/TLSA | The other reported policy layer (`policy-type: tlsa`) |
+| Google Workspace Admin — "TLS reports" | How the largest reporter generates and sends these reports |
+| Microsoft 365 documentation — SMTP TLS reporting | The reporter actually seen in the act3ai.com corpus |
+
+Plus the three category-common receiver rows (Gmail / Yahoo / Microsoft sender requirements)
+that [dns.mdx §14.4](./dns.mdx) puts on all ten pages. Plain anchors, new tab, never proxied.
+
+### 9.8 Loading / empty / error states (family-specific additions)
+
+The generic states are [dns.mdx §14.5](./dns.mdx) (unknown key, unknown run, never-audited,
+run-in-progress). TLS-RPT adds:
+
+- **Ingestion disabled** → the reports panel renders muted with the master-switch explanation
+  and a Settings → Admin link; the DNS half of block 2 is unaffected.
+- **No reports ingested yet** → the panel shows the CTA state ("reports usually start arriving
+  within 24-48 h of publishing the record"), not an error.
+- **Transient DNS failure this run** (`_present` info) → block 2's verdict says "presence
+  unknown, not confirmed absent" and the parsed table renders every row "not captured this run";
+  block 5 is the retry affordance.
+- **Early-exit runs** (§9.2 ladder) → blocked rows render "not evaluated this run", not ✓/✗.
+
+## 10. Drill-downs and the clickable-concept map
+
+### 10.1 Finding → problem drill-down mapping
+
+Problem drill-downs (`/domains/:domainId/dns/:problemId`, `lib/dns-problems.ts`) tell
+cross-family *stories*; this explainer is the *reference*. Every non-`ok` TLS-RPT finding row
+carries a "see the story →" link:
+
+| Finding id | Drill-down | Why |
+|---|---|---|
+| `infra.tls_rpt_present`, `_single`, `_syntax`, `_version`, `_rua_present`, `_rua.*`, `_rua_scheme.*` | **PS-08 — Encryption-in-transit gaps** | TLS-RPT-missing/broken is one leg of the PS-08 story (STARTTLS + MTA-STS + DANE + TLS-RPT) |
+| `infra.tls_rpt_endpoint_reachable.*` | **PS-08**, and **PS-01 — Broken inbound mail routing** when the rua mailbox is on the audited domain and its MX is the broken thing | the report bounce is a routing symptom |
+| `infra.tls_rpt_reports_ingested` (warning) | the drill-down of the **reported layer**: `sts-*` → PS-08 via the MTA-STS leg, `tlsa-*`/`dnssec-*` → **PS-07 — DANE gap** / **PS-06 — DNSSEC broken**, `starttls-*`/`certificate-*` → PS-08 via the transport leg | reports diagnose other families' breakage |
+| `infra.tls_rpt_no_policy_found` | **PS-08** | inconsistent policy visibility |
+| `infra.tls_rpt_rua_external_authorized.*`, `_unknown_tags`, `_no_extra_txt` (info) | none — info rows link only to their §9.1 concept anchor | hygiene, not a story |
+
+Drill-down pages cross-link back: any mention of the mechanism ("TLS-RPT", "rua") in a PS-06/07/
+08 story routes to this explainer's anchors, run-scoped — stories → drill-downs, mechanisms →
+explainers, no dead ends in either direction.
+
+### 10.2 Outbound concept links from this page
+
+Every underlined term on this explainer navigates (first occurrence per page region), preserving
+`:runId`:
+
+| Term on this page | Destination |
+|---|---|
+| MTA-STS, `mode: enforce`, policy file | `…/dns/check/mta-sts#concept-…` |
+| DANE, TLSA | `…/dns/check/dane-tlsa#concept-…` |
+| DNSSEC | `…/dns/check/dnssec#concept-…` |
+| STARTTLS, MX certificate | `…/dns/check/tls-transport#concept-…` |
+| MX record | `…/dns/check/mx-routing#concept-mx-record` |
+| DMARC `rua` (the contrast in §9.1) | the DMARC category's aggregate-reports surface ([dmarc.mdx](./dmarc.mdx)) |
+| report ingestion, Ingest now, report mailbox setup | the Reports page ([../emails.mdx](../emails.mdx) §7) and Settings → Admin (§8) |
+
+## 11. History & trends on this page
+
+All render-time derivations from `GET /api/audit/runs` per [dns.mdx §16](./dns.mdx) — nothing
+persisted, no new endpoint.
+
+- **Trend glyph** (header): ▲/▼/=/· against the most recent earlier run whose scope included
+  `tls_rpt`; tooltip names the exact delta ("record disappeared — was present in the 2026-06-30
+  run" / "1 new critical: `infra.tls_rpt_single`").
+- **History strip** (footer): ≤30 cells oldest→newest, cell color = worst TLS-RPT severity that
+  run, viewed-run ring, dotted underline on scoped runs, click swaps `:runId`.
+- **Trended fields with change markers** — [dns.mdx §16.3](./dns.mdx) fixes the `rua`
+  destination set; this spec adds (same mechanism): `present`, `recordCount`, `valid`, and the
+  report-side `totalFailure` per window. A changed rua set gets a change-marker dot even at
+  unchanged severity (a silently redirected rua is an exfiltration-adjacent event worth a dot).
+- **Sparkline**: failed-session count per ingestion window (≥2 windows), rendered under the
+  strip — the §2 "failure volume + trend" made visible. Zero-failure baselines plot as zeros, so
+  a first failure is a visible step, not a first data point.
+
+## 12. Snapshot additions this spec proposes (small, code-facing)
+
+The checker today returns findings only; the explainer's raw+parsed breakdown and §11 trends
+want a small structured snapshot persisted per run (the §5 `checks.tls_rpt` object, already
+specced) — this is the delta between spec and code as of 2026-07:
+
+1. Persist `checks.tls_rpt = { present, recordCount, rawRecord, versionOk, ruaEndpoints[],
+   valid, unknownTags[], strayTxt[], checkedAt }` into the run file's `dns_infra` section
+   (today only derivable lossily from finding `evidence` strings).
+2. Capture the report aggregate **at audit time** — `{ window, reporters[], totalSuccess,
+   totalFailure, resultTypes[], reportCount }` — so an old run's explainer shows what was known
+   *then*, not the store's current contents (the page describes this run, per the
+   [dns.mdx §14.3](./dns.mdx) no-re-query rule).
+3. Keep emitting the indexed ids (`.<i>` suffixes) — the UI groups by base id; do not collapse
+   them in code.
+
+## 13. UI surfaces this check appears on (recap)
+
+| Surface | Route | What TLS-RPT contributes |
+|---|---|---|
+| Dashboard roll-up | `/` | worst `infra.tls_rpt_*` severity feeds the DNS & Infrastructure cell |
+| Run report, DNS section | `/domains/:domainId/runs/:runId` (alias `/domains/:domainId`) | the family row (label + one-line meaning + K of M + trend glyph + ⟳ + `details ›`) in the ten-family list ([dns.mdx §17](./dns.mdx)) |
+| DNS category page | `…/runs/:runId/dns` (alias `…/dns`) | the "TLS-RPT" group header with its findings, `details ›`, family ⟳, trend glyph |
+| **Check-detail explainer** (this spec, §9) | `…/runs/:runId/dns/check/tls-rpt` (alias `…/dns/check/tls-rpt`) | the five-block reference page |
+| Problem drill-downs | `…/dns/PS-08` (also PS-01/06/07 per §10.1) | story legs + back-links to the explainer anchors |
+| Reports page | the [../emails.mdx](../emails.mdx) §7 surface | the ingested TLS-RPT reports that feed §9.3's panel |
 
 <!--
 MAINTENANCE NOTES

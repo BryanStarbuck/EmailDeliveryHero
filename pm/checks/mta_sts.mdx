@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — MTA-STS Check
-description: The MTA-STS (SMTP MTA Strict Transport Security, RFC 8461) deliverability check — verifying the _mta-sts TXT record (first-round pure DNS), the HTTPS-served policy file, the enforce/testing mode, the mx: host set, max_age sanity, TXT id freshness, and TXT/policy consistency; splits the pure-DNS TXT sub-checks from the future HTTPS-fetch sub-checks and defines the mta_sts_check_results schema.
+description: The MTA-STS (SMTP MTA Strict Transport Security, RFC 8461) deliverability check — verifying the _mta-sts TXT record (first-round pure DNS), the HTTPS-served policy file, the enforce/testing mode, the mx: host set, max_age sanity, TXT id freshness, and TXT/policy consistency; splits the pure-DNS TXT sub-checks from the future HTTPS-fetch sub-checks, defines the mta_sts_check_results schema, and specs the run-scoped check-detail explainer page at /domains/:domainId/runs/:runId/dns/check/mta-sts (five locked blocks, raw+parsed TXT/policy breakdown, #concept anchors, family-scoped Run-this-check-now, history/trends, PS-08 drill-down mapping).
 ---
 
 # EmailDeliveryHero — MTA-STS Check
@@ -650,4 +650,30 @@ All cross-family links preserve the viewed `:runId` (alias form when on the alia
     ./mx_routing.mdx (MX set the mx: patterns must match), ./dane_tlsa.mdx (DNSSEC alternative).
   - When storage graduates to Postgres, the embedded checkResults.mta_sts object becomes one
     mta_sts_check_results row; no checker changes.
+  - Explainer layer (§9-§10): the shell (five-block order, run strip, raw+parsed frame, history
+    strip, references frame, error states) is OWNED by ../dns.mdx §14-§17 — this spec owns only
+    the MTA-STS interior copy. Route: /domains/:domainId/runs/:runId/dns/check/mta-sts with
+    newest alias /domains/:domainId/dns/check/mta-sts; :checkKey slug "mta-sts" is fixed (kebab
+    of family key mta_sts = backend dir checks/mta-sts/) — never invent another slug. Row label
+    "MTA-STS" + one-line meaning come from dns.mdx §14.1's table; the five #concept-* anchors
+    (mta-sts, mode-enforce, policy-id, max-age, policy-file) implement dns.mdx §14.6's map —
+    keep both sides in lockstep. Frontend mapping module: lib/dns-check-explainers.ts /
+    lib/dns-families.ts.
+  - §9.3.1's row-state table was inventoried from checks/mta-sts/mta-sts.check.ts (2026-07):
+    finding ids infra.mta_sts_txt / _txt_single / _version / _id_format / _vs_tlsrpt plus the
+    collapsed pending infra.mta_sts_policy. If the checker's titles/severities/ids change, or
+    the HTTPS probe ships and the pending row fans out into the eleven policy sub-checks of §2,
+    update §9.3.1, the §9.3.2 parsed rows, and §10's mapping table together.
+  - Scoped re-run: POST /api/audit/run/:domainId/check/dns/mta-sts writes a NEW run file with
+    run.scope = dns.mta_sts (mechanism owned by dns.mdx §15 — one checker-filter param on
+    AuditService.runForDomain, shared across categories). Trended fields (dns.mdx §16.3): TXT
+    id + mode; the stale-id trap (policy_hash changed, id unchanged) is the cross-run headline.
+  - §9.3.3 proposes the additive mta_sts run-file snapshot (txt_present/txt_raw/txt_id/
+    txt_version/txt_count/tlsrpt_present, policy fields null until the probe) — until it lands
+    the explainer reconstructs raw TXT from finding evidence and must label it so; never
+    re-query DNS at render time.
+  - Drill-down mapping: every infra.mta_sts_* finding's "Learn more ›" → PS-08
+    (/domains/:domainId/dns/PS-08, lib/dns-problems.ts) — stories to drill-downs, mechanisms to
+    this explainer's anchors; infra.mta_sts_vs_tlsrpt's mechanism link goes cross-family to the
+    tls-rpt explainer.
 -->

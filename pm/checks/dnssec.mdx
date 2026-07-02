@@ -320,6 +320,300 @@ When storage graduates to PostgreSQL the reconciliation is mechanical: `results.
     new problem on the Dashboard.
 13. `infra.dnssec_dane_ready` correctly signals to [`./dane_tlsa.mdx`](./dane_tlsa.mdx) that TLSA is
     trustworthy only when the zone is both signed and validates.
+14. The DNSSEC **check-detail explainer page** renders at
+    `/domains/:domainId/runs/:runId/dns/check/dnssec` (newest alias
+    `/domains/:domainId/dns/check/dnssec`) with the five locked blocks of
+    [`./dns.mdx`](./dns.mdx) §14.2 in order — never reordered, never removed.
+15. Block 1 carries the six required `#concept-<term>` anchors from the [`./dns.mdx`](./dns.mdx)
+    §14.6 map (`dnssec`, `ds`, `dnskey`, `rrsig`, `algorithm-13`, `signed-but-broken`) plus this
+    spec's local anchors (§9.2), and renders statically — before any run data arrives.
+16. Block 2 renders **all eleven §2 sub-check rows** of the viewed run in §2 order, fail rows
+    pre-expanded, each row's evidence deep-linking to the matching `tool_runs[]` entry; the raw +
+    parsed breakdown (§9.4) renders per-field verdict chips and shows **"not captured this run"**
+    for every null/ungathered field — it never re-queries DNS at render time.
+17. A run whose DNSKEY lookup failed (the checker returned findings with **no** `results` snapshot)
+    renders block 2 as "DNSSEC state could not be determined this run" — never a false "unsigned".
+18. Block 4's fix recipes are conditional on the observed state (§9.6): the broken-chain path leads,
+    the unsigned path is advisory, and every step's copy button carries a publishable artifact (the
+    DS record line, the NSEC3PARAM value, the verification command) — never prose.
+19. Block 5 POSTs `POST /api/audit/run/:domainId/check/dns/dnssec`, which writes a **new** run file
+    tagged `run.scope: dns.dnssec` and follows the idle → running → done-with-diff-flash → error
+    state machine of [`./dns.mdx`](./dns.mdx) §15.2; the button is disabled with an inline reason
+    while any run for the domain is in flight.
+20. The footer history strip and the since-last-run trend glyph follow [`./dns.mdx`](./dns.mdx)
+    §16.1-16.3, always comparing against the most recent earlier run **whose scope included the
+    dnssec family**, with change markers on `signed`, `algorithms[]`, `ds_digest_types[]`, and
+    `ds_matches_dnskey`.
+21. Every finding id the checker emits maps to a drill-down / navigation target per the §10 table —
+    no finding row dead-ends; `infra.dnssec_dane_ready.*` rows cross-link the PS-07 DANE drill-down
+    and the [`./dane_tlsa.mdx`](./dane_tlsa.mdx) explainer.
+22. The references footer renders the §9.8 rows plus the three category-common receiver rows
+    (Gmail / Yahoo / Microsoft sender requirements) per [`./dns.mdx`](./dns.mdx) §14.4.
+23. All §9.9 states render as specified: unknown `checkKey`, unknown `runId`, never-audited domain
+    (blocks 1/3/4 still render; block 5 stays runnable), deep-path-disabled (`.pending` rows grouped
+    under one "Deep check off" band with the enable path), and run-in-progress skeletons.
+24. When §11's small recording additions land (`dsRecords[]`, `rrsigs[]`), the parsed breakdown
+    upgrades from summary rows to per-record rows with no route or block-contract change.
+
+---
+
+## 9. The check-detail explainer page — `…/dns/check/dnssec`
+
+[`./dns.mdx`](./dns.mdx) §14 owns the **shell** (routes, block order, chrome, the raw+parsed frame,
+the history strip, the references frame, the state matrix). This section owns the **interior copy**
+for the DNSSEC family: the concept text and anchors, the sub-test rows, the parsed-field table, the
+conditional impact copy, and the fix recipes. Slug: **`dnssec`** (row 7 of the §14.1 table — label
+"DNSSEC", one-line meaning *"Are this zone's DNS answers cryptographically signed — and validly
+so?"*). The frontend keeps this copy in `lib/dns-check-explainers.ts` (entry `dnssec`), rendered by
+`DnsCheckPage.tsx`; grow that entry to match this section, never fork a second page.
+
+### 9.1 Route and reachability
+
+| Page | Route |
+| --- | --- |
+| DNSSEC explainer, one specific run | `/domains/:domainId/runs/:runId/dns/check/dnssec` |
+| DNSSEC explainer, newest run (alias) | `/domains/:domainId/dns/check/dnssec` |
+
+Reachable from: the DNS category page's family strip chip `[✓ DNSSEC]` and the "DNSSEC" family
+group header's `details ›`; the run report's ten-family list (row 7); the Zone panel's one-line
+DNSSEC state (the whole line is a link); every underlined DNSSEC-family concept term anywhere in
+the app (`#concept-<term>` deep links, §9.2); the PS-06 drill-down's mechanism terms; and the
+DANE/TLSA explainer's "prerequisite" cross-link. The alias rewrites itself to the canonical run URL;
+the static `check` segment outranks `/domains/:domainId/dns/:problemId`, so `…/dns/check/dnssec`
+never matches the PS drill-down route.
+
+### 9.2 Block 1 — What this is (concept copy + anchors)
+
+Two-to-four paragraphs, plain language first (§1 is the source material): DNS answers are normally
+unauthenticated; DNSSEC adds signatures (RRSIG) made with zone keys (DNSKEY) that a parent-published
+digest (DS) anchors into a chain of trust from the root; a validating resolver proves the answer is
+exactly what the zone owner published and sets AD=1. Then the two-state framing: **unsigned** is a
+missing upgrade (advisory), **signed-but-broken** is an outage — validating resolvers SERVFAIL the
+entire zone. Close with the DANE hook: DNSSEC is the hard prerequisite for
+[`./dane_tlsa.mdx`](./dane_tlsa.mdx).
+
+Anchored sub-headings. The first six are **required** by the [`./dns.mdx`](./dns.mdx) §14.6 map
+(every underlined term app-wide routes here); the rest are local anchors this page's own copy and
+finding rows link to:
+
+| Anchor | Term | One-line content contract |
+| --- | --- | --- |
+| `#concept-dnssec` | DNSSEC | Signatures over DNS data; chain of trust root → TLD → zone; RFC 4033-4035. |
+| `#concept-ds` | DS record | The parent-published digest of your KSK — the registrar step; no DS = island of security. |
+| `#concept-dnskey` | DNSKEY | The zone's public keys; flags 257 = KSK, 256 = ZSK; algorithm number decides strength. |
+| `#concept-rrsig` | RRSIG | The signature over one RRset, with an explicit expiration — the "signed once, broke later" trap. |
+| `#concept-algorithm-13` | algorithm 13 | ECDSAP256SHA256 — the recommended default (RFC 8624/9904); 15 good, 8 ≥ 2048 acceptable, 5/7 deprecated. |
+| `#concept-signed-but-broken` | signed-but-broken | Expired RRSIG / DS↔DNSKEY mismatch / bogus: strictly worse than unsigned — the zone goes dark. |
+| `#concept-ksk-zsk` | KSK / ZSK | Key-signing vs zone-signing key split; the DS points at the KSK; rollovers per RFC 6781. |
+| `#concept-ad-flag` | AD flag | Authenticated Data bit a validating resolver sets — the pass/fail wire signal this check reads. |
+| `#concept-island-of-security` | island of security | Signed zone with no DS at the parent: zero protection, no resolver can validate it. |
+| `#concept-nsec3` | NSEC3 | Authenticated denial of existence; iterations must be 0 per RFC 9276; opt-out rarely appropriate. |
+| `#concept-cds-cdnskey` | CDS/CDNSKEY | RFC 8078 automation so key rolls update the parent DS without a manual registrar step. |
+| `#concept-bogus` | bogus | The validator verdict: data exists (CD=1 answers) but signatures do not verify (CD=0 SERVFAILs). |
+
+### 9.3 Block 2 — Is it healthy right now?
+
+Header: the family StatusCell + one verdict sentence derived from the run, worst state first —
+*"Signed, DS published, chain validates (AD=1 via 1.1.1.1)"* / *"Signed but the DS at the parent
+matches no live key — validating resolvers are SERVFAILing this zone"* / *"Zone is not
+DNSSEC-signed — optional, but required for DANE"*.
+
+Body: **every sub-test row of this family from this run**, in §2 order (`dnssec_signed`,
+`ds_present`, `validates`, `algorithm`, `rrsig_expiry`, `nsec3`, `ds_algo_match`, `key_rollover`,
+`chain_complete`, `soa_signed`, `dane_ready`), same row anatomy as the category page (severity
+badge, title, detail, remediation, evidence), fail rows pre-expanded. Evidence lines link to the
+matching `tool_runs[]` entry (the `dig DNSKEY` / `dig DS` / deep-path `dig +dnssec` invocations)
+with tool, exact command, duration, and parsed output — the §3.1 no-fabrication trail. When the
+deep path is off, the four `.pending` rows (`validates`, `rrsig_expiry`, `nsec3`,
+`chain_complete`) collapse into one gray **"Deep check off"** band naming the toggle
+(`checks.dnssec.validateViaDig`) and linking Settings — four separate info rows would bury the real
+verdicts.
+
+When `infra.dnssec_validates` is `critical` (bogus), this block leads with the same **"Domain may
+be unresolvable"** banner §4 pins to the category page.
+
+### 9.4 The raw + parsed breakdown
+
+**Raw** — monospace, copy button, sourced from the run's `tool_runs[]` (never re-queried at render
+time): the DNSKEY answer lines, the DS answer lines, and — deep path — the `dig +dnssec … SOA`
+header line showing `flags: … ad` plus the NSEC3PARAM RDATA. Each raw pane cites its tool run
+(`dig · 187 ms`).
+
+**Parsed** — the field-by-field table (**Field | Observed | Expected / sane | Verdict**), built
+from `results["infra.dnssec"]` (the `DnssecResults` snapshot the checker writes today):
+
+| Field (snapshot source) | Observed (example) | Expected / sane | Verdict chip |
+| --- | --- | --- | --- |
+| Zone signed (`signed`) | DNSKEY present | signed | ✓ / ⓘ unsigned |
+| DNSKEY keys (`dnskeyAlgos[]`, one row per key) | `keyTag=20326 flags=257 (KSK) alg 13 ECDSAP256SHA256 256-bit` | alg 13/15, or 8 ≥ 2048-bit | ✓ / ⚠ deprecated or undersized |
+| Algorithms in use (`algorithms[]`) | `[13]` | 13/15 good, 8 acceptable; never 5/7 (RFC 8624/9904) | ✓ / ⚠ |
+| DS at parent (`ds_present`/`dsPresent`) | published | ≥ 1 DS at the registrar | ✓ / ⚠ missing / ⓘ unknown |
+| DS digest type (`dsDigestType`, `ds_digest_types[]`) | `2 (SHA-256)` | 2; never 1 (SHA-1) | ✓ / ⚠ |
+| DS ↔ DNSKEY match (`ds_matches_dnskey`/`dsAlgoMatch`) | recomputed digest matches keyTag 20326 | must match a live KSK (RFC 4034 §5.1.4) | ✓ / ✗ critical |
+| Chain validates (`validates`, `resolverUsed`) | `AD=1 via 1.1.1.1` | AD=1 | ✓ / ⚠ AD=0 / not captured this run |
+| Bogus probe (`bogus`) | CD=0 SERVFAIL, CD=1 answers | false | ✓ / ✗ critical |
+| Earliest RRSIG expiry (`rrsigEarliestExpiry`) | `2026-07-14T00:00:00Z (in 13 d)` | > now + lead time (default 72 h) | ✓ / ⚠ near / ✗ expired |
+| NSEC3 (`nsec3`, `nsec3Iterations`, `nsec3Optout`) | `iterations=0, opt-out off` | iterations 0, opt-out off (RFC 9276) | ✓ / ⚠ |
+| DANE-ready (`dane_ready`) | true | signed AND validates | ✓ / ⓘ — links [`./dane_tlsa.mdx`](./dane_tlsa.mdx) |
+| Checked (`checkedAt`, `resolverUsed`) | `2026-07-01T10:05:00Z via 1.1.1.1` | — | ⓘ informational |
+
+Nullable snapshot fields (`validates`, `nsec3Iterations`, `rrsigEarliestExpiry`, `resolverUsed`,
+`dsPresent` when the DS lookup failed) render **"not captured this run"** — the breakdown never
+invents data. A run with **no** `results["infra.dnssec"]` snapshot at all (the checker's transient
+DNSKEY-lookup failure returns findings only) renders the whole table as "could not be determined
+this run" with the `dnssec_signed.unavailable` row above it.
+
+### 9.5 Block 3 — What it means (conditional impact copy)
+
+Copy keys off the observed state, worst first:
+
+* **Bogus / DS mismatch / expired RRSIG (`critical`)** — *rejected now*: "Validating resolvers —
+  Google, Cloudflare, Quad9, Comcast, roughly a third of the internet including most large mailbox
+  providers' resolver paths — return SERVFAIL for this zone. Mail to **and from** this domain is
+  failing right now; MX, SPF, DKIM and DMARC lookups all fail together. This is an outage, not a
+  score." Names the enforcement mechanics: this is resolver behavior, not a Gmail/Yahoo policy tier.
+* **Island of security / deprecated algorithm / SHA-1 DS / NSEC3 params / weak rollover
+  (`warning`)** — *reputation eroding / fragility*: "Working today, but either providing zero
+  protection (no DS: no resolver validates it) or on a deprecation path (RSASHA1, SHA-1 DS) that
+  validators are removing — the next validator update can flip this to the outage case."
+* **Unsigned (`info`)** — *hardening available*: "Not a spam signal by itself; Google/Yahoo/
+  Microsoft bulk-sender rules do not (yet) mandate DNSSEC. But every deliverability record this app
+  audits rides on unauthenticated DNS, and DANE is impossible until the zone signs and validates.
+  Expected for high-trust senders and government/regulated domains."
+* **Healthy (`ok`)** — what green buys: tamper-evident MX/SPF/DKIM/DMARC/MTA-STS, DANE unlocked,
+  and the one ongoing duty — signatures expire, so keep automated re-signing healthy (that is why
+  this family is a high-value scheduled check, §6).
+
+### 9.6 Block 4 — What you can do (fix recipes)
+
+Numbered steps, conditional lead-in per the fix-order ladder ([`./dns.mdx`](./dns.mdx) §8: broken
+DNSSEC is rung 5, unsigned is rung 8 — when a broken chain and an adoption gap coexist, broken
+leads). Every step carries a copy button with a publishable artifact:
+
+1. **Broken chain — DS mismatch / bogus / expired RRSIG (`critical`, fix today):**
+   * Re-sign: `[copy]` `sudo rndc sign <domain>` (BIND) / re-enable the provider's auto-signing.
+   * Republish the DS for the live KSK: `[copy]` `<domain>. IN DS <keyTag> <alg> 2 <sha256-digest>`
+     — the page fills `<keyTag>`/`<alg>` from `dnskeyAlgos[]` and instructs pasting the digest from
+     the DNS provider's DNSSEC panel into the registrar's DS form (digest type **2**, never 1).
+   * Emergency fallback: `[copy]` registrar-ticket wording to **remove the DS** (going insecure
+     beats staying bogus) with the re-add-after-re-sign caveat.
+   * Verify: `[copy]` `delv +vtrace @8.8.8.8 <domain> MX` (look for `; fully validated`), then the
+     block-5 spot-check.
+2. **Island of security — signed, no DS (`warning`):** copy the DS/DNSKEY digest from the DNS
+   provider into the registrar's DNSSEC panel; `[copy]` the exact DS line as above; enable
+   CDS/CDNSKEY (`#concept-cds-cdnskey`) so the next roll is automatic.
+3. **Deprecated algorithm / SHA-1 DS / undersized RSA (`warning`):** the RFC 6781 roll plan —
+   introduce the alg-13 key, dual-sign, wait ≥ 1 TTL, publish the new DS (type 2), retire the old
+   key, remove the old DS; `[copy]` per-step commands.
+4. **NSEC3 params (`warning`):** `[copy]` `NSEC3PARAM 1 0 0 -` (iterations 0, no opt-out, empty
+   salt per RFC 9276), then re-sign.
+5. **Unsigned (`info`):** enable DNSSEC at the provider (one-click at Cloudflare / Route 53 /
+   Google Cloud DNS — provider docs linked in §9.8), publish the DS at the registrar, verify with
+   the spot-check; framed as the DANE on-ramp.
+6. **Deep checks pending (`info`):** enable `checks.dnssec.validateViaDig` in Settings so
+   validation, RRSIG expiry, NSEC3 and the chain walk run — link to the Settings panel (§4).
+
+### 9.7 Block 5 — Run this check now
+
+The [`./dns.mdx`](./dns.mdx) §15 spot-check, family scope: **`POST
+/api/audit/run/:domainId/check/dns/dnssec`**, writing a new run file tagged `run.scope:
+dns.dnssec`. Button copy states the exact scope and cost: *"Runs DNSSEC only — 1 of 10 families,
+DNS queries only, ~2 s (deep path adds +dnssec probes against 1.1.1.1 / 8.8.8.8, ~5-10 s)"* plus
+the timestamp of the last run that included this family. State machine, diff flash, 409-in-flight
+behavior, and history/roll-up merging are the §15.2-15.3 contract verbatim. This is the
+fixed-it-verified loop for the registrar DS step: publish the DS → spot-check → watch
+`ds_present` flip ⚠→✓ (respecting parent-zone TTL; the button's helper text warns that parent DS
+changes can take up to the parent TTL to appear).
+
+### 9.8 References (footer rows)
+
+| Standard / doc | Why it matters here |
+| --- | --- |
+| RFC 4033 / 4034 / 4035 (+ RFC 6840) | DNSSEC core: DNSKEY, RRSIG, DS, validation. DS digest recomputation per RFC 4034 §5.1.4. |
+| RFC 8624 as updated by RFC 9904 | Algorithm guidance — why 13/15 pass, 8 is acceptable, 5/7 warn. |
+| RFC 9276 | NSEC3 parameter guidance — iterations 0, short/empty salt. |
+| RFC 6781 | Key-rollover timing the §9.6 roll plan follows. |
+| RFC 8078 (CDS/CDNSKEY) | Automating the parent DS update. |
+| RFC 6698 / 7671 | DANE — what a validated zone unlocks. |
+| DNSViz (dnsviz.net) | Visual chain debugger for the PS-06 deep dive. |
+| Verisign DNSSEC debugger / internet.nl | Independent second opinions. |
+| Cloudflare / Route 53 / Google Cloud DNS DNSSEC docs | The "enable DNSSEC" provider steps §9.6 links. |
+| Gmail / Yahoo / Microsoft sender requirements | Category-common rows (the §14.4 enforcement floor). |
+
+### 9.9 Loading / empty / error states
+
+The [`./dns.mdx`](./dns.mdx) §14.5 matrix applies verbatim; DNSSEC-specific notes:
+
+* **Loading** — blocks 1/3 concept copy and references render immediately; block 2, the breakdown,
+  and the history strip skeleton-load.
+* **Never-audited domain** (alias, no runs) — blocks 1/3/4 render in full; block 2 shows the gray
+  never-run cell + "Run an audit"; block 5 stays active and creates the domain's first (scoped) run.
+* **Unknown run / unknown checkKey** — per §14.5; the unknown-checkKey page lists the ten valid
+  slugs.
+* **Deep path off** — this family's `.pending` variant: block 2's "Deep check off" band (§9.3);
+  block 5's button still runs the presence round and says so ("validation sub-checks stay pending
+  until the deep path is enabled — Settings →").
+* **Transient lookup failure** (`dnssec_signed.unavailable`, no snapshot) — block 2 renders "could
+  not be determined this run", never a false "unsigned" (the checker already guarantees no snapshot
+  is written; the UI must not synthesize one).
+
+---
+
+## 10. Finding → drill-down and click-through map
+
+Every finding row this check emits is clickable. Mechanism terms route to §9.2 anchors; the
+cross-family *story* routes to the **PS-06** drill-down at `/domains/:domainId/dns/ps-06`
+(`DnsProblemPage`, matched case-insensitively by finding-id prefix; DANE-boundary rows also
+cross-link **PS-07** at `…/dns/ps-07`). Full inventory of ids the checker emits today:
+
+| Finding id (`infra.` elided) | Severity | Drill-down story | Explainer anchor(s) on the row |
+| --- | --- | --- | --- |
+| `dnssec_signed.ok` / `.unsigned` / `.unavailable` | ok / info / info | PS-06 | `#concept-dnssec`, `#concept-dnskey` |
+| `dnssec_ds_present.ok` / `.missing` / `.unavailable` | ok / warning / info | PS-06 | `#concept-ds`, `#concept-island-of-security` |
+| `dnssec_ds_algo_match.ok` / `.sha1` / `.mismatch` | ok / warning / **critical** | PS-06 | `#concept-ds`, `#concept-signed-but-broken` |
+| `dnssec_algorithm.ok` / `.deprecated` | ok / warning | PS-06 | `#concept-algorithm-13` |
+| `dnssec_key_rollover.ok` / `.weak` | ok / warning | PS-06 | `#concept-ksk-zsk` |
+| `dnssec_validates.ok` / `.no_ad` / `.bogus` / `.unavailable` / `.pending` | ok / warning-or-info / **critical** / info / info | PS-06 | `#concept-ad-flag`, `#concept-bogus` |
+| `dnssec_rrsig_expiry.ok` / `.near` / `.expired` / `.no_rrsig` / `.unavailable` / `.pending` | ok / warning / **critical** / warning / info / info | PS-06 | `#concept-rrsig` |
+| `dnssec_nsec3.ok` / `.nsec` / `.params` / `.unavailable` / `.pending` | ok / ok / warning / info / info | PS-06 | `#concept-nsec3` |
+| `dnssec_chain_complete.ok` / `.no_ds` / `.no_dnskey_rrsig` / `.broken` / `.unavailable` / `.pending` | ok / info / warning / **critical** / info / info | PS-06 | `#concept-ds`, `#concept-signed-but-broken` |
+| `dnssec_soa_signed.ok` / `.partial` / `.present` / `.unavailable` | ok / warning / info / info | PS-06 | `#concept-rrsig` |
+| `dnssec_dane_ready.ok` / `.signed` / `.not_validating` | ok / info / info | **PS-07** (+ PS-06) | `#concept-ad-flag` → [`./dane_tlsa.mdx`](./dane_tlsa.mdx) explainer |
+
+Rules: (a) the row itself expands in place (row anatomy of [`./dns.mdx`](./dns.mdx) §7); (b) its
+"why →" story link goes to the PS drill-down above, run-qualified (`?run=<runId>`); (c) underlined
+terms in title/detail go to the §9.2 anchors, preserving `:runId`; (d) on the **category page** and
+**run report**, clicking the DNSSEC family row/chip navigates to this explainer (§9.1) — the
+PS-06 drill-down keeps telling the cross-family story and now links mechanism terms back here
+instead of dead-ending. The frontend id→prefix matching lives in `lib/dns-problems.ts` (PS-06
+`findingPrefixes` already lists all ten sub-check prefixes) and `lib/dns-check-explainers.ts` —
+keep both in lockstep with this table.
+
+---
+
+## 11. Small additions to what the check records
+
+The §9.4 parsed table renders per-record rows only where the snapshot has them. Two small,
+backward-compatible additions to `DnssecResults` (nullable/empty-default, no shape change to
+existing fields) upgrade the breakdown from summary rows to true per-record rows:
+
+* **`dsRecords: [{ keyTag, algorithm, digestType }]`** — the parsed DS RRset the checker already
+  computes internally (`parseDs`) but only surfaces in finding evidence strings. Lets the table show
+  one row per published DS with its own ✓/⚠ chip (SHA-1 vs SHA-256, matched vs unmatched key tag).
+* **`rrsigs: [{ typeCovered, keyTag, expiration }]`** *(deep path only)* — the parsed apex RRSIGs
+  (`parseRrsig`) behind `rrsigEarliestExpiry`, so the table can show which RRset expires when
+  instead of only the earliest timestamp, and the §16.3 sparkline can trend days-to-expiry.
+
+Also **request** (owner: [`./dns.mdx`](./dns.mdx) §16.3 table) trending two more fields for this
+family once recorded: `rrsigEarliestExpiry` as a days-to-expiry sparkline (the silent-march-to-
+outage metric) and `validates`. Until granted, the four §16.3 fields (`signed`, `algorithms[]`,
+`ds_digest_types[]`, `ds_matches_dnskey`) are the trend/change-marker set.
+
+Storage note: runs persist per [`../storage.mdx`](../storage.mdx) as the per-run YAML
+(`~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml`), with this family's snapshot at
+`dns_infra.dnssec` = `results["infra.dnssec"]` ([`./dns.mdx`](./dns.mdx) §5). §5 above documents the
+row shape and the earlier JSON-file mapping; the field names are identical — `../storage.mdx` owns
+the path/filename/`run:` block, never redefine them here.
 
 <!--
   Maintenance notes:

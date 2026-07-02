@@ -471,6 +471,8 @@ export function defaultAppConfig(): AppConfigFile {
       // hourly poll is a no-op until files/an IMAP mailbox are configured (pm/emails.mdx §4.1).
       enabled: true,
       dropFolder: "",
+      // "" = auto-detect the repo emails/ corpus (dev), else the drop folder (pm/emails.mdx §8).
+      analyzeDir: "",
       pollMinutes: 60,
       windowDays: 7,
       imap: { host: "", port: 993, user: "", mailbox: "INBOX" },

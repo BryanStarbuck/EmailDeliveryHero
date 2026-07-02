@@ -758,6 +758,68 @@ export interface ContentSampleView {
   raw_path: string | null
 }
 
+// ---- Inbox placement (pm/checks/inbox_placement.mdx §5 — mirrors the backend placementPayload) --
+
+/** One per-seed verdict (an `inbox_placement_results` row mapped onto the audit JSON). */
+export interface PlacementSeedResult {
+  provider: string
+  folder: "inbox" | "spam" | "promotions" | "missing"
+  gmailTab: "primary" | "promotions" | "social" | "updates" | "forums" | null
+  spfPass: boolean | null
+  dkimPass: boolean | null
+  dmarcPass: boolean | null
+  latencySecs: number | null
+  /** Hard 5xx bounce vs accepted-then-dropped (only on missing seeds). */
+  missingReason?: "bounced" | "dropped"
+}
+
+/** One provider row of the §4 placement matrix (the backend ProviderAggregate). */
+export interface PlacementProviderAggregate {
+  provider: string
+  total: number
+  inbox: number
+  spam: number
+  promotions: number
+  missing: number
+  bounced: number
+  delivered: number
+  inboxRatePct: number | null
+  spfFails: number
+  dkimFails: number
+  dmarcFails: number
+  authParsed: number
+  maxLatencySecs: number | null
+}
+
+/** One point of the §4 trend sparkline (oldest → newest). */
+export interface PlacementTrendPoint {
+  sentAt: string
+  overallPct: number | null
+  byProvider: Record<string, number | null>
+}
+
+/**
+ * `results["content.inbox_placement"]` — the seed-test envelope + per-seed results (spec §5).
+ * `configured: false` is the light-gray "configure seed list" state; configured with no
+ * `testToken` means the integration is armed but the first test has not been recorded yet.
+ */
+export interface InboxPlacementResults {
+  configured: boolean
+  seedService?: string
+  sampleId?: string | null
+  testToken?: string
+  sentAt?: string
+  settledAt?: string | null
+  seedCount?: number
+  deliveredCount?: number
+  /** Present only on the configured-but-no-test payload. */
+  testCount?: number
+  overallInbox?: number | null
+  results?: PlacementSeedResult[]
+  providers?: PlacementProviderAggregate[]
+  trend?: PlacementTrendPoint[]
+}
+
 export interface AuditResult {
   /** Unique id of this run (pm/dashboard.mdx §1). Optional: pre-history persisted data lacks it. */
   runId?: string
@@ -805,6 +867,7 @@ export interface AuditResult {
     "content.scoring"?: ContentScoreResults
     "content.bimi"?: BimiResults
     "content.url"?: LinkUrlResults
+    "content.inbox_placement"?: InboxPlacementResults
   } & Record<string, unknown>
 }
 

@@ -209,6 +209,295 @@ CREATE UNIQUE INDEX ptr_generic_patterns_pattern_idx ON ptr_generic_patterns (pa
 23. Every finding id in the §10 inventory navigates per the §10 map: critical/warning rows expose "Open the problem story →" to the PS-02 drill-down, `infra.helo_match.pending` links to the smtp-security explainer, `infra.ptr_no_ips` links to the Sending IPs editor, and every underlined concept term on any surface reaches its §9.2 anchor run-scoped.
 24. Entry points all land here: the category page's family group header `details ›`, the family strip cell, the run report's ten-family row, and PS-02's mechanism links — each preserving the `:runId` being viewed.
 
+## 9. Check-detail explainer page — `/domains/:domainId/runs/:runId/dns/check/reverse-dns`
+
+The per-family explainer page specified as a shell by [./dns.mdx](./dns.mdx) §14 (five locked
+blocks, raw+parsed frame, history strip, references frame, states). **That spec owns the shell;
+this section owns the reverse-dns interior copy** — the concept text and anchors, the per-IP
+evidence panels, the parsed-field rows, the conditional impact copy, the fix recipes, and the
+references list. Never reorder or remove the five blocks; this family adds one family-specific
+panel inside block 2: the **per-IP FCrDNS loop diagram** (§9.3), explicitly permitted by §14.2.
+
+### 9.1 Route & entry points
+
+| Page | Route |
+| --- | --- |
+| Reverse-DNS explainer, one specific run (canonical) | `/domains/:domainId/runs/:runId/dns/check/reverse-dns` |
+| Reverse-DNS explainer, newest run (alias) | `/domains/:domainId/dns/check/reverse-dns` |
+
+`:checkKey = reverse-dns` — the kebab-case of family key `reverse_dns`, equal to the backend
+check directory `code/packages/backend/src/modules/audit/checks/reverse-dns/`. The alias
+rewrites to the canonical run URL; the static `check` segment outranks the
+`/domains/:domainId/dns/:problemId` drill-down segment (router static-over-dynamic rule), so
+this page never shadows PS-02 and vice versa.
+
+**Row label / one-line meaning** (fixed by [./dns.mdx](./dns.mdx) §14.1, repeated verbatim on
+every family-row surface): **Reverse DNS (PTR / FCrDNS)** — *"Does every sending/MX IP
+reverse-resolve to a real hostname that points back to it?"*
+
+Entry points (all preserve the viewed `:runId`):
+- The DNS category page's family strip cell and the "Reverse DNS / PTR" group header's `details ›`.
+- The run report's ten-family status list row ([./dns.mdx](./dns.mdx) §17 item 1).
+- Every underlined concept term mapped to this family (§9.2) anywhere in the app.
+- The PS-02 drill-down's mechanism links (stories → drill-down; mechanisms → this page).
+- The Mail path panel's per-IP PTR chips on the category page.
+
+### 9.2 Block 1 — What this is (concept copy + anchors)
+
+2-4 paragraphs, plain language first, standards second, condensed from §1: reverse DNS as the
+mirror of forward DNS; the PTR record; FCrDNS as the two-way handshake ("the IP names a host,
+the host names the IP back — only the real operator can close the loop"); why receivers treat
+it as the cheapest hard-to-fake trust signal; the 2024 Gmail/Yahoo hard gate and Gmail's
+`550-5.7.25` rejection. Static content — renders instantly, independent of run data. A static
+three-step **FCrDNS loop diagram** (`IP → PTR host → forward A/AAAA → same IP?`) illustrates
+the mechanism before any run data loads.
+
+Anchored sub-headings. The first five are this family's rows in the [./dns.mdx](./dns.mdx)
+§14.6 clickable-concept map (every underlined occurrence of these terms app-wide routes here,
+run-scoped); the rest are internal anchors this page and PS-02 link to:
+
+| Anchor | Heading | Copy covers |
+| --- | --- | --- |
+| `#concept-reverse-dns` | Reverse DNS | `in-addr.arpa` / `ip6.arpa`, who owns the reverse zone (the **IP's network owner**, not the domain owner — why every fix is a provider action) |
+| `#concept-ptr` | The PTR record | What a PTR is, one-PTR hygiene, how `dig -x` reads it |
+| `#concept-fcrdns` | FCrDNS | The forward-confirmation loop, why it is an identity anchor, what breaks it (forward A edited, IP re-assigned) |
+| `#concept-generic-ptr` | Generic / dynamic PTR | ISP/cloud default naming, why FCrDNS-valid-but-generic still scores as spam (SpamAssassin `RDNS_DYNAMIC`), the §3 pattern classes |
+| `#concept-helo-match` | HELO ↔ PTR match | RFC 5321 §4.1.4, why the three names (HELO, PTR, forward) must agree; notes it is **future** here and links the [./smtp_security.mdx](./smtp_security.mdx) probe |
+| `#concept-in-addr-arpa` | The reverse zones | How `24.113.0.203.in-addr.arpa` / nibble-reversed `ip6.arpa` names are formed |
+| `#concept-multi-ptr` | Multiple PTRs | Why >1 PTR is ambiguity, receivers may pick either |
+| `#concept-rfc-2317` | RFC 2317 delegation | Classless in-addr.arpa CNAME sub-delegation — valid, but the delegated PTR must still forward-confirm |
+| `#concept-ptr-alignment` | Sender-domain alignment | PTR under your own domain vs an ESP-owned pool name; why alignment is advisory |
+
+### 9.3 Block 2 — Is it healthy right now? (this run's evidence)
+
+Header: the family StatusCell + one verdict sentence derived from this run's findings:
+- all clean → "Every audited IP (N) has a single, non-generic PTR that forward-confirms."
+- fails → "K of N audited IPs fail — worst: *IPv6 MX 2001:db8::25 has no PTR record*."
+- transient-only → "Reverse lookups could not complete this run (timeout) — nothing is confirmed broken."
+- no IPs → "No sending or MX IPs could be audited" (renders the `infra.ptr_no_ips` card, §9.9).
+
+**Findings as actually emitted** (inventoried from `reverse-dns.check.ts` 2026-07; per-IP ids
+are suffixed with the IP so they stay unique — the §2 table lists the base ids). Block 2 renders
+these grouped **per IP**, fail rows pre-expanded:
+
+| Emitted id | Severity | When |
+| --- | --- | --- |
+| `infra.ptr_present.<ip>` | critical | IPv4 IP has no PTR (`ENOTFOUND`/`ENODATA`) |
+| `infra.ptr_ipv6.<ip>` | critical | IPv6 IP has no `ip6.arpa` PTR |
+| `infra.fcrdns.<ip>` | critical | No returned PTR host forward-resolves back to the IP |
+| `infra.ptr_single.<ip>` | warning | >1 PTR record returned |
+| `infra.ptr_generic.<ip>` | warning | PTR matched a generic/dynamic/cloud-default pattern |
+| `infra.ptr_no_ip_literal.<ip>` | warning | PTR re-encodes the IP octets/groups |
+| `infra.ptr_tld_valid.<ip>` | warning | PTR is single-label / reserved suffix (`.local` …) |
+| `infra.ptr_matches_sender_domain.<ip>` | info | PTR not under the sender's org domain (advisory) |
+| `infra.ptr_cname.<ip>` | info | Reverse name is an RFC 2317 CNAME (advisory) |
+| `infra.ptr_transient.<ip>` | info | Reverse lookup timed out / SERVFAIL after one retry |
+| `infra.fcrdns_transient.<ip>` | info | Forward resolution of all PTR hosts failed transiently |
+| `infra.ptr_ok.<ip>` | ok | Single PTR, forward-confirms, non-generic |
+| `infra.ptr_no_ips` | info | No sending IPs configured **and** MX hosts resolve to no addresses |
+| `infra.helo_match.pending` | info | Always (future sub-check placeholder) |
+
+**Per-IP card anatomy** (one card per row of `results["infra.reverse_dns"].ips[]`):
+1. Header: the IP, a v4/v6 chip, and a **source chip** (`mx` = derived from MX A/AAAA fallback;
+   `sending_ip` = operator-configured) — clicking the source chip opens the Sending IPs editor
+   (`sending_ip`) or the MX routing explainer (`mx`).
+2. The **live FCrDNS loop diagram**: `IP → PTR host → forward IPs`, each hop green/red, the
+   equality mark at the end (`✓ loop closes` / `✗ got 198.51.100.9`). Missing PTR renders the
+   first hop red with "no PTR".
+3. The IP's finding rows (same row anatomy as the category page; §7-table severity chips).
+4. **Raw** — monospace, copy button: the reverse answer as observed (`dig -x <ip>` answer lines
+   or `NXDOMAIN`, from the run's `tool_runs[]` entry when the dig fallback ran, else rendered
+   from the snapshot) plus the forward `A`/`AAAA` answer for each PTR host. Sourced from the run
+   file only — never re-queried at render time (block 5 is "now"; block 2 is "this run").
+   Each raw excerpt links its matching `tool_runs[]` entry (tool, command, duration, exit code).
+5. **Parsed** — the field-by-field table, per-field verdict chips:
+
+| Field | Observed (example) | Expected / sane | Verdict |
+| --- | --- | --- | --- |
+| PTR | `mail.example.com` / — | exactly one PTR exists | ✓/✗ |
+| PTR count | 1 | 1 (multi-PTR = ambiguity) | ✓/⚠ |
+| Forward-confirmed (FCrDNS) | true / false | PTR's A/AAAA includes this IP | ✓/✗ |
+| Forward IPs | `203.0.113.25` | contains the audited IP | ✓/✗ |
+| Generic / dynamic name | false (`—`) / true (`pattern: dsl`) | non-generic, semantic mail hostname | ✓/⚠ |
+| Public FQDN | valid / `reserved suffix .local` | public TLD, multi-label | ✓/⚠ |
+| Under sender domain | true / false | advisory — expected false on ESP pools | ✓/ⓘ |
+| Reverse name CNAMEd (RFC 2317) | false / target chain | advisory | ⓘ |
+| Lookup error | — / `ETIMEOUT` | none | ✓/ⓘ |
+
+Fields the run file did not capture (older runs predating §11) render **"not captured this
+run"** — the table never invents data ([./dns.mdx](./dns.mdx) §3.1 no-fabrication rule).
+
+The pending `infra.helo_match` row renders last, disabled, with the "Future — needs SMTP probe"
+tooltip linking [./smtp_security.mdx](./smtp_security.mdx).
+
+### 9.4 Block 3 — What it means (conditional impact copy)
+
+Copy is conditional on the observed state, worst-first; who enforces it and since when:
+
+| Observed state | Impact copy (gist) |
+| --- | --- |
+| Missing PTR (v4 or v6) | **Rejected now.** Gmail returns `550-5.7.25` (permanent since the Nov 2025 ramp); many MTAs refuse at connect. If the miss is IPv6-only: Gmail prefers the IPv6 path when your MTA has AAAA — the dual-stack trap means your v4 posture doesn't save you. |
+| FCrDNS mismatch | **Rejected/deferred now.** The loop doesn't close, so receivers can't anchor your identity; deferrals plus heavy spam scoring. |
+| Generic PTR (FCrDNS ok) | **Reputation eroding.** Delivers to some receivers but reads as a dynamic/compromised host (Yahoo requires non-generic rDNS since Feb 2024; SpamAssassin `RDNS_DYNAMIC`); reputation accrual is capped. |
+| Multi-PTR / IP-literal / non-public FQDN | **Reputation eroding.** Ambiguity and generic-looking names lower trust; FCrDNS may pass or fail depending on which PTR a receiver picks. |
+| Info-only (alignment / RFC 2317) | **Hardening available.** Nothing is broken; branding alignment is optional and expected to be "off" on ESP pools. |
+| All clean | **Healthy.** This is the rung-2 foundation of the fix ladder — reputation can now accrue to a stable name. |
+| Transient-only | **Unknown this run.** Not confirmed broken; re-run (block 5) before acting. |
+
+### 9.5 Block 4 — What you can do (fix recipes)
+
+One numbered recipe per non-ok finding, fail-first; every step carries a copy button holding a
+publishable record or ticket text — never prose. The **Copy record** / **Copy ticket** contents
+are exactly the checker's `remediation` strings (§2, acceptance item 12). Because the reverse
+zone belongs to the **IP owner**, every critical recipe leads with the provider action:
+
+1. **Missing PTR (v4)** — ① `asn <ip>` tells you who owns the block = who gets the ticket;
+   ② **Copy ticket**: "Please set reverse DNS (PTR) for `<ip>` to `mail1.<domain>`."
+   ③ **Copy record**: `mail1.<domain>. A <ip>` (publish the forward side yourself so FCrDNS
+   closes the moment the PTR lands). ④ Verify: `dig -x <ip> +short`.
+2. **Missing PTR (v6)** — same, `ip6.arpa` + `AAAA`; escape hatch step: **Copy config**
+   `inet_protocols = ipv4` (Postfix) / equivalent, to disable outbound IPv6 until the PTR exists.
+3. **FCrDNS mismatch** — **Copy record**: `<ptrHost>. A|AAAA <ip>`; or change the PTR to a
+   hostname whose forward record already points at the IP. The record must match the PTR exactly.
+4. **Generic / IP-literal / invalid-FQDN PTR** — replace the provider default with a dedicated
+   mail hostname (**Copy ticket** with `mail1.<domain>`) and publish the matching forward record.
+5. **Multi-PTR** — reduce to one PTR; remove stale reverse-zone entries at the provider.
+6. **Alignment (info)** — optional; no action on ESP pools.
+
+**Provider quick-list** (collapsible; where to click, per provider): AWS (Route 53 "Request
+reverse DNS" / EC2 Elastic IP rDNS form), Google Cloud (VM → Edit → PTR record, requires
+matching forward DNS pre-published), Azure (PublicIPAddress `--reverse-fqdn`), DigitalOcean
+(droplet **name** becomes the PTR), Vultr/Linode/Hetzner/OVH (network panel rDNS field),
+cPanel/WHM or bare ISP (support ticket with the Copy-ticket text).
+
+Ladder cross-link ([./dns.mdx](./dns.mdx) §8): this family is **rung 2**. When rung 1
+(MX routing) is failing in the same run, block 4 leads with "Fix mail routing first (rung 1) —
+PTR advice is premature until MX resolves." Conversely DANE/MTA-STS explainers point back here.
+
+### 9.6 Block 5 — Run this check now
+
+The [./dns.mdx](./dns.mdx) §15 spot-check, family scope:
+
+- **Endpoint:** `POST /api/audit/run/:domainId/check/dns/reverse-dns` → new run file tagged
+  `run.scope: dns.reverse_dns`; never mutates the viewed run.
+- **Button copy:** "⟳ Run reverse-dns only — 1 of 10 families, DNS queries only, ~2 s"
+  (estimate scales with IP count: ~N/8 × worst-case 5 s lookups, bounded concurrency 8; typical
+  1-3 IPs ≈ 2-5 s). Below: "last ran <timestamp of the newest run that included this family>".
+- **State machine:** idle → running → done → error exactly per §15.2; **done** navigates to the
+  new scoped run's explainer with the diff flash — e.g. `infra.ptr_ipv6.2001:db8::25` flips
+  "was ✗ · now ✓" for ~2 s when the PTR ticket landed. Fixed-it-verified is the point: file the
+  ticket in block 4, click block 5 when the provider replies.
+- This family is pure DNS — the button is never `.pending`-disabled; only the `helo_match`
+  sub-row stays pending (its enablement belongs to the smtp-security probe, not this button).
+- 409 while any run for the domain is in flight (button disabled with inline reason via
+  `useScanProgress`); 404 on unknown domain.
+
+### 9.7 History strip & trends
+
+Footer strip per [./dns.mdx](./dns.mdx) §16.2: ≤ 30 cells, oldest → newest, **only runs whose
+scope included `reverse_dns`**; cell color = the family's worst severity in that run; viewed
+run ringed; scoped runs dot-underlined; hover = timestamp + `K of N IPs fail` + scope chip;
+click swaps `:runId`. Trend glyph (§16.1) in the header compares against the most recent
+earlier in-scope run — tooltip names the exact regressing IP ("1 new critical:
+`infra.fcrdns.203.0.113.24` — forward A record changed since the 2026-06-30 run").
+
+Trended snapshot fields (§16.3): **per-IP `ptr` value** and **`forward_confirmed`** — a lost or
+provider-reset PTR is the headline regression — plus `generic` and `ptr_count` once §11
+persists them. A change marker (dot under the cell) appears when any of these changed even at
+unchanged severity (e.g. PTR renamed `mail1` → `mail2`, still ok). The IP **set** itself is
+trended: an IP appearing/disappearing (elastic-IP churn, MX re-resolve) gets a marker with
+"+`<ip>` / −`<ip>`" in the tooltip. No numeric sparklines for this family (no numeric fields).
+
+### 9.8 References (footer rows this family owns)
+
+| Standard / doc | Why it matters here | Link |
+| --- | --- | --- |
+| RFC 1035 | PTR type, `in-addr.arpa` | rfc-editor.org/rfc/rfc1035 |
+| RFC 3596 | IPv6 reverse zone `ip6.arpa` | rfc-editor.org/rfc/rfc3596 |
+| RFC 8499 | Defines the term FCrDNS | rfc-editor.org/rfc/rfc8499 |
+| RFC 5321 §4.1.4 | HELO/EHLO must be a valid FQDN | rfc-editor.org/rfc/rfc5321 |
+| RFC 2317 | Classless in-addr.arpa delegation (the CNAME advisory) | rfc-editor.org/rfc/rfc2317 |
+| RFC 1912 §2.1 | "Every Internet-reachable host should have a name… PTR should match" | rfc-editor.org/rfc/rfc1912 |
+| SpamAssassin `RDNS_NONE` / `RDNS_DYNAMIC` | The rules a bad PTR trips | spamassassin.apache.org rules docs |
+| Provider rDNS docs (AWS / GCP / Azure / DO) | The block-4 provider quick-list, linked per provider | vendor docs |
+| MXToolbox Reverse Lookup · multirbl.valli.org FCrDNS | Online second opinions ([./dns.mdx](./dns.mdx) §3 reference-only) | vendor sites |
+
+Plus the three category-common rows on all ten explainers: Gmail sender guidelines, Yahoo
+sender requirements, Microsoft/Outlook sender requirements.
+
+### 9.9 Loading / empty / error states
+
+Shell states per [./dns.mdx](./dns.mdx) §14.5 (unknown `:checkKey`, unknown `:runId`,
+never-audited alias, run-in-progress skeletons). Family-specific:
+
+- **No IPs audited** (`infra.ptr_no_ips` in the run) — block 2 replaces the per-IP cards with
+  the info card "Add sending IPs to audit reverse DNS": the Sending IPs editor link plus
+  **Import from SPF** / **Import from MX** buttons; blocks 1/3/4 still render (reference value);
+  block 5 stays active — a spot-check after adding IPs is the natural first verification.
+- **Transient-only run** (`infra.ptr_transient.*` / `infra.fcrdns_transient.*` only) — block 2's
+  verdict states "not confirmed broken"; the affected IP cards show an ⏳ chip and the parsed
+  table's Lookup-error row carries `ETIMEOUT`/`ESERVFAIL`; block 5's button is highlighted as
+  the suggested next action ("re-run now").
+- **MX-fallback source** — when every card's source chip is `mx`, a slim banner explains the
+  audit fell back to MX-derived addresses because no sending IPs are configured, with the same
+  import affordances.
+- **Pending sub-row** — `infra.helo_match.pending` renders disabled with tooltip + link; it
+  never blocks the family's status or the spot-check.
+
+## 10. Findings → navigation map
+
+Where each finding and clickable sub-concept goes. Stories go to the §9 problem drill-down of
+[./dns.mdx](./dns.mdx) (PS-02, `/domains/:domainId/dns/PS-02`, `?run=` preserved); mechanisms
+go to this explainer's anchors ([./dns.mdx](./dns.mdx) §14.6 rule):
+
+| Finding id (emitted) | Row click / expand | "Learn more" concept link | Problem drill-down |
+| --- | --- | --- | --- |
+| `infra.ptr_present.<ip>` / `infra.ptr_ipv6.<ip>` | expands in place (fix recipe §9.5) | `#concept-ptr`, `#concept-in-addr-arpa` | PS-02 — Reverse-DNS failure |
+| `infra.fcrdns.<ip>` | expands in place | `#concept-fcrdns` | PS-02 |
+| `infra.ptr_generic.<ip>` / `infra.ptr_no_ip_literal.<ip>` | expands; pattern chip → admin "Generic PTR patterns" panel (§4) | `#concept-generic-ptr` | PS-02 |
+| `infra.ptr_single.<ip>` | expands | `#concept-multi-ptr` | PS-02 |
+| `infra.ptr_tld_valid.<ip>` | expands | `#concept-ptr` | PS-02 |
+| `infra.ptr_matches_sender_domain.<ip>` | expands | `#concept-ptr-alignment` | — (info; never enters PS-02) |
+| `infra.ptr_cname.<ip>` | expands | `#concept-rfc-2317` | — |
+| `infra.ptr_transient.<ip>` / `infra.fcrdns_transient.<ip>` | expands; "re-run" → block 5 | `#concept-fcrdns` | — |
+| `infra.ptr_ok.<ip>` | expands to the clean loop diagram | `#concept-fcrdns` | — |
+| `infra.ptr_no_ips` | → Sending IPs editor / import actions | `#concept-reverse-dns` | — |
+| `infra.helo_match.pending` | disabled; tooltip → [./smtp_security.mdx](./smtp_security.mdx) explainer | `#concept-helo-match` | — |
+
+Other clickable sub-concepts on the explainer: the IP itself → the category page's Mail path
+panel row (run-scoped); source chip `mx` → the mx-routing explainer; every `tool_runs[]`
+evidence chip → the expanded tool-run entry on the category page's evidence trail; the PS-02
+link in critical rows carries the run (`?run=:runId`). On PS-02 itself, the terms *PTR*,
+*FCrDNS*, *generic PTR* underline and route back to §9.2's anchors — drill-down and explainer
+cross-link, never duplicate.
+
+## 11. Snapshot additions (proposed — small, backward-compatible)
+
+Today `results["infra.reverse_dns"]` persists per IP: `ip`, `source` (`mx` | `sending_ip`),
+`ptr`, `forward_confirmed`, `generic` (`ReverseDnsIpResult` in `reverse-dns.check.ts`;
+[./dns.mdx](./dns.mdx) §5). The checker already *computes* everything §9.3's parsed table and
+§9.7's trends need but drops it after emitting findings. Persist five more fields per row —
+additive only, older run files stay valid (absent fields render "not captured this run"):
+
+```yaml
+reverse_dns:                       # results["infra.reverse_dns"]
+  ips:
+    - ip: 203.0.113.24
+      source: sending_ip
+      ptr: mail1.example.com       # existing — first PTR host
+      forward_confirmed: true      # existing
+      generic: false               # existing
+      ptrs: [mail1.example.com]    # NEW — every PTR host returned (multi-PTR evidence)
+      ptr_count: 1                 # NEW — drives the parsed-table row + trend marker
+      forward_ips: ["203.0.113.24"]# NEW — what the PTR host(s) resolved to (raw panel)
+      generic_pattern: null        # NEW — which §3 pattern matched (e.g. "dsl", "embedded-ip:…")
+      error: null                  # NEW — ETIMEOUT | ESERVFAIL | null (transient runs)
+```
+
+These mirror the §5 `ptr_check_results` columns (`ptr_count`, `forward_ips`, `generic_pattern`,
+`error_code`) so the file→Postgres migration stays 1:1. No new lookups, no timing change — the
+values are already in `auditIp`'s local state.
+
 <!--
 MAINTENANCE NOTES
 - Keep RFC refs current: RFC 1035 / 3596 (PTR, in-addr.arpa / ip6.arpa), RFC 8499 (FCrDNS term),

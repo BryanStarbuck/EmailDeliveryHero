@@ -253,6 +253,7 @@ function encodeRunFile(result: AuditResult): RunFile {
         ? { new_problem_count: result.newProblemCount }
         : {}),
       ...(result.scope !== undefined ? { scope: result.scope } : {}),
+      ...(result.checks !== undefined ? { checks: result.checks } : {}),
       findings: result.findings,
     },
   }
@@ -335,6 +336,7 @@ function decodeRunFile(doc: unknown): AuditResult | null {
     counts: run.counts ?? { ok: 0, info: 0, warning: 0, critical: 0 },
     ...(run.new_problem_count !== undefined ? { newProblemCount: run.new_problem_count } : {}),
     ...(run.scope !== undefined ? { scope: run.scope } : {}),
+    ...(run.checks !== undefined ? { checks: run.checks } : {}),
     ...(Object.keys(results).length > 0 ? { results } : {}),
   }
 }

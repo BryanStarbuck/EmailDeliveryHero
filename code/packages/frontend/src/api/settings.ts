@@ -52,6 +52,12 @@ export interface ChecksConfig {
   content: { threshold: number; safeTarget: number; networkTests: boolean }
   /** BIMI admin settings (pm/checks/bimi.mdx §4/§5): the VMC/CMC issuer allow-list. */
   bimi: { mvaAllowList: BimiMvaEntry[] }
+  /**
+   * DANE / TLSA admin settings (pm/checks/dane_tlsa.mdx §4): the FUTURE :25 STARTTLS cert-match
+   * probe toggle + timeout and the require-AD-bit validating-resolver switch. Optional so older
+   * backend payloads stay valid.
+   */
+  dane?: { probeEnabled: boolean; probeTimeoutMs: number; requireAdBit: boolean }
   thresholds: { green: number; amber: number }
   weights: { critical: number; warning: number; info: number }
 }
@@ -123,6 +129,7 @@ export interface UpdateAdminSettingsInput {
     dnsbl?: { zones?: string[] }
     content?: { threshold?: number; safeTarget?: number; networkTests?: boolean }
     bimi?: { mvaAllowList?: BimiMvaEntry[] }
+    dane?: { probeEnabled?: boolean; probeTimeoutMs?: number; requireAdBit?: boolean }
     thresholds?: { green?: number; amber?: number }
     weights?: { critical?: number; warning?: number; info?: number }
   }

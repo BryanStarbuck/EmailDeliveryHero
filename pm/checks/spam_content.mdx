@@ -906,7 +906,291 @@ consciously declined).
 
 ---
 
-## 7. Acceptance criteria
+## 7. The run report's Spam & Content section — how the cell grows
+
+The full run report (`/domains/:domainId` newest / `/domains/:domainId/runs/:runId` historical —
+`RunDetailPage.tsx`) shows this category twice: the **chip** in the six-chip grid and the
+**collapsible findings section** below it. Today the chip's chevron for Spam & Content routes to
+the newest-run content-scoring page only and the section renders a flat finding list with a single
+BIMI sub-group. Both grow:
+
+1. **The chip.** The Spam & Content StatusCell keeps the §2 label rules (placement % when a
+   placement result exists, `K of M fail`/`Healthy` fallback, worst-severity color). Its chevron
+   becomes **run-scoped exactly like the DKIM/DMARC/DNS chips already are** in
+   `RunDetailPage.tsx`: on a historical run it opens
+   `/domains/:domainId/runs/:runId/spam-content`; on the newest view it opens the
+   `/domains/:domainId/spam-content` alias. The chevron never points at the legacy
+   `/domains/:id/content` route once the category page exists.
+2. **The section header** gains a one-line micro-summary next to the "N problems" count: the
+   placement percentage (or `no placement test`) and the failing-family names, e.g.
+   `88% inbox · failing: List-Unsub, Links`. It reads from the same roll-up the chip uses — no new
+   data.
+3. **Per-family sub-groups, not one flat list.** The section renders its findings grouped under
+   the §1 families (deriving the family from the finding-id prefix table), in §1 order, fail-first
+   within each group — the same grouping the §2 category page uses, so the two views never
+   disagree. The existing BIMI sub-group pattern (`BimiSubGroup` in `RunDetailPage.tsx`) is the
+   template; each group header shows the family name, its pass/fail count, and a **chevron into
+   that family's §8 check detail page** (run-scoped). The "Logo & certificate validation is a
+   future round" BIMI footnote stays until the VMC probes ship.
+4. **Every finding row stays a row** (severity badge, title, checkId, evidence, Fix strip with
+   copy) — the run report is the operator's flat view; concept teaching lives one click away in
+   §8. Rows gain nothing except the group placement.
+5. **Problem-state chips.** Under the section's last group, one small chip per matched §6 problem
+   state (`PS-03 Bulk-sender compliance gap ›`) linking to the run-scoped drill-down — the same
+   targets the §2 category page's cards use.
+
+Nothing else on the run report changes; the other five categories own their own sections.
+
+---
+
+## 8. Check detail pages — `/spam-content/check/:checkKey`
+
+The **check detail page** is the per-family explainer + evidence + action page: the destination
+for every click on a family chip, family group header, or family name anywhere in the app. One
+page template, one instance per §1 family. It must answer, top to bottom, the five questions
+every clickable concept in this product answers: **what is this** (the concept), **is it healthy
+here** (this run's status + evidence), **what does it mean** (deliverability impact in plain
+language), **what can I do** (copy-pasteable fixes), **can I run it now** (the §9 single-check
+re-run).
+
+**Routes** (already reserved in §2's table):
+
+| Page | Route |
+| --- | --- |
+| Check detail, one specific run | `/domains/:domainId/runs/:runId/spam-content/check/:checkKey` |
+| Check detail, the newest run (alias) | `/domains/:domainId/spam-content/check/:checkKey` |
+
+**The `:checkKey` map** — slug ↔ backend checker id (`CHECKERS` registry,
+`code/packages/backend/src/modules/audit/checks/index.ts`) ↔ §4 snapshot key ↔ owning spec. The
+slugs are frozen; an unknown slug renders "check not found" with a link back to the category page:
+
+| `:checkKey` | Checker registry id | §4 section key | Interior owned by |
+| --- | --- | --- | --- |
+| `bimi` | `content.bimi` | `bimi` | [./bimi.mdx](./bimi.mdx) |
+| `report-emails` | `content.report_emails` | `report_emails` | [../emails.mdx §13](../emails.mdx) |
+| `content-score` | `content.scoring` | `content_score` | [./content_scoring.mdx](./content_scoring.mdx) |
+| `list-unsubscribe` | `content.list_unsubscribe` | `list_unsubscribe` | [./list_unsubscribe.mdx](./list_unsubscribe.mdx) |
+| `link-reputation` | `content.url` | `link_reputation` | [./link_url_reputation.mdx](./link_url_reputation.mdx) |
+| `sender-reputation` | `content.reputation` | `sender_reputation` | [./reputation_metrics.mdx](./reputation_metrics.mdx) |
+| `inbox-placement` | `content.inbox_placement` | `inbox_placement` | [./inbox_placement.mdx](./inbox_placement.mdx) |
+
+This category spec owns the **template** (the bands below, their order, the states, the route);
+each family spec owns its interior copy — the concept paragraphs, the parsed-field rows, the
+per-sub-check fix text. The legacy `/domains/:id/content` content-scoring page becomes a redirect
+alias of `…/spam-content/check/content-score`; its upload / re-score / view-raw features move into
+that detail page's instance (the `audit/content-sample` API endpoints are unchanged).
+
+**Page anatomy, top to bottom** (same chrome vocabulary as §2 — the detail page must feel like a
+zoom-in of the category page, not a different app):
+
+1. **Header** — back link to the **category page for the same run**, the family name as the
+   title, the family status chip, the run timestamp with the §2 **‹ prev / next ›** run
+   navigation (swaps `:runId`, page stays on the same `:checkKey`), and the **"Run this check
+   now ⟳"** button (§9).
+2. **Verdict banner** — one sentence, plain language, severity-colored: the family's worst
+   finding named with its observed value ("One-click unsubscribe header is missing — Gmail and
+   Yahoo require it for bulk senders since Feb 2024"). Healthy = quiet green one-liner.
+3. **"What is this?"** — the concept: 2–3 paragraphs from the family spec answering what the
+   mechanism/record/header/metric *is* and why receivers evaluate it, written for the learner
+   persona. Collapsible; remembers collapse per user (localStorage) so operators aren't re-taught
+   on every visit.
+4. **Raw + parsed** — the family's raw artifact verbatim in a monospace block with a copy button,
+   then the **field-by-field breakdown table**: one row per field/tag/rule/provider with columns
+   *field* (mono), *value* (mono), *meaning* (one plain sentence), *status* (✓/⚠/✗/ⓘ chip). The
+   per-family raw artifact and parse rows:
+
+   | `:checkKey` | Raw block shows | Parsed table rows |
+   | --- | --- | --- |
+   | `bimi` | the `<selector>._bimi` TXT record verbatim + this run's `_dmarc` policy line | one row per tag (`v=`, `l=`, `a=`) plus derived rows: DMARC enforcing, SVG fetch (status/content-type), VMC issuer & validity window, logo hash match |
+   | `report-emails` | the newest matched report's identifying headers + the decoded XML/JSON snippet for this domain | corpus size & window, reports for this domain, real-world DMARC pass rate, spoofing sources, alignment-fragility flag, enforcement observed, TLS failure count, corpus freshness |
+   | `content-score` | the scored sample's `Subject:`/`From:`/`Date:` headers + the `X-Spam-Status` line | the fired-rule table (rule, points, description, fix), points-descending, plus score / threshold / engine rows |
+   | `list-unsubscribe` | the `List-Unsubscribe`, `List-Unsubscribe-Post`, `List-Id`, `Precedence` header lines verbatim (absent lines rendered red as `— absent —`) | header present, one-click POST, https URI, mailto fallback, per-recipient token, DKIM `h=` coverage, From-alignment (spf/dkim), bulk-sender flag |
+   | `link-reputation` | the extracted, deduped URL list from the sample | one row per registrable domain: occurrences, zones queried, listing code + decoded meaning, redirect/final domain, delisting URL |
+   | `sender-reputation` | the connected source summary (GPT/FBL/ESP + last-sync) as fetched | complaint rate vs 0.1%/0.3% lines, complaint trend, hard-bounce rate, GPT domain band, one row per sending-IP band, recurring-blocklist flag |
+   | `inbox-placement` | the probe identity (sample id, `X-EDH-Test-Id` token, tested-at) + per-seed SMTP replies from `tool_runs[]` | one row per provider: seeds, inbox, spam, promotions, missing, receiver auth triple (spf/dkim/dmarc), delivery latency |
+
+5. **Sub-test results** — this family's findings only (filtered by the §1 id-prefix table),
+   fail-first, same row anatomy as the §2 table (status icon, id, title, observed value,
+   accordion with observed/expected/why-it-matters/Fix + `[copy fix]`).
+6. **What it means** — one short severity-keyed paragraph translating the current state into
+   deliverability outcome ("with this header missing, Gmail will progressively junk this stream
+   regardless of authentication"), written by the family spec; the healthy state gets the
+   keep-it-green version.
+7. **Fix panel** — the failing rows' remediations, deduplicated, ordered by the §5 ladder, each
+   with its copy button; one accent **primary fix** CTA maximum. Healthy = the §5 rung-9 "keep
+   it" guidance. Gated-no-input = the unlock action (upload sample / connect source / add seeds)
+   as the panel's only CTA.
+8. **History strip** — this family across the domain's stored runs (§10): headline-metric
+   sparkline + a last-N-runs mini-table (timestamp, status chip, metric, Δ); clicking a row swaps
+   `:runId` to view that run's version of this same page.
+9. **Diagnose it yourself** — the family's §3 commands with the real domain/sample/link values
+   substituted, each copyable.
+10. **References footer** — this family's rows from the §11 reference library (3–6 links max,
+    external-link icon, new tab).
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Spam & Content       List-Unsubscribe & one-click        [Run check ⟳]   │ header
+│ whitehatengineering.com · [ critical ] · run of 2026-07-01 09:14   ‹ ▸     │
+├────────────────────────────────────────────────────────────────────────────┤
+│ ✗ One-click unsubscribe header is missing — a hard Gmail/Yahoo gate for    │ verdict
+│   bulk senders since Feb 2024, not a score.                                │
+├────────────────────────────────────────────────────────────────────────────┤
+│ WHAT IS THIS?                                                   [collapse] │ concept
+│ Receivers require bulk mail to carry two headers: List-Unsubscribe… (2–3 ¶)│
+├────────────────────────────────────────────────────────────────────────────┤
+│ RAW HEADERS                                                         [copy] │ raw block
+│   List-Unsubscribe: <https://links.whitehatengineering.com/u/{token}>,     │
+│                     <mailto:unsubscribe@whitehatengineering.com>           │
+│   List-Unsubscribe-Post: — absent —                                        │
+│ FIELD BY FIELD                                                             │ parsed table
+│   field                value                        meaning        status  │
+│   header present       yes                          RFC 2369 base    ✓     │
+│   one-click POST       absent                       RFC 8058 gate    ✗     │
+│   https URI            links.whitehat…/u/{token}    per-recipient    ✓     │
+│   From alignment       spf pass · dkim pass         2024 rules       ✓     │
+├────────────────────────────────────────────────────────────────────────────┤
+│ SUB-TESTS                                              7 passed · 1 failed │ findings
+│  ✗ content.list_unsub_oneclick  one-click POST header missing        [v]   │
+│  ✓ content.from_alignment       From aligns with DKIM d=             [v]   │
+├────────────────────────────────────────────────────────────────────────────┤
+│ FIX  Add verbatim: List-Unsubscribe-Post: List-Unsubscribe=One-Click [copy]│ fix panel
+├────────────────────────────────────────────────────────────────────────────┤
+│ HISTORY   ✗──✗──✓──✓──✗   run of 06-28 ✓ · 06-30 ✓ · 07-01 ✗ (header lost) │ history
+├────────────────────────────────────────────────────────────────────────────┤
+│ DIAGNOSE IT YOURSELF   npx mailauth report campaign_2026-06-28.eml   [copy]│ commands
+│ REFERENCES   RFC 8058 · RFC 2369 · Gmail sender guidelines · Yahoo …       │ footer
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+**States.** Loading → skeleton banner + skeleton table. **Never-run** (domain has no runs) →
+gray chip, concept panel still renders (the page teaches even with no data), "No run yet — run
+one" CTA where the raw block would be. **Gated-no-input** (family is input-gated per §1 and the
+input is absent) → the info finding renders as the verdict, the raw/parsed bands collapse into
+the unlock CTA ("Upload a sample `.eml` → this page fills in"), history/references still render.
+**Run not found** (`:runId` unknown) → "run not found, open the newest" link, same as §2.
+**Unknown `:checkKey`** → "check not found" + link to the category page. Concept, Diagnose, and
+References render in **every** state — the explainer never 404s just because data is missing.
+
+---
+
+## 9. "Run this check now" — the single-check re-run
+
+Every check detail page (§8), and each family group header's overflow on the category page,
+offers a **single-family re-run** — the affordance that closes the fix loop: publish the record /
+add the header / clean the link, then re-test *just that* in seconds instead of a full audit.
+
+**Endpoint.**
+
+```
+POST /api/audit/run/:domainId/check/:checkerId       → 200 AuditResult (the merged latest)
+```
+
+`:checkerId` is the **checker registry id** (§8 map: `content.bimi`, `content.report_emails`,
+`content.scoring`, `content.list_unsubscribe`, `content.url`, `content.reputation`,
+`content.inbox_placement`). Unknown domain or checker id → 404. A full audit already in flight
+for the domain (the `inFlight` map in `audit.service.ts`) → 409 with
+`{ reason: "audit_in_flight" }` and the UI falls back to "audit already running — watch the dock".
+
+**Backend shape.** This generalizes the **already-implemented** content-scoring re-score
+(`AuditService.rescoreContent`, exposed today as
+`POST /api/audit/content-sample/:domainId/rescore`) into `rerunChecker(domainId, checkerId)`,
+keeping its exact semantics:
+
+- runs the one checker with the domain's config and `previousResults` from the latest result;
+- **surgical merge** — swap only this checker's findings/payload (matched by the §1 id-prefix
+  table, exactly as `isContentScoringFinding` does today), keep every other check's output;
+- re-summarize score/status/counts and the `isNew` new-problem count;
+- **latest-cache-only persist** — refreshes the latest-result store and the dashboard but
+  **never rewrites the immutable per-run history** (pm/storage.mdx §7.2); a single-check re-run
+  is a patch to "now", not a new run;
+- with no prior run at all, a full audit runs instead (nothing to merge into);
+- a checker crash merges the standing `<checkerId>.error` warning finding, never a fabricated
+  pass;
+- external tools invoked by the re-run still log `tool_runs[]` entries per §3 into the latest
+  result's execution log.
+
+The legacy `POST /api/audit/content-sample/:domainId/rescore` remains as a thin alias delegating
+to `rerunChecker(domainId, "content.scoring")` — the upload-panel flow keeps working unchanged.
+
+**UX rules.**
+
+- Button label **"Run this check now ⟳"**; while running: spinner + "Checking…", button disabled;
+  on completion the results query invalidates and the page re-renders from the merged latest —
+  no navigation.
+- **On a historical run view** the button relabels to **"Re-run on newest ⟳"** with a tooltip
+  ("re-running updates the newest result — this historical run is immutable"); on completion it
+  navigates to the newest-run alias of the same page so the user is looking at what they just
+  produced.
+- **Gated family, input absent** — the button still runs (the checker is cheap and re-emits the
+  info finding) but the hover names the missing input; the real CTA is the §8 unlock panel.
+- **Inbox placement** is the one costed family: the button opens a confirm dialog stating the
+  seed/credit cost ("sends 1 probe to 46 seeds — uses 1 placement credit") before posting;
+  placement re-runs are never auto-triggered.
+- The full **"Re-run" (whole audit)** stays where §2 put it — the category-page header — and is
+  never replaced by the single-check button; the two are visually distinct (accent vs outline).
+
+---
+
+## 10. History & trends across runs
+
+The run store keeps every run per domain (§4), so trend rendering is a **client-side derivation
+over `GET /api/audit/runs?domainId=…`** (newest-first, full results included) — no new endpoint.
+The frontend derives, per run, each family's status (worst severity over the §1 prefix match) and
+its **headline metric**:
+
+| Family | Headline metric (per run) | Sparkline shape |
+| --- | --- | --- |
+| BIMI | chain depth reached (DMARC → record → SVG → VMC, 0–4) | step line |
+| Report emails | real-world DMARC pass rate over the window | line |
+| Content scoring | SpamAssassin total (same-sample runs annotated) | line with 2.0/5.0 bands |
+| List-Unsubscribe | one-click present (the bulk gate) | ✓/✗ boolean strip |
+| Link reputation | zone-hit count (flagged count secondary) | bar |
+| Sender reputation | complaint rate | line with 0.1%/0.3% bands |
+| Inbox placement | overall inbox % | line, per-provider on hover |
+
+**Where trends render.**
+
+1. **Category page (§2)** gains a **History band** between the two-up panels and the sub-test
+   table: one small sparkline tile per family (label + current value + Δ vs previous run);
+   clicking a tile opens that family's §8 detail page. Collapsed by default when the domain has
+   fewer than 2 runs.
+2. **Check detail page (§8, band 8)** — the family's sparkline plus the last-N-runs mini-table
+   (timestamp, chip, metric, Δ); row click swaps `:runId`.
+3. **The hero (§2)** keeps its ▲/▼-vs-previous-run marker — same derivation, previous run only.
+
+Trend **semantics** stay owned by the §4 regression differ: a band crossing (score crosses
+2.0/5.0, complaint crosses 0.1%/0.3%, placement drops a band, a new zone hit, a lost one-click
+header, a VMC entering its expiry window) is what flags `isNew` — the sparklines *visualize*, the
+differ *decides*. One-run domains render the tiles with "first run — trends appear after the next
+run" and no fabricated flat line.
+
+---
+
+## 11. External reference library
+
+Every §8 detail page and §6 drill-down ends with a **References footer**: 3–6 curated links,
+external-link icon, opens a new tab, never inline mid-prose. The library (family specs may extend
+their own row; the category page's own footer uses the *Category-wide* row):
+
+| Scope | References |
+| --- | --- |
+| Category-wide | Gmail Email sender guidelines (support.google.com/a/answer/81126); Yahoo/AOL Sender Best Practices (senders.yahooinc.com); Microsoft Outlook sender requirements; RFC 5322 (message format); RFC 2045–2049 (MIME) |
+| BIMI | BIMI Group implementation guide + SVG conformance checker (bimigroup.org); the BIMI/AVP IETF drafts; MVA VMC/CMC pages (DigiCert, Entrust); RFC 7489 → RFC 9989 (the DMARC prerequisite) |
+| Report emails | RFC 7489 Appendix C (aggregate-report XML schema); RFC 8460 (TLS-RPT JSON reports); dmarc.org report-consumer resources |
+| Content scoring | SpamAssassin tests catalog (spamassassin.apache.org); RFC 5322; RFC 2045–2049; mail-tester.com |
+| List-Unsubscribe | RFC 8058 (one-click); RFC 2369 (List-* headers); RFC 2919 (List-Id); the Gmail/Yahoo bulk-sender rule pages (category-wide row) |
+| Link reputation | RFC 5782 (DNSBL/RHSBL mechanics); RFC 3986 (URL syntax); Spamhaus DBL return codes + check.spamhaus.org; surbl.org lists page; uribl.com; publicsuffix.org (registrable-domain reduction) |
+| Sender reputation | Google Postmaster Tools help + API (gmailpostmastertools.googleapis.com/v1); Microsoft SNDS + JMRP portals; Yahoo Complaint Feedback Loop; RFC 5965 (ARF) |
+| Inbox placement | Gmail SMTP error-code reference (421 4.7.26 / 550 5.7.x); Microsoft 550 5.7.515 documentation; provider postmaster pages (category-wide row); RFC 5321 (SMTP reply semantics) |
+
+Rules: links are **teaching material, never the fix** — the fix is always the copyable text in
+the Fix strip; URLs live in one frontend reference module (keyed by family), not hard-coded per
+component; dead-link review rides the yearly baseline revisit (see the maintenance notes).
+
+---
+
+## 12. Acceptance criteria
 
 1. All seven family checkers run in every run and emit pass **and** fail findings with the
    `content.` prefix; input-gated families with no sample/integration/seeds emit a single **info**
@@ -956,6 +1240,37 @@ consciously declined).
 13. A later scheduled run that sees a placement drop, a new URI-zone hit, a complaint band change,
     a lost one-click header, or a VMC nearing expiry flags each as a **new problem** via the
     run-file regression diff.
+14. Check detail pages render at `/domains/:domainId/runs/:runId/spam-content/check/:checkKey`
+    (newest alias `/domains/:domainId/spam-content/check/:checkKey`) for every §8 `:checkKey`
+    slug with the full §8 anatomy — verdict banner, collapsible concept panel, raw artifact +
+    field-by-field parsed table, family-filtered sub-test rows, what-it-means paragraph, fix
+    panel, history strip, diagnose commands, references footer — and the §8 states
+    (loading / never-run / gated-no-input / run-not-found / unknown-checkKey); concept, diagnose,
+    and references render in every state.
+15. The §8 slug map is frozen (slug ↔ checker registry id ↔ §4 section key); the static `check`
+    segment outranks the dynamic `:problemId` route, and the legacy `/domains/:id/content` route
+    redirects to `…/spam-content/check/content-score` with the upload/re-score/view-raw features
+    intact on that detail page.
+16. `POST /api/audit/run/:domainId/check/:checkerId` re-runs exactly one checker and responds
+    with the surgically merged latest `AuditResult` (only that checker's findings/payload
+    replaced, score/status/counts/newProblemCount re-summarized); it never rewrites the immutable
+    per-run history; unknown domain/checker → 404, audit in flight → 409; the legacy
+    `POST /api/audit/content-sample/:domainId/rescore` delegates to it unchanged.
+17. The "Run this check now" button shows the running state and refreshes in place on the newest
+    view; on a historical run it reads "Re-run on newest" and navigates to the newest alias on
+    completion; the inbox-placement variant requires the cost-confirm dialog before posting and
+    is never auto-triggered.
+18. The run report's Spam & Content chip chevron is run-scoped (historical run → that run's
+    category page); the section renders per-family sub-groups each with a chevron into the §8
+    detail page, the header micro-summary, and the matched problem-state chips (§7).
+19. Trends derive client-side from `GET /api/audit/runs?domainId=…`: the category page's History
+    band (one tile per family) and each detail page's history strip render the §10 headline
+    metrics with Δ markers, link/swap into the corresponding run-scoped pages, and show the
+    honest "first run — trends appear after the next run" state instead of a fabricated flat
+    line.
+20. No dead-end clickables: every family chip, family group header, sparkline tile, problem-state
+    card/chip, and reference link resolves to its specced destination (§8 detail page, §6
+    drill-down, or the §11 external doc in a new tab).
 14. **Report-email analysis (family 2):** every run scans the analysis directory **in place**
     (files never moved/renamed), attributes each report by its **payload** policy domain (exact
     monitored-domain match, else closest monitored parent — never filename/subject/mailbox),
@@ -997,4 +1312,12 @@ consciously declined).
     (../dashboard.mdx §5.2) with the K-of-M fallback before any placement test exists.
   * Placement, list-management, scoring, and URL probes are input-gated (sample / integrations /
     seeds); the §5 ladder gains no rungs until those inputs exist — PS-09 is the onboarding hook.
+  * §7–§11 (run-report section growth, /spam-content/check/:checkKey detail pages, the
+    single-check re-run endpoint POST /api/audit/run/:domainId/check/:checkerId, history trends,
+    reference library) are owned HERE at template level; keep the §8 slug ↔ checker-id map in
+    lockstep with the CHECKERS registry ids (content.bimi, content.report_emails, content.scoring,
+    content.list_unsubscribe, content.url, content.reputation, content.inbox_placement) and with
+    each family spec's interior. The single-check re-run generalizes AuditService.rescoreContent
+    (surgical merge, latest-cache-only — never a new run, never a rewritten run file). §11
+    reference URLs live in one frontend module keyed by family and ride the yearly revisit.
 -->

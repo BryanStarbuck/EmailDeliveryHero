@@ -1106,6 +1106,31 @@ function matchToolRun(f: Finding, toolRuns: InfraToolRun[]): InfraToolRun | unde
   return toolRuns.find((tr) => tokens.some((t) => tr.command.includes(t)))
 }
 
+/**
+ * One family group header's since-last-run trend glyph (pm/checks/dns.mdx §6.2 item 6):
+ * ▲ regressed / ▼ improved / = unchanged. Absent (null) with no previous run to diff against.
+ */
+function TrendGlyph({ trend }: { trend?: "regressed" | "improved" | "unchanged" }) {
+  if (!trend) return null
+  if (trend === "regressed")
+    return (
+      <span className="text-red-600" title="Regressed since the previous run">
+        ▲
+      </span>
+    )
+  if (trend === "improved")
+    return (
+      <span className="text-emerald-600" title="Improved since the previous run">
+        ▼
+      </span>
+    )
+  return (
+    <span className="text-slate-400" title="Unchanged since the previous run">
+      =
+    </span>
+  )
+}
+
 /** The main table: one group per family (spec order), fail-first rows inside each group. */
 function TestResultsByFamily({
   families,
@@ -1114,6 +1139,9 @@ function TestResultsByFamily({
   onRecheck,
   scanning = false,
   toolRuns = [],
+  domainId,
+  runId,
+  trends = {},
 }: {
   families: FamilyRollup[]
   dane?: DaneTlsaResults
@@ -1123,7 +1151,20 @@ function TestResultsByFamily({
   onRecheck?: () => void
   scanning?: boolean
   toolRuns?: InfraToolRun[]
+  /** Route context for the group headers' `details ›` explainer links (§6.2 item 6). */
+  domainId?: string
+  runId?: string
+  /** Since-last-run trend per family (▲ regressed / ▼ improved / = unchanged, §6.2 item 6). */
+  trends?: Partial<Record<DnsFamilyKey, FamilyTrend>>
 }) {
+  const spot = useDnsSpotCheck()
+  // Which family's ⟳ spot-check result (a live re-run, never persisted) is shown inline.
+  const [spotFamily, setSpotFamily] = useState<DnsFamilyKey | null>(null)
+  const onSpotCheck = (key: DnsFamilyKey) => {
+    if (!domainId || spot.isPending) return
+    setSpotFamily(key)
+    spot.mutate({ domainId, checkKey: key })
+  }
   const all = families.flatMap((f) => f.findings)
   const counts = {
     pass: all.filter((f) => f.severity === "ok").length,
@@ -1149,16 +1190,54 @@ function TestResultsByFamily({
             .filter((fam) => fam.findings.length > 0 || fam.def.key === "domain_reputation")
             .map((fam) => (
               <div key={fam.def.key} id={`fam-${fam.def.key}`} className="scroll-mt-4">
-                <div className="flex items-center justify-between border-t border-[var(--edh-border)] bg-slate-50 px-3 py-1.5 first:border-t-0">
-                  <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">
+                <div className="flex items-center justify-between gap-2 border-t border-[var(--edh-border)] bg-slate-50 px-3 py-1.5 first:border-t-0">
+                  <span className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-600">
                     {fam.def.header}
+                    <TrendGlyph trend={trends[fam.def.key]} />
                   </span>
-                  <span className="text-xs text-[var(--edh-muted)]">
-                    {fam.failCount > 0
-                      ? `${fam.failCount} of ${fam.findings.length} failing`
-                      : `${fam.findings.length} tests`}
+                  <span className="flex items-center gap-3 text-xs text-[var(--edh-muted)]">
+                    <span>
+                      {fam.failCount > 0
+                        ? `${fam.failCount} of ${fam.findings.length} failing`
+                        : `${fam.findings.length} tests`}
+                    </span>
+                    {/* ⟳ spot-check (§6.2 item 6): re-run just this family live — never saved. */}
+                    {domainId && (
+                      <button
+                        type="button"
+                        onClick={() => onSpotCheck(fam.def.key)}
+                        disabled={spot.isPending}
+                        title={`Spot-check ${fam.def.header} now (live, not saved)`}
+                        aria-label={`Spot-check ${fam.def.header} now`}
+                        className="rounded p-0.5 text-[var(--edh-muted)] hover:bg-slate-200 hover:text-slate-700 disabled:opacity-50"
+                      >
+                        {spot.isPending && spotFamily === fam.def.key ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    )}
+                    {/* details › — the family's run-scoped check-detail explainer (§6.2 item 6). */}
+                    {domainId && runId && (
+                      <Link
+                        to="/domains/$id/runs/$runId/dns/check/$checkKey"
+                        params={{ id: domainId, runId, checkKey: fam.def.key }}
+                        className="font-medium text-[var(--edh-primary)] hover:underline"
+                      >
+                        details ›
+                      </Link>
+                    )}
                   </span>
                 </div>
+                {spotFamily === fam.def.key && spot.data && !spot.isPending && (
+                  <SpotCheckResultStrip result={spot.data} onDismiss={() => setSpotFamily(null)} />
+                )}
+                {spotFamily === fam.def.key && spot.isError && (
+                  <p className="border-t border-[var(--edh-border)] px-3 py-2 text-xs text-red-600">
+                    Spot check failed — try again in a moment.
+                  </p>
+                )}
                 {fam.def.key === "dane_tlsa" && dane && dane.length > 0 && (
                   <DaneMatrix rows={dane} />
                 )}
@@ -1201,6 +1280,43 @@ function TestResultsByFamily({
         )}
       </div>
     </section>
+  )
+}
+
+/**
+ * The inline result of a family ⟳ spot-check (pm/checks/dns.mdx §6.2 item 6): a LIVE single-family
+ * re-run summarized under the group header. Never persisted — the stored run stays untouched.
+ */
+function SpotCheckResultStrip({
+  result,
+  onDismiss,
+}: {
+  result: DnsSpotCheckResult
+  onDismiss: () => void
+}) {
+  const failing = result.findings.filter(
+    (f) => f.severity === "critical" || f.severity === "warning",
+  )
+  const worst = failing.find((f) => f.severity === "critical") ?? failing[0]
+  return (
+    <div
+      className={cn(
+        "border-t border-[var(--edh-border)] px-3 py-2 text-xs",
+        failing.length > 0 ? "bg-amber-50 text-amber-800" : "bg-emerald-50 text-emerald-800",
+      )}
+    >
+      <span className="font-medium">Spot check (live, not saved): </span>
+      {failing.length > 0
+        ? `${failing.length} of ${result.findings.length} failing — ${worst?.title ?? ""}`
+        : `all ${result.findings.length} tests pass right now`}
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="ml-2 font-medium underline hover:no-underline"
+      >
+        dismiss
+      </button>
+    </div>
   )
 }
 

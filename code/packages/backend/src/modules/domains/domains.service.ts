@@ -13,6 +13,7 @@ import type {
   DnsHealthConfig,
   DomainReputationConfig,
   LinkUrlDomainConfig,
+  MtaStsDomainConfig,
   MxRoutingConfig,
 } from "../audit/checks/types"
 import type { MonitoredDomain } from "./domain.types"
@@ -24,6 +25,7 @@ import type {
   DnsHealthConfigDto,
   DomainReputationConfigDto,
   LinkUrlConfigDto,
+  MtaStsConfigDto,
   MxRoutingConfigDto,
   UpdateDomainDto,
 } from "./dto/domain.dto"
@@ -106,6 +108,7 @@ export class DomainsService {
         ? { domainReputation: normalizeDomainReputation(dto.domainReputation) }
         : {}),
       ...(dto.dane ? { dane: normalizeDane(dto.dane) } : {}),
+      ...(dto.mtaSts ? { mtaSts: normalizeMtaSts(dto.mtaSts) } : {}),
       ...(dto.linkUrl ? { linkUrl: normalizeLinkUrl(dto.linkUrl) } : {}),
       addedBy,
       createdAt: now,
@@ -139,6 +142,7 @@ export class DomainsService {
           ? normalizeDomainReputation(dto.domainReputation)
           : current.domainReputation,
       dane: dto.dane !== undefined ? normalizeDane(dto.dane) : current.dane,
+      mtaSts: dto.mtaSts !== undefined ? normalizeMtaSts(dto.mtaSts) : current.mtaSts,
       linkUrl: dto.linkUrl !== undefined ? normalizeLinkUrl(dto.linkUrl) : current.linkUrl,
       updatedAt: new Date().toISOString(),
     }
@@ -247,6 +251,17 @@ function normalizeMx(cfg: MxRoutingConfigDto): MxRoutingConfig | undefined {
   const skipSmtpProbe = cfg.skipSmtpProbe ?? false
   if (receivesMail && expectedHosts.length === 0 && !skipSmtpProbe) return undefined
   return { receivesMail, expectedHosts, skipSmtpProbe }
+}
+
+/**
+ * Normalize the operator-entered MTA-STS config (pm/checks/mta_sts.mdx §4): keep the explicit
+ * desired-mode target, and collapse an absent/`enforce` (the default target, spec §5) selection to
+ * undefined so domains.yaml stays clean — the checker defaults to `enforce` anyway.
+ */
+function normalizeMtaSts(cfg: MtaStsConfigDto): MtaStsDomainConfig | undefined {
+  const desiredMode = cfg.desiredMode
+  if (desiredMode === undefined || desiredMode === "enforce") return undefined
+  return { desiredMode }
 }
 
 /**

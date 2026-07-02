@@ -1,6 +1,6 @@
 ---
 title: DANE / TLSA for SMTP
-description: Audits DNSSEC-anchored TLSA records at _25._tcp.<mx-host> that bind each MX server's TLS certificate for opportunistic-to-mandatory SMTP transport security, verifying DNSSEC prerequisite, record presence, "3 1 1" parameters, live certificate match, rollover staging, and full MX coverage.
+description: Audits DNSSEC-anchored TLSA records at _25._tcp.<mx-host> that bind each MX server's TLS certificate for opportunistic-to-mandatory SMTP transport security, verifying DNSSEC prerequisite, record presence, "3 1 1" parameters, live certificate match, rollover staging, and full MX coverage — plus the run-scoped dane-tlsa check-detail explainer page (what/healthy/meaning/fix/run-now), its raw+parsed TLSA breakdown, fix recipes with the 3 1 1 generator, scoped re-run, and run-over-run history.
 ---
 
 # DANE / TLSA for SMTP
@@ -27,6 +27,7 @@ ignore it, and an attacker can simply strip or forge it. That dependency shapes 
 - [../engineering.mdx](../engineering.mdx) — Checker/Finding contract, file store, scheduler.
 - [../spam_checks.mdx](../spam_checks.mdx) — master catalog; this spec expands the DANE slice of DNS & Infrastructure.
 - [../dashboard.mdx](../dashboard.mdx) — the 6-column status dashboard (this feeds the **DNS & Infrastructure** cell).
+- [../dns.mdx](../dns.mdx) — the DNS & Infrastructure **category** spec; its §14-§17 own the explainer-page shell, the scoped re-run system, and the history/trend derivations that §9-§11 below write interior copy for.
 - [../scheduled_checks.mdx](../scheduled_checks.mdx) — recurring-check config + per-OS scheduling.
 - [./dnssec.mdx](./dnssec.mdx) — **hard prerequisite**; DANE is ineffective without a signed zone.
 - [./mta_sts.mdx](./mta_sts.mdx) — the non-DNSSEC alternative for enforcing TLS on inbound mail.
@@ -335,6 +336,235 @@ place that changes. No new reference/config table is required for DANE (MX come 
     additionally cross-link **PS-06**; mechanism terms go to explainer anchors, story terms to
     drill-downs, per the §10 map.
 
+## 9. Check-detail explainer page — `/domains/:domainId/runs/:runId/dns/check/dane-tlsa`
+
+The per-family explainer page for DANE. The **shell** — routes, the five locked blocks, the
+raw+parsed frame, the history strip, the references frame, and the loading/empty/error states —
+is owned by [../dns.mdx](../dns.mdx) §14 and is not redefined here. This section owns the
+**interior copy**: the concept text and anchors, the parsed-field rows, the conditional impact
+copy, the per-finding fix recipes, and the references rows. Per §14.1 the `:checkKey` is
+**`dane-tlsa`** (equal to the backend directory `checks/dane-tlsa/`), the row label is
+**DANE / TLSA**, and the one-line meaning everywhere this family renders as a row is *"Is the MX
+certificate pinned in DNS for DANE-validating senders?"* — never paraphrased.
+
+**Routes.** Canonical `/domains/:domainId/runs/:runId/dns/check/dane-tlsa`; newest-run alias
+`/domains/:domainId/dns/check/dane-tlsa` (rewrites itself to the canonical run URL). Entry
+points: the DANE family row on the category page and the run report's ten-family list
+(`details ›`), the family-strip cell, the §16 history-strip cells of other runs, every
+underlined DANE concept term app-wide (§14.6), and the PS-07 drill-down's mechanism links.
+
+### 9.1 Block 1 — What this is (concept copy + anchors)
+
+Two-to-four paragraphs distilled from §1, plain language first: STARTTLS is opportunistic and
+strippable; DANE publishes a DNSSEC-signed pin of the MX certificate at `_25._tcp.<mx-host>` so
+a validating sender *requires* matching TLS or defers — and a *wrong* pin makes those senders
+bounce your inbound mail, which is worse than no pin. Static content — renders instantly,
+independent of run data. Anchored sub-headings (the first four are the fixed §14.6 map entries;
+the last two are local anchors this page's own copy links to):
+
+| Anchor | Sub-heading copy covers |
+|---|---|
+| `#concept-dane` | DANE in one breath: DNSSEC-anchored cert pinning for SMTP; RFC 7672; who validates it today (Gmail inbound, Exchange Online, Comcast, German/Dutch ISPs); relation to MTA-STS (the Web-PKI alternative). |
+| `#concept-tlsa` | The TLSA record: owner name `_<port>._<proto>.<host>`, the four RDATA fields (usage / selector / matching type / association data) — reuse the §1 field table verbatim. |
+| `#concept-3-1-1` | Why `3 1 1` (DANE-EE / SPKI / SHA-256) is the SMTP profile: no CA chain needed, survives key-reusing renewals; why usage 0/1 (PKIX) MUST NOT be published for SMTP. |
+| `#concept-tlsa-rollover` | Rollover discipline: ≥2 records (current + next) staged *before* renewal; the classic "renewed the cert, forgot the TLSA" outage; TTL's role in propagation. |
+| `#concept-dnssec-prereq` *(local)* | The hard prerequisite: an unsigned TLSA is a no-op senders MUST ignore — both the MX host's zone and the domain's own zone (the MX lookup itself) must validate. Links onward to `…/dns/check/dnssec#concept-dnssec`. |
+| `#concept-partial-coverage` *(local)* | Why partial DANE ≈ no DANE: an attacker steers delivery to the unprotected (often backup) MX. |
+
+### 9.2 Block 2 — Is it healthy right now?
+
+The family StatusCell (worst `infra.dane_*` severity in the viewed run) plus one verdict
+sentence chosen by state, e.g.: *"All 2 MX hosts publish a DNSSEC-signed 3 1 1 TLSA with
+rollover staged"* (ok) / *"mail2.example.com publishes a TLSA on an unsigned zone — validating
+senders ignore it"* (critical) / *"No MX host publishes DANE — inbound TLS is downgradeable"*
+(warning) / *"No MX hosts — DANE not applicable"* (info).
+
+Then, top to bottom:
+
+1. **The per-MX matrix** from §4 (DNSSEC | TLSA | Params | Cert match | Rollover), one row per
+   MX in priority order — the fastest multi-host triage surface.
+2. **Every sub-test finding row** of this family from this run, grouped per MX host, fail rows
+   pre-expanded — the full id inventory the checker emits (suffix `<tag>` = canonical host with
+   non-alphanumerics → `_`; `<i>` = record index): `infra.dane_tlsa_present.<tag>`,
+   `infra.dane_dnssec_prereq.<tag>` + `.domain_zone`, `infra.dane_without_dnssec.<tag>` +
+   `.domain_zone`, `infra.dane_name_alignment.<tag>`, `infra.dane_tlsa_params.<tag>.<i>`,
+   `infra.dane_digest_length.<tag>.<i>`, `infra.dane_ttl_sane.<tag>`,
+   `infra.dane_rollover.<tag>` + `infra.dane_rollover.next_missing.<tag>`, and the domain-level
+   `infra.dane_all_mx`, `infra.dane_mx_lookup`, `infra.dane_no_mx`,
+   `infra.dane_tlsa_cert_match` (pending-probe info).
+3. **The raw + parsed breakdown** (§9.3).
+
+Data source: the run file only — the findings plus the structured `DaneHostResult[]` rows the
+checker persists at `results["infra.dane_tlsa"]` (the code's key for the §5
+`checkResults.dane[]` projection). The page never re-queries DNS at render time; "now" is
+block 5's job.
+
+### 9.3 The raw + parsed breakdown (DANE rows)
+
+**Raw pane** — per MX host, monospace with a copy button: the observed TLSA RRset exactly as
+answered (`_25._tcp.mail2.example.com. 3600 IN TLSA 3 1 1 5c1b…`, one line per RR from
+`tlsaRecords[]`/`raw`), the DS/DNSKEY/RRSIG observation lines behind the `dnssecSigned` verdict,
+and the CNAME chain when the MX target was cnamed. Each pane links to its matching `tool_runs[]`
+entry (`dig +dnssec TLSA _25._tcp.<mx>` et al.) for command + duration traceability.
+
+**Parsed pane** — one section per MX host (priority order), fields with per-field verdict chips:
+
+| Field | Observed (from `DaneHostResult`) | Expected / sane range | Verdict rule |
+|---|---|---|---|
+| TLSA owner name | `_25._tcp.<mxHost>` | at the post-CNAME canonical name | ✓ / ✗ per `dane_name_alignment` |
+| Zone DNSSEC | `dnssecSigned` | signed (DS/DNSKEY or RRSIG observed) | ✓ signed · ✗ TLSA-on-unsigned · ⚠ unsigned-no-TLSA · ⓘ unknown |
+| TLSA present | `tlsaPresent` + record count | ≥1 (≥2 for rollover) | ✓ / ⚠ absent (rolled up by `dane_all_mx`) |
+| — per record `i` — Usage | `tlsaRecords[i].usage` | 3 (2 usable) | ✓ 3 · ⓘ 2 · ✗ 0/1 |
+| — Selector | `tlsaRecords[i].selector` | 1 (SPKI) | ✓ 1 · ⓘ 0 |
+| — Matching type | `tlsaRecords[i].mtype` | 1 (SHA-256) | ✓ 1 · ⓘ 2 · ⓘ 0 |
+| — Association data | first 16 hex + length | 64 hex (mtype 1) / 128 (mtype 2) | ✓ / ✗ malformed (`dane_digest_length`) |
+| — TTL | `tlsaRecords[i].ttl` | ≤3600 s; not 0; not >86400 | ✓ / ⓘ >1h / ⚠ >24h or 0 |
+| Rollover staged | `rolloverReady` (count ≥2) | ≥2 records (current + next) | ✓ / ⚠ single record |
+| Expected next pin | admin-pinned SPKI digest, when set | staged among the records | ✓ staged · ⚠ `next_missing` |
+| Cert match | `certMatch` | pinned digest = live cert | **pending** until the :25 probe (never ✗ while null) |
+| STARTTLS offered | `starttlsOffered` | offered on :25 | **pending** until the probe |
+| Lookup error | `probeError` | none | ✗ SERVFAIL-on-signed-zone · ⓘ other |
+
+A field the run did not capture renders **"not captured this run"** (§14.3 no-fabrication rule).
+The domain-level rows (`dane_all_mx` coverage N-of-M, the domain-zone DNSSEC prerequisite from
+the upstream `infra.dnssec` result) render once above the per-host sections.
+
+### 9.4 Block 3 — What it means (conditional impact copy)
+
+Copy is selected by the worst observed state, most severe first:
+
+| Observed state | Impact copy (gist) |
+|---|---|
+| Cert mismatch (probe, FUTURE) / TLSA on unsigned zone / SERVFAIL on signed zone / malformed digest / usage 0-1 / CNAME-to-unsigned | **Rejected or ignored now.** A wrong or unvalidatable pin makes DANE-validating senders (Gmail inbound, Exchange Online, Comcast, most German/Dutch systems) defer and bounce your **inbound** mail — or ignore the record entirely, leaving you unprotected while believing otherwise. This is a hard transport failure, not a spam score. |
+| Partial MX coverage (`dane_all_mx` critical) | **Protection is void.** An active attacker steers delivery to the unprotected MX; partial DANE ≈ no DANE. |
+| Single record (`dane_rollover`) / expected-next not staged / long or zero TTL | **A time bomb.** The next cert renewal (or an emergency re-pin against a >24 h TTL) breaks delivery from every DANE-validating sender at once. |
+| No DANE anywhere (warning) | **Downgradeable.** Mail still flows, but STARTTLS to your MX can be stripped to cleartext; you also forgo the well-run-system signal DANE now carries. Pairs with MTA-STS (`…/dns/check/mta-sts`) as the two anti-stripping answers. |
+| All green | **Authenticated, downgrade-resistant inbound TLS**, with rollover staged so renewals cannot break it. |
+
+### 9.5 Block 4 — What you can do (fix recipes)
+
+Numbered recipes, one per finding family, each with a **copy button carrying the exact snippet**
+(these must stay word-for-word in sync with the checker's remediation strings in
+`dane-tlsa.check.ts`). Ordering rule: when the zone is unsigned, the block **leads with the
+DNSSEC cross-link** — *"Sign the zone first (see DNSSEC) — TLSA advice is premature until the
+zone validates"* — before any record recipe.
+
+| Finding | Recipe (copy payload in backticks) |
+|---|---|
+| `dane_without_dnssec.*` | Sign the MX host's zone (DNSKEY + DS at the parent registrar — link to `…/dns/check/dnssec`) — preferred — **or** remove the TLSA so it isn't mistaken for protection. |
+| `dane_dnssec_prereq.*` (warning) | Sign the zone first, then publish `_25._tcp.<mx>. 3600 IN TLSA 3 1 1 <sha256-of-SPKI>`. |
+| `dane_tlsa_params.*` (critical/info) | Republish as `3 1 1`; remove usage-0/1 (PKIX) records — unusable for SMTP per RFC 7672. |
+| `dane_digest_length.*` | Regenerate the digest: `3 1 1` data must be exactly 64 hex chars (128 for SHA-512). Use the generator panel below. |
+| `dane_rollover.*` / `.next_missing.*` | Publish the **next** cert's digest alongside the current one *before* renewing: `_25._tcp.<mx>. 3600 IN TLSA 3 1 1 <next-digest>`; remove the old record only after the new cert is live. |
+| `dane_name_alignment.*` | Publish the TLSA at the fully-qualified **canonical** (post-CNAME) MX name; every chain hop must be signed. |
+| `dane_all_mx` (partial/none) | Publish a `3 1 1` TLSA for **every** MX host including backups. |
+| `dane_ttl_sane.*` | Set the TLSA TTL to 3600 s (lower during a planned rollover). |
+| SERVFAIL-on-signed-zone | Repair the DNSSEC chain (re-sign, fix the DS at the parent) — validating resolvers are refusing the whole zone. |
+
+**The `3 1 1` generator panel** (already implemented backend-side in
+`checks/dane-tlsa/tlsa-generator.ts`): paste a PEM certificate + confirm the MX host → the app
+calls `generateTlsa311` and renders the `GeneratedTlsaRecord` — the owner name, the SPKI SHA-256
+digest, the complete zone-file line (`_25._tcp.<mx>. 3600 IN TLSA 3 1 1 <digest>`) with a copy
+button, plus the cert **subject** and **notAfter** so the user confirms they pasted the right
+(and unexpired) cert. Exposed via a thin controller route, `POST
+/api/audit/tools/tlsa-generate` `{ pem, mxHost, ttl? }` → the `GeneratedTlsaRecord` JSON; a PEM
+parse failure returns the generator's user-readable message as a 400, rendered inline. Also
+offered pre-filled from the "No TLSA records on any MX" state (§4's one-click generator).
+
+### 9.6 Block 5 — Run this check now
+
+The §15 spot-check scoped to this family: `POST /api/audit/run/:domainId/check/dns/dane-tlsa`
+(writes a **new** run tagged `run.scope: dns.dane_tlsa`). Button copy names the scope and cost
+exactly: **"⟳ Run dane-tlsa only — 1 of 10 families · DNS queries only (TLSA + DS/DNSKEY/RRSIG
+per MX, concurrent) · ~2-4 s"**, plus the timestamp of the last run that included this family.
+State machine per §15.2 (idle → running → done-with-diff-flash → error); on done, navigate to
+the new run's explainer and flash any sub-test whose severity changed ("was ⚠ · now ✓" — e.g.
+the rollover row after the second record propagates). The FUTURE cert-match probe does not gate
+this button: the DNS side always runs; the `certMatch`/`starttlsOffered` rows simply remain
+pending, and the button's fine print says so. 409 while any run for the domain is in flight.
+
+### 9.7 History strip, trends, references
+
+Per §16: the footer strip shows ≤30 cells (runs whose scope included `dane_tlsa`), colored by
+the family's worst severity; the trended snapshot field is **the TLSA record set per MX**
+(§16.3). Change-dots appear when the record set changed even if severity did not; the §16.1
+glyph shows ▲ on: record count dropped ≥2→1 on any host, `dnssecSigned` flipped true→false,
+or any new critical (the "renewed the cert, forgot the TLSA" alarm of §6). Record-count per
+host renders as a small sparkline when ≥2 data points exist.
+
+**References rows** (this family's contribution to the §14.4 footer; the shell adds the three
+category-common provider rows):
+
+| Standard / doc | Why it matters here |
+|---|---|
+| RFC 7672 | DANE for SMTP — the rules this check audits (usage constraints, CNAME handling) |
+| RFC 6698 | The TLSA record and DANE base |
+| RFC 7671 | DANE operational guidance (rollover, `3 1 1` profile rationale) |
+| RFC 4033-4035 | DNSSEC — the hard prerequisite |
+| dane.sys4.de | Independent online DANE posture check for cross-verification |
+| `gnutls-cli --dane --starttls-proto=smtp <mx> -p 25` | Local live validation once certs are in play |
+| Registrar/DNS-host DNSSEC + TLSA docs | Where the user actually publishes the records |
+
+### 9.8 States (DANE-specific renderings of §14.5)
+
+- **`.pending` probe rows** — `certMatch`/`starttlsOffered` render a pending chip with one line:
+  *"The live :25 STARTTLS probe is opt-in (admin settings, `smtp25` semaphore) — the DNS-side
+  audit above is complete without it"*, plus the enable path. Never rendered as failures (AC9/16).
+- **No MX** (`infra.dane_no_mx`) — block 2 shows the single info row; the parsed pane renders
+  *"No MX hosts — nothing to pin"*; blocks 1/3/4 still render (the page stays a useful reference).
+- **MX lookup failed** (`infra.dane_mx_lookup`) — block 2 shows the transient-info row + a
+  retry hint pointing at block 5.
+- **SERVFAIL on a signed zone** — block 2 renders it as the critical validation-failure row
+  (AC10), with the raw pane showing the failed query; never rendered as "no DANE".
+- **Never-audited / unknown run / loading** — exactly §14.5; the alias route with zero runs
+  keeps block 5 active (the spot-check creates the domain's first, scoped, run).
+
+## 10. Finding → drill-down and concept-link map
+
+**Story links (findings → problem drill-downs).** Every `infra.dane_*` finding row on the
+explainer, the category page, and the run report links to the cross-family *story* page that
+owns it — [../dns.mdx](../dns.mdx) §9 **PS-07 "DANE gap"** at `/domains/:domainId/dns/PS-07`
+(run-qualified `?run=` per the drill-down convention). Two finding families additionally
+cross-link **PS-06** (DNSSEC broken/missing), since their root cause lives there:
+
+| Finding id (family) | Drill-down | Also cross-links |
+|---|---|---|
+| `dane_tlsa_present.*`, `dane_tlsa_params.*`, `dane_digest_length.*`, `dane_ttl_sane.*`, `dane_rollover.*`, `dane_name_alignment.*`, `dane_all_mx`, `dane_mx_lookup`, `dane_no_mx`, `dane_tlsa_cert_match` | PS-07 | — |
+| `dane_dnssec_prereq.*`, `dane_without_dnssec.*` | PS-07 | PS-06 (`…/dns/PS-06`) + the DNSSEC explainer |
+
+The reverse direction: PS-07's mechanism terms (DANE, TLSA, "3 1 1", rollover) stop dead-ending
+and link to this explainer's `#concept-*` anchors, run-scoped — stories → drill-downs,
+mechanisms → explainers (§14.6).
+
+**Outbound concept links on this page** (underlined at first occurrence per region):
+
+| Term on this page | Destination |
+|---|---|
+| DNSSEC, DS, DNSKEY, RRSIG | `…/dns/check/dnssec#concept-…` |
+| MX record, backup MX, MX priority | `…/dns/check/mx-routing#concept-…` |
+| STARTTLS, MX certificate | `…/dns/check/tls-transport#concept-…` |
+| MTA-STS (the alternative) | `…/dns/check/mta-sts#concept-mta-sts` |
+| DANE, TLSA, "3 1 1", TLSA rollover (inbound from everywhere else) | this page's §9.1 anchors |
+
+## 11. Small additions the checker should record (for the explainer)
+
+The explainer renders from the run file only, so `DaneHostResult` grows four **additive**
+fields (no existing field changes; the Postgres projection §5 gains the same columns):
+
+1. `tlsaName: string` — the owner name queried (`_25._tcp.<canonical>`); today the UI would
+   have to re-derive it.
+2. `cnameChain: string[] | null` — the observed MX→canonical CNAME hops (the checker already
+   computes `cnamed` but persists only the canonical name); powers the raw pane's chain display
+   and the `dane_name_alignment` evidence.
+3. `rawAnswer: string[]` — the TLSA answer lines exactly as returned (the per-record `raw` is
+   parsed away today); powers the raw pane and its copy button without re-querying.
+4. `rrsigObserved: boolean` — currently folded into `dnssecSigned`; splitting it lets the parsed
+   pane say *which* first-round DNSSEC evidence was seen (DS/DNSKEY at the apex vs RRSIG at the
+   TLSA name).
+
+The checker's `tool_runs[]` entries (the `dig` invocations) must carry ids the findings/rows can
+reference, per the category contract, so block 2's evidence links resolve.
+
 <!--
 MAINTENANCE NOTES
 - Keep RFC refs current: DANE base RFC 6698, updated ops RFC 7671, SMTP DANE RFC 7672; DNSSEC
@@ -349,4 +579,24 @@ MAINTENANCE NOTES
   checkResults.dane[]; update the store module and this section together.
 - If a native node:dns TLSA resolver becomes reliable, prefer it over shelling to dig, but keep dig as
   the fallback for resolvers that mangle the TLSA RRtype.
+- Explainer layer (§9-§11): the checkKey is `dane-tlsa` (= the backend directory name
+  code/packages/backend/src/modules/audit/checks/dane-tlsa/); routes are
+  /domains/:domainId/runs/:runId/dns/check/dane-tlsa with newest alias
+  /domains/:domainId/dns/check/dane-tlsa. ../dns.mdx §14 owns the SHELL (five locked blocks,
+  raw+parsed frame, history strip, references frame, states, the row-label/one-line-meaning
+  table row 6, and the §14.6 concept map entries #concept-dane / #concept-tlsa / #concept-3-1-1
+  / #concept-tlsa-rollover) — this spec owns the INTERIOR copy; keep both in sync. The scoped
+  re-run is POST /api/audit/run/:domainId/check/dns/dane-tlsa → run.scope dns.dane_tlsa
+  (../dns.mdx §15 owns the endpoint mechanics/state machine; §16 owns history/trend derivation —
+  DANE's trended field is the per-MX TLSA record set).
+- Keep §9.2's finding-id inventory and §9.5's recipe payloads word-for-word in sync with
+  dane-tlsa.check.ts (the REM_* strings and the id suffix scheme `<tag>` / `<tag>.<i>` /
+  .domain_zone / .next_missing were inventoried from code 2026-07); the structured rows persist
+  at results["infra.dane_tlsa"] (the code key for §5's checkResults.dane[] projection — rename
+  both together or neither). The generator panel wraps generateTlsa311 in
+  checks/dane-tlsa/tlsa-generator.ts (proposed route POST /api/audit/tools/tlsa-generate).
+- Drill-down mapping: DANE findings → PS-07 (dnssec_prereq/without_dnssec also cross-link PS-06)
+  in ../dns.mdx §9 / frontend lib/dns-problems.ts — keep the PS-07 checkId prefix list there in
+  sync with §9.2's inventory. §11's four additive DaneHostResult fields (tlsaName, cnameChain,
+  rawAnswer, rrsigObserved) update §5's table/JSON example when implemented.
 -->

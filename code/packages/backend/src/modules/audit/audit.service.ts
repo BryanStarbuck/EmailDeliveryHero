@@ -423,6 +423,135 @@ export class AuditService {
   }
 
   /**
+   * DKIM category-scoped re-run (pm/checks/dkim.mdx §7.7 — "Run DKIM now"): execute ONLY the DKIM
+   * checker for one domain and persist a NEW run in which the `dkim` key (findings + structured
+   * results) is fresh while the other five categories are carried forward unchanged from the
+   * domain's previous newest result. The run carries `scope: "dkim"` / `checks: ["dkim"]`, so the
+   * Runs table can chip-tag it "DKIM only". Because a scoped re-run is just a new run,
+   * immutability, ‹ prev / next › stepping, and the newest-run aliases all keep working with zero
+   * special cases. With no prior run there is nothing to carry forward, so a full audit runs
+   * instead (§7.7 — "first run checks everything").
+   */
+  async runDkimForDomain(domainId: string, trigger: AuditTrigger = "manual"): Promise<AuditResult> {
+    // A run already in flight for the same domain wins — join it rather than double-query DNS
+    // (the same in-flight guard every trigger funnels through, pm/run_checks.mdx §9).
+    const existing = this.inFlight.get(domainId)
+    if (existing) {
+      logInfo(
+        `Audit already in flight for domain ${domainId} — joining it (DKIM-scoped request)`,
+        "AuditService",
+      )
+      return existing
+    }
+    const latest = this.latest(domainId)
+    // No prior run → nothing to carry forward: fall back to a full audit (pm/checks/dkim.mdx §7.7).
+    if (!latest) return this.runForDomain(domainId, trigger)
+    const run = (async () => {
+      const domain = this.domains.get(domainId)
+      logInfo(
+        `${TRIGGER_LABEL[trigger]} DKIM-scoped check started for ${domain.name} (trigger: ${trigger})`,
+        "AuditService",
+      )
+      const checker = CHECKERS.find((c) => c.id === "dkim")
+      if (!checker) throw new Error("dkim checker not registered")
+      const startedAt = new Date().toISOString()
+      // Cross-run context — the same derivation a full run makes: the OTHER domains' latest key
+      // hashes power dkim.duplicate_key; previousResults powers the rotation first-seen carry.
+      const all = this.loadAll()
+      const peerDkimKeys = Object.values(all)
+        .filter((r) => r.domainId !== domain.id)
+        .flatMap((r) => {
+          const dkim = r.results?.dkim as
+            | { selectors?: { selector: string; key_sha256: string | null }[] }
+            | undefined
+          return (dkim?.selectors ?? [])
+            .filter((s) => s.key_sha256)
+            .map((s) => ({
+              domain: r.domain,
+              selector: s.selector,
+              keySha256: s.key_sha256 as string,
+            }))
+        })
+      const findings: Finding[] = []
+      let payload: unknown
+      try {
+        const outcome = await checker.run({
+          domain: domain.name,
+          domainId: domain.id,
+          dkimSelectors: domain.dkimSelectors,
+          sendingIps: domain.sendingIps,
+          peerDkimKeys,
+          previousResults: latest.results,
+          trigger,
+          tools: locateTools(),
+        })
+        if (Array.isArray(outcome)) {
+          findings.push(...outcome)
+        } else {
+          findings.push(...outcome.findings)
+          payload = outcome.results
+        }
+      } catch (err) {
+        logError(`DKIM-scoped check failed for ${domain.name}`, err, "AuditService")
+        findings.push({
+          id: "dkim.error",
+          checkId: "dkim",
+          title: "DKIM check errored",
+          severity: "warning",
+          detail: `The DKIM check could not complete: ${err instanceof Error ? err.message : String(err)}`,
+          remediation: "Re-run the check. If it keeps failing, this may be a transient DNS issue.",
+        })
+      }
+      // Regression detection against the previous run's DKIM findings only — the scoped differ
+      // must diff only the re-executed category (pm/checks/dkim.mdx §7.7).
+      flagNewProblems(
+        latest.findings.filter((f) => f.checkId === "dkim"),
+        findings,
+      )
+      // Carry the other five categories forward unchanged — minus stale isNew flags, which
+      // described the PREVIOUS run's regressions, not this one's.
+      const carried = latest.findings
+        .filter((f) => f.checkId !== "dkim")
+        .map(({ isNew: _stale, ...rest }) => rest as Finding)
+      const merged = [...carried, ...findings]
+      // Registry order keeps scoped runs byte-comparable with full runs (stable diffs/grouping).
+      const registryIndex = new Map(CHECKERS.map((c, i) => [c.id, i]))
+      merged.sort(
+        (a, b) => (registryIndex.get(a.checkId) ?? 99) - (registryIndex.get(b.checkId) ?? 99),
+      )
+      const { score, status, counts } = summarize(merged, readAppConfig().checks.weights)
+      const finishedAt = new Date().toISOString()
+      const result: AuditResult = {
+        runId: randomUUID(),
+        domainId: domain.id,
+        domain: domain.name,
+        startedAt,
+        finishedAt,
+        ranAt: finishedAt,
+        trigger,
+        scope: "dkim",
+        checks: ["dkim"],
+        score,
+        status,
+        findings: merged,
+        counts,
+        newProblemCount: findings.filter((f) => f.isNew).length,
+        results: {
+          ...latest.results,
+          ...(payload !== undefined ? { dkim: payload } : {}),
+        },
+      }
+      // The scoped run is a complete six-category picture (dkim fresh, five carried forward), so
+      // the standard persist covers both the immutable run file and the latest-per-domain cache.
+      await this.persistResult(result)
+      logInfo(`DKIM-scoped check finished for ${domain.name}: ${result.status}`, "AuditService")
+      return result
+    })().finally(() => this.inFlight.delete(domainId))
+    this.inFlight.set(domainId, run)
+    return run
+  }
+
+  /**
    * Re-run JUST the content-scoring checker for one domain and merge its findings/payload into
    * the domain's latest result (pm/checks/content_scoring.mdx §6 — the dedicated "Re-score"
    * action after a sample is uploaded/edited, without a full re-audit). With no prior run, a
@@ -532,6 +661,9 @@ export class AuditService {
       mx: domain.mx,
       domainReputation: domain.domainReputation,
       dane: domain.dane,
+      // Per-domain MTA-STS config (pm/checks/mta_sts.mdx §4) — the desired-mode target
+      // infra.mta_sts_mode compares the served policy against.
+      mtaSts: domain.mtaSts,
       linkUrl: domain.linkUrl,
       // A spot check is always user-initiated — the registration checker bypasses its RDAP cache.
       trigger: "manual" as AuditTrigger,
@@ -661,6 +793,9 @@ export class AuditService {
       // Per-domain DANE config (pm/checks/dane_tlsa.mdx §4) — the optional pinned expected
       // next-cert SPKI digest that infra.dane_rollover verifies is pre-staged in DNS.
       dane: domain.dane,
+      // Per-domain MTA-STS config (pm/checks/mta_sts.mdx §4) — the "Desired MTA-STS mode" target
+      // infra.mta_sts_mode compares the served policy's mode: against (absent = enforce).
+      mtaSts: domain.mtaSts,
       // Per-domain Link/URL-reputation config (pm/checks/link_url_reputation.mdx §4) — the
       // own/related/allow-listed link domains for content.url_domain_alignment.
       linkUrl: domain.linkUrl,
