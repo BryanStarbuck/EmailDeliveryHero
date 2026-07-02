@@ -11,6 +11,41 @@ import { CopyFixButton } from "./CopyFixButton"
  */
 const ORDER = { critical: 0, warning: 1, info: 2, ok: 3 } as const
 
+const URL_RE = /(https?:\/\/[^\s)"'<>\]]+)/g
+
+/**
+ * Remediation text with any URL rendered as a clickable deep-link (pm/ui.mdx §5) — e.g. a blacklist
+ * critical's specific removal/delisting page — so the user can jump straight to the fix.
+ */
+export function RemediationText({ text }: { text: string }) {
+  const parts = text.split(URL_RE)
+  return (
+    <>
+      {parts.map((part, i) => {
+        const key = `${i}:${part.slice(0, 24)}`
+        if (i % 2 === 0) return <span key={key}>{part}</span>
+        // Trailing sentence punctuation belongs to the prose, not the URL.
+        const trimmed = part.replace(/[.,;]+$/, "")
+        const rest = part.slice(trimmed.length)
+        return (
+          <span key={key}>
+            <a
+              href={trimmed}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="break-all text-[var(--edh-primary)] underline"
+            >
+              {trimmed}
+            </a>
+            {rest}
+          </span>
+        )
+      })}
+    </>
+  )
+}
+
 export function FindingsList({ findings }: { findings: Finding[] }) {
   const sorted = [...findings].sort((a, b) => ORDER[a.severity] - ORDER[b.severity])
   return (
