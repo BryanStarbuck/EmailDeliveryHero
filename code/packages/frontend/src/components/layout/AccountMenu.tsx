@@ -38,7 +38,8 @@ export function AccountMenu() {
           className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm font-medium text-[var(--edh-primary)] hover:bg-slate-100"
           title="Sign in with your company Google Workspace account"
         >
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-200 text-slate-500">
+          {/* Icon inherits the item's green sign-in accent (pm/leftbar.mdx §2) — no medium grey. */}
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-200">
             <LogIn className="h-4 w-4" />
           </span>
           <span className="min-w-0 flex-1">

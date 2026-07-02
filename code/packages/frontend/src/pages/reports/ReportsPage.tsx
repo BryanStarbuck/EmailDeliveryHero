@@ -154,7 +154,9 @@ function IngestedReportsSection() {
 }
 
 function ReportRow({ run, onOpen }: { run: AuditResult; onOpen: (r: AuditResult) => void }) {
-  const cells = rollupCategories(run.findings)
+  // Pass the run's structured results too so the DKIM/DMARC metric text matches the Dashboard's
+  // Runs table exactly (pm/reports.mdx §3.2 — "same four colors and metric text rules").
+  const cells = rollupCategories(run.findings, run.results)
   return (
     <tr
       onClick={() => onOpen(run)}

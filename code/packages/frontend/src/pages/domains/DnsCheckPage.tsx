@@ -36,8 +36,11 @@ export function DnsCheckPage() {
 
   const domain = (domains ?? []).find((d) => d.id === id)
   const name = domain?.name ?? id
+  // `:checkKey` slugs are the kebab-case family keys (pm/checks/dns.mdx §14.1, e.g. `dns-health`);
+  // internal family keys are snake_case — normalize once so both forms resolve.
+  const familyKey = checkKey.replace(/-/g, "_")
   const explainer = dnsCheckExplainer(checkKey)
-  const familyDef = DNS_FAMILIES.find((f) => f.key === checkKey)
+  const familyDef = DNS_FAMILIES.find((f) => f.key === familyKey)
 
   const history = runs ?? []
   const run: AuditResult | undefined = runId
@@ -46,11 +49,11 @@ export function DnsCheckPage() {
 
   // This family's sub-test rows in the run being viewed, fail-first (pm/checks/dns.mdx §6.2).
   const familyFindings = infraFindings(run?.findings)
-    .filter((f) => familyOf(f.id) === checkKey)
+    .filter((f) => familyOf(f.id) === familyKey)
     .sort((a, b) => ORDER[a.severity] - ORDER[b.severity])
 
   // The family's §5 structured snapshot (results["infra.<key>"]) when the checker persists one.
-  const snapshot = run?.results?.[`infra.${checkKey}`]
+  const snapshot = run?.results?.[`infra.${familyKey}`]
   const toolRuns = (run?.results?.["infra.tool_runs"] as InfraToolRun[] | undefined) ?? []
 
   // Deep links from the DNS page land on #concept-<term> — scroll there once content exists.
@@ -92,7 +95,7 @@ export function DnsCheckPage() {
                 a fresh observation, never persisted into the immutable run history. */}
             <button
               type="button"
-              onClick={() => spot.mutate({ domainId: id, checkKey })}
+              onClick={() => spot.mutate({ domainId: id, checkKey: familyKey })}
               disabled={spot.isPending}
               className="inline-flex items-center gap-2 rounded-md bg-[var(--edh-primary)] px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
             >
@@ -193,7 +196,7 @@ export function DnsCheckPage() {
                 {history.map((r) => {
                   // Pre-history persisted runs lack a runId and cannot be linked to.
                   if (!r.runId) return null
-                  const worst = worstFor(r, checkKey)
+                  const worst = worstFor(r, familyKey)
                   const isViewed = r.runId === run?.runId
                   return (
                     <li key={r.runId}>

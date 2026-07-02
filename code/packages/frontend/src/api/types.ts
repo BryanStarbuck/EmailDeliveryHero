@@ -81,6 +81,17 @@ export interface LinkUrlDomainConfig {
   allowedDomains: string[]
 }
 
+/**
+ * Per-domain List-Unsubscribe / one-click config (pm/checks/list_unsubscribe.mdx §3/§4 per-domain
+ * config inputs) — mirrors the backend ListUnsubConfigDto.
+ */
+export interface ListUnsubDomainConfig {
+  /** Bulk sender (> 5,000 msgs/day): escalates missing one-click / mailto:-only to critical. */
+  isBulkSender: boolean
+  /** Opt-in live one-click POST probe (default off — may unsubscribe the sampled recipient). */
+  probeUnsubEndpoint: boolean
+}
+
 export interface MonitoredDomain {
   id: string
   name: string
@@ -104,6 +115,11 @@ export interface MonitoredDomain {
   domainReputation?: DomainReputationConfig
   /** Link / URL-reputation config (pm/checks/link_url_reputation.mdx §4). Absent = sender-domain only. */
   linkUrl?: LinkUrlDomainConfig
+  /**
+   * List-management config (pm/checks/list_unsubscribe.mdx §4): the isBulkSender escalator and
+   * the opt-in probeUnsubEndpoint toggle. Absent = not a bulk sender, probe off.
+   */
+  listUnsub?: ListUnsubDomainConfig
   addedBy: string
   createdAt: string
   updatedAt: string
@@ -202,16 +218,22 @@ export interface DmarcSection {
  * The per-run ARC observation (`results.arc`, pm/checks/arc.mdx §5). First round is advisory-only,
  * so the sample-derived fields stay null until a forwarded message sample is captured (FUTURE).
  */
+export interface ArcForwarderObservation {
+  label: string
+  forwardAddress: string
+  signerDomain: string | null
+  signerSelector: string | null
+  selectorResolves: boolean | null
+  /** §9.11 recorded data — optional so runs persisted before the fields existed still render. */
+  rawKeyRecord?: string | null
+  keyType?: string | null
+  keyBits?: number | null
+}
+
 export interface ArcResults {
   applicable: boolean | null
   forwardingRisk: boolean | null
-  forwarders: {
-    label: string
-    forwardAddress: string
-    signerDomain: string | null
-    signerSelector: string | null
-    selectorResolves: boolean | null
-  }[]
+  forwarders: ArcForwarderObservation[]
   messageSampleId: string | null
   chainPresent: boolean | null
   chainLength: number | null
@@ -223,6 +245,9 @@ export interface ArcResults {
   instances: unknown[] | null
   probeSentAt: string | null
   notes: string | null
+  /** The DMARC p= the applicability verdict used + its provenance (pm/checks/arc.mdx §9.11). */
+  dmarcPolicy?: string | null
+  policySource?: "sibling" | "dns" | null
 }
 
 /** One parsed apex-level SPF term (mechanism or redirect/exp modifier). */
@@ -251,6 +276,18 @@ export interface SpfIpCoverage {
   matched_by: string | null
 }
 
+/** One captured external-tool invocation (`spf.tool_runs[]`, pm/checks/spf.mdx §3/§5). */
+export interface SpfToolRun {
+  tool: string
+  command: string
+  started_at: string
+  duration_ms: number
+  exit_code: number | null
+  output_format: "json" | "text"
+  parsed: unknown
+  error: string | null
+}
+
 /** The parsed SPF observation (`results.spf`, pm/checks/spf.mdx §5). */
 export interface SpfResults {
   query_name: string
@@ -265,9 +302,21 @@ export interface SpfResults {
   byte_length: number
   /** valid | permerror | temperror | none. */
   eval_result: string
+  /** Apex TXT RRset TTL from dig (null when dig is absent) — drives the TTL posture chip. */
+  ttl: number | null
+  /** Local vs 8.8.8.8 public-resolver view of the v=spf1 set (null when dig is absent). */
+  cross_resolver: { resolver: string; agrees: boolean; public_records: string[] } | null
+  /** IPv6-completeness posture (spf.ipv6). */
+  ipv6: { pass_set_v6_count: number; mx_has_aaaa: boolean }
+  /** Declared mail role vs the record (spf.mail_posture). */
+  mail_posture: { has_mx: boolean; null_mx: boolean; non_sending_record: boolean }
+  /** DNS-side DMARC alignment posture (spf.alignment_prep): the _dmarc record's aspf= tag. */
+  alignment: { dmarc_found: boolean; aspf: "r" | "s" | null }
   include_tree: SpfTreeNode | null
   pass_set: { cidr: string; source: string }[]
   ip_coverage: SpfIpCoverage[]
+  /** External tool invocations captured during the run (file-only forensics, §5). */
+  tool_runs?: SpfToolRun[]
 }
 
 /** One probed DKIM selector (`results.dkim.selectors[]`, pm/checks/dkim.mdx §5). */
@@ -290,7 +339,27 @@ export interface DkimSelectorResult {
   txt_record_count: number
   oversize_chunk: boolean
   flags: Record<string, string>
+  /**
+   * Local vs 8.8.8.8/1.1.1.1 view (dkim.mdx §2.2 `dkim.resolver_agreement`): true = agree,
+   * false = split view, null = not cross-checked. Absent on older persisted runs.
+   */
+  resolvers_agree?: boolean | null
   first_seen_at: string | null
+}
+
+/** Historic ADSP leftover at `_adsp._domainkey.<domain>` (`results.dkim.adsp`, dkim.mdx §5). */
+export interface DkimAdspObservation {
+  present: boolean
+  /** The raw TXT when present, e.g. "dkim=discardable". */
+  record: string | null
+  practice: "unknown" | "all" | "discardable" | null
+}
+
+/** Pre-DKIM DomainKeys policy record at `_domainkey.<domain>` (`results.dkim.legacy_domainkeys`). */
+export interface DkimLegacyDomainKeysObservation {
+  present: boolean
+  /** The raw TXT when present, e.g. "o=-; n=notes". */
+  record: string | null
 }
 
 /** One external tool invocation captured by a run (`results.dkim.tool_runs[]`, dkim.mdx §3/§5). */
@@ -329,12 +398,16 @@ export interface DkimResults {
   working_selectors: number
   wildcard_shadow: boolean
   duplicate_keys: { key_sha256: string; seen_on: string[] }[]
+  /** Historic ADSP leftover observation (dkim.mdx §5). Absent on older persisted runs. */
+  adsp?: DkimAdspObservation
+  /** Legacy DomainKeys policy observation (dkim.mdx §5). Absent on older persisted runs. */
+  legacy_domainkeys?: DkimLegacyDomainKeysObservation
   selectors: DkimSelectorResult[]
   /** Absent on runs persisted before the tool-runs capture landed. */
   tool_runs?: DkimToolRun[]
   /** The per-sub-test rows (§5 `tests[]`). Absent on older persisted runs. */
   tests?: DkimTestRow[]
-  /** Matched §9 problem-state ids (PS-00…PS-12). Absent on older persisted runs. */
+  /** Matched §9 problem-state ids (PS-00…PS-12, PS-17, PS-18). Absent on older persisted runs. */
   problem_states?: string[]
 }
 
@@ -399,6 +472,16 @@ export interface ReverseDnsIpResult {
   ptr: string | null
   forward_confirmed: boolean
   generic: boolean
+  /** Every PTR host returned (multi-PTR evidence) — pm/checks/reverse_dns.mdx §11. */
+  ptrs?: string[]
+  /** Number of PTR records returned (parsed-table row + trend marker). */
+  ptr_count?: number
+  /** Addresses the PTR host(s) forward-resolved to (raw panel / FCrDNS loop). */
+  forward_ips?: string[]
+  /** Which generic/dynamic pattern matched; null when non-generic. */
+  generic_pattern?: string | null
+  /** Transient resolver error observed this run (ETIMEOUT | ESERVFAIL | …), else null. */
+  error?: string | null
 }
 
 export interface ReverseDnsResults {
@@ -414,6 +497,20 @@ export interface DnsDanglingEntry {
   /** The dead / unclaimed target. */
   target: string
   kind: "cname" | "include" | "mx" | "ns"
+}
+
+/**
+ * One CNAME chain observed by the dangling sweep, live ones included
+ * (pm/checks/dns_health.mdx §12 `cname_chains`).
+ */
+export interface DnsCnameChain {
+  /** The owner name the chain starts at. */
+  name: string
+  /** The CNAME nodes visited, in order (the owner name first). */
+  chain: string[]
+  /** The final non-CNAME target. */
+  final: string
+  status: "live" | "dead" | "loop"
 }
 
 /** The zone snapshot (`results["infra.dns_health"]`); null fields = probe not run yet. */
@@ -466,6 +563,14 @@ export interface DnsHealthResults {
   glue_ok?: boolean | null
   /** NULL until the AXFR probe ships (future); absent on pre-upgrade runs. */
   axfr_open?: boolean | null
+  /** §12: apex TXT set size in octets; absent on pre-upgrade runs. */
+  txt_total_octets?: number
+  /** §12: the labels the dangling sweep actually resolved this run; absent on pre-upgrade runs. */
+  scanned_labels?: string[]
+  /** §12: every CNAME chain observed this run, live ones included; absent on pre-upgrade runs. */
+  cname_chains?: DnsCnameChain[]
+  /** §12: zone-file-style render strings built at check time; absent on pre-upgrade runs. */
+  raw?: { ns_lines: string[]; soa_line: string | null; apex_txt_meta: string | null }
   /** The worst DNS-health severity this run; absent on pre-upgrade runs. */
   worst_severity?: Severity
   /** ISO timestamp of the DNS-health pass; absent on pre-upgrade runs. */
@@ -560,7 +665,15 @@ export interface DaneTlsaRecord {
 export interface DaneHostResult {
   mxHost: string
   mxPreference: number | null
+  /** The TLSA owner name queried (`_25._tcp.<canonical>`); absent on runs before spec §11. */
+  tlsaName?: string
+  /** MX→canonical CNAME chain (host first, canonical last); null when not cnamed. */
+  cnameChain?: string[] | null
+  /** The TLSA answer lines exactly as returned, one per RR — powers the raw pane + copy. */
+  rawAnswer?: string[]
   dnssecSigned: boolean
+  /** An RRSIG observed at the TLSA name itself (split out of dnssecSigned, spec §11 item 4). */
+  rrsigObserved?: boolean
   tlsaPresent: boolean
   tlsaRecords: DaneTlsaRecord[]
   paramsOk: boolean | null
@@ -746,6 +859,58 @@ export interface LinkUrlResults {
   checkedAt: string
 }
 
+// ---- List-Unsubscribe / one-click (pm/checks/list_unsubscribe.mdx §5 — mirrors the backend) ----
+
+/** The raw header lines the §4 "Sample headers" disclosure shows verbatim. */
+export interface ListUnsubRawHeaders {
+  listUnsubscribe: string | null
+  listUnsubscribePost: string | null
+  from: string | null
+  returnPath: string | null
+  dkimSignature: string | null
+  precedence: string | null
+  autoSubmitted: string | null
+  xPriority: string | null
+  priority: string | null
+  importance: string | null
+  listId: string | null
+}
+
+/**
+ * `results["content.list_unsubscribe"]` — the parsed list-management observation
+ * (pm/checks/list_unsubscribe.mdx §5 `results.content.listUnsubscribe`, the future
+ * `list_unsub_check_results` row). Probe fields stay null until the opt-in endpoint probe runs.
+ */
+export interface ListUnsubResults {
+  sampleId: string | null
+  hasHeader: boolean
+  hasOneclick: boolean
+  hasHttps: boolean
+  hasMailto: boolean
+  httpsUri: string | null
+  mailtoUri: string | null
+  endpointOk: boolean | null
+  endpointStatus: number | null
+  getSafe: boolean | null
+  tlsValid: boolean | null
+  fromAligned: boolean
+  fromSpfAligned: boolean
+  fromDkimAligned: boolean
+  precedenceBulk: boolean
+  priorityAbuse: boolean
+  listId: string | null
+  isBulkSender: boolean
+  checkedAt: string
+  /** When the one-click POST probe last actually fired (null = never). */
+  probedAt: string | null
+  /** POST round-trip latency in ms (§4 "Endpoint probe" panel); null = not probed. */
+  probeLatencyMs: number | null
+  /** RFC 2369 grammar verdict backing content.list_unsub_syntax. */
+  syntaxOk: boolean
+  /** The §4 "Sample headers" disclosure content — the raw header values verbatim. */
+  rawHeaders: ListUnsubRawHeaders
+}
+
 /** One stored sample message (GET/PUT /audit/content-sample/:domainId). */
 export interface ContentSampleView {
   id: string
@@ -861,7 +1026,10 @@ export interface AuditResult {
     "content.scoring"?: ContentScoreResults
     "content.bimi"?: BimiResults
     "content.url"?: LinkUrlResults
+    "content.list_unsubscribe"?: ListUnsubResults
     "content.inbox_placement"?: InboxPlacementResults
+    /** pm/emails.mdx §16.3 — the run-scoped ingested-reports aggregate snapshot. */
+    "dmarc.reports"?: DmarcReportsSnapshot
   } & Record<string, unknown>
 }
 
@@ -1166,4 +1334,50 @@ export interface ReportIngestSummary {
   duplicates: number
   skipped: number
   errors: string[]
+}
+
+/**
+ * The run-scoped `dmarc.reports` snapshot (pm/emails.mdx §16.3) the dmarc-reports checker
+ * serializes into the run file (snake_case, mirroring the backend `DmarcAggregate`). It makes the
+ * explainer's block-2 aggregate-breakdown and per-source-IP tables RUN-SCOPED — an older run stays
+ * a historical snapshot rather than reading the live store.
+ */
+export interface DmarcReportsSnapshotRow {
+  source_ip: string
+  count: number
+  disposition: string
+  spf_evaluated: string
+  spf_aligned: boolean
+  dkim_evaluated: string
+  dkim_aligned: boolean
+  dmarc_pass: boolean
+  header_from: string
+  envelope: string
+  dkim_signing_domains: string[]
+  reporters: string[]
+}
+
+export interface DmarcReportsSnapshot {
+  report_count: number
+  reporters: string[]
+  window: { begin: string; end: string }
+  window_days: number
+  total_messages: number
+  aligned_pass_messages: number
+  dmarc_pass_messages: number
+  pass_rate_pct: number
+  dkim_only: number
+  spf_only: number
+  both_fail: number
+  quarantined: number
+  rejected: number
+  policy_published: {
+    p: string
+    sp: string | null
+    adkim: string
+    aspf: string
+    pct: string | null
+    np: string | null
+  } | null
+  rows: DmarcReportsSnapshotRow[]
 }

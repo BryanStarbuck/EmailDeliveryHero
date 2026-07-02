@@ -1,6 +1,6 @@
 import { deriveTlsRptFindings } from "@module/reports/derive-findings"
 import { resolve4, resolve6, resolveMx, resolveTxt } from "../dns-util"
-import type { Checker, Finding } from "../types"
+import type { Checker, CheckOutcome, Finding } from "../types"
 
 /**
  * TLS-RPT (SMTP TLS Reporting, RFC 8460). Inspects the TXT record at `_smtp._tls.<domain>` that tells
@@ -66,6 +66,8 @@ export interface TlsRptResults {
   valid: boolean
   /** Tags outside {v, rua} observed on the record (e.g. a typo'd `ruf`). */
   unknownTags: string[]
+  /** Non-TLSRPT TXT strings observed at `_smtp._tls.<domain>` (spec §12 raw+parsed pane). */
+  strayTxt: string[]
   checkedAt: string
 }
 
@@ -155,6 +157,7 @@ async function checkEndpoints(endpoints: RuaEndpoint[], domain: string): Promise
           evidence: ep.uri,
         })
       } else if (mx.records.length === 0) {
+        ep.reachable = false
         findings.push({
           id: `infra.tls_rpt_endpoint_reachable.${i}`,
           checkId: CHECK_ID,
@@ -165,6 +168,7 @@ async function checkEndpoints(endpoints: RuaEndpoint[], domain: string): Promise
           evidence: ep.uri,
         })
       } else {
+        ep.reachable = true
         findings.push({
           id: `infra.tls_rpt_endpoint_reachable.${i}`,
           checkId: CHECK_ID,
@@ -178,6 +182,7 @@ async function checkEndpoints(endpoints: RuaEndpoint[], domain: string): Promise
       const [a, aaaa] = [await resolve4(ep.host), await resolve6(ep.host)]
       const resolved = a.records.length > 0 || aaaa.records.length > 0
       if (resolved) {
+        ep.reachable = true
         findings.push({
           id: `infra.tls_rpt_endpoint_reachable.${i}`,
           checkId: CHECK_ID,
@@ -187,6 +192,7 @@ async function checkEndpoints(endpoints: RuaEndpoint[], domain: string): Promise
           evidence: ep.uri,
         })
       } else if (a.error || aaaa.error) {
+        ep.reachable = null
         findings.push({
           id: `infra.tls_rpt_endpoint_reachable.${i}`,
           checkId: CHECK_ID,
@@ -198,6 +204,7 @@ async function checkEndpoints(endpoints: RuaEndpoint[], domain: string): Promise
           evidence: ep.uri,
         })
       } else {
+        ep.reachable = false
         findings.push({
           id: `infra.tls_rpt_endpoint_reachable.${i}`,
           checkId: CHECK_ID,
@@ -213,12 +220,38 @@ async function checkEndpoints(endpoints: RuaEndpoint[], domain: string): Promise
   return findings
 }
 
+/** Project the internal parsed endpoints into the persisted results shape (spec §5). */
+function toPersistedEndpoints(endpoints: RuaEndpoint[]): TlsRptRuaEndpoint[] {
+  return endpoints.map((ep) => ({
+    uri: ep.uri,
+    scheme: ep.scheme,
+    domain: ep.domain,
+    sizeLimit: ep.sizeLimit,
+    reachable: ep.reachable,
+    external: ep.external,
+  }))
+}
+
 export const tlsRptCheck: Checker = {
   id: "infra.tls_rpt",
   label: "TLS-RPT",
-  async run(ctx): Promise<Finding[]> {
+  async run(ctx): Promise<CheckOutcome> {
     const domain = ctx.domain
     const name = `_smtp._tls.${domain}`
+    // The structured §5/§12 snapshot persisted at AuditResult.results["infra.tls_rpt"] — powers
+    // the explainer's raw+parsed breakdown and the §11 trended fields. Filled in as we learn each
+    // field; every early-exit path returns it alongside the findings.
+    const results: TlsRptResults = {
+      present: false,
+      recordCount: 0,
+      rawRecord: null,
+      versionOk: false,
+      ruaEndpoints: [],
+      valid: false,
+      unknownTags: [],
+      strayTxt: [],
+      checkedAt: new Date().toISOString(),
+    }
     // The TTL future stub + the REAL report-fed sub-check (pm/emails.mdx §5): ingested TLS-RPT
     // reports for this domain roll into infra.tls_rpt_reports_ingested (warning on failures,
     // info at zero / when nothing is ingested yet / when ingestion is disabled).
@@ -226,38 +259,50 @@ export const tlsRptCheck: Checker = {
 
     const { records, error, empty } = await resolveTxt(name)
     if (error) {
-      return [
-        {
-          id: "infra.tls_rpt_present",
-          checkId: CHECK_ID,
-          title: "Could not look up TLS-RPT",
-          severity: "info",
-          detail: `DNS lookup for TXT ${name} failed transiently (${error}); the record's presence is unknown, not confirmed absent.`,
-          remediation: `Retry the audit shortly. If it persists, check the authoritative nameservers for ${domain} (SERVFAIL/timeout).`,
-          evidence: name,
-        },
-        ...future,
-      ]
+      // Transient DNS failure: presence is UNKNOWN, not confirmed absent (spec §3 edge cases) —
+      // leave results.present false but flag the finding as info, never warning.
+      return {
+        findings: [
+          {
+            id: "infra.tls_rpt_present",
+            checkId: CHECK_ID,
+            title: "Could not look up TLS-RPT",
+            severity: "info",
+            detail: `DNS lookup for TXT ${name} failed transiently (${error}); the record's presence is unknown, not confirmed absent.`,
+            remediation: `Retry the audit shortly. If it persists, check the authoritative nameservers for ${domain} (SERVFAIL/timeout).`,
+            evidence: name,
+          },
+          ...future,
+        ],
+        results,
+      }
     }
 
     const txt = records.map((r) => r.trim()).filter(Boolean)
     const candidates = txt.filter(isTlsRptCandidate)
     const stray = txt.filter((r) => !isTlsRptCandidate(r))
+    results.strayTxt = stray
 
     if (candidates.length === 0) {
-      return [
-        {
-          id: "infra.tls_rpt_present",
-          checkId: CHECK_ID,
-          title: "No TLS-RPT record",
-          severity: "warning",
-          detail: `${name} has no v=TLSRPTv1 TXT record${empty ? " (NXDOMAIN / no data)" : ""}. You are blind to STARTTLS, MTA-STS, and DANE negotiation failures against this domain.`,
-          remediation: `Publish a TXT record: _smtp._tls.${domain}. IN TXT "v=TLSRPTv1; rua=mailto:tls-reports@${domain}"`,
-          evidence: name,
-        },
-        ...future,
-      ]
+      return {
+        findings: [
+          {
+            id: "infra.tls_rpt_present",
+            checkId: CHECK_ID,
+            title: "No TLS-RPT record",
+            severity: "warning",
+            detail: `${name} has no v=TLSRPTv1 TXT record${empty ? " (NXDOMAIN / no data)" : ""}. You are blind to STARTTLS, MTA-STS, and DANE negotiation failures against this domain.`,
+            remediation: `Publish a TXT record: _smtp._tls.${domain}. IN TXT "v=TLSRPTv1; rua=mailto:tls-reports@${domain}"`,
+            evidence: name,
+          },
+          ...future,
+        ],
+        results,
+      }
     }
+
+    results.present = true
+    results.recordCount = candidates.length
 
     const findings: Finding[] = []
 
@@ -291,7 +336,7 @@ export const tlsRptCheck: Checker = {
         remediation: `Delete the duplicate TXT record(s) at _smtp._tls.${domain}; keep exactly one v=TLSRPTv1 record.`,
         evidence: candidates.join(" | "),
       })
-      return [...findings, ...future]
+      return { findings: [...findings, ...future], results }
     }
 
     findings.push({
@@ -304,6 +349,7 @@ export const tlsRptCheck: Checker = {
     })
 
     const record = candidates[0]
+    results.rawRecord = record
     const tags = record
       .split(";")
       .map((t) => t.trim())
@@ -322,7 +368,7 @@ export const tlsRptCheck: Checker = {
         remediation: `Rewrite the record so it begins exactly: v=TLSRPTv1; rua=mailto:tls-reports@${domain}`,
         evidence: record,
       })
-      return [...findings, ...future]
+      return { findings: [...findings, ...future], results }
     }
 
     if (first.value !== "TLSRPTv1") {
@@ -335,9 +381,10 @@ export const tlsRptCheck: Checker = {
         remediation: `Set the version tag to exactly v=TLSRPTv1 (e.g. v=TLSRPTv1; rua=mailto:tls-reports@${domain}).`,
         evidence: record,
       })
-      return [...findings, ...future]
+      return { findings: [...findings, ...future], results }
     }
 
+    results.versionOk = true
     findings.push({
       id: "infra.tls_rpt_syntax",
       checkId: CHECK_ID,
@@ -356,6 +403,7 @@ export const tlsRptCheck: Checker = {
     })
 
     const unknown = tags.filter((t) => !KNOWN_TAGS.has(t.key.toLowerCase())).map((t) => t.key)
+    results.unknownTags = unknown
     if (unknown.length > 0) {
       findings.push({
         id: "infra.tls_rpt_unknown_tags",
@@ -383,7 +431,7 @@ export const tlsRptCheck: Checker = {
         remediation: `Add a reporting endpoint so the final record reads: v=TLSRPTv1; rua=mailto:tls-reports@${domain}`,
         evidence: record,
       })
-      return [...findings, ...future]
+      return { findings: [...findings, ...future], results }
     }
 
     findings.push({
@@ -496,6 +544,11 @@ export const tlsRptCheck: Checker = {
 
     findings.push(...(await checkEndpoints(endpoints, domain)))
 
-    return [...findings, ...future]
+    // checkEndpoints has now filled each endpoint's reachability, so the persisted snapshot
+    // (spec §5) reflects the advisory MX/A probe. Valid = version ok AND ≥1 well-formed rua.
+    results.ruaEndpoints = toPersistedEndpoints(endpoints)
+    results.valid = results.versionOk && endpoints.length > 0
+
+    return { findings: [...findings, ...future], results }
   },
 }

@@ -24,7 +24,7 @@ import {
 } from "../audit/checks/blacklist/recheck"
 import {
   applyPortalStates,
-  listBlacklistDomainIds,
+  listBlacklistDomains,
   readBlacklistHistory,
   readLatestBlacklistRun,
   writePortalState,
@@ -153,7 +153,7 @@ export class BlacklistsController {
   @ApiOperation({ summary: "Latest blacklist run for every domain that has one" })
   latestAll(): BlacklistRunResults[] {
     const runs: BlacklistRunResults[] = []
-    for (const domain of listBlacklistDomainIds()) {
+    for (const domain of listBlacklistDomains()) {
       const run = readLatestBlacklistRun(domain)
       if (run) runs.push(run)
     }
@@ -196,15 +196,15 @@ export class BlacklistsController {
 
   @Patch(":domain/portals/:provider")
   @ApiOperation({ summary: "Set the user's provider-portal checklist state" })
-  setPortalState(
+  async setPortalState(
     @Param("domain") domain: string,
     @Param("provider") provider: string,
     @Body() body: UpdatePortalStateDto,
-  ): ProviderPortal[] {
+  ): Promise<ProviderPortal[]> {
     if (!PROVIDER_PORTALS.some((p) => p.provider === provider)) {
       throw new NotFoundException(`Unknown provider portal: ${provider}`)
     }
-    const states = writePortalState(domain, provider, body.state)
+    const states = await writePortalState(domain, provider, body.state)
     return applyPortalStates(PROVIDER_PORTALS, states)
   }
 }

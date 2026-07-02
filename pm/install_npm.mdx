@@ -1,0 +1,277 @@
+---
+title: EmailDeliveryHero — Installing the npm / pnpm Packages
+description: The product + engineering spec for the npm/pnpm side of the Install flow — the sibling to pm/install_brew.mdx. Where the brew spec installs OS CLI tools, this spec covers the JavaScript toolbox: pnpm itself (the package manager the whole monorepo runs on — installed via corepack or `npm i -g pnpm`), the restore of the backend's declared dependencies (`pnpm install` when a fresh checkout has no node_modules), and the on-demand optional packages. It carries the CANONICAL npm catalog mapped to categories (verified against the npm registry 2026-06-28), going deep on the email-authentication core: mailauth (SPF + DKIM verify + DMARC + ARC + BIMI in one MIT lib), dnsbl (blacklist), spf-parse (SPF second opinion), fast-xml-parser + mailparser (DMARC rua / TLS-RPT report-email ingestion), @peculiar/x509 (TLS cert parsing), rdapper (domain/RDAP) — plus the node-builtin coverage (node:dns, node:tls, node:zlib) and the two honest gaps (no npm TLS-RPT parser; no viable pure-JS spam scorer). It reuses install_brew.mdx's shared Install page, detection model, install streaming, and the continue/resume flow — this file specifies only what differs for pnpm.
+---
+
+# EmailDeliveryHero — Installing the npm / pnpm Packages
+
+The brew side ([install_brew.mdx](./install_brew.mdx)) installs the **OS CLI tools** a run shells out
+to. This side installs the **JavaScript toolbox** — the in-process libraries the checkers `import`,
+the package manager they're installed with, and the workspace that ties them together.
+
+It shares everything user-facing with the brew spec: the **Install page** (rows with left checkboxes,
+Install bars top and bottom, live per-row output), the **detection → missing-list** model, the
+**streamed install**, and the **continue/resume** flow that returns to the origin page and replays
+the pending run. This file specifies only **what is different for pnpm** and the **npm package
+catalog**. Read [install_brew.mdx §4–§8](./install_brew.mdx) for the shared UI and flow; everything
+there applies with `manager=npm` in place of `manager=brew`.
+
+Siblings: [install_brew.mdx](./install_brew.mdx) (the shared page + OS-tool side),
+[engineering.mdx](./engineering.mdx) (the pnpm monorepo — `code/`, backend on 9312, frontend on
+4444), [run_checks.mdx](./run_checks.mdx) (how checkers use these libraries), the project
+[charter](../CLAUDE.md) (`pnpm`, `just build`/`just run`).
+
+---
+
+## 1. What "installing npm packages" means here — three layers
+
+Unlike a brew CLI tool (globally on `PATH` or not), a JavaScript dependency lives **inside the
+monorepo**. So "missing" has three distinct shapes, and the npm side of the Install page handles all
+three:
+
+| Layer | "Missing" means | Install action |
+| --- | --- | --- |
+| **L0 — pnpm itself** | The `pnpm` binary isn't on the machine (a fresh laptop with only Node). | Enable via **corepack** (`corepack enable pnpm`, Node's built-in shim) or `npm install -g pnpm`. This is the one the charter and the user call out: *install pnpm.* |
+| **L1 — declared dependencies** | `package.json` lists them but `node_modules` is absent/stale (fresh clone, or `just build` never run). | `pnpm install` in `code/` — restores the whole workspace in one shot. |
+| **L2 — optional / on-demand packages** | A capability we don't bundle by default (heavier or situational: `spamscanner`, `dmarc-report-parser`, `dns2`, `whoiser`). | `pnpm --filter backend add <pkg>` — adds just that package. |
+
+The **core email-authentication engine ships as L1** (declared deps): `mailauth`, `dnsbl`,
+`mailparser`, `fast-xml-parser`, `@peculiar/x509`, `rdapper`, `spf-parse`, `tldts`. A user who ran
+`just build` has all of these — so on a normal machine the npm side of Install is **empty or shows
+only L0/L2 items.** The page earns its keep in exactly two moments: a **fresh checkout** (L0/L1) and
+an **opt-in to an optional capability** (L2).
+
+---
+
+## 2. Use cases
+
+| # | Use case | Entry | Outcome |
+| --- | --- | --- | --- |
+| N1 | **Fresh machine, no pnpm** — user cloned the repo, has Node, no pnpm. | Preflight finds no `pnpm` | The page's top row is **"Enable pnpm"** (corepack) — one click; then L1 becomes installable. |
+| N2 | **Workspace not installed** — `node_modules` missing (never ran `just build`). | Preflight finds pnpm but a broken import surface | A single **"Install workspace dependencies (`pnpm install`)"** row restores every L1 package at once. |
+| N3 | **Opt into an optional package** — user enables an advanced capability (e.g. richer DMARC-report parsing). | Install page, L2 rows (unchecked by default) | `pnpm add` that one package; the capability lights up on the next run. |
+| N4 | **Diverted run needs a JS capability** — rare, since L1 ships with the app, but a run that needs an L2 package (a check gated on an optional lib) diverts here. | Run trigger → preflight(`manager=npm`) → `/install?manager=npm&from&intent` | Install the package, then **resume the run** ([install_brew.mdx §8](./install_brew.mdx)). |
+| N5 | **Unified "install everything"** — reached from Settings, the page shows **both** brew and npm missing tools together. | Settings → Tools & environment → Install missing tools | One list, two managers; each row installs through its own manager (§5). |
+
+The overwhelmingly common runtime story is still the brew side — a fresh machine is missing `doggo`,
+not `mailauth`. The npm side exists so a fresh checkout is **also** one click to a working app, and
+so optional JS capabilities are discoverable rather than buried in `package.json`.
+
+---
+
+## 3. The canonical npm catalog
+
+The single source of truth for the JS toolbox. Every package below was verified against the npm
+registry and download API for the week of **2026-06-22…28**. It lives in the repo as
+`code/packages/backend/src/modules/install/catalog/npm.ts`, using the same `ToolCatalogEntry` shape
+as the brew catalog ([install_brew.mdx §3](./install_brew.mdx)) with `manager: 'npm'` and, for L2,
+`installArgs` = the `pnpm add` target.
+
+### 3.1 The email-authentication core — one library does most of it
+
+**`mailauth`** (MIT, ~68.5k downloads/wk, by the Nodemailer/Postal author; requires Node ≥ 20.18.1)
+is the anchor. Its `authenticate()` validates a raw message's **SPF, DKIM signatures, DMARC, ARC, and
+BIMI** and does **MTA-STS** lookups — collapsing five of our record-check families into one
+maintained dependency. It bundles `psl`, `node-forge`, `ipaddr.js`, `libmime`, and `@fidm/x509`
+internally.
+
+| Sub-module | Our check family | Notes |
+| --- | --- | --- |
+| `mailauth/lib/spf` | **SPF** | `check_host`, macro expansion, include/redirect chasing — the alignment input to DMARC |
+| `mailauth/lib/dkim` | **DKIM** | signature verification (canonicalization + key fetch + hash) — the hard part we don't want to hand-roll |
+| `mailauth/lib/dmarc` | **DMARC** | applies policy given SPF+DKIM with org-domain/PSL alignment |
+| `mailauth/lib/arc` | **ARC** | forwarded-chain seal validation ([checks/arc.mdx](./checks/arc.mdx)) |
+| `mailauth` BIMI / VMC | **BIMI** | record + VMC presence ([checks/bimi.mdx](./checks/bimi.mdx)) |
+| `mailauth` MTA-STS | **MTA-STS** | policy fetch/validate ([checks/mta_sts.mdx](./checks/mta_sts.mdx)) |
+
+### 3.2 The rest of the L1 core (declared dependencies)
+
+| Package | License | Health | Maps to | Why this one |
+| --- | --- | --- | --- | --- |
+| **`dnsbl`** | BSD-2-Clause | ~5.8k/wk, v5.1.1, maintained | **Blacklist / DNSBL** | `lookup`/`batch` over DNSBL zones. **Gotcha:** its default `servers` are OpenDNS resolvers — we **must** override with the configured resolver ([checks/blacklists.mdx](./checks/blacklists.mdx)). |
+| **`spf-parse`** | MIT | small but stable | **SPF (record lint)** | pure SPF record-string parser with per-term validity — a syntax second opinion alongside mailauth's evaluation. (No `node-spf` exists.) |
+| **`fast-xml-parser`** | MIT | ~82M/wk, v5 | **DMARC report XML** | parse the DMARC **aggregate** (`<feedback>`) XML from `rua` reports into objects — faster and better-maintained than `xml2js`. |
+| **`mailparser`** | **EUPL-1.1+** ⚠️ | ~3.47M/wk, healthy | **Report-email ingestion** | MIME-parse the raw report **emails** and extract the `.zip/.gz/.xml` (DMARC) and `.gz` JSON (TLS-RPT) attachments. **License is copyleft — deliberate call (§3.5).** |
+| **`@peculiar/x509`** | MIT | ~7.4M/wk, v2 | **TLS transport** | modern TS-native X.509 parsing for cert details beyond `node:tls`'s `getPeerCertificate()` (extensions, chain). |
+| **`rdapper`** | MIT | ~2.1k/wk, v0.13, Jan 2026 | **Domain health** | RDAP-first (WHOIS fallback) → registrar, nameservers, EPP statuses, key dates, **DNSSEC flag**. |
+| **`tldts`** | MIT | high | **Link/URL, spam** | Public-Suffix reduction to the registrable domain — the RHSBL query key ([checks/link_url_reputation.mdx](./checks/link_url_reputation.mdx)). |
+
+### 3.3 Node built-ins — the "already installed" tier (zero dependency)
+
+These need **no install** and back the majority of checks; the catalog lists them as
+**always-satisfied** rows (shown green in the "installed" view, never on the missing list) so the
+user can see the coverage:
+
+| Built-in | Covers |
+| --- | --- |
+| `node:dns/promises` | all TXT/MX/NS/CAA lookups + `reverse()` PTR — SPF/DMARC/DKIM/MTA-STS/TLS-RPT record fetch, reverse-DNS, **DNSBL reverse-IP A/TXT queries** |
+| `node:tls` | STARTTLS connect + `getPeerCertificate(true)` — most TLS-transport checks |
+| `node:zlib` + `JSON.parse` | **TLS-RPT report parsing** — RFC 8460 is gzipped JSON; **no npm library exists**, so this is the DIY path (§3.4) |
+
+### 3.4 Optional / on-demand (L2) — unchecked by default
+
+| Package | License | Maps to | When |
+| --- | --- | --- | --- |
+| `dmarc-report-parser` | MIT (TS-native) | DMARC report pipeline | a convenience over hand-wiring `mailparser` + `fast-xml-parser` + `zlib`; low adoption — vet the code |
+| `dmarc-parse` | MIT | DMARC record tags | only to display parsed DMARC DNS-record tags separately from full auth |
+| `dns2` | MIT | DNSSEC / DoH | only if we add RRSIG/DS inspection or DoH resolvers ([checks/dnssec.mdx](./checks/dnssec.mdx)) |
+| `whoiser` | MIT (beta) | domain WHOIS | higher-usage WHOIS alternative to `rdapper` (still on a 2.0 beta) |
+| `emailjs-mime-parser` | MIT | MIME parse | the **license fallback** if we drop `mailparser` to avoid EUPL (§3.5); stale, lower-level |
+| `spamscanner` | BSL-1.1→Apache-2.0 | content scoring | heavy (50+ deps, pulls ClamAV); band-edge cross-validation only — generally **avoid** |
+
+### 3.5 Two honest gaps + one license call (bake into the spec)
+
+1. **No npm TLS-RPT parser exists.** TLS-RPT (RFC 8460) reports are gzipped JSON; we parse them with
+   `node:zlib` + `JSON.parse` against the schema ourselves. The catalog notes this so no one goes
+   hunting for a package that isn't there ([emails.mdx](./emails.mdx)).
+2. **No viable pure-JS spam scorer.** There is no drop-in SpamAssassin-in-JS. Content scoring stays
+   an **external process** (SpamAssassin/rspamd via the brew/`special` side, [install_brew.mdx
+   §3.3](./install_brew.mdx)); `spamscanner` is too heavy and BSL-licensed. `spamc`/`node-spamd` are
+   only IPC bridges to a real daemon.
+3. **`mailparser` is EUPL-1.1 (copyleft).** Fine for an open-source app in most readings, but it is a
+   deliberate license decision. `emailjs-mime-parser` (MIT, stale) is the documented fallback if the
+   project chooses to avoid EUPL. The catalog flags the license on the row (`notes`).
+
+### 3.6 Recommended `pnpm add` set (what ships as L1)
+
+```
+pnpm --filter backend add mailauth dnsbl spf-parse fast-xml-parser mailparser @peculiar/x509 rdapper tldts
+```
+
+Everything else is a Node built-in (§3.3) or an L2 opt-in (§3.4). This is the set `just build` should
+guarantee; the npm side of Install is the safety net that restores or completes it.
+
+---
+
+## 4. Installing pnpm (L0) and the workspace (L1)
+
+### 4.1 Enable pnpm
+
+pnpm is the manager the whole monorepo runs on; without it nothing installs. Detection: `locateTool('pnpm')`
+([install_brew.mdx §5](./install_brew.mdx)). If absent, the page's first row is **"Enable pnpm"**,
+preferring the **least-privilege, no-network-trust** path:
+
+1. **corepack** (built into Node ≥ 16) — `runTool('corepack', ['enable', 'pnpm'])`. This activates the
+   pnpm shim Node already ships; no global npm write, no `sudo`. **Preferred.**
+2. **npm global** — `runTool('npm', ['install', '-g', 'pnpm'])` — the fallback when corepack is
+   disabled. On systems where the global prefix needs root, this becomes a **copy-only** row
+   (`sudo npm i -g pnpm`), honoring the no-privilege-escalation rule ([install_brew.mdx §6.4](./install_brew.mdx)).
+
+The exact repo pin (via the root `package.json` `packageManager` field) is respected — corepack reads
+it, so we enable *the version the repo expects*.
+
+### 4.2 Restore the workspace
+
+Once pnpm is present, an absent/stale `node_modules` is one row: **"Install workspace dependencies"** →
+`runTool('pnpm', ['install'], { cwd: codeRoot, timeoutMs: 10min })`. This restores **every L1
+package** in a single streamed install (the same live per-row tail as brew, [install_brew.mdx
+§4.4](./install_brew.mdx) — here the "row" is the whole workspace). It's the fresh-clone → working-app
+button.
+
+### 4.3 Add an optional package (L2)
+
+An L2 row installs with `runTool('pnpm', ['--filter', 'backend', 'add', pkg], { cwd: codeRoot })`.
+`pkg` is a **fixed catalog string**, never user input — same no-shell, no-interpolation contract as
+brew ([install_brew.mdx §11](./install_brew.mdx)). After it lands, a re-detect (and, for a diverted
+run, the resume) picks up the new capability.
+
+---
+
+## 5. How we check what's installed (npm specifics)
+
+Reuses the shared detector ([install_brew.mdx §5](./install_brew.mdx)); the npm signals differ:
+
+* **L0 (pnpm)** — `locateTool('pnpm')`; `locateTool('corepack')`/`locateTool('npm')` decide which
+  enable-path to offer.
+* **L1 (declared deps)** — resolve each package from the backend's `node_modules`
+  (`require.resolve(pkg, { paths: [backendDir] })` semantics, in-process, no spawn). A failing resolve
+  = the workspace needs `pnpm install` (N2). We do **not** shell `pnpm list` on the hot path — a
+  resolve check is instant; `pnpm list --depth 0 --json` is used only for the Settings version display
+  (mirrors brew's `brew list` enrichment role, [install_brew.mdx §5.2](./install_brew.mdx)).
+* **L2 (optional)** — same resolve check; a failing resolve just means "not opted in yet", shown as an
+  unchecked missing row, not an error.
+* **Built-ins (§3.3)** — always satisfied; listed green, never missing.
+
+Scoped preflight (§5.3 of the brew spec) applies unchanged: `usedBy` on each catalog entry maps the
+package to the checks that import it, so a `run-check:dmarc` preflight only considers `mailauth`/
+`fast-xml-parser`, never `@peculiar/x509`.
+
+---
+
+## 6. How we install, call, and continue
+
+All identical to the brew spec, with `pnpm`/`corepack`/`npm` as the spawned binary instead of `brew`:
+
+* **Installing** — serial batch, `execFile` through the existing `ToolRunner`
+  ([run_checks.mdx §5](./run_checks.mdx)), generous 10-min timeout, one failure never sinks the batch
+  ([install_brew.mdx §6](./install_brew.mdx)). `cwd` is the `code/` monorepo root for `pnpm install`/
+  `pnpm add` (so the workspace, not the state dir, is the target).
+* **Calling** — the same endpoints, parameterized by `manager=npm`:
+  `GET /api/install/catalog?manager=npm`, `GET /api/install/preflight?manager=npm&scope=…`,
+  `POST /api/install/run { ids }` (the service dispatches each id to its manager — brew or npm — from
+  the merged catalog), the SSE `…/stream`, and `POST /api/install/detect`
+  ([install_brew.mdx §7.1](./install_brew.mdx)).
+* **Continuing** — the same `from` + `intent` round-trip, the same "wait until every selected install
+  settles → re-detect → navigate to `from` → replay `intent`" ([install_brew.mdx §8](./install_brew.mdx)).
+  A fresh checkout that diverts here to run `pnpm install` lands back on the Dashboard and fires the
+  run once the workspace is ready.
+
+### 6.1 The merged, cross-manager list (N5)
+
+Reached from Settings (no `manager` param), the page shows **one list spanning both managers** —
+`catalog/index.ts` concatenates `brew.ts` + `npm.ts`; each row carries its `manager` chip; the batch
+routes each id to `brew install` or `pnpm add`/`pnpm install`/`corepack enable` accordingly. From a
+diverted run, `manager=<one>` narrows it to just that side. There is **one** Install page, one flow;
+the manager is data on the row.
+
+---
+
+## 7. Cross-platform
+
+* **All OSes** — pnpm is Node-native, so L0/L1/L2 behave identically on macOS, Linux, and Windows
+  (unlike the brew side, which has no Windows path). This is why a **Windows** user who can't get the
+  brew CLI tools still gets a fully installed **JS** toolbox — the pure-Node checks
+  ([install_brew.mdx §10](./install_brew.mdx), [run_checks.mdx §8](./run_checks.mdx)) run at full
+  fidelity from `mailauth` + `node:dns`/`node:tls` alone.
+* **Global prefix needing root** — the only privilege snag is `npm i -g pnpm` on a root-owned global
+  prefix; corepack sidesteps it, and where it can't, the row is copy-only (§4.1).
+
+---
+
+## 8. Acceptance criteria
+
+1. A machine without `pnpm` shows an **"Enable pnpm"** row that runs `corepack enable pnpm` (falling
+   back to `npm i -g pnpm`, or copy-only where the global prefix needs root) — this is the spec's
+   *install pnpm* requirement.
+2. A checkout with no `node_modules` shows **one** "Install workspace dependencies" row that runs
+   `pnpm install` in `code/` and restores every L1 package, streamed live.
+3. The L1 core — `mailauth`, `dnsbl`, `spf-parse`, `fast-xml-parser`, `mailparser`, `@peculiar/x509`,
+   `rdapper`, `tldts` — is the declared dependency set `just build` guarantees; the page detects each
+   by in-process resolve, not by spawning `pnpm list` on the hot path.
+4. `mailauth` is documented as covering **SPF, DKIM verify, DMARC, ARC, BIMI, MTA-STS**; `dnsbl` maps
+   to blacklists (with the OpenDNS-resolver override gotcha noted); the DMARC/TLS-RPT report pipeline
+   maps to `mailparser` + `fast-xml-parser` + `node:zlib` (**TLS-RPT has no npm parser — DIY**).
+5. L2 packages (`dmarc-report-parser`, `dns2`, `whoiser`, `spamscanner`…) render **unchecked**;
+   selecting one runs `pnpm --filter backend add <fixed catalog pkg>`; `pkg` is never user input.
+6. Node built-ins (`node:dns`, `node:tls`, `node:zlib`) are shown as **always-satisfied**, never on
+   the missing list; the **no pure-JS spam scorer** and **no TLS-RPT npm parser** gaps and the
+   **`mailparser` EUPL license** are surfaced as row notes.
+7. The npm side **reuses** the shared Install page, streamed install, detection model, and
+   continue/resume flow ([install_brew.mdx §4–§8](./install_brew.mdx)); the merged Settings view (N5)
+   lists brew and npm rows together and routes each id to its own manager.
+8. Every install endpoint validates `ids` against the in-repo merged catalog; unknown id → `400`,
+   never a spawn; all spawns are `execFile`, no shell.
+
+<!--
+  install_npm.mdx maintenance: this file owns the JS/pnpm side and the npm CATALOG (§3); it REUSES the
+  shared Install page + flow from install_brew.mdx §4–§8 (do not re-specify the UI here — only what
+  differs for pnpm). Three layers (§1): L0 pnpm-via-corepack, L1 declared deps restored by
+  `pnpm install`, L2 optional `pnpm add`. mailauth is the anchor — if a record check gains a family
+  (BIMI/MTA-STS/ARC), map it to a mailauth sub-module here rather than adding a new dependency. Keep
+  §3.5's two gaps load-bearing: NO npm TLS-RPT parser (node:zlib DIY) and NO pure-JS spam scorer
+  (external SpamAssassin/rspamd, install_brew.mdx §3.3). Re-verify package health/license against the
+  npm registry before adding a row; mailparser's EUPL-1.1 is a deliberate call with emailjs-mime-parser
+  as the MIT fallback. The catalog entry shape, install streaming, ToolRunner contract, and the
+  continue vocabulary (from + intent) all come from install_brew.mdx / run_checks.mdx §5 / §1 — stay in
+  lockstep.
+-->

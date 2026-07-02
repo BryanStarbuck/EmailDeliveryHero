@@ -19,6 +19,7 @@ import {
   useUploadContentSample,
 } from "@/api/content-sample"
 import { useDomains } from "@/api/domains"
+import { useSettings } from "@/api/settings"
 import type {
   ContentRuleFired,
   ContentScoreResults,
@@ -110,6 +111,10 @@ export function ContentScoringPage() {
 
 /** The headline gauge: `3.2 / 5.0`, colored by band (< 2 green, 2–5 amber, ≥ 5 red). */
 function ScoreGauge({ score, hasRun }: { score?: ContentScoreResults; hasRun: boolean }) {
+  // The inbox-safe target is admin-overridable (§4 Settings); the gauge band must agree with the
+  // backend's §3.5 severity banding, which uses the configured value.
+  const { data: settings } = useSettings()
+  const safeTarget = settings?.config.checks.content?.safeTarget ?? 2.0
   if (!score) {
     return (
       <div className="mt-4 rounded-lg border border-dashed border-[var(--edh-border)] bg-white p-4 text-sm text-slate-600">
@@ -119,7 +124,6 @@ function ScoreGauge({ score, hasRun }: { score?: ContentScoreResults; hasRun: bo
       </div>
     )
   }
-  const safeTarget = 2.0
   const band =
     score.total_score >= score.threshold
       ? "red"

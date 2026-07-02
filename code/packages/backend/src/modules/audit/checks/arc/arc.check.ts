@@ -31,6 +31,15 @@ interface ArcForwarderObservation {
   signerSelector: string | null
   /** `<selector>._domainkey.<signerDomain>` resolved with a non-empty key; null when unknown. */
   selectorResolves: boolean | null
+  /**
+   * The raw TXT answer at `<selector>._domainkey.<signer>` — the explainer's signer-key card body
+   * (pm/checks/arc.mdx §9.11). Null when the signer is unknown or the name did not resolve.
+   */
+  rawKeyRecord: string | null
+  /** The parsed `k=` tag, defaulted "rsa" when the record resolves (pm/checks/arc.mdx §9.11). */
+  keyType: string | null
+  /** Estimated RSA modulus bits; null for ed25519 / unresolved keys (pm/checks/arc.mdx §9.11). */
+  keyBits: number | null
 }
 
 /**
@@ -68,6 +77,16 @@ export interface ArcResults {
   probeSentAt: string | null
   /** Freeform note (e.g. why applicability could not be evaluated). */
   notes: string | null
+  /**
+   * The DMARC `p=` the applicability verdict used (pm/checks/arc.mdx §9.11) — the explainer's
+   * applicability panel renders it without re-querying DNS. Null when it could not be read.
+   */
+  dmarcPolicy: string | null
+  /**
+   * Where the policy came from: the sibling `dmarc` result of THIS run, or the checker's own
+   * fallback `_dmarc` lookup (the applicability panel's provenance line, pm/checks/arc.mdx §9.11).
+   */
+  policySource: "sibling" | "dns" | null
 }
 
 /** The all-null sample-derived columns — first round is advisory-only, no message sample exists. */
@@ -87,6 +106,8 @@ function emptyResults(): ArcResults {
     instances: null,
     probeSentAt: null,
     notes: null,
+    dmarcPolicy: null,
+    policySource: null,
   }
 }
 
@@ -169,6 +190,9 @@ async function inspectSigner(
     signerDomain: f.signerDomain ?? null,
     signerSelector: f.signerSelector ?? null,
     selectorResolves: null,
+    rawKeyRecord: null,
+    keyType: null,
+    keyBits: null,
   }
 
   if (!f.signerDomain || !f.signerSelector) {
@@ -227,6 +251,10 @@ async function inspectSigner(
   }
 
   const rec = records.find((r) => /(?:^|;)\s*p\s*=/i.test(r)) ?? records[0]
+  // §9.11 recorded data: the raw TXT (the signer-key card's body) and the parsed key type — kept
+  // even for a revoked (empty p=) record so the drill-down can show what is actually published.
+  observation.rawKeyRecord = rec
+  observation.keyType = (tag(rec, "k") ?? "rsa").toLowerCase()
   const p = tag(rec, "p")
   if (p === null || p === "") {
     observation.selectorResolves = false
@@ -258,7 +286,8 @@ async function inspectSigner(
     },
   ]
 
-  const k = (tag(rec, "k") ?? "rsa").toLowerCase()
+  const k = observation.keyType ?? "rsa"
+  if (k === "rsa") observation.keyBits = estimateRsaBits(p)
   if (k !== "rsa" && k !== "ed25519") {
     findings.push({
       id: `arc.signature_algorithm.${key}`,
@@ -270,7 +299,7 @@ async function inspectSigner(
       evidence: rec,
     })
   } else if (k === "rsa") {
-    const bits = estimateRsaBits(p)
+    const bits = observation.keyBits ?? 0
     if (bits < 1024) {
       findings.push({
         id: `arc.signature_algorithm.${key}`,
@@ -303,6 +332,7 @@ export const arcCheck: Checker = {
     if (sibling) {
       policy = sibling.policy
       enforcing = sibling.enforcing
+      results.policySource = "sibling"
     } else {
       const dmarc = await resolveTxt(`_dmarc.${ctx.domain}`)
       if (dmarc.error) {
@@ -325,7 +355,11 @@ export const arcCheck: Checker = {
       }
       policy = dmarcPolicy(dmarc.records)
       enforcing = policy === "quarantine" || policy === "reject"
+      results.policySource = "dns"
     }
+    // §9.11: persist the policy the applicability verdict used, so the explainer's applicability
+    // panel renders provenance from `results.arc` alone (never re-querying DNS).
+    results.dmarcPolicy = policy
 
     // 2. Not enforcing → ARC brings nothing; a directly-sent or p=none message is never rescued by it.
     if (!enforcing) {

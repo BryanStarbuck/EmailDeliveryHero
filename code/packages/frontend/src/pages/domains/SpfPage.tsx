@@ -1,6 +1,6 @@
 import { Link, useNavigate, useParams } from "@tanstack/react-router"
 import { ArrowLeft, ChevronRight, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react"
-import { useAuditResults } from "@/api/audit"
+import { useAuditResults, useDomainRuns } from "@/api/audit"
 import { useDomains } from "@/api/domains"
 import type { Finding, SpfResults, SpfTreeNode } from "@/api/types"
 import { CopyFixButton } from "@/components/CopyFixButton"
@@ -33,15 +33,22 @@ const TYPE_MEANING: Record<string, string> = {
  * and problem-state cards linking to the per-problem drill-down pages.
  */
 export function SpfPage() {
-  const { id = "" } = useParams({ strict: false }) as { id?: string }
+  // Run-scoped at /domains/:id/runs/:runId/spf with the newest-run alias /domains/:id/spf
+  // (pm/use_cases/view_one_category_run.mdx §9/AC8 — the page renders the run named in the URL).
+  const { id = "", runId } = useParams({ strict: false }) as { id?: string; runId?: string }
   const { data: domains } = useDomains()
   const { data: results } = useAuditResults()
+  const { data: runs } = useDomainRuns(id)
   const runDomains = useScanRunner()
   const scanning = useScanProgress().some((s) => s.domainId === id)
   const navigate = useNavigate()
 
   const domain = (domains ?? []).find((d) => d.id === id)
-  const result = (results ?? []).find((r) => r.domainId === id)
+  // The domain's run history, newest first; the latest-results cache is the fallback for
+  // pre-history data with no run files. When :runId is present, render THAT run, never a blend.
+  const history = runs ?? []
+  const newest = history[0] ?? (results ?? []).find((r) => r.domainId === id)
+  const result = runId ? history.find((r) => r.runId === runId) : newest
   const findings = (result?.findings ?? []).filter((f) => f.checkId === "spf")
   const spf = result?.results?.spf
   const cell = rollupCategories(result?.findings).spf ?? NEVER_CELL
@@ -102,6 +109,8 @@ export function SpfPage() {
           <TestResultsTable findings={findings} emptyText="No SPF tests in the latest run." />
 
           <IpCoveragePanel spf={spf} />
+
+          <ToolRunsPanel spf={spf} />
 
           {problems.length > 0 && (
             <section className="mt-6">
@@ -219,6 +228,7 @@ function BudgetHero({
           {spf?.eval_result ?? "none"}
         </span>
       </div>
+      <PostureChips spf={spf} />
       <p className="mt-3 text-sm text-slate-700">{verdict}</p>
       <p className="mt-1 text-sm font-medium text-[var(--edh-primary)]">Next step: {next}</p>
     </div>
@@ -252,6 +262,54 @@ function LookupGauge({ lookups }: { lookups: number }) {
         {lookups}/10
       </span>
     </span>
+  )
+}
+
+/** One rounded posture chip: green (ok) / amber (attention) / slate (not measured). */
+function PostureChip({ tone, children }: { tone: "ok" | "warn" | "muted"; children: string }) {
+  return (
+    <span
+      className={cn(
+        "rounded-full px-2.5 py-0.5 font-mono text-[11px] font-medium",
+        tone === "warn"
+          ? "bg-amber-100 text-amber-700"
+          : tone === "ok"
+            ? "bg-emerald-100 text-emerald-700"
+            : "bg-slate-100 text-slate-500",
+      )}
+    >
+      {children}
+    </span>
+  )
+}
+
+/**
+ * The hero's second line (pm/checks/spf.mdx §6.2 "posture chips"): TTL, cross-resolver agreement,
+ * DMARC aspf alignment, and IPv6 coverage — each green/amber, or a muted "—" when not measured
+ * (e.g. dig absent). Secondary to the gauge: smaller type, no icons.
+ */
+function PostureChips({ spf }: { spf?: SpfResults }) {
+  if (!spf) return null
+  const ttl = spf.ttl
+  const ttlTone: "ok" | "warn" | "muted" =
+    ttl === null ? "muted" : ttl > 86_400 || ttl < 300 ? "warn" : "ok"
+  const xr = spf.cross_resolver
+  const aspf = spf.alignment?.aspf ?? null
+  const v6 = spf.ipv6
+  const v6Gap = Boolean(v6?.mx_has_aaaa) && (v6?.pass_set_v6_count ?? 0) === 0
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <PostureChip tone={ttlTone}>{ttl === null ? "ttl —" : `ttl ${ttl}s`}</PostureChip>
+      <PostureChip tone={xr === null ? "muted" : xr.agrees ? "ok" : "warn"}>
+        {xr === null ? "resolvers —" : xr.agrees ? "resolvers ✓" : "resolvers ✗"}
+      </PostureChip>
+      <PostureChip tone={aspf === "s" ? "warn" : aspf === "r" ? "ok" : "muted"}>
+        {aspf ? `aspf=${aspf}` : "no dmarc"}
+      </PostureChip>
+      <PostureChip tone={v6Gap ? "warn" : "ok"}>
+        {v6Gap ? "ipv6 —" : v6 && v6.pass_set_v6_count > 0 ? `ipv6 ${v6.pass_set_v6_count}` : "ipv6 ✓"}
+      </PostureChip>
+    </div>
   )
 }
 
@@ -435,6 +493,69 @@ function IpCoveragePanel({ spf }: { spf?: SpfResults }) {
           ))}
         </ul>
       )}
+      {spf?.ipv6 && (
+        <p className="mt-3 border-t border-[var(--edh-border)] pt-2 text-xs text-slate-500">
+          IPv6:{" "}
+          <span
+            className={cn(
+              "font-medium",
+              spf.ipv6.mx_has_aaaa && spf.ipv6.pass_set_v6_count === 0
+                ? "text-amber-600"
+                : "text-slate-600",
+            )}
+          >
+            {spf.ipv6.pass_set_v6_count} v6 range{spf.ipv6.pass_set_v6_count === 1 ? "" : "s"}{" "}
+            authorized
+          </span>{" "}
+          · MX {spf.ipv6.mx_has_aaaa ? "publishes" : "has no"} AAAA
+          {spf.ipv6.mx_has_aaaa && spf.ipv6.pass_set_v6_count === 0
+            ? " — add the sending hosts' ip6: ranges before v6-preferring MTAs softfail you."
+            : ""}
+        </p>
+      )}
+    </section>
+  )
+}
+
+/**
+ * The collapsed-by-default tool-runs accordion (pm/checks/spf.mdx §6.2 #7 / §7): every external
+ * tool this run shelled out to (dig type-99 / TTL / cross-resolver, checkdmarc, …), verbatim —
+ * the exact command line, duration, exit code, and the parsed output. The "show your work" surface.
+ */
+function ToolRunsPanel({ spf }: { spf?: SpfResults }) {
+  const runs = spf?.tool_runs ?? []
+  if (runs.length === 0) return null
+  return (
+    <section className="mt-4 rounded-lg border border-[var(--edh-border)] bg-white p-4">
+      <details>
+        <summary className="cursor-pointer font-semibold">Tool runs ({runs.length})</summary>
+        <ul className="mt-3 space-y-3">
+          {runs.map((r, i) => (
+            <li
+              key={`${r.tool}-${r.started_at}-${i}`}
+              className="rounded-md border border-[var(--edh-border)] p-2"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-mono text-xs font-semibold text-slate-700">{r.tool}</span>
+                <span className="ml-auto font-mono text-[10px] text-[var(--edh-muted)]">
+                  {r.duration_ms} ms · exit {r.exit_code === null ? "—" : r.exit_code}
+                </span>
+                <CopyFixButton text={r.command} label="Copy" />
+              </div>
+              <p className="mt-1 break-all rounded bg-slate-50 p-1.5 font-mono text-[11px] text-slate-700">
+                {r.command}
+              </p>
+              {r.error ? (
+                <p className="mt-1 font-mono text-[11px] text-red-600">{r.error}</p>
+              ) : (
+                <pre className="mt-1 max-h-40 overflow-auto rounded bg-slate-50 p-1.5 font-mono text-[10px] text-slate-500">
+                  {JSON.stringify(r.parsed, null, 2)}
+                </pre>
+              )}
+            </li>
+          ))}
+        </ul>
+      </details>
     </section>
   )
 }

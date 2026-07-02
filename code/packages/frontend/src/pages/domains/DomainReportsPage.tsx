@@ -105,7 +105,7 @@ export function DomainReportsPage() {
         <EmptyState domain={view.domain} enabled={view.ingestionEnabled} />
       ) : (
         <div className="space-y-6">
-          <DmarcGroup agg={view.dmarc} findings={dmarcFindings} />
+          <DmarcGroup agg={view.dmarc} findings={dmarcFindings} domainId={id} />
           <TlsRptGroup agg={view.tlsrpt} findings={tlsFindings} />
         </div>
       )}
@@ -158,7 +158,15 @@ function RecordLine({ name, value }: { name: string; value: string }) {
 }
 
 /** DMARC aggregate group: header stats + finding rows expanding to the per-source-IP table. */
-function DmarcGroup({ agg, findings }: { agg: DmarcReportAggregate; findings: Finding[] }) {
+function DmarcGroup({
+  agg,
+  findings,
+  domainId,
+}: {
+  agg: DmarcReportAggregate
+  findings: Finding[]
+  domainId: string
+}) {
   return (
     <section className="overflow-hidden rounded-lg border border-[var(--edh-border)] bg-white">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--edh-border)] bg-slate-50 px-4 py-3">
@@ -184,7 +192,12 @@ function DmarcGroup({ agg, findings }: { agg: DmarcReportAggregate; findings: Fi
       ) : (
         <ul className="divide-y divide-[var(--edh-border)]">
           {findings.map((f) => (
-            <ReportFindingRow key={f.id} finding={f} detailTable={<DmarcSourceTable agg={agg} />} />
+            <ReportFindingRow
+              key={f.id}
+              finding={f}
+              detailTable={<DmarcSourceTable agg={agg} />}
+              explainer={{ domainId, findingId: f.id }}
+            />
           ))}
         </ul>
       )}
@@ -241,32 +254,55 @@ function severityIcon(f: Finding) {
 function ReportFindingRow({
   finding: f,
   detailTable,
+  explainer,
 }: {
   finding: Finding
   detailTable: ReactNode
+  /** DMARC-aggregate rows deep-link to the ingested-reports explainer anchor (pm/emails.mdx §7.1 / §16.5). */
+  explainer?: { domainId: string; findingId: string }
 }) {
   const [open, setOpen] = useState(false)
   const showFix = f.severity !== "ok" && Boolean(f.remediation)
   return (
     <li className="p-3">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 text-left"
-        aria-expanded={open}
-      >
-        {open ? (
-          <ChevronDown className="h-4 w-4 shrink-0 text-[var(--edh-muted)]" />
+      <div className="flex w-full items-center gap-2 text-left">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="flex items-center gap-2 text-left"
+          aria-expanded={open}
+          aria-label={open ? "Collapse details" : "Expand details"}
+        >
+          {open ? (
+            <ChevronDown className="h-4 w-4 shrink-0 text-[var(--edh-muted)]" />
+          ) : (
+            <ChevronRight className="h-4 w-4 shrink-0 text-[var(--edh-muted)]" />
+          )}
+          {severityIcon(f)}
+          <SeverityBadge severity={f.severity} />
+        </button>
+        {explainer ? (
+          <Link
+            to="/domains/$id/dmarc/check/$checkKey"
+            params={{ id: explainer.domainId, checkKey: "reports" }}
+            hash={`finding-${explainer.findingId}`}
+            className="font-medium text-[var(--edh-primary)] hover:underline"
+          >
+            {f.title}
+          </Link>
         ) : (
-          <ChevronRight className="h-4 w-4 shrink-0 text-[var(--edh-muted)]" />
+          <button
+            type="button"
+            onClick={() => setOpen((o) => !o)}
+            className="font-medium text-left"
+          >
+            {f.title}
+          </button>
         )}
-        {severityIcon(f)}
-        <SeverityBadge severity={f.severity} />
-        <span className="font-medium">{f.title}</span>
         <span className="ml-auto rounded-full bg-slate-100 px-2 py-0.5 text-[10px] uppercase tracking-wide text-slate-500">
           from reports
         </span>
-      </button>
+      </div>
       <p className="mt-1 pl-6 text-sm text-slate-600">{f.detail}</p>
       {showFix && f.remediation && (
         <div className="ml-6 mt-2 flex items-start justify-between gap-2 rounded-md bg-slate-50 p-2 text-sm text-slate-700">

@@ -43,13 +43,48 @@ export interface TakeoverFingerprint {
   enabled: boolean
 }
 
+/**
+ * One registrar/TLD abuse-reputation watchlist entry (pm/checks/domain_reputation.mdx §4/§5 — the
+ * `registrar_reputation` reference table mapped onto `config.yaml →
+ * domain_reputation.registrar_reputation`; admin-only editing). Matched by the
+ * `infra.registrar_reputation` / `infra.tld_risk` sub-checks.
+ */
+export interface RegistrarReputationEntry {
+  match_type: "registrar_iana_id" | "registrar_name" | "tld"
+  /** IANA registrar id, registrar-name substring, or a TLD like "top". */
+  match_value: string
+  note?: string
+}
+
+/**
+ * Domain Registration Reputation admin settings (pm/checks/domain_reputation.mdx §4 "Global admin
+ * settings"): the RDAP cache TTL / per-run request budget and the curated reference lists.
+ */
+export interface DomainReputationSettings {
+  cache_ttl_hours: number
+  rdap_request_budget: number
+  parking_nameservers: string[]
+  high_abuse_tlds: string[]
+  registrar_reputation: RegistrarReputationEntry[]
+}
+
 export interface ChecksConfig {
   enabled: string[]
   spf: { maxLookups: number }
   dkim: { defaultSelectors: string[] }
   dnsbl: { zones: string[] }
-  /** Content-scoring admin settings (pm/checks/content_scoring.mdx §4). */
-  content: { threshold: number; safeTarget: number; networkTests: boolean }
+  /**
+   * Content-scoring admin settings (pm/checks/content_scoring.mdx §4). The optional `url` block
+   * is the Link/URL-reputation sub-panel (pm/checks/link_url_reputation.mdx §4/§5): the shortener
+   * domain list matched by `content.url_shortener` and the Google Safe Browsing API key ("" = not
+   * configured); absent on older configs — the checker falls back to its bundled shortener seed.
+   */
+  content: {
+    threshold: number
+    safeTarget: number
+    networkTests: boolean
+    url?: { shorteners: string[]; safeBrowsingKey: string }
+  }
   /** BIMI admin settings (pm/checks/bimi.mdx §4/§5): the VMC/CMC issuer allow-list. */
   bimi: { mvaAllowList: BimiMvaEntry[] }
   /**
@@ -58,8 +93,47 @@ export interface ChecksConfig {
    * backend payloads stay valid.
    */
   dane?: { probeEnabled: boolean; probeTimeoutMs: number; requireAdBit: boolean }
+  /**
+   * List-Unsubscribe / one-click admin settings (pm/checks/list_unsubscribe.mdx §4): the
+   * bulk-sender daily threshold (default 5000), probe timeout (default 5s), whether the live
+   * endpoint probe is globally permitted, and the probe cadence (default 24h). Optional so older
+   * backend payloads stay valid.
+   */
+  listUnsub?: {
+    bulkThresholdPerDay: number
+    probeTimeoutMs: number
+    probeAllowed: boolean
+    probeCadenceHours: number
+  }
   thresholds: { green: number; amber: number }
   weights: { critical: number; warning: number; info: number }
+}
+
+/**
+ * One seed mailbox (pm/checks/inbox_placement.mdx §5 — the `seed_list_config` reference table
+ * mapped onto `config.yaml → seedList.seeds`; admin-only editing, §4). Credentials live in the
+ * out-of-repo credentials file, never here.
+ */
+export interface SeedMailboxEntry {
+  provider: string
+  seed_address: string
+  read_method: "imap" | "graph" | "jmap" | "service"
+  active: boolean
+}
+
+/**
+ * Seed-list inbox-placement settings (pm/checks/inbox_placement.mdx §4 "Admin-only settings", §5
+ * `seedList:` block, §6 gating). `service` "" = not configured — the whole placement family stays
+ * dark (light-gray, never a false ok/critical).
+ */
+export interface SeedListConfig {
+  service: string
+  providers: string[]
+  cadence: "daily" | "weekly"
+  thresholds: { warnBelowPct: number; criticalBelowPct: number }
+  settlePollMinutes: number[]
+  monthlyBudget: number
+  seeds: SeedMailboxEntry[]
 }
 
 export interface NotificationChannels {
@@ -104,6 +178,16 @@ export interface SettingsView {
     access: { allowedDomains: string[] }
     /** DNS-health takeover-fingerprint list (pm/checks/dns_health.mdx §4/§5; admin-only editing). */
     dns_health: { fingerprints: TakeoverFingerprint[] }
+    /**
+     * Domain-registration-reputation settings (pm/checks/domain_reputation.mdx §4/§5; admin-only
+     * editing). Optional so payloads from older backends stay valid.
+     */
+    domain_reputation?: DomainReputationSettings
+    /**
+     * Seed-list inbox-placement settings (pm/checks/inbox_placement.mdx §4 "Admin-only settings";
+     * admin-only editing). Optional so payloads from older backends stay valid.
+     */
+    seedList?: SeedListConfig
   }
   me: {
     sub: string
@@ -127,9 +211,21 @@ export interface UpdateAdminSettingsInput {
     spf?: { maxLookups?: number }
     dkim?: { defaultSelectors?: string[] }
     dnsbl?: { zones?: string[] }
-    content?: { threshold?: number; safeTarget?: number; networkTests?: boolean }
+    content?: {
+      threshold?: number
+      safeTarget?: number
+      networkTests?: boolean
+      /** Link/URL-reputation admin settings (pm/checks/link_url_reputation.mdx §4/§5). */
+      url?: { shorteners?: string[]; safeBrowsingKey?: string }
+    }
     bimi?: { mvaAllowList?: BimiMvaEntry[] }
     dane?: { probeEnabled?: boolean; probeTimeoutMs?: number; requireAdBit?: boolean }
+    listUnsub?: {
+      bulkThresholdPerDay?: number
+      probeTimeoutMs?: number
+      probeAllowed?: boolean
+      probeCadenceHours?: number
+    }
     thresholds?: { green?: number; amber?: number }
     weights?: { critical?: number; warning?: number; info?: number }
   }
@@ -149,6 +245,17 @@ export interface UpdateAdminSettingsInput {
   access?: { allowedDomains?: string[] }
   /** Replaces the whole takeover-fingerprint list (pm/checks/dns_health.mdx §4; admin-only). */
   dns_health?: { fingerprints?: TakeoverFingerprint[] }
+  /**
+   * Domain-registration-reputation settings (pm/checks/domain_reputation.mdx §4; admin-only).
+   * Each list, when present, replaces the whole stored list.
+   */
+  domain_reputation?: {
+    cache_ttl_hours?: number
+    rdap_request_budget?: number
+    parking_nameservers?: string[]
+    high_abuse_tlds?: string[]
+    registrar_reputation?: RegistrarReputationEntry[]
+  }
 }
 
 export interface TestNotificationResult {

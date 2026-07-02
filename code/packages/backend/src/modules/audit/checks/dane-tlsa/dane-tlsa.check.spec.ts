@@ -87,7 +87,14 @@ describe("analyzeHost", () => {
     expect(row).toEqual({
       mxHost: "mail.example.com",
       mxPreference: 10,
+      tlsaName: "_25._tcp.mail.example.com",
+      cnameChain: null,
+      rawAnswer: [
+        `_25._tcp.mail.example.com. 3600 IN TLSA 3 1 1 ${SHA256}`,
+        `_25._tcp.mail.example.com. 3600 IN TLSA 3 1 1 ${"c".repeat(64)}`,
+      ],
       dnssecSigned: true,
+      rrsigObserved: false,
       tlsaPresent: true,
       tlsaRecords: [
         { usage: 3, selector: 1, mtype: 1, data: SHA256, ttl: 3600 },
@@ -101,6 +108,30 @@ describe("analyzeHost", () => {
       probeError: null,
       checkedAt: "2026-07-01T12:00:00Z",
     })
+  })
+
+  it("persists the §11 explainer fields: tlsaName, cnameChain, rawAnswer, rrsigObserved", () => {
+    const { row } = analyzeHost(
+      observe({
+        cnamed: true,
+        canonical: "mx.other.net",
+        cnameChain: ["mail.example.com", "mx.other.net"],
+        tlsa: { records: [rr(`3 1 1 ${SHA256}`)] },
+        rrsigObserved: true,
+      }),
+    )
+    expect(row.tlsaName).toBe("_25._tcp.mx.other.net")
+    expect(row.cnameChain).toEqual(["mail.example.com", "mx.other.net"])
+    expect(row.rawAnswer).toEqual([`_25._tcp.mail.example.com. 3600 IN TLSA 3 1 1 ${SHA256}`])
+    expect(row.rrsigObserved).toBe(true)
+  })
+
+  it("a failed lookup still records tlsaName and an empty rawAnswer (spec §11)", () => {
+    const { row } = analyzeHost(observe({ tlsa: { records: [], error: "SERVFAIL" } }))
+    expect(row.tlsaName).toBe("_25._tcp.mail.example.com")
+    expect(row.rawAnswer).toEqual([])
+    expect(row.cnameChain).toBeNull()
+    expect(row.rrsigObserved).toBe(false)
   })
 
   it("TLSA on an unsigned zone is critical dane_without_dnssec (AC3)", () => {

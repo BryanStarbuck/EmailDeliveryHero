@@ -13,6 +13,7 @@ import type {
   DnsHealthConfig,
   DomainReputationConfig,
   LinkUrlDomainConfig,
+  ListUnsubDomainConfig,
   MtaStsDomainConfig,
   MxRoutingConfig,
 } from "../audit/checks/types"
@@ -25,6 +26,7 @@ import type {
   DnsHealthConfigDto,
   DomainReputationConfigDto,
   LinkUrlConfigDto,
+  ListUnsubConfigDto,
   MtaStsConfigDto,
   MxRoutingConfigDto,
   UpdateDomainDto,
@@ -110,6 +112,7 @@ export class DomainsService {
       ...(dto.dane ? { dane: normalizeDane(dto.dane) } : {}),
       ...(dto.mtaSts ? { mtaSts: normalizeMtaSts(dto.mtaSts) } : {}),
       ...(dto.linkUrl ? { linkUrl: normalizeLinkUrl(dto.linkUrl) } : {}),
+      ...(dto.listUnsub ? { listUnsub: normalizeListUnsub(dto.listUnsub) } : {}),
       addedBy,
       createdAt: now,
       updatedAt: now,
@@ -144,6 +147,8 @@ export class DomainsService {
       dane: dto.dane !== undefined ? normalizeDane(dto.dane) : current.dane,
       mtaSts: dto.mtaSts !== undefined ? normalizeMtaSts(dto.mtaSts) : current.mtaSts,
       linkUrl: dto.linkUrl !== undefined ? normalizeLinkUrl(dto.linkUrl) : current.linkUrl,
+      listUnsub:
+        dto.listUnsub !== undefined ? normalizeListUnsub(dto.listUnsub) : current.listUnsub,
       updatedAt: new Date().toISOString(),
     }
     domains[idx] = updated
@@ -166,6 +171,18 @@ export class DomainsService {
 function normalizeList(list: string[] | undefined): string[] {
   if (!list) return []
   return [...new Set(list.map((s) => s.trim().toLowerCase()).filter(Boolean))]
+}
+
+/**
+ * Normalize the operator-entered List-Unsubscribe / one-click config
+ * (pm/checks/list_unsubscribe.mdx §3/§4): both toggles default off; an all-default block
+ * collapses back to undefined so domains.yaml stays clean.
+ */
+function normalizeListUnsub(dto: ListUnsubConfigDto): ListUnsubDomainConfig | undefined {
+  const isBulkSender = dto.isBulkSender ?? false
+  const probeUnsubEndpoint = dto.probeUnsubEndpoint ?? false
+  if (!isBulkSender && !probeUnsubEndpoint) return undefined
+  return { isBulkSender, probeUnsubEndpoint }
 }
 
 /**

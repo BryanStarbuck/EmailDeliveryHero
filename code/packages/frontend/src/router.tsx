@@ -13,6 +13,7 @@ import { BlacklistZonePage } from "@/pages/blacklists/BlacklistZonePage"
 import { ContentScoringPage } from "@/pages/domains/ContentScoringPage"
 import { DkimPage } from "@/pages/domains/DkimPage"
 import { DkimProblemPage } from "@/pages/domains/DkimProblemPage"
+import { DmarcCheckPage } from "@/pages/domains/DmarcCheckPage"
 import { DmarcPage } from "@/pages/domains/DmarcPage"
 import { DmarcProblemPage } from "@/pages/domains/DmarcProblemPage"
 import { DnsCheckPage } from "@/pages/domains/DnsCheckPage"
@@ -21,6 +22,7 @@ import { DnsProblemPage } from "@/pages/domains/DnsProblemPage"
 import { DomainReportsPage } from "@/pages/domains/DomainReportsPage"
 import { DomainsPage } from "@/pages/domains/DomainsPage"
 import { RunDetailPage } from "@/pages/domains/RunDetailPage"
+import { InstallPage } from "@/pages/install/InstallPage"
 import { SpfPage } from "@/pages/domains/SpfPage"
 import { SpfProblemPage } from "@/pages/domains/SpfProblemPage"
 import { ReportsPage } from "@/pages/reports/ReportsPage"
@@ -79,6 +81,12 @@ const dashboardRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/",
   component: DashboardPage,
+  // `?resume=<intent>` is the one-shot replay token the Install page lands us back with after a
+  // diverted run finishes installing (pm/install_brew.mdx §8.3). DashboardPage reads it, fires the
+  // run once, and clears it so a later refresh doesn't re-trigger.
+  validateSearch: (search: Record<string, unknown>): { resume?: string } => ({
+    ...(typeof search.resume === "string" && search.resume ? { resume: search.resume } : {}),
+  }),
 })
 const domainsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
@@ -110,6 +118,20 @@ const dmarcRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/domains/$id/dmarc",
   component: DmarcPage,
+})
+// The DMARC sub-test explainer pages (pm/checks/dmarc.mdx §6.3/§6.4): the LOCKED shared route
+// pattern /domains/:id/runs/:runId/dmarc/check/:checkKey (+ newest alias). The literal `check`
+// segment keeps the pattern disjoint from the problem-state drill-down; these static routes are
+// registered ahead of the `:problemId` param routes.
+const dmarcCheckRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/dmarc/check/$checkKey",
+  component: DmarcCheckPage,
+})
+const runDmarcCheckRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/runs/$runId/dmarc/check/$checkKey",
+  component: DmarcCheckPage,
 })
 const dmarcProblemRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
@@ -146,6 +168,13 @@ const dnsCheckRoute = createRoute({
   path: "/domains/$id/runs/$runId/dns/check/$checkKey",
   component: DnsCheckPage,
 })
+// Newest-run alias of the explainer (pm/checks/dane_tlsa.mdx §9 / AC13): the static `check`
+// segment outranks the `:problemId` drill-down route below.
+const dnsCheckAliasRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/dns/check/$checkKey",
+  component: DnsCheckPage,
+})
 const dnsProblemRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/domains/$id/dns/$problemId",
@@ -180,6 +209,14 @@ const dkimRunProblemRoute = createRoute({
 const spfRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/domains/$id/spf",
+  component: SpfPage,
+})
+// Run-scoped SPF category page (pm/use_cases/view_one_category_run.mdx AC1 — the locked route
+// pattern /domains/:id/runs/:runId/<slug>); /domains/$id/spf above stays the newest-run alias of
+// the same page, matching dkim/dmarc/dns/blacklists.
+const spfRunRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/runs/$runId/spf",
   component: SpfPage,
 })
 const spfProblemRoute = createRoute({
@@ -222,9 +259,22 @@ const blacklistDomainRoute = createRoute({
   path: "/blacklists/$domain",
   component: BlacklistDomainPage,
 })
+// Legacy shorthand — BlacklistStatePage redirects it into the newest-run alias (AC 25).
 const blacklistStateRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/blacklists/$domain/state/$psId",
+  component: BlacklistStatePage,
+})
+// The problem-state deep-dive routes (pm/checks/blacklists.mdx §20.5 / AC 25): run-scoped
+// canonical /domains/$id/runs/$runId/blacklists/state/$psId with the newest-run alias.
+const runBlacklistStateRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/runs/$runId/blacklists/state/$psId",
+  component: BlacklistStatePage,
+})
+const domainBlacklistStateRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/blacklists/state/$psId",
   component: BlacklistStatePage,
 })
 // The zone/target explainer pages (pm/checks/blacklists.mdx §20.3/§20.4, AC 23/24): run-scoped
@@ -269,6 +319,20 @@ const scheduledChecksRoute = createRoute({
   path: "/scheduled-checks",
   component: ScheduledChecksPage,
 })
+// The Install page (pm/install_brew.mdx §4, pm/install_npm.mdx §6): reached by a preflight
+// diversion from a run (?from + ?intent resume it afterward, §8) or proactively from Settings.
+const installRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/install",
+  component: InstallPage,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { manager?: string; from?: string; intent?: string } => ({
+    ...(typeof search.manager === "string" ? { manager: search.manager } : {}),
+    ...(typeof search.from === "string" ? { from: search.from } : {}),
+    ...(typeof search.intent === "string" ? { intent: search.intent } : {}),
+  }),
+})
 const settingsIndexRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/settings",
@@ -289,18 +353,24 @@ const routeTree = rootRoute.addChildren([
     runDetailRoute,
     runReportRoute,
     dmarcRoute,
+    // The static `check/:checkKey` explainer routes register ahead of the `:problemId` param
+    // routes (pm/checks/dmarc.mdx §6.3).
+    dmarcCheckRoute,
+    runDmarcCheckRoute,
     dmarcProblemRoute,
     runDmarcRoute,
     runDmarcProblemRoute,
     dnsRoute,
     dnsRunRoute,
     dnsCheckRoute,
+    dnsCheckAliasRoute,
     dnsProblemRoute,
     dkimRoute,
     dkimProblemRoute,
     dkimRunRoute,
     dkimRunProblemRoute,
     spfRoute,
+    spfRunRoute,
     spfProblemRoute,
     contentScoringRoute,
     auditsRoute,
@@ -309,6 +379,8 @@ const routeTree = rootRoute.addChildren([
     runBlacklistsRoute,
     blacklistDomainRoute,
     blacklistStateRoute,
+    runBlacklistStateRoute,
+    domainBlacklistStateRoute,
     runBlacklistZoneRoute,
     blacklistZoneRoute,
     runBlacklistTargetRoute,
@@ -316,6 +388,7 @@ const routeTree = rootRoute.addChildren([
     reportsRoute,
     domainReportsRoute,
     scheduledChecksRoute,
+    installRoute,
     settingsIndexRoute,
     settingsSectionRoute,
   ]),

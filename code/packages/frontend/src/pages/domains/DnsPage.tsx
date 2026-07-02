@@ -1222,7 +1222,7 @@ function TestResultsByFamily({
                     {domainId && runId && (
                       <Link
                         to="/domains/$id/runs/$runId/dns/check/$checkKey"
-                        params={{ id: domainId, runId, checkKey: fam.def.key }}
+                        params={{ id: domainId, runId, checkKey: fam.def.slug }}
                         className="font-medium text-[var(--edh-primary)] hover:underline"
                       >
                         details ›

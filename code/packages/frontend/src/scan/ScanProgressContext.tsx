@@ -52,8 +52,10 @@ export function ScanProgressProvider({ children }: { children: ReactNode }) {
         begin(d.id, d.name)
         try {
           await api.post(`/audit/run/${d.id}`)
-          // Recolor this domain's cells as soon as it finishes — not after the whole batch.
+          // Recolor this domain's cells as soon as it finishes — not after the whole batch. A run
+          // also rewrites the per-domain blacklist run document, so both grids refetch.
           qc.invalidateQueries({ queryKey: ["audit"] })
+          qc.invalidateQueries({ queryKey: ["blacklists"] })
         } catch {
           failures++
           toast.error(`Audit failed for ${d.name}`)
@@ -62,8 +64,18 @@ export function ScanProgressProvider({ children }: { children: ReactNode }) {
         }
       })
 
+      // One batch-settle toast (pm/progress_ui.mdx §3.3 item 4 / acceptance 7): it fires once the
+      // whole batch settles — not one per domain (the cards gave per-domain feedback). It must tell
+      // the truth: a GREEN "complete" only when every domain actually succeeded. If any failed we
+      // never claim success (that would read as "it finished" while a domain's cells never
+      // refreshed — the catch path skips that domain's invalidateQueries); a partial batch gets an
+      // honest amber summary, and a wholly failed batch says nothing more (each domain already
+      // raised its own error toast above).
+      const succeeded = domains.length - failures
       if (failures === 0) {
         toast.success(domains.length === 1 ? `Audited ${domains[0].name}` : "Checks complete")
+      } else if (succeeded > 0) {
+        toast.warning(`Checks finished — ${succeeded} ok, ${failures} failed`)
       }
     },
     [begin, end, qc],

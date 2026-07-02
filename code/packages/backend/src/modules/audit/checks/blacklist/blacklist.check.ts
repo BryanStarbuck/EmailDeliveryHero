@@ -441,7 +441,13 @@ export const blacklistCheck: Checker = {
   async run(ctx): Promise<CheckOutcome> {
     const startedAt = Date.now()
     const ranAt = new Date(startedAt)
-    const auditId = `${ranAt.toISOString().replace(/[:.]/g, "-")}_${Math.random().toString(36).slice(2, 6)}`
+    // The deep-store id IS the envelope run id when the audit engine minted one (both are
+    // timestamp-prefixed, so lexical order stays chronological) — the run-record snapshot and
+    // the blacklists/<domain>/ copy of the same run join on it (pm/storage.mdx §7A, D8+D12).
+    // The self-generated fallback covers direct invocations outside a persisted run.
+    const auditId =
+      ctx.runId ??
+      `${ranAt.toISOString().replace(/[:.]/g, "-")}_${Math.random().toString(36).slice(2, 6)}`
     const { resolver, mode, server } = makeResolver()
 
     const zones = loadZones().filter((z) => z.enabled)

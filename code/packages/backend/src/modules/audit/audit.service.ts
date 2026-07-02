@@ -77,6 +77,23 @@ const DNS_INFRA_FAMILY_KEYS = new Set([
 const SPOT_CHECK_DEADLINE_MS = 60 * 1000
 
 /**
+ * Thrown when a scoped re-run is requested while a run for the same domain is already in flight
+ * (pm/checks/dns.mdx §15.1 — the controller maps it to 409 Conflict).
+ */
+export class RunInFlightError extends Error {}
+
+/**
+ * Resolve a `:checkKey` route slug (pm/checks/dns.mdx §14.1 — kebab-case, equal to the backend
+ * check directory names, e.g. "reverse-dns") to its §5 family key ("reverse_dns"). The snake_case
+ * family key itself is tolerated as input; the mapping is 1:1 so this is just kebab → snake.
+ * Returns null for anything outside the ten fixed keys.
+ */
+function dnsFamilyKeyForCheckKey(checkKey: string): string | null {
+  const familyKey = checkKey.replaceAll("-", "_")
+  return DNS_INFRA_FAMILY_KEYS.has(familyKey) ? familyKey : null
+}
+
+/**
  * The result of re-running ONE DNS & Infrastructure family checker live (pm/checks/dns.mdx §6.2
  * item 6 — the ⟳ spot-check / "run this check now" action). A spot check is a LIVE VIEW: it is
  * never persisted — run files are immutable history and stay untouched.
@@ -94,11 +111,108 @@ export interface SpotCheckResult {
   toolRuns: ToolRunRecord[]
 }
 
+/**
+ * The seven Spam & Content family checker registry ids (pm/checks/spam_content.mdx §8 map). The
+ * single-check re-run endpoint (§9) accepts exactly these; anything else is a 404.
+ */
+const CONTENT_CHECKER_IDS = new Set<string>([
+  "content.bimi",
+  "content.report_emails",
+  "content.scoring",
+  "content.list_unsubscribe",
+  "content.url",
+  "content.reputation",
+  "content.inbox_placement",
+])
+
+/** Sender-reputation finding-id stems (pm/checks/spam_content.mdx §1 prefix table). */
+const REPUTATION_FINDING_STEMS = [
+  "complaint_rate",
+  "bounce_rate",
+  "gpt_",
+  "fbl_",
+  "engagement",
+  "warmup",
+  "volume_consistency",
+  "blocklist_history",
+  "reputation_data_available",
+  "reputation",
+  "postmaster_verified",
+  "delivery_errors",
+]
+
+/**
+ * Whether a finding belongs to one Spam & Content family checker, matched by the §1 id-prefix
+ * table (pm/checks/spam_content.mdx §9 — "matched by the §1 id-prefix table, exactly as
+ * isContentScoringFinding does today"). Three families (bimi, report_emails, list_unsubscribe)
+ * stamp their own checker id as the finding `checkId`, so that is the primary match; the other
+ * four share the bare `content` checkId, so ownership is by finding-id prefix. The synthetic
+ * runner error/timeout findings carry `<checkerId>.error`, caught by the checkId equality too.
+ */
+function ownsContentFinding(f: Finding, checkerId: string): boolean {
+  if (f.checkId === checkerId) return true
+  switch (checkerId) {
+    case "content.scoring":
+      return isContentScoringFinding(f)
+    case "content.bimi":
+      return f.id.startsWith("content.bimi")
+    case "content.report_emails":
+      return f.id.startsWith("content.report_")
+    case "content.url":
+      return f.id.startsWith("content.url")
+    case "content.inbox_placement":
+      return (
+        f.id.startsWith("content.inbox_placement") ||
+        f.id.startsWith("content.placement_") ||
+        f.id.startsWith("content.seed")
+      )
+    case "content.reputation":
+      return REPUTATION_FINDING_STEMS.some((stem) => f.id.startsWith(`content.${stem}`))
+    case "content.list_unsubscribe":
+      return (
+        f.id.startsWith("content.list_") ||
+        f.id === "content.from_alignment" ||
+        f.id === "content.precedence" ||
+        f.id === "content.no_priority_abuse"
+      )
+    default:
+      return false
+  }
+}
+
+/**
+ * Timestamp-prefixed run id (pm/storage.mdx §7.5/§16 D8): the run's start instant (UTC, second
+ * precision, `:` → `-` so it is filename-safe) plus a short random suffix — e.g.
+ * `2026-07-01T16-14-02-a1b2`. Lexical order ≈ chronological order, and the id joins the run file,
+ * the REST `/runs/:runId` route, and the blacklists deep store's `audit_id` (D12).
+ */
+function makeRunId(startedAtIso: string): string {
+  const stamp = startedAtIso.slice(0, 19).replace(/:/g, "-")
+  return `${stamp}-${randomUUID().slice(0, 4)}`
+}
+
 function onAbort(signal: AbortSignal): Promise<typeof DEADLINE> {
   return new Promise((resolve) => {
     if (signal.aborted) resolve(DEADLINE)
     else signal.addEventListener("abort", () => resolve(DEADLINE), { once: true })
   })
+}
+
+/**
+ * Fold the SPF category's own external-tool invocations into `results.spf.tool_runs[]` (pm/checks/
+ * spf.mdx §5). Like the DNS & Infrastructure trail, these are file-only run forensics — never a
+ * verdict input — so the regression differ ignores them. No-op when SPF ran no tools or produced
+ * no structured payload (e.g. a resolver error before the record was parsed).
+ */
+function attachSpfToolRuns(results: Record<string, unknown>, log: TaggedToolRun[]): void {
+  const spfToolRuns: ToolRunRecord[] = log
+    .filter((r) => r.check_id === "spf")
+    .map(({ check_id: _checkId, ...rest }) => rest)
+  if (spfToolRuns.length === 0) return
+  const spf = results.spf
+  if (spf && typeof spf === "object") {
+    ;(spf as Record<string, unknown>).tool_runs = spfToolRuns
+  }
 }
 
 /** Log-line wording per trigger (pm/errors.mdx); the raw tag is recorded alongside it. */
@@ -324,6 +438,7 @@ export class AuditService {
       const checker = CHECKERS.find((c) => c.id === "blacklist")
       if (!checker) throw new Error("blacklist checker not registered")
       const startedAt = new Date().toISOString()
+      const runId = makeRunId(startedAt)
       const latest = this.latest(domainId)
       const findings: Finding[] = []
       let payload: unknown
@@ -331,6 +446,8 @@ export class AuditService {
         const outcome = await checker.run({
           domain: domain.name,
           domainId: domain.id,
+          // Deep-store writes of this scoped run carry the same id as its run file (D12).
+          runId,
           dkimSelectors: domain.dkimSelectors,
           sendingIps: domain.sendingIps,
           previousResults: latest?.results,
@@ -364,7 +481,7 @@ export class AuditService {
       const { score, status, counts } = summarize(findings, weights)
       const finishedAt = new Date().toISOString()
       const result: AuditResult = {
-        runId: randomUUID(),
+        runId,
         domainId: domain.id,
         domain: domain.name,
         startedAt,
@@ -455,6 +572,7 @@ export class AuditService {
       const checker = CHECKERS.find((c) => c.id === "dkim")
       if (!checker) throw new Error("dkim checker not registered")
       const startedAt = new Date().toISOString()
+      const runId = makeRunId(startedAt)
       // Cross-run context — the same derivation a full run makes: the OTHER domains' latest key
       // hashes power dkim.duplicate_key; previousResults powers the rotation first-seen carry.
       const all = this.loadAll()
@@ -478,6 +596,7 @@ export class AuditService {
         const outcome = await checker.run({
           domain: domain.name,
           domainId: domain.id,
+          runId,
           dkimSelectors: domain.dkimSelectors,
           sendingIps: domain.sendingIps,
           peerDkimKeys,
@@ -522,7 +641,7 @@ export class AuditService {
       const { score, status, counts } = summarize(merged, readAppConfig().checks.weights)
       const finishedAt = new Date().toISOString()
       const result: AuditResult = {
-        runId: randomUUID(),
+        runId,
         domainId: domain.id,
         domain: domain.name,
         startedAt,
@@ -552,30 +671,383 @@ export class AuditService {
   }
 
   /**
-   * Re-run JUST the content-scoring checker for one domain and merge its findings/payload into
-   * the domain's latest result (pm/checks/content_scoring.mdx §6 — the dedicated "Re-score"
-   * action after a sample is uploaded/edited, without a full re-audit). With no prior run, a
-   * full audit runs instead (there is nothing to merge into).
+   * SPF category-scoped re-run (pm/checks/spf.mdx §6.5 — "Run this check now" / "Re-run SPF only",
+   * `POST /api/audit/run/:domainId?checks=spf`): execute ONLY the SPF checker for one domain and
+   * persist a NEW run in which the `spf` key (findings + structured results + tool_runs) is fresh
+   * while the other five categories are carried forward verbatim from the domain's previous newest
+   * result. The run carries `scope`-free `checks: ["spf"]`, so the Runs table can chip-tag it
+   * "SPF only". A scoped re-run is just a new run, so immutability, ‹ prev / next › stepping, and
+   * the newest-run aliases keep working. With no prior run there is nothing to carry forward, so a
+   * full audit runs instead.
    */
-  async rescoreContent(domainId: string): Promise<AuditResult> {
+  async runSpfForDomain(domainId: string, trigger: AuditTrigger = "manual"): Promise<AuditResult> {
+    const existing = this.inFlight.get(domainId)
+    if (existing) {
+      logInfo(
+        `Audit already in flight for domain ${domainId} — joining it (SPF-scoped request)`,
+        "AuditService",
+      )
+      return existing
+    }
     const latest = this.latest(domainId)
-    if (!latest) return this.runForDomain(domainId, "manual")
-    const domain = this.domains.get(domainId)
-    logInfo(`Content re-score started for ${domain.name}`, "AuditService")
+    // No prior run → nothing to carry forward: fall back to a full audit.
+    if (!latest) return this.runForDomain(domainId, trigger)
+    const run = (async () => {
+      const domain = this.domains.get(domainId)
+      logInfo(
+        `${TRIGGER_LABEL[trigger]} SPF-scoped check started for ${domain.name} (trigger: ${trigger})`,
+        "AuditService",
+      )
+      const checker = CHECKERS.find((c) => c.id === "spf")
+      if (!checker) throw new Error("spf checker not registered")
+      const startedAt = new Date().toISOString()
+      const runId = makeRunId(startedAt)
+      const findings: Finding[] = []
+      let payload: unknown
+      const toolRunLog: TaggedToolRun[] = []
+      try {
+        const outcome = await withToolRunLog(toolRunLog, () =>
+          withDnsMemo(() =>
+            withCheckTag(checker.id, () =>
+              Promise.resolve(
+                checker.run({
+                  domain: domain.name,
+                  domainId: domain.id,
+                  runId,
+                  dkimSelectors: domain.dkimSelectors,
+                  sendingIps: domain.sendingIps,
+                  previousResults: latest.results,
+                  trigger,
+                  tools: locateTools(),
+                }),
+              ),
+            ),
+          ),
+        )
+        if (Array.isArray(outcome)) {
+          findings.push(...outcome)
+        } else {
+          findings.push(...outcome.findings)
+          payload = outcome.results
+        }
+      } catch (err) {
+        logError(`SPF-scoped check failed for ${domain.name}`, err, "AuditService")
+        findings.push({
+          id: "spf.error",
+          checkId: "spf",
+          title: "SPF check errored",
+          severity: "warning",
+          detail: `The SPF check could not complete: ${err instanceof Error ? err.message : String(err)}`,
+          remediation: "Re-run the check. If it keeps failing, this may be a transient DNS issue.",
+        })
+      }
+      // Regression detection against the previous run's SPF findings only (§6.5: the differ skips
+      // carried-forward categories, so it can only diff the re-executed category).
+      flagNewProblems(
+        latest.findings.filter((f) => f.checkId === "spf"),
+        findings,
+      )
+      // Carry the other five categories forward verbatim — minus stale isNew flags, which
+      // described the PREVIOUS run's regressions, not this one's.
+      const carried = latest.findings
+        .filter((f) => f.checkId !== "spf")
+        .map(({ isNew: _stale, ...rest }) => rest as Finding)
+      const merged = [...carried, ...findings]
+      const registryIndex = new Map(CHECKERS.map((c, i) => [c.id, i]))
+      merged.sort(
+        (a, b) => (registryIndex.get(a.checkId) ?? 99) - (registryIndex.get(b.checkId) ?? 99),
+      )
+      const { score, status, counts } = summarize(merged, readAppConfig().checks.weights)
+      const finishedAt = new Date().toISOString()
+      const mergedResults: Record<string, unknown> = {
+        ...latest.results,
+        ...(payload !== undefined ? { spf: payload } : {}),
+      }
+      // Fold the SPF category's own tool invocations into results.spf.tool_runs[] (§5).
+      attachSpfToolRuns(mergedResults, toolRunLog)
+      const result: AuditResult = {
+        runId,
+        domainId: domain.id,
+        domain: domain.name,
+        startedAt,
+        finishedAt,
+        ranAt: finishedAt,
+        trigger,
+        checks: ["spf"],
+        score,
+        status,
+        findings: merged,
+        counts,
+        newProblemCount: findings.filter((f) => f.isNew).length,
+        results: mergedResults,
+      }
+      await this.persistResult(result)
+      logInfo(`SPF-scoped check finished for ${domain.name}: ${result.status}`, "AuditService")
+      return result
+    })().finally(() => this.inFlight.delete(domainId))
+    this.inFlight.set(domainId, run)
+    return run
+  }
 
-    const checker = CHECKERS.find((c) => c.id === "content.scoring")
-    if (!checker) return latest
-    const findings: Finding[] = []
-    let payload: unknown
-    try {
-      const outcome = await checker.run({
+  /**
+   * DNS & Infrastructure scoped re-run (pm/checks/dns.mdx §15.1 / AC 20-21): execute the whole
+   * category (all ten `infra.*` family checkers) or ONE family for a domain and write a **new**
+   * immutable run file tagged `run.scope: dns` / `dns.<family_key>`. The run body contains only
+   * the category's own findings, snapshots, and `tool_runs[]` — an existing run is never mutated.
+   * All the full-run discipline applies unchanged: the checker dependency graph, the per-run DNS
+   * memo, semaphores inside the checkers, the RDAP daily cache, and `.pending` gating. The
+   * Domain-health (newest) roll-up merges per category — the latest cache swaps only the
+   * re-executed findings/payloads, so a scoped DNS run advances the DNS cell and never blanks or
+   * ages the other five categories (§15.3).
+   *
+   * @param checkKey the §14.1 kebab-case check key ("reverse-dns") for a single-family run;
+   *                 undefined = the whole category. Throws for an unknown key (controller → 404);
+   *                 throws RunInFlightError when a run for the domain is in flight (→ 409).
+   */
+  async runDnsForDomain(
+    domainId: string,
+    checkKey?: string,
+    trigger: AuditTrigger = "manual",
+  ): Promise<AuditResult> {
+    const familyKey = checkKey === undefined ? undefined : dnsFamilyKeyForCheckKey(checkKey)
+    if (checkKey !== undefined && familyKey === null) {
+      throw new Error(`Unknown DNS & Infrastructure check "${checkKey}"`)
+    }
+    // §15.1: 409 while a run for the same domain is in flight — the UI disables the affordance
+    // with a reason (§15.2 idle state) rather than joining, so the user never gets a stale scope.
+    if (this.inFlight.has(domainId)) {
+      throw new RunInFlightError(`A run is already in flight for domain ${domainId}`)
+    }
+    const scope = (familyKey ? `dns.${familyKey}` : "dns") as AuditResult["scope"]
+    const scoped = familyKey
+      ? CHECKERS.filter((c) => c.id === `infra.${familyKey}`)
+      : CHECKERS.filter((c) => c.id.startsWith("infra."))
+    if (scoped.length === 0) throw new Error(`No checker registered for infra.${familyKey}`)
+    const run = (async () => {
+      const domain = this.domains.get(domainId)
+      logInfo(
+        `${TRIGGER_LABEL[trigger]} DNS-scoped check (${scope}) started for ${domain.name} (trigger: ${trigger})`,
+        "AuditService",
+      )
+      const startedAt = new Date().toISOString()
+      const latest = this.latest(domainId)
+      const findings: Finding[] = []
+      const results: Record<string, unknown> = {}
+      // Upstream map for the dependency graph (pm/run_checks.mdx §2): seeded with the latest
+      // run's structured results so a family-scoped run of mta_sts/dane_tlsa still sees the MX
+      // list; a category run overwrites each key as its own checker publishes fresh data.
+      const upstream: Record<string, unknown> = { ...(latest?.results ?? {}) }
+      const deadline = new AbortController()
+      const deadlineTimer = setTimeout(() => deadline.abort(), DOMAIN_DEADLINE_MS)
+      deadlineTimer.unref?.()
+      const ctx = {
         domain: domain.name,
         domainId: domain.id,
         dkimSelectors: domain.dkimSelectors,
         sendingIps: domain.sendingIps,
-        previousResults: latest.results,
+        previousResults: latest?.results,
+        arc: domain.arc,
+        bimi: domain.bimi,
+        dnsHealth: domain.dnsHealth,
+        mx: domain.mx,
+        domainReputation: domain.domainReputation,
+        dane: domain.dane,
+        mtaSts: domain.mtaSts,
+        linkUrl: domain.linkUrl,
+        listUnsub: domain.listUnsub,
+        trigger,
+        signal: deadline.signal,
         tools: locateTools(),
+        upstream,
+      }
+      // One checker, fully contained (pm/run_checks.mdx §10) — same containment as a full run.
+      const runOne = async (checker: Checker): Promise<void> => {
+        if (deadline.signal.aborted) return
+        try {
+          const outcome = await withCheckTag(checker.id, () => Promise.resolve(checker.run(ctx)))
+          if (Array.isArray(outcome)) {
+            findings.push(...outcome)
+          } else {
+            findings.push(...outcome.findings)
+            if (outcome.results !== undefined) {
+              results[checker.id] = outcome.results
+              upstream[checker.id] = outcome.results
+            }
+          }
+        } catch (err) {
+          logError(`Checker ${checker.id} failed for ${domain.name}`, err, "AuditService")
+          findings.push({
+            id: `${checker.id}.error`,
+            checkId: checker.id,
+            title: `${checker.label} check errored`,
+            severity: "warning",
+            detail: `The ${checker.label} check could not complete: ${err instanceof Error ? err.message : String(err)}`,
+            remediation: "Re-run the check. If it keeps failing, this may be a transient DNS issue.",
+          })
+        }
+      }
+      // Dependency-ordered graph over just the scoped checkers, inside the per-run DNS memo, with
+      // every external-tool invocation captured verbatim (pm/checks/dns.mdx §3.1).
+      const toolRunLog: TaggedToolRun[] = []
+      await withToolRunLog(toolRunLog, () => withDnsMemo(() => runCheckerGraph(scoped, runOne)))
+      clearTimeout(deadlineTimer)
+      const infraToolRuns: ToolRunRecord[] = toolRunLog
+        .filter((r) => r.check_id.startsWith("infra."))
+        .map(({ check_id: _checkId, ...rest }) => rest)
+      if (infraToolRuns.length > 0) results["infra.tool_runs"] = infraToolRuns
+      attachSpfToolRuns(results, toolRunLog)
+      const registryIndex = new Map(CHECKERS.map((c, i) => [c.id, i]))
+      findings.sort(
+        (a, b) => (registryIndex.get(a.checkId) ?? 99) - (registryIndex.get(b.checkId) ?? 99),
+      )
+      // Regression detection against ONLY the re-executed checkers' previous findings (§15.3 —
+      // the differ per family always compares within the family's own scope).
+      const executedIds = new Set(scoped.map((c) => c.id))
+      flagNewProblems(
+        (latest?.findings ?? []).filter((f) => executedIds.has(f.checkId)),
+        findings,
+      )
+      const weights = readAppConfig().checks.weights
+      const { score, status, counts } = summarize(findings, weights)
+      const finishedAt = new Date().toISOString()
+      const result: AuditResult = {
+        runId: randomUUID(),
+        domainId: domain.id,
+        domain: domain.name,
+        startedAt,
+        finishedAt,
+        ranAt: finishedAt,
+        trigger,
+        scope,
+        checks: familyKey ? [`infra.${familyKey}`] : ["infra"],
+        score,
+        status,
+        findings,
+        counts,
+        newProblemCount: findings.filter((f) => f.isNew).length,
+        results,
+      }
+      // Persist: the scoped run is its own immutable run file (run.scope tagged); the latest
+      // cache merges surgically — only the re-executed findings/payloads swap (§15.3).
+      const write = this.writeChain.then(() => {
+        const config = readAppConfig()
+        saveRun(result, config.schedule.timezone)
+        pruneRuns(config.storage.retentionDays, RUNS_KEPT_PER_DOMAIN)
+        const map = this.loadAll()
+        const prior = map[domainId]
+        if (prior) {
+          const mergedFindings = [
+            ...prior.findings.filter((f) => !executedIds.has(f.checkId)),
+            ...findings,
+          ]
+          mergedFindings.sort(
+            (a, b) => (registryIndex.get(a.checkId) ?? 99) - (registryIndex.get(b.checkId) ?? 99),
+          )
+          const rollup = summarize(mergedFindings, weights)
+          map[domainId] = {
+            ...prior,
+            findings: mergedFindings,
+            score: rollup.score,
+            status: rollup.status,
+            counts: rollup.counts,
+            newProblemCount: mergedFindings.filter((f) => f.isNew).length,
+            results: { ...prior.results, ...results },
+          }
+        } else {
+          map[domainId] = result
+        }
+        this.saveAll(map)
       })
+      this.writeChain = write.catch(() => {})
+      await write
+      logInfo(
+        `DNS-scoped check (${scope}) finished for ${domain.name}: ${result.status}`,
+        "AuditService",
+      )
+      return result
+    })().finally(() => this.inFlight.delete(domainId))
+    this.inFlight.set(domainId, run)
+    return run
+  }
+
+  /**
+   * Re-run exactly ONE Spam & Content family checker for a domain and surgically merge its
+   * findings/payload into the domain's latest result (pm/checks/spam_content.mdx §9 — the
+   * "Run this check now" affordance on the check-detail and category pages). This generalizes the
+   * content-scoring re-score: it runs the one checker with the domain's config and the latest
+   * result's `previousResults`, swaps ONLY that checker's findings/payload (matched by the §1
+   * id-prefix table via `ownsContentFinding`), keeps every other check untouched, re-summarizes
+   * the roll-up, and persists to the latest cache only — the immutable per-run history is never
+   * rewritten (pm/storage.mdx §7.2). With no prior run at all, a full audit runs instead (nothing
+   * to merge into). A checker crash merges the standing `<checkerId>.error` warning, never a
+   * fabricated pass. External tools invoked by the re-run still append `tool_runs[]` entries per
+   * §3 into the latest result's execution log.
+   *
+   * Throws when a run for the same domain is already in flight (→ 409). An unknown `checkerId`
+   * throws a plain Error the controller maps to 404.
+   */
+  async rerunChecker(domainId: string, checkerId: string): Promise<AuditResult> {
+    if (!CONTENT_CHECKER_IDS.has(checkerId)) {
+      throw new Error(`Unknown Spam & Content checker "${checkerId}"`)
+    }
+    if (this.inFlight.has(domainId)) {
+      throw new RunInFlightError(`A run is already in flight for domain ${domainId}`)
+    }
+    const latest = this.latest(domainId)
+    if (!latest) return this.runForDomain(domainId, "manual")
+    const domain = this.domains.get(domainId)
+    const checker = CHECKERS.find((c) => c.id === checkerId)
+    if (!checker) return latest
+    logInfo(`Single-check re-run ${checkerId} started for ${domain.name}`, "AuditService")
+
+    // The other domains' latest DKIM key hashes and every monitored domain — the same cross-run
+    // context a full run builds, so report-email attribution and dkim.duplicate_key stay correct.
+    const all = this.loadAll()
+    const peerDkimKeys = Object.values(all)
+      .filter((r) => r.domainId !== domain.id)
+      .flatMap((r) => {
+        const dkim = r.results?.dkim as
+          | { selectors?: { selector: string; key_sha256: string | null }[] }
+          | undefined
+        return (dkim?.selectors ?? [])
+          .filter((s) => s.key_sha256)
+          .map((s) => ({
+            domain: r.domain,
+            selector: s.selector,
+            keySha256: s.key_sha256 as string,
+          }))
+      })
+    const ctx = {
+      domain: domain.name,
+      domainId: domain.id,
+      dkimSelectors: domain.dkimSelectors,
+      sendingIps: domain.sendingIps,
+      peerDkimKeys,
+      monitoredDomains: this.domains.list().map((d) => ({ id: d.id, name: d.name })),
+      previousResults: latest.results,
+      arc: domain.arc,
+      bimi: domain.bimi,
+      dnsHealth: domain.dnsHealth,
+      mx: domain.mx,
+      dane: domain.dane,
+      mtaSts: domain.mtaSts,
+      domainReputation: domain.domainReputation,
+      linkUrl: domain.linkUrl,
+      listUnsub: domain.listUnsub,
+      trigger: "manual" as AuditTrigger,
+      tools: locateTools(),
+    }
+
+    const findings: Finding[] = []
+    let payload: unknown
+    // Capture every external-tool invocation this single-check re-run makes (§3 tool_runs[]).
+    const toolRunLog: TaggedToolRun[] = []
+    try {
+      const outcome = await withToolRunLog(toolRunLog, () =>
+        withDnsMemo(() =>
+          withCheckTag(checker.id, () => Promise.resolve(checker.run(ctx))),
+        ),
+      )
       if (Array.isArray(outcome)) {
         findings.push(...outcome)
       } else {
@@ -583,21 +1055,38 @@ export class AuditService {
         payload = outcome.results
       }
     } catch (err) {
-      logError(`Content re-score failed for ${domain.name}`, err, "AuditService")
+      logError(`Single-check re-run ${checkerId} failed for ${domain.name}`, err, "AuditService")
       findings.push({
-        id: "content.scoring.error",
-        checkId: "content.scoring",
-        title: "Message Content Spam Scoring check errored",
+        id: `${checkerId}.error`,
+        checkId: checkerId,
+        title: `${checker.label} check errored`,
         severity: "warning",
-        detail: `The content re-score could not complete: ${err instanceof Error ? err.message : String(err)}`,
-        remediation: "Re-score again. If it keeps failing, check the SpamAssassin installation.",
+        detail: `The ${checker.label} check could not complete: ${err instanceof Error ? err.message : String(err)}`,
+        remediation: "Run this check again. If it keeps failing, check the tool installation.",
       })
     }
 
+    // Regression detection against ONLY this checker's previous findings — a single-check re-run
+    // must never re-flag the untouched families as new/resolved (pm/checks/spam_content.mdx §9).
+    flagNewProblems(
+      latest.findings.filter((f) => ownsContentFinding(f, checkerId)),
+      findings,
+    )
+
     // Surgical merge: swap only this checker's findings/payload, keep every other check's output.
-    const merged = [...latest.findings.filter((f) => !isContentScoringFinding(f)), ...findings]
+    const merged = [...latest.findings.filter((f) => !ownsContentFinding(f, checkerId)), ...findings]
     const results = { ...latest.results }
-    if (payload !== undefined) results["content.scoring"] = payload
+    if (payload !== undefined) results[checkerId] = payload
+    // Append this re-run's tool invocations to the latest result's content execution log (§3).
+    const contentToolRuns = toolRunLog
+      .filter((r) => r.check_id.startsWith("content."))
+      .map(({ check_id: _checkId, ...rest }) => rest)
+    if (contentToolRuns.length > 0) {
+      const prior = Array.isArray(results["content.tool_runs"])
+        ? (results["content.tool_runs"] as ToolRunRecord[])
+        : []
+      results["content.tool_runs"] = [...prior, ...contentToolRuns]
+    }
     const { score, status, counts } = summarize(merged, readAppConfig().checks.weights)
     const updated: AuditResult = {
       ...latest,
@@ -606,14 +1095,11 @@ export class AuditService {
       status,
       counts,
       results,
-      // The checker flags its own §6 regressions (band crossing / newly fired high-weight rule)
-      // via `isNew`, so a re-score keeps the latest run's new-problem count honest
-      // (pm/checks/content_scoring.mdx §8 AC 9).
       newProblemCount: merged.filter((f) => f.isNew).length,
     }
 
-    // Latest-cache-only persist: a re-score refreshes the dashboard/current view but never
-    // rewrites the immutable per-run YAML history (pm/storage.mdx §7.2).
+    // Latest-cache-only persist: refreshes the dashboard/current view but never rewrites the
+    // immutable per-run YAML history (pm/storage.mdx §7.2).
     const write = this.writeChain.then(() => {
       const map = this.loadAll()
       map[updated.domainId] = updated
@@ -621,8 +1107,21 @@ export class AuditService {
     })
     this.writeChain = write.catch(() => {})
     await write
-    logInfo(`Content re-score finished for ${domain.name}: score ${updated.score}`, "AuditService")
+    logInfo(
+      `Single-check re-run ${checkerId} finished for ${domain.name}: ${updated.status}`,
+      "AuditService",
+    )
     return updated
+  }
+
+  /**
+   * Re-run JUST the content-scoring checker for one domain (pm/checks/content_scoring.mdx §6 — the
+   * dedicated "Re-score" action after a sample is uploaded/edited). A thin alias over the
+   * generalized single-check re-run (pm/checks/spam_content.mdx §9) so the upload-panel flow keeps
+   * working unchanged.
+   */
+  async rescoreContent(domainId: string): Promise<AuditResult> {
+    return this.rerunChecker(domainId, "content.scoring")
   }
 
   /**
@@ -735,8 +1234,11 @@ export class AuditService {
   }
 
   private async auditDomain(domain: MonitoredDomain, trigger: AuditTrigger): Promise<AuditResult> {
-    // One RUN (pm/dashboard.mdx §1): per domain, stamped with when it started and stopped.
+    // One RUN (pm/dashboard.mdx §1): per domain, stamped with when it started and stopped. The
+    // run id is minted at start (timestamp-prefixed, pm/storage.mdx D8) so checkers with their
+    // own deep stores can record it and the two copies of a run join (D12).
     const startedAt = new Date().toISOString()
+    const runId = makeRunId(startedAt)
     // Cross-run context: the other domains' latest DKIM key hashes (dkim.duplicate_key) and this
     // domain's previous structured results (dkim.rotation first-seen carry-forward). Both are
     // best-effort reads of the same store the results land in.
@@ -770,9 +1272,14 @@ export class AuditService {
       domain: domain.name,
       // The store id keys per-domain stores (e.g. content-scoring's samples/<domainId>/).
       domainId: domain.id,
+      // The envelope run id — deep-store writers (blacklist) record it so the copies join (D12).
+      runId,
       dkimSelectors: domain.dkimSelectors,
       sendingIps: domain.sendingIps,
       peerDkimKeys,
+      // Every monitored domain — the report-email corpus scan routes each report to the matching
+      // monitored domain's store by the report's OWN payload domain (pm/emails.mdx §13.1.3).
+      monitoredDomains: this.domains.list().map((d) => ({ id: d.id, name: d.name })),
       previousResults: all[domain.id]?.results,
       // Per-domain ARC / forwarding config (pm/checks/arc.mdx §4) — powers arc.applicable /
       // arc.forwarding_risk / arc.selector_dns.
@@ -876,6 +1383,16 @@ export class AuditService {
       .filter((r) => r.check_id.startsWith("infra."))
       .map(({ check_id: _checkId, ...rest }) => rest)
     if (infraToolRuns.length > 0) results["infra.tool_runs"] = infraToolRuns
+    // The SPF category persists its own tool invocations inside its own section as
+    // `spf.tool_runs[]` (pm/checks/spf.mdx §5 — file-only run forensics, never a verdict input).
+    attachSpfToolRuns(results, toolRunLog)
+    // The Spam & Content category persists its own tool invocations as `spam_content.tool_runs[]`
+    // (pm/checks/spam_content.mdx §3/§4 — the runs-store maps results["content.tool_runs"] to that
+    // key). Same append-only evidence-trail contract as the DNS category above.
+    const contentToolRuns: ToolRunRecord[] = toolRunLog
+      .filter((r) => r.check_id.startsWith("content."))
+      .map(({ check_id: _checkId, ...rest }) => rest)
+    if (contentToolRuns.length > 0) results["content.tool_runs"] = contentToolRuns
     // Findings complete in graph order, not registry order — restore the registry order so runs
     // are deterministic and diffs/UI grouping are stable.
     const registryIndex = new Map(CHECKERS.map((c, i) => [c.id, i]))
@@ -896,7 +1413,7 @@ export class AuditService {
     const { score, status, counts } = summarize(findings, readAppConfig().checks.weights)
     const finishedAt = new Date().toISOString()
     return {
-      runId: randomUUID(),
+      runId,
       domainId: domain.id,
       domain: domain.name,
       startedAt,

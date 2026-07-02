@@ -1,4 +1,5 @@
 import axios from "axios"
+import { toast } from "sonner"
 import { logger } from "@/lib/logger"
 
 declare module "axios" {
@@ -61,13 +62,24 @@ api.interceptors.request.use(async (config) => {
   return config
 })
 
+/**
+ * Global 403 permission toast (pm/engineering.mdx §5): every refused write surfaces the same
+ * "role:admin required" toast without each call site re-implementing it. The fixed sonner id
+ * collapses a burst of simultaneous 403s into a single toast.
+ */
+const notifyForbidden = () => {
+  toast.error("Permission denied — this action requires role:admin.", { id: "forbidden-403" })
+}
+
 // Response: a 401 is usually transient (expired access token). Rehydrate from the persistent
 // session cookie and retry ONCE with a fresh token before giving up — never eagerly sign out.
+// A 403 is a real permission denial (role:admin gating, pm/security.mdx §3.3) → permission toast.
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const status = error.response?.status
     const original = error.config
+    if (status === 403) notifyForbidden()
     if (status === 401 && bridge && original && !original._authRetried) {
       original._authRetried = true
       try {

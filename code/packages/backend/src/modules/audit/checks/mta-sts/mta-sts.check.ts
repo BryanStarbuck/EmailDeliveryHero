@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import { request as httpsRequest } from "node:https"
 import { checkServerIdentity, type TLSSocket } from "node:tls"
+import { withResource } from "@shared/concurrency"
 import { readAppConfig } from "@shared/config-store"
 import { resolveMx, resolveTxt } from "../dns-util"
 import type { CheckContext, Checker, CheckOutcome, Finding } from "../types"
@@ -506,10 +507,14 @@ export const mtaStsCheck: Checker = {
     }
 
     // ONE defensive request per domain per audit (spec §3/§6): hard timeout, capped body, no
-    // redirect following. A fetch error is a finding, never a crash.
+    // redirect following. A fetch error is a finding, never a crash. The fetch holds a slot of
+    // the process-global `http` resource semaphore (pm/run_checks.mdx §3.1 — RDAP, MTA-STS/BIMI
+    // policy fetches, unsubscribe probes) so 4+ parallel domains never fan out unbounded HTTPS.
     const timeoutMs = cfg?.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS
     const maxBodyBytes = cfg?.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES
-    const fetched = await fetchPolicy(policyHost, timeoutMs, maxBodyBytes, ctx.signal)
+    const fetched = await withResource("http", () =>
+      fetchPolicy(policyHost, timeoutMs, maxBodyBytes, ctx.signal),
+    )
     results.policyStatus = fetched.status
     results.httpsCertOk = fetched.certOk
     const redirected = fetched.status !== null && fetched.status >= 300 && fetched.status < 400

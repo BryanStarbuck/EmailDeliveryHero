@@ -6,6 +6,7 @@ import type {
   DnsHealthConfig,
   DomainReputationConfig,
   LinkUrlDomainConfig,
+  ListUnsubDomainConfig,
   MonitoredDomain,
   MxRoutingConfig,
 } from "./types"
@@ -28,6 +29,8 @@ export interface CreateDomainInput {
   domainReputation?: DomainReputationConfig
   /** Link / URL-reputation config (pm/checks/link_url_reputation.mdx §4 per-domain inputs). */
   linkUrl?: LinkUrlDomainConfig
+  /** List-management config (pm/checks/list_unsubscribe.mdx §4 per-domain inputs). */
+  listUnsub?: ListUnsubDomainConfig
 }
 
 export interface UpdateDomainInput {
@@ -47,6 +50,8 @@ export interface UpdateDomainInput {
   domainReputation?: DomainReputationConfig
   /** Link / URL-reputation config (pm/checks/link_url_reputation.mdx §4 per-domain inputs). */
   linkUrl?: LinkUrlDomainConfig
+  /** List-management config (pm/checks/list_unsubscribe.mdx §4 per-domain inputs). */
+  listUnsub?: ListUnsubDomainConfig
 }
 
 const KEY = ["domains"] as const

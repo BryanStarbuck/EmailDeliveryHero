@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs"
+import { existsSync, mkdirSync, renameSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -15,13 +15,39 @@ import { join } from "node:path"
 /** Last-resort root when os.homedir() is unavailable. */
 const FALLBACK_STATE_DIR = "/tmp/.email_delivery_hero"
 
-/** Resolve the state root without side effects other than the best-effort mkdir. */
+/**
+ * One-time adoption of a legacy state dir (pm/storage.mdx §16 D1): earlier installs kept their
+ * state under ~/T/_emaildeliveryhero/. When the canonical ~/.email_delivery_hero/ does not exist
+ * yet and the old-path dir does, rename it into place so an upgrade keeps all its data. Attempted
+ * once per process, best-effort (a failed rename just means a fresh dir is created — never a
+ * crash). Skipped entirely under an EDH_STATE_DIR override.
+ */
+let legacyAdoptAttempted = false
+function adoptLegacyStateDir(home: string, canonicalDir: string): void {
+  if (legacyAdoptAttempted) return
+  legacyAdoptAttempted = true
+  try {
+    if (existsSync(canonicalDir)) return
+    const legacy = join(home, "T", "_emaildeliveryhero")
+    if (!existsSync(legacy)) return
+    renameSync(legacy, canonicalDir)
+  } catch {
+    // Best-effort: never let adoption break state-root resolution. (No logger here — logging.ts
+    // resolves its paths through this module, so importing it would be circular.)
+  }
+}
+
+/** Resolve the state root without side effects other than the best-effort mkdir/adopt. */
 function computeStateDir(): string {
   const override = process.env.EDH_STATE_DIR?.trim()
   if (override && override.length > 0) return override
   try {
     const home = homedir()
-    if (home && home.trim() !== "") return join(home, ".email_delivery_hero")
+    if (home && home.trim() !== "") {
+      const dir = join(home, ".email_delivery_hero")
+      adoptLegacyStateDir(home, dir)
+      return dir
+    }
   } catch {
     // homedir() can throw on a misconfigured host — fall through to the temp dir.
   }

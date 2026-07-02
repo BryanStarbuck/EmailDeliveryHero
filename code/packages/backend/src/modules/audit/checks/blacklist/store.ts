@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
+import { withFileLock } from "@shared/config-store"
 import { stateSubdir } from "@shared/state-dir"
 import { readYaml, writeYaml } from "@shared/yaml-store"
 import type {
@@ -11,11 +12,13 @@ import type {
 
 /**
  * Per-run persistence for the Blacklists checker (pm/checks/blacklists.mdx §12). Layout under the
- * app state dir (EDH_STATE_DIR):
+ * app state dir (EDH_STATE_DIR). Keyed by the domain NAME (sanitized), not the monitored-domain
+ * UUID — deliberately operator-facing, consistent with the runs/<domain>/ rule
+ * (pm/storage.mdx §7A/D11):
  *
- *   blacklists/<domainId>/latest.yaml            — the most recent full BlacklistRunResults
- *   blacklists/<domainId>/runs/<auditId>.yaml    — append-only history (pruned to MAX_RUNS)
- *   blacklists/<domainId>/portals.yaml           — the user's provider-portal checklist state
+ *   blacklists/<domain-name>/latest.yaml          — the most recent full BlacklistRunResults
+ *   blacklists/<domain-name>/runs/<auditId>.yaml  — append-only history (pruned to MAX_RUNS)
+ *   blacklists/<domain-name>/portals.yaml         — the user's provider-portal checklist state
  *
  * The audit engine's audits.json stays latest-only; this store is what powers the diff (§6) and the
  * history sparkline (§13.2). Plain functions (no DI) so both the checker and the Nest controller
@@ -24,16 +27,16 @@ import type {
 
 const MAX_RUNS = 50
 
-function domainDir(domainId: string): string {
-  return stateSubdir("blacklists", sanitize(domainId))
+function domainDir(domain: string): string {
+  return stateSubdir("blacklists", sanitize(domain))
 }
 
 function sanitize(part: string): string {
   return part.replace(/[^a-zA-Z0-9._-]/g, "_")
 }
 
-export function saveBlacklistRun(domainId: string, run: BlacklistRunResults): void {
-  const dir = domainDir(domainId)
+export function saveBlacklistRun(domain: string, run: BlacklistRunResults): void {
+  const dir = domainDir(domain)
   const runsDir = join(dir, "runs")
   writeYaml(join(runsDir, `${sanitize(run.audit_id)}.yaml`), run)
   writeYaml(join(dir, "latest.yaml"), run)
@@ -54,12 +57,12 @@ function pruneRuns(runsDir: string): void {
   }
 }
 
-export function readLatestBlacklistRun(domainId: string): BlacklistRunResults | null {
-  return readYaml<BlacklistRunResults | null>(join(domainDir(domainId), "latest.yaml"), null)
+export function readLatestBlacklistRun(domain: string): BlacklistRunResults | null {
+  return readYaml<BlacklistRunResults | null>(join(domainDir(domain), "latest.yaml"), null)
 }
 
-export function readBlacklistHistory(domainId: string): BlacklistHistoryEntry[] {
-  const runsDir = join(domainDir(domainId), "runs")
+export function readBlacklistHistory(domain: string): BlacklistHistoryEntry[] {
+  const runsDir = join(domainDir(domain), "runs")
   if (!existsSync(runsDir)) return []
   const entries: BlacklistHistoryEntry[] = []
   for (const file of readdirSync(runsDir)
@@ -79,8 +82,31 @@ export function readBlacklistHistory(domainId: string): BlacklistHistoryEntry[] 
   return entries
 }
 
-/** All domain ids that have at least one persisted blacklist run. */
-export function listBlacklistDomainIds(): string[] {
+/**
+ * Full per-run history (chronological, oldest→newest) for one domain — the complete
+ * BlacklistRunResults documents, not the compact BlacklistHistoryEntry rows. Powers the
+ * reputation check's `content.blocklist_history` trend (pm/checks/reputation_metrics.mdx §2/§7),
+ * which needs per-(zone, target) listing detail across runs that the compact summary lacks.
+ * Read-only; capped by the store's MAX_RUNS pruning.
+ */
+export function readBlacklistRuns(domain: string): BlacklistRunResults[] {
+  const runsDir = join(domainDir(domain), "runs")
+  if (!existsSync(runsDir)) return []
+  const runs: BlacklistRunResults[] = []
+  for (const file of readdirSync(runsDir)
+    .filter((f) => f.endsWith(".yaml"))
+    .sort()) {
+    const run = readYaml<BlacklistRunResults | null>(join(runsDir, file), null)
+    if (run) runs.push(run)
+  }
+  return runs
+}
+
+/**
+ * All (sanitized) domain NAMES that have at least one persisted blacklist run — the store's
+ * directory keys, not monitored-domain UUIDs (pm/storage.mdx §7A/D11).
+ */
+export function listBlacklistDomains(): string[] {
   const root = stateSubdir("blacklists")
   if (!existsSync(root)) return []
   return readdirSync(root, { withFileTypes: true })
@@ -90,19 +116,27 @@ export function listBlacklistDomainIds(): string[] {
 
 type PortalStateFile = Record<string, PortalUserState>
 
-export function readPortalStates(domainId: string): PortalStateFile {
-  return readYaml<PortalStateFile>(join(domainDir(domainId), "portals.yaml"), {})
+export function readPortalStates(domain: string): PortalStateFile {
+  return readYaml<PortalStateFile>(join(domainDir(domain), "portals.yaml"), {})
 }
 
+/**
+ * Read-modify-write of the user's portal checklist, serialized per file (pm/storage.mdx §9 —
+ * every read-modify-write gets a serialization guard, so two concurrent PATCHes in server mode
+ * can never drop each other's state).
+ */
 export function writePortalState(
-  domainId: string,
+  domain: string,
   provider: string,
   state: PortalUserState,
-): PortalStateFile {
-  const states = readPortalStates(domainId)
-  states[provider] = state
-  writeYaml(join(domainDir(domainId), "portals.yaml"), states)
-  return states
+): Promise<PortalStateFile> {
+  const path = join(domainDir(domain), "portals.yaml")
+  return withFileLock(path, () => {
+    const states = readYaml<PortalStateFile>(path, {})
+    states[provider] = state
+    writeYaml(path, states)
+    return states
+  })
 }
 
 export function applyPortalStates(

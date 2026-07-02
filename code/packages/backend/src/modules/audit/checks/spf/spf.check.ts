@@ -1,4 +1,4 @@
-import { dig, resolve4, resolve6, resolveMx, resolveTxt } from "../dns-util"
+import { dig, digAnswer, resolve4, resolve6, resolveMx, resolveTxt } from "../dns-util"
 import type { Checker, CheckOutcome, Finding } from "../types"
 
 /**
@@ -61,6 +61,16 @@ export interface SpfResults {
   byte_length: number
   /** valid | permerror | temperror | none. */
   eval_result: string
+  /** Apex TXT RRset TTL from `dig +noall +answer` (null when dig is absent) — drives spf.ttl. */
+  ttl: number | null
+  /** Local vs 8.8.8.8 public-resolver view of the v=spf1 set (null when dig is absent). */
+  cross_resolver: { resolver: string; agrees: boolean; public_records: string[] } | null
+  /** IPv6-completeness posture (spf.ipv6): v6 entries in the pass-set + whether MX publishes AAAA. */
+  ipv6: { pass_set_v6_count: number; mx_has_aaaa: boolean }
+  /** Declared mail role vs the record (spf.mail_posture): Null MX / non-sending-record signals. */
+  mail_posture: { has_mx: boolean; null_mx: boolean; non_sending_record: boolean }
+  /** DNS-side DMARC alignment posture (spf.alignment_prep): the _dmarc record's aspf= tag. */
+  alignment: { dmarc_found: boolean; aspf: "r" | "s" | null }
   include_tree: SpfTreeNode | null
   /** The concrete ip4/ip6 CIDRs the record authorizes, each with its source term. */
   pass_set: { cidr: string; source: string }[]
@@ -690,6 +700,71 @@ export function analyzeSpfTerms(domain: string, raw: string, parsed: ParsedSpf):
     }
   }
 
+  // exists: is only sane WITH a macro — a macro-less exists: matches for every connecting IP
+  // (an accidental pass-everything, one DNS entry away from +all) (pm/checks/spf.mdx §2).
+  const existsTerms = parsed.mechanisms.filter((m) => m.type === "exists")
+  if (existsTerms.length > 0) {
+    const macroless = existsTerms.filter((m) => !(m.value ?? "").includes("%"))
+    if (macroless.length > 0) {
+      findings.push({
+        id: "spf.exists_usage",
+        checkId: "spf",
+        title: `Macro-less exists: ${macroless.map((m) => m.raw).join(", ")}`,
+        severity: "warning",
+        detail:
+          "A macro-less exists: matches whenever the fixed name resolves — i.e. for every connecting IP, an accidental pass-everything one DNS entry away from +all.",
+        remediation:
+          "Replace the macro-less exists: with the intended ip4:/ip6: or include:; keep exists: only in its %{…}-macro form.",
+        evidence: macroless.map((m) => m.raw).join(" "),
+      })
+    } else {
+      findings.push({
+        id: "spf.exists_usage",
+        checkId: "spf",
+        title: "Macro exists: in use (legal)",
+        severity: "info",
+        detail:
+          "exists: with a %{…} macro is legal — it is counted toward the lookup budget but cannot be statically expanded; verify it with a live-message evaluation.",
+        evidence: existsTerms.map((m) => m.raw).join(" "),
+      })
+    }
+  }
+
+  // Lookup mechanisms should carry the default + qualifier. -include: is a semantic trap: include
+  // only ever matches on the target's pass, so -include: hard-fails exactly the vendor's IPs.
+  const nonPlusLookups = parsed.mechanisms.filter(
+    (m) =>
+      (m.type === "include" || m.type === "a" || m.type === "mx" || m.type === "exists") &&
+      m.qualifier !== "+",
+  )
+  if (nonPlusLookups.length > 0) {
+    const hardFail = nonPlusLookups.filter((m) => m.qualifier === "-")
+    if (hardFail.length > 0) {
+      findings.push({
+        id: "spf.include_qualifier",
+        checkId: "spf",
+        title: `Hard-fail on a lookup mechanism: ${hardFail.map((m) => m.raw).join(", ")}`,
+        severity: "warning",
+        detail:
+          "include only ever matches on the target's pass, so -include: means 'hard-fail exactly the IPs your vendor authorizes' — almost never what was intended.",
+        remediation:
+          "Drop the qualifier (use plain include:) unless you truly mean to fail the target's authorized ranges.",
+        evidence: hardFail.map((m) => m.raw).join(" "),
+      })
+    } else {
+      findings.push({
+        id: "spf.include_qualifier",
+        checkId: "spf",
+        title: `Non-default qualifier on a lookup mechanism: ${nonPlusLookups.map((m) => m.raw).join(", ")}`,
+        severity: "info",
+        detail:
+          "A ~ or ? qualifier on include/a/mx/exists is legal but rarely intended — these mechanisms only match on the target's pass.",
+        remediation: "Use the plain (+) form unless the softfail/neutral is deliberate.",
+        evidence: nonPlusLookups.map((m) => m.raw).join(" "),
+      })
+    }
+  }
+
   // Record length: >450 bytes risks UDP truncation and TempErrors at strict resolvers.
   const byteLength = Buffer.byteLength(raw, "utf8")
   if (byteLength > 450) {
@@ -726,6 +801,11 @@ function emptyResults(domain: string): SpfResults {
     has_redirect: false,
     byte_length: 0,
     eval_result: "none",
+    ttl: null,
+    cross_resolver: null,
+    ipv6: { pass_set_v6_count: 0, mx_has_aaaa: false },
+    mail_posture: { has_mx: false, null_mx: false, non_sending_record: false },
+    alignment: { dmarc_found: false, aspf: null },
     include_tree: null,
     pass_set: [],
     ip_coverage: [],
@@ -952,6 +1032,220 @@ export const spfCheck: Checker = {
       })
     }
 
+    // ---- Posture reads (pm/checks/spf.mdx §4 step 5 / §5) — none SPF-budget-counted ----
+
+    // TTL (spf.ttl): the apex TXT RRset TTL is only visible via `dig +noall +answer` (§3 row 2).
+    // Skipped (ttl null, no finding) when dig is absent or the SPF row is not in the answer.
+    let ttl: number | null = null
+    const txtAnswer = await digAnswer(ctx.domain, "TXT")
+    if (!txtAnswer.error) {
+      const spfRow = txtAnswer.records.find((r) => r.rdata.toLowerCase().includes("v=spf1"))
+      if (spfRow) {
+        ttl = spfRow.ttl
+        if (ttl > 86_400) {
+          findings.push({
+            id: "spf.ttl",
+            checkId: "spf",
+            title: `SPF TTL is very long (${ttl}s)`,
+            severity: "warning",
+            detail:
+              "A TTL over 86,400s (1 day) means a broken record stays broken — and an emergency fix stays invisible — for more than a day after you correct it.",
+            remediation:
+              "Set the SPF TXT record's TTL to ~3600s (1 hour) at the DNS console once the record is stable.",
+            evidence: `TTL ${ttl}s`,
+          })
+        } else if (ttl < 300) {
+          findings.push({
+            id: "spf.ttl",
+            checkId: "spf",
+            title: `SPF TTL is very short (${ttl}s)`,
+            severity: "info",
+            detail:
+              "A sub-5-minute TTL is migration-grade churn — fine short-term while you are editing the record, wasteful as a steady state (it hammers resolvers for no benefit).",
+            remediation: "Once the record is stable, raise the TTL to ~3600s (1 hour).",
+            evidence: `TTL ${ttl}s`,
+          })
+        } else {
+          findings.push({
+            id: "spf.ttl",
+            checkId: "spf",
+            title: `TTL ${ttl}s — sane`,
+            severity: "ok",
+            detail: "The SPF TXT record's TTL is in the operationally sane range (~300s–86,400s).",
+            evidence: `TTL ${ttl}s`,
+          })
+        }
+      }
+    }
+
+    // Cross-resolver (spf.cross_resolver): does 8.8.8.8 see the same v=spf1 set as the local
+    // resolver? Catches propagation lag, split-horizon views, and stale caches. Skipped when dig
+    // is absent. `dig +short TXT` returns quoted, possibly multi-chunk strings — normalize both.
+    let crossResolver: SpfResults["cross_resolver"] = null
+    const publicView = await dig(ctx.domain, "TXT", { resolver: "8.8.8.8" })
+    if (!publicView.error) {
+      const normalize = (r: string) => r.replace(/"\s+"/g, "").replace(/^"|"$/g, "")
+      const publicSpf = publicView.records
+        .map(normalize)
+        .filter((r) => r.toLowerCase().startsWith("v=spf1"))
+      const localSet = [...spf].sort()
+      const publicSet = [...publicSpf].sort()
+      const agrees =
+        localSet.length === publicSet.length && localSet.every((r, i) => r === publicSet[i])
+      crossResolver = { resolver: "8.8.8.8", agrees, public_records: publicSpf }
+      if (agrees) {
+        findings.push({
+          id: "spf.cross_resolver",
+          checkId: "spf",
+          title: "Local and 8.8.8.8 answers agree",
+          severity: "ok",
+          detail: "The local resolver and Google's 8.8.8.8 return the same v=spf1 record set.",
+          evidence: publicSpf.join(" | "),
+        })
+      } else {
+        findings.push({
+          id: "spf.cross_resolver",
+          checkId: "spf",
+          title: "Local and 8.8.8.8 resolvers disagree",
+          severity: "warning",
+          detail:
+            "The local resolver and 8.8.8.8 return different v=spf1 answers — a sign of propagation lag after an edit, a split-horizon DNS view, or a stale cache.",
+          remediation:
+            "Wait out the record's TTL after an edit and re-run; if it persists, check for split-horizon DNS or authoritative servers serving different zone versions.",
+          evidence: `local: ${spf.join(" | ")} — 8.8.8.8: ${publicSpf.join(" | ") || "(none)"}`,
+        })
+      }
+    }
+
+    // Mail posture (spf.mail_posture): the declared mail role vs the record (RFC 7505). resolveMx
+    // is memoized and shared with the MX check.
+    const mx = await resolveMx(ctx.domain)
+    const isNullExchange = (ex: string) => ex === "." || ex === ""
+    const nullMx =
+      mx.records.length === 1 && mx.records[0].priority === 0 && isNullExchange(mx.records[0].exchange)
+    const hasMx = mx.records.length > 0 && !nullMx
+    const nonSendingRecord = raw.trim().toLowerCase() === "v=spf1 -all"
+    const hasAuthorizingMech = parsed.mechanisms.some((m) =>
+      ["ip4", "ip6", "a", "mx", "include", "exists"].includes(m.type),
+    )
+    if (nonSendingRecord && nullMx) {
+      findings.push({
+        id: "spf.mail_posture",
+        checkId: "spf",
+        title: "Locked-down non-sending posture",
+        severity: "ok",
+        detail:
+          "The record is exactly `v=spf1 -all` and a Null MX (0 .) is published — the correct non-sending posture (add DMARC p=reject to complete the trio).",
+        evidence: raw,
+      })
+    } else if (nonSendingRecord && !nullMx) {
+      findings.push({
+        id: "spf.mail_posture",
+        checkId: "spf",
+        title: "Non-sending SPF (`-all`) but no Null MX",
+        severity: "info",
+        detail:
+          "The record is exactly `v=spf1 -all` (a non-sending declaration), but no Null MX (0 .) is published — the RFC 7505 non-sending trio is incomplete.",
+        remediation:
+          "For a domain that never sends mail, publish `v=spf1 -all`, a Null MX (`0 .`), and DMARC `p=reject`.",
+        evidence: raw,
+      })
+    } else if (nullMx && hasAuthorizingMech) {
+      findings.push({
+        id: "spf.mail_posture",
+        checkId: "spf",
+        title: "Null MX with an authorizing SPF record (send-only)",
+        severity: "info",
+        detail:
+          "A Null MX (0 .) says the domain does not receive mail, yet the SPF record authorizes senders — a legitimate send-only posture. Confirm it is deliberate.",
+        remediation: "If the send-only posture is intentional, document it; otherwise review the MX.",
+        evidence: raw,
+      })
+    }
+
+    // IPv6 completeness (spf.ipv6): infrastructure that receives on IPv6 usually sends on it too.
+    const passSetV6Count = state.passSet.filter((p) => p.cidr.includes(":")).length
+    let mxHasAaaa = false
+    for (const rec of mx.records.slice(0, 3)) {
+      if (isNullExchange(rec.exchange)) continue
+      const aaaa = await resolve6(rec.exchange)
+      if (aaaa.records.length > 0) {
+        mxHasAaaa = true
+        break
+      }
+    }
+    if (mxHasAaaa && passSetV6Count === 0) {
+      findings.push({
+        id: "spf.ipv6",
+        checkId: "spf",
+        title: "No IPv6 coverage while MX hosts publish AAAA",
+        severity: "warning",
+        detail:
+          "The domain's MX hosts publish AAAA (an IPv6 mail signal) but the expanded pass-set authorizes zero IPv6 ranges — mail sent over IPv6 (Gmail prefers AAAA) silently fails SPF.",
+        remediation:
+          "Add the sending hosts' ip6: ranges (or confirm the vendor include: already carries them — the include tree shows it).",
+        evidence: raw,
+      })
+    } else {
+      findings.push({
+        id: "spf.ipv6",
+        checkId: "spf",
+        title:
+          passSetV6Count > 0
+            ? `IPv6 authorized (${passSetV6Count} range${passSetV6Count === 1 ? "" : "s"})`
+            : "No IPv6 mail signal observed",
+        severity: "ok",
+        detail:
+          passSetV6Count > 0
+            ? "The record authorizes IPv6 ranges, so the v6 sending path is covered."
+            : "No IPv6 mail signal (no AAAA on the MX hosts), so a v4-only pass-set is fine.",
+      })
+    }
+
+    // Alignment prep (spf.alignment_prep): the _dmarc record's aspf= tag (the DNS half of SPF/DMARC
+    // alignment). resolveTxt(_dmarc) is memoized and shared with the DMARC check.
+    const dmarcLookup = await resolveTxt(`_dmarc.${ctx.domain}`)
+    const dmarcRec = dmarcLookup.records.find((r) => r.toLowerCase().startsWith("v=dmarc1"))
+    let aspf: "r" | "s" | null = null
+    if (dmarcRec) {
+      const m = /aspf=([rs])/i.exec(dmarcRec)
+      aspf = m ? (m[1].toLowerCase() as "r" | "s") : "r"
+    }
+    if (aspf === "s") {
+      findings.push({
+        id: "spf.alignment_prep",
+        checkId: "spf",
+        title: "DMARC uses strict SPF alignment (aspf=s)",
+        severity: "warning",
+        detail:
+          "With aspf=s, ESP return-path subdomains (em1234.<domain>) contribute nothing to DMARC even when raw SPF passes — the stream then relies on aligned DKIM alone.",
+        remediation:
+          "Use relaxed alignment: delete aspf=s (or set aspf=r) in the _dmarc record unless strict is a hard requirement.",
+        evidence: dmarcRec,
+      })
+    } else if (!dmarcRec) {
+      findings.push({
+        id: "spf.alignment_prep",
+        checkId: "spf",
+        title: "No DMARC record — SPF alignment not in play yet",
+        severity: "info",
+        detail:
+          "No _dmarc record is published, so SPF/DMARC alignment is not evaluated. Deploy DMARC to turn SPF passes into DMARC passes.",
+        remediation: "Publish a _dmarc TXT record (start at p=none with rua reporting).",
+        evidence: `_dmarc.${ctx.domain}`,
+      })
+    } else {
+      findings.push({
+        id: "spf.alignment_prep",
+        checkId: "spf",
+        title: "Relaxed SPF alignment (aspf=r)",
+        severity: "ok",
+        detail:
+          "DMARC uses relaxed SPF alignment (the RFC 7489 default), so an ESP return-path subdomain in the same org-domain still counts toward DMARC.",
+        evidence: dmarcRec,
+      })
+    }
+
     const permerror =
       parsed.syntaxErrors.length > 0 ||
       parsed.macroErrors.length > 0 ||
@@ -972,6 +1266,11 @@ export const spfCheck: Checker = {
       has_redirect: Boolean(parsed.redirect),
       byte_length: Buffer.byteLength(raw, "utf8"),
       eval_result: permerror ? "permerror" : "valid",
+      ttl,
+      cross_resolver: crossResolver,
+      ipv6: { pass_set_v6_count: passSetV6Count, mx_has_aaaa: mxHasAaaa },
+      mail_posture: { has_mx: hasMx, null_mx: nullMx, non_sending_record: nonSendingRecord },
+      alignment: { dmarc_found: Boolean(dmarcRec), aspf },
       include_tree: tree,
       pass_set: state.passSet,
       ip_coverage: ipCoverage,

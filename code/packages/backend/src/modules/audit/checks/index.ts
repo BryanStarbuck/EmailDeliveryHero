@@ -14,6 +14,7 @@ import { linkUrlReputationCheck } from "./link-url-reputation/link-url-reputatio
 import { listUnsubscribeCheck } from "./list-unsubscribe/list-unsubscribe.check"
 import { mtaStsCheck } from "./mta-sts/mta-sts.check"
 import { mxRoutingCheck } from "./mx-routing/mx-routing.check"
+import { reportEmailsCheck } from "./report-emails/report-emails.check"
 import { reputationMetricsCheck } from "./reputation-metrics/reputation-metrics.check"
 import { reverseDnsCheck } from "./reverse-dns/reverse-dns.check"
 import { smtpSecurityCheck } from "./smtp-security/smtp-security.check"
@@ -55,6 +56,9 @@ export const CHECKERS: Checker[] = [
   // Spam & Content
   bimiCheck,
   contentScoringCheck,
+  // Family #7 — the run-time report-email corpus scan (pm/emails.mdx §13): runs BEFORE
+  // dmarc.reports / infra.tls_rpt (run-graph.ts) so their §5 findings read a fresh store.
+  reportEmailsCheck,
   listUnsubscribeCheck,
   linkUrlReputationCheck,
   reputationMetricsCheck,

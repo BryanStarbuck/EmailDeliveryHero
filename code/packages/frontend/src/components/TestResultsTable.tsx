@@ -15,6 +15,7 @@ export function TestResultsTable({
   findings,
   emptyText = "No tests in the latest run.",
   expectedById,
+  titleLinkFor,
 }: {
   findings: Finding[]
   emptyText?: string
@@ -23,6 +24,12 @@ export function TestResultsTable({
    * row shows observed AND expected, e.g. `<auth_name> TXT "v=DMARC1"`).
    */
   expectedById?: Map<string, string>
+  /**
+   * Optional deep link per finding id (pm/checks/dmarc.mdx §6.2 item 5): when it returns a
+   * navigate callback, the test name renders as a link to the owning sub-test explainer page;
+   * ids with no owning unit (e.g. `dmarc.tool_missing`) return undefined and stay plain text.
+   */
+  titleLinkFor?: (findingId: string) => (() => void) | undefined
 }) {
   const sorted = [...findings].sort((a, b) => ORDER[a.severity] - ORDER[b.severity])
   const counts = {
@@ -45,7 +52,12 @@ export function TestResultsTable({
         ) : (
           <ul>
             {sorted.map((f) => (
-              <TestRow key={f.id + f.title} finding={f} expected={expectedById?.get(f.id)} />
+              <TestRow
+                key={f.id + f.title}
+                finding={f}
+                expected={expectedById?.get(f.id)}
+                titleLink={titleLinkFor?.(f.id)}
+              />
             ))}
           </ul>
         )}
@@ -54,7 +66,15 @@ export function TestResultsTable({
   )
 }
 
-function TestRow({ finding: f, expected }: { finding: Finding; expected?: string }) {
+function TestRow({
+  finding: f,
+  expected,
+  titleLink,
+}: {
+  finding: Finding
+  expected?: string
+  titleLink?: () => void
+}) {
   const [open, setOpen] = useState(f.severity === "critical")
   const icon =
     f.severity === "ok" ? (
@@ -75,7 +95,27 @@ function TestRow({ finding: f, expected }: { finding: Finding; expected?: string
       >
         {icon}
         <span className="font-mono text-xs uppercase text-[var(--edh-muted)]">{f.id}</span>
-        <span className="font-medium">{f.title}</span>
+        {titleLink ? (
+          <span
+            role="link"
+            tabIndex={0}
+            onClick={(e) => {
+              e.stopPropagation()
+              titleLink()
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.stopPropagation()
+                titleLink()
+              }
+            }}
+            className="font-medium text-[var(--edh-primary)] underline-offset-2 hover:underline"
+          >
+            {f.title}
+          </span>
+        ) : (
+          <span className="font-medium">{f.title}</span>
+        )}
         <ChevronDown
           className={cn(
             "ml-auto h-4 w-4 shrink-0 text-[var(--edh-muted)] transition-transform",

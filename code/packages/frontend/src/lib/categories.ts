@@ -71,7 +71,7 @@ export function techPageRoute(
 }
 
 /** The never-run cell — no audit has produced this category yet. */
-export const NEVER_CELL: CellStatus = { color: "gray", label: "Never run", title: "Never run" }
+export const NEVER_CELL: CellStatus = { color: "gray", label: "Never", title: "Never run" }
 
 const WORST: Record<Severity, number> = { ok: 0, info: 1, warning: 2, critical: 3 }
 

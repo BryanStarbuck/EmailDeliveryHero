@@ -74,6 +74,21 @@ export function useDnsSpotCheck() {
 }
 
 /**
+ * Category-scoped re-run of all ten DNS & Infrastructure family checkers
+ * (pm/checks/dns.mdx §15.1 / §17 footer — "Re-run DNS checks only"). Writes a NEW run file
+ * tagged `run.scope: dns`; the newest-run roll-up merges per category so only the DNS cell
+ * advances. Persisted, so the results/runs queries are invalidated.
+ */
+export function useRunDnsChecks() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (domainId: string) =>
+      (await api.post<AuditResult>(`/audit/run/${domainId}/check/dns`)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: RESULTS_KEY }),
+  })
+}
+
+/**
  * The DANE subsection's one-click TLSA generator (pm/checks/dane_tlsa.mdx §4): paste a PEM
  * certificate, get back the exact `3 1 1` record to publish at `_25._tcp.<mx-host>`. Pure
  * computation on the backend — nothing persisted, no queries to invalidate.

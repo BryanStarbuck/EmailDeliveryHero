@@ -71,16 +71,69 @@ export interface TlsRptAggregate {
 const DISPOSITION_RANK: Record<string, number> = { none: 0, quarantine: 1, reject: 2 }
 
 /** True when `child` equals `parent` or is a subdomain of it. */
-function underDomain(child: string, parent: string): boolean {
+export function underDomain(child: string, parent: string): boolean {
   const c = child.replace(/\.$/, "").toLowerCase()
   const p = parent.replace(/\.$/, "").toLowerCase()
   return c === p || c.endsWith(`.${p}`)
 }
 
 /** "Known sender" heuristic (§3.1): the row's envelope or a DKIM d= traces to the org domain. */
-function isKnownSender(row: DmarcReportRow, domain: string): boolean {
+export function isKnownSender(row: DmarcReportRow, domain: string): boolean {
   if (row.envelopeSpfDomain && underDomain(row.envelopeSpfDomain, domain)) return true
   return row.dkimSigningDomains.some((d) => underDomain(d, domain))
+}
+
+/**
+ * Volume breakdown of a DMARC aggregate (pm/emails.mdx §13.3/§16.3 snapshot fields): how many
+ * messages passed on one mechanism only (the fragile slices), failed both, or were actively
+ * quarantined/rejected by receivers.
+ */
+export function dmarcVolumeBreakdown(agg: DmarcAggregate): {
+  dkimOnly: number
+  spfOnly: number
+  bothFail: number
+  quarantined: number
+  rejected: number
+} {
+  let dkimOnly = 0
+  let spfOnly = 0
+  let bothFail = 0
+  let quarantined = 0
+  let rejected = 0
+  for (const row of agg.rows) {
+    if (row.dkimAligned && !row.spfAligned) dkimOnly += row.count
+    else if (row.spfAligned && !row.dkimAligned) spfOnly += row.count
+    else if (!row.spfAligned && !row.dkimAligned) bothFail += row.count
+    if (row.disposition === "quarantine") quarantined += row.count
+    else if (row.disposition === "reject") rejected += row.count
+  }
+  return { dkimOnly, spfOnly, bothFail, quarantined, rejected }
+}
+
+/**
+ * The §7.1 fragile-stream detection, shared by the per-source dmarc.report_alignment_fragility
+ * enumeration (§5) and the aggregate content.report_fragility verdict (§13.2): OWN streams that
+ * pass DMARC on only one mechanism. DKIM-only rows count only when the envelope traces to the org
+ * domain (an ESP subdomain under aspf=s); a DKIM-only row with an unrelated envelope is forwarded
+ * mail — benign when DKIM aligns (§3.1). SPF-only rows count when the stream is otherwise ours.
+ */
+export function fragileStreams(
+  agg: DmarcAggregate,
+  domain: string,
+): Map<string, { count: number; ips: Set<string>; dkimOnly: boolean }> {
+  const fragile = new Map<string, { count: number; ips: Set<string>; dkimOnly: boolean }>()
+  for (const row of agg.rows) {
+    if (!row.dmarcPass || row.spfAligned === row.dkimAligned) continue
+    const dkimOnly = row.dkimAligned && !row.spfAligned
+    if (dkimOnly && !(row.envelopeSpfDomain && underDomain(row.envelopeSpfDomain, domain))) continue
+    if (!dkimOnly && !isKnownSender(row, domain)) continue
+    const streamKey = `${row.envelopeSpfDomain || row.sourceIp}|${dkimOnly ? "dkim" : "spf"}`
+    const entry = fragile.get(streamKey) ?? { count: 0, ips: new Set<string>(), dkimOnly }
+    entry.count += row.count
+    entry.ips.add(row.sourceIp)
+    fragile.set(streamKey, entry)
+  }
+  return fragile
 }
 
 /** Reports whose window overlaps [start, end]. */
@@ -302,24 +355,9 @@ export function deriveDmarcReportFindings(domainId: string, domain: string): Fin
     }
   }
 
-  // dmarc.report_alignment_fragility — own streams passing via ONE mechanism only (§5 row 3).
-  const fragile = new Map<string, { count: number; ips: Set<string>; dkimOnly: boolean }>()
-  for (const row of agg.rows) {
-    if (!row.dmarcPass || row.spfAligned === row.dkimAligned) continue
-    const dkimOnly = row.dkimAligned && !row.spfAligned
-    // A DKIM-only row is a fragile OWN stream only when its envelope traces to the org domain
-    // (an ESP subdomain like em2598.<domain> under aspf=s). A DKIM-only row with an unrelated
-    // envelope (gmail.com, another org) is FORWARDED/indirect mail — benign when DKIM aligns
-    // (§3.1 "Forwarded / indirect mail failing"), so it is not flagged.
-    if (dkimOnly && !(row.envelopeSpfDomain && underDomain(row.envelopeSpfDomain, domain))) continue
-    // An SPF-only row is fragile when the stream is otherwise ours (it should also sign).
-    if (!dkimOnly && !isKnownSender(row, domain)) continue
-    const streamKey = `${row.envelopeSpfDomain || row.sourceIp}|${dkimOnly ? "dkim" : "spf"}`
-    const entry = fragile.get(streamKey) ?? { count: 0, ips: new Set<string>(), dkimOnly }
-    entry.count += row.count
-    entry.ips.add(row.sourceIp)
-    fragile.set(streamKey, entry)
-  }
+  // dmarc.report_alignment_fragility — own streams passing via ONE mechanism only (§5 row 3);
+  // detection shared with the aggregate content.report_fragility verdict (fragileStreams above).
+  const fragile = fragileStreams(agg, domain)
   if (fragile.size === 0) {
     findings.push({
       id: "dmarc.report_alignment_fragility",

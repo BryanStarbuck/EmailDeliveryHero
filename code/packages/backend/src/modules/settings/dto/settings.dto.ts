@@ -112,6 +112,33 @@ export class ChecksDnsblDto {
   zones?: string[]
 }
 
+/**
+ * Link / URL-reputation admin settings (pm/checks/link_url_reputation.mdx §4/§5 — the "URL
+ * Reputation" settings sub-panel): the public URL-shortener domain list matched by
+ * `content.url_shortener` (config, not code) and the Google Safe Browsing API key that enables
+ * `content.url_safe_browsing` in a future round ("" clears the key = not configured).
+ */
+export class ChecksContentUrlDto {
+  @ApiPropertyOptional({
+    type: [String],
+    description: "Public URL-shortener domains flagged by content.url_shortener (registrable domains)",
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(500)
+  @IsString({ each: true })
+  @MaxLength(253, { each: true })
+  shorteners?: string[]
+
+  @ApiPropertyOptional({
+    description: "Google Safe Browsing API key for content.url_safe_browsing (empty = not configured)",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  safeBrowsingKey?: string
+}
+
 /** Content-scoring admin settings (pm/checks/content_scoring.mdx §4). */
 export class ChecksContentDto {
   @ApiPropertyOptional({ description: "SpamAssassin spam threshold override (default 5.0)" })
@@ -134,6 +161,12 @@ export class ChecksContentDto {
   @IsOptional()
   @IsBoolean()
   networkTests?: boolean
+
+  @ApiPropertyOptional({ type: ChecksContentUrlDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ChecksContentUrlDto)
+  url?: ChecksContentUrlDto
 }
 
 /**
@@ -211,6 +244,47 @@ export class ChecksDaneDto {
   @IsOptional()
   @IsBoolean()
   requireAdBit?: boolean
+}
+
+/**
+ * List-Unsubscribe / one-click admin settings (pm/checks/list_unsubscribe.mdx §4 "Admin-only
+ * settings"): the Gmail/Yahoo bulk-sender daily threshold (default 5,000), the endpoint-probe
+ * timeout (default 5s), whether the live one-click POST probe is globally permitted at all, and
+ * the probe cadence (default 24h — the probe never re-fires more often, §6).
+ */
+export class ChecksListUnsubDto {
+  @ApiPropertyOptional({
+    description: "Gmail/Yahoo bulk-sender daily message threshold (default 5000)",
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(10_000_000)
+  bulkThresholdPerDay?: number
+
+  @ApiPropertyOptional({ description: "One-click endpoint probe timeout in ms (default 5000)" })
+  @IsOptional()
+  @IsInt()
+  @Min(500)
+  @Max(120000)
+  probeTimeoutMs?: number
+
+  @ApiPropertyOptional({
+    description:
+      "Globally permit the live one-click POST probe (per-domain probeUnsubEndpoint still required)",
+  })
+  @IsOptional()
+  @IsBoolean()
+  probeAllowed?: boolean
+
+  @ApiPropertyOptional({
+    description: "Minimum hours between live endpoint probes per domain (default 24)",
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(24 * 30)
+  probeCadenceHours?: number
 }
 
 export class ChecksThresholdsDto {
@@ -298,6 +372,12 @@ export class ChecksConfigDto {
   @ValidateNested()
   @Type(() => ChecksDaneDto)
   dane?: ChecksDaneDto
+
+  @ApiPropertyOptional({ type: ChecksListUnsubDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ChecksListUnsubDto)
+  listUnsub?: ChecksListUnsubDto
 
   @ApiPropertyOptional({ type: ChecksThresholdsDto })
   @IsOptional()
@@ -460,6 +540,83 @@ export class DnsHealthSettingsDto {
   fingerprints?: TakeoverFingerprintDto[]
 }
 
+/**
+ * One registrar/TLD abuse-reputation watchlist entry (pm/checks/domain_reputation.mdx §5 — the
+ * `registrar_reputation` reference table mapped onto `config.yaml →
+ * domain_reputation.registrar_reputation`, admin-editable §4). The `infra.registrar_reputation`
+ * and `infra.tld_risk` sub-checks match the audited domain's registrar / TLD against these rows.
+ */
+export class RegistrarReputationEntryDto {
+  @ApiProperty({ enum: ["registrar_iana_id", "registrar_name", "tld"] })
+  @IsIn(["registrar_iana_id", "registrar_name", "tld"])
+  match_type!: "registrar_iana_id" | "registrar_name" | "tld"
+
+  @ApiProperty({ description: 'IANA registrar id, registrar-name substring, or a TLD like "top"' })
+  @IsString()
+  @MaxLength(253)
+  match_value!: string
+
+  @ApiPropertyOptional({ description: "Why this entry is on the watchlist (shown in the finding)" })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  note?: string
+}
+
+/**
+ * Domain Registration Reputation admin settings (pm/checks/domain_reputation.mdx §4 "Global admin
+ * settings"): the long-TTL RDAP cache / per-run request budget and the curated reference lists
+ * (parking-provider nameservers, high-abuse TLDs, registrar abuse-reputation watchlist).
+ */
+export class DomainReputationSettingsDto {
+  @ApiPropertyOptional({
+    description: "RDAP snapshot cache TTL in hours (default 24 — registration data is stale-tolerant)",
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(24 * 30)
+  cache_ttl_hours?: number
+
+  @ApiPropertyOptional({ description: "Max RDAP requests per run (default 5 — endpoints rate-limit hard)" })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  rdap_request_budget?: number
+
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Parking-provider nameserver suffixes, e.g. "sedoparking.com" (replaces the whole list)',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(200)
+  @IsString({ each: true })
+  parking_nameservers?: string[]
+
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'High-abuse TLDs, e.g. "top" (Spamhaus TLD stats; replaces the whole list)',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(200)
+  @IsString({ each: true })
+  high_abuse_tlds?: string[]
+
+  @ApiPropertyOptional({
+    type: [RegistrarReputationEntryDto],
+    description: "Registrar/TLD abuse-reputation watchlist (replaces the whole list)",
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(200)
+  @ValidateNested({ each: true })
+  @Type(() => RegistrarReputationEntryDto)
+  registrar_reputation?: RegistrarReputationEntryDto[]
+}
+
 export class AccessConfigDto {
   @ApiPropertyOptional({
     type: [String],
@@ -471,6 +628,120 @@ export class AccessConfigDto {
   @ArrayMaxSize(20)
   @IsString({ each: true })
   allowedDomains?: string[]
+}
+
+/**
+ * One seed mailbox (pm/checks/inbox_placement.mdx §5 — the `seed_list_config` reference table
+ * mapped onto `config.yaml → seedList.seeds`): the provider it covers, the address the probe is
+ * sent to, and how the mailbox is read back (imap/graph/jmap for self-hosted, "service" when the
+ * seed service owns the mailbox). Credentials live in the out-of-repo credentials file.
+ */
+export class SeedMailboxEntryDto {
+  @ApiProperty({ description: 'Provider key, e.g. "gmail" | "outlook" | "yahoo" | "apple"' })
+  @IsString()
+  @MaxLength(100)
+  provider!: string
+
+  @ApiProperty({ description: "The seed mailbox address the probe is sent to" })
+  @IsString()
+  @MaxLength(320)
+  seed_address!: string
+
+  @ApiProperty({ enum: ["imap", "graph", "jmap", "service"] })
+  @IsIn(["imap", "graph", "jmap", "service"])
+  read_method!: "imap" | "graph" | "jmap" | "service"
+
+  @ApiProperty({ description: "Whether this seed is live (counted for coverage / probed)" })
+  @IsBoolean()
+  active!: boolean
+}
+
+/** Overall inbox-rate severity bands (pm/checks/inbox_placement.mdx §4, defaults 80 / 50). */
+export class SeedThresholdsDto {
+  @ApiPropertyOptional({ description: "Overall inbox rate below this % → warning (default 80)" })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  warnBelowPct?: number
+
+  @ApiPropertyOptional({ description: "Overall inbox rate below this % → critical (default 50)" })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  criticalBelowPct?: number
+}
+
+/**
+ * Seed-list inbox-placement admin settings (pm/checks/inbox_placement.mdx §4 "Admin-only
+ * settings", §5 `seedList:`, §6 gating): the seed source ("" = not configured — the whole
+ * placement family stays dark), the tested providers, the slow dedicated cadence, the inbox-rate
+ * bands, the settle-window poll schedule, the monthly test budget, and the seed mailboxes.
+ */
+export class SeedListSettingsDto {
+  @ApiPropertyOptional({
+    description:
+      'Seed source: "" = not configured; a seed-service name (glockapps/mailtrap/everest/' +
+      'mailreach) or "self_hosted". API key / mailbox credentials live in the credentials file.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  service?: string
+
+  @ApiPropertyOptional({ type: [String], description: "Providers to test (spec §4 config)" })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  providers?: string[]
+
+  @ApiPropertyOptional({
+    enum: ["daily", "weekly"],
+    description: "The slow dedicated cadence — decoupled from the 6h DNS cadence (spec §6)",
+  })
+  @IsOptional()
+  @IsIn(["daily", "weekly"])
+  cadence?: "daily" | "weekly"
+
+  @ApiPropertyOptional({ type: SeedThresholdsDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SeedThresholdsDto)
+  thresholds?: SeedThresholdsDto
+
+  @ApiPropertyOptional({
+    type: [Number],
+    description: "Read-back poll backoff in minutes before a Missing verdict (default 2/5/10/15)",
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  @Max(24 * 60, { each: true })
+  settlePollMinutes?: number[]
+
+  @ApiPropertyOptional({
+    description: "Max probe sends per calendar month — each spends a credit and sends real mail",
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  monthlyBudget?: number
+
+  @ApiPropertyOptional({
+    type: [SeedMailboxEntryDto],
+    description: "Self-hosted seed mailboxes (replaces the whole list; deduped on seed_address)",
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(500)
+  @ValidateNested({ each: true })
+  @Type(() => SeedMailboxEntryDto)
+  seeds?: SeedMailboxEntryDto[]
 }
 
 export class UpdateAdminSettingsDto {
@@ -515,6 +786,18 @@ export class UpdateAdminSettingsDto {
   @ValidateNested()
   @Type(() => DnsHealthSettingsDto)
   dns_health?: DnsHealthSettingsDto
+
+  @ApiPropertyOptional({ type: DomainReputationSettingsDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => DomainReputationSettingsDto)
+  domain_reputation?: DomainReputationSettingsDto
+
+  @ApiPropertyOptional({ type: SeedListSettingsDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SeedListSettingsDto)
+  seedList?: SeedListSettingsDto
 }
 
 // ---------------------------------------------------------------------------

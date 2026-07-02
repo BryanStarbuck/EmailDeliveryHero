@@ -57,8 +57,27 @@ export interface DaneHostResult {
   mxHost: string
   /** MX priority, for coverage reporting. */
   mxPreference: number | null
+  /** The TLSA owner name queried (`_25._tcp.<canonical>`) — spec §11 item 1, for the explainer. */
+  tlsaName: string
+  /**
+   * The observed MX→canonical CNAME chain (every name traversed, original host first, canonical
+   * last); null when the MX target was not cnamed — spec §11 item 2 (raw-pane chain display +
+   * `dane_name_alignment` evidence).
+   */
+  cnameChain: string[] | null
+  /**
+   * The TLSA answer lines exactly as answered, one per RR (`_25._tcp.<mx>. <ttl> IN TLSA <rdata>`)
+   * — spec §11 item 3: powers the explainer's raw pane + copy button without re-querying.
+   */
+  rawAnswer: string[]
   /** MX host's zone DNSSEC-signed (DS/DNSKEY observed first-round; AD-bit trust is FUTURE). */
   dnssecSigned: boolean
+  /**
+   * An RRSIG was observed at the TLSA name itself — spec §11 item 4: split out of `dnssecSigned`
+   * so the parsed pane can say WHICH first-round DNSSEC evidence was seen (apex DS/DNSKEY vs
+   * RRSIG at the TLSA name).
+   */
+  rrsigObserved: boolean
   /** Any TLSA at `_25._tcp.<mx>`. */
   tlsaPresent: boolean
   tlsaRecords: DaneTlsaRecord[]
@@ -103,17 +122,25 @@ export function parseTlsa(answers: DigAnswer[]): Tlsa[] {
   return out
 }
 
-/** Follow the CNAME chain for an MX host to its final canonical name (RFC 7672 TLSA base name). */
-async function canonicalName(host: string): Promise<{ canonical: string; cnamed: boolean }> {
+/**
+ * Follow the CNAME chain for an MX host to its final canonical name (RFC 7672 TLSA base name).
+ * `chain` is every name traversed, original host first, canonical last (spec §11 item 2) — length
+ * 1 (just the host) when the MX target is not cnamed.
+ */
+async function canonicalName(
+  host: string,
+): Promise<{ canonical: string; cnamed: boolean; chain: string[] }> {
   let current = host.replace(/\.$/, "")
   let cnamed = false
+  const chain: string[] = [current]
   for (let i = 0; i < 8; i++) {
     const c = await resolveCname(current)
     if (c.records.length === 0) break
     cnamed = true
     current = c.records[0].replace(/\.$/, "")
+    chain.push(current)
   }
-  return { canonical: current, cnamed }
+  return { canonical: current, cnamed, chain }
 }
 
 /**
@@ -173,8 +200,12 @@ export interface HostObservation {
   priority: number
   canonical: string
   cnamed: boolean
+  /** The observed MX→canonical CNAME chain (host first, canonical last) — persisted per §11. */
+  cnameChain?: string[]
   tlsa: { records: DigAnswer[]; error?: string }
   dnssec: { signed: boolean; error: boolean }
+  /** An RRSIG was observed at the TLSA name itself (persisted separately per §11 item 4). */
+  rrsigObserved?: boolean
   /**
    * The admin-pinned expected next-cert SPKI digest (pm/checks/dane_tlsa.mdx §4, optional): when
    * set, `infra.dane_rollover` proactively warns until a TLSA record with this digest is staged.
@@ -205,10 +236,16 @@ export function analyzeHost(obs: HostObservation): {
   const tlsaName = `_25._tcp.${canonical}`
   const checkedAt = obs.checkedAt ?? new Date().toISOString()
 
+  // Spec §11: the answer lines exactly as returned, reconstructed from the full-answer RRs.
+  const rawAnswer = obs.tlsa.records.map((a) => `${a.name}. ${a.ttl} IN ${a.type} ${a.rdata}`)
   const baseRow = {
     mxHost: canonical,
     mxPreference: obs.priority,
+    tlsaName,
+    cnameChain: cnamed ? (obs.cnameChain ?? [host, canonical]) : null,
+    rawAnswer,
     dnssecSigned: dnssec.signed,
+    rrsigObserved: obs.rrsigObserved ?? false,
     certMatch: null,
     starttlsOffered: null,
     checkedAt,
@@ -656,7 +693,7 @@ export const daneTlsaCheck: Checker = {
     const perHost = await Promise.all(
       sorted.map(async (record) => {
         const host = record.exchange.replace(/\.$/, "")
-        const { canonical, cnamed } = await canonicalName(host)
+        const { canonical, cnamed, chain } = await canonicalName(host)
         const tlsaName = `_25._tcp.${canonical}`
         // TLSA lookup, the zone DNSSEC observation, and an RRSIG observation at the TLSA name are
         // independent — run them concurrently per host. An RRSIG covering the TLSA name is direct
@@ -679,8 +716,10 @@ export const daneTlsaCheck: Checker = {
           priority: record.priority,
           canonical,
           cnamed,
+          cnameChain: chain,
           tlsa: { records: tlsa.records, error: tlsa.error },
           dnssec,
+          rrsigObserved: rrsigSeen,
           expectedNextSpki: ctx.dane?.expectedNextSpki,
           requireAdBit: daneCfg.requireAdBit,
         })

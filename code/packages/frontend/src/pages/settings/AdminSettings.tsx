@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import {
   type BimiMvaEntry,
+  type RegistrarReputationEntry,
   type SettingsView,
   type TakeoverFingerprint,
   type UpdateAdminSettingsInput,
@@ -45,6 +46,18 @@ interface Draft {
   contentThreshold: number
   contentSafeTarget: number
   contentNetworkTests: boolean
+  /** List-Unsubscribe / one-click admin settings (pm/checks/list_unsubscribe.mdx §4). */
+  unsubBulkThreshold: number
+  unsubProbeTimeoutMs: number
+  unsubProbeAllowed: boolean
+  unsubProbeCadenceHours: number
+  /**
+   * URL Reputation admin settings (pm/checks/link_url_reputation.mdx §4/§5): the public
+   * URL-shortener domain list (comma-separated; empty = the bundled seed list) and the Google
+   * Safe Browsing API key ("" = not configured — content.url_safe_browsing stays info-gated).
+   */
+  urlShorteners: string
+  safeBrowsingKey: string
   /** SpamAssassin binary-path overrides (pm/checks/content_scoring.mdx §4; empty = auto-detect). */
   spamassassinPath: string
   spamcPath: string
@@ -52,6 +65,12 @@ interface Draft {
   mvaAllowList: BimiMvaEntry[]
   /** DNS-health subdomain-takeover fingerprints (pm/checks/dns_health.mdx §4/§5 — admin-only). */
   fingerprints: TakeoverFingerprint[]
+  /** Domain-registration-reputation settings (pm/checks/domain_reputation.mdx §4 — admin-only). */
+  repCacheTtlHours: number
+  repRdapBudget: number
+  repParkingNs: string
+  repHighAbuseTlds: string
+  repWatchlist: RegistrarReputationEntry[]
   webhookEnabled: boolean
   webhookUrl: string
   smtpHost: string
@@ -79,6 +98,12 @@ function toDraft(view: SettingsView): Draft {
     contentThreshold: checks.content?.threshold ?? 5.0,
     contentSafeTarget: checks.content?.safeTarget ?? 2.0,
     contentNetworkTests: checks.content?.networkTests ?? false,
+    unsubBulkThreshold: checks.listUnsub?.bulkThresholdPerDay ?? 5000,
+    unsubProbeTimeoutMs: checks.listUnsub?.probeTimeoutMs ?? 5000,
+    unsubProbeAllowed: checks.listUnsub?.probeAllowed ?? false,
+    unsubProbeCadenceHours: checks.listUnsub?.probeCadenceHours ?? 24,
+    urlShorteners: (checks.content?.url?.shorteners ?? []).join(", "),
+    safeBrowsingKey: checks.content?.url?.safeBrowsingKey ?? "",
     spamassassinPath: tools.paths?.spamassassin ?? "",
     spamcPath: tools.paths?.spamc ?? "",
     mvaAllowList: (checks.bimi?.mvaAllowList ?? []).map((m) => ({
@@ -86,6 +111,13 @@ function toDraft(view: SettingsView): Draft {
       markTypes: [...m.markTypes],
     })),
     fingerprints: (view.config.dns_health?.fingerprints ?? []).map((f) => ({ ...f })),
+    repCacheTtlHours: view.config.domain_reputation?.cache_ttl_hours ?? 24,
+    repRdapBudget: view.config.domain_reputation?.rdap_request_budget ?? 5,
+    repParkingNs: (view.config.domain_reputation?.parking_nameservers ?? []).join(", "),
+    repHighAbuseTlds: (view.config.domain_reputation?.high_abuse_tlds ?? []).join(", "),
+    repWatchlist: (view.config.domain_reputation?.registrar_reputation ?? []).map((r) => ({
+      ...r,
+    })),
     webhookEnabled: notifications.webhook.enabled,
     webhookUrl: notifications.webhook.url,
     smtpHost: notifications.smtp.host,
@@ -119,6 +151,12 @@ function fromDraft(d: Draft): UpdateAdminSettingsInput {
         threshold: d.contentThreshold,
         safeTarget: d.contentSafeTarget,
         networkTests: d.contentNetworkTests,
+        // URL Reputation (pm/checks/link_url_reputation.mdx §4/§5): an empty shortener list keeps
+        // the bundled seed defaults; an empty key clears/leaves Safe Browsing unconfigured.
+        url: {
+          shorteners: splitList(d.urlShorteners).map((s) => s.toLowerCase()),
+          safeBrowsingKey: d.safeBrowsingKey.trim(),
+        },
       },
       // BIMI MVA allow-list (pm/checks/bimi.mdx §4/§5): blank rows are dropped on save.
       bimi: {
@@ -161,6 +199,22 @@ function fromDraft(d: Draft): UpdateAdminSettingsInput {
           enabled: f.enabled,
         }))
         .filter((f) => f.provider && f.cname_suffix),
+    },
+    // Domain-registration-reputation settings (pm/checks/domain_reputation.mdx §4 "Global admin
+    // settings"): blank watchlist rows are dropped; the backend dedupes (match_type, match_value)
+    // pairs like the SQL UNIQUE constraint and lower-cases the NS/TLD reference lists.
+    domain_reputation: {
+      cache_ttl_hours: d.repCacheTtlHours,
+      rdap_request_budget: d.repRdapBudget,
+      parking_nameservers: splitList(d.repParkingNs),
+      high_abuse_tlds: splitList(d.repHighAbuseTlds),
+      registrar_reputation: d.repWatchlist
+        .map((r) => ({
+          match_type: r.match_type,
+          match_value: r.match_value.trim(),
+          ...(r.note?.trim() ? { note: r.note.trim() } : {}),
+        }))
+        .filter((r) => r.match_value),
     },
   }
 }
@@ -223,8 +277,10 @@ export function AdminSettings() {
       setDraft(toDraft(view))
       toast.success("Admin settings saved")
     } catch (err) {
+      // A 403 already surfaces via the shared axios interceptor's permission toast
+      // (pm/engineering.mdx §5) — only toast the generic failure for other errors.
       const status = (err as { response?: { status?: number } }).response?.status
-      toast.error(status === 403 ? "Refused: role:admin required" : "Could not save admin settings")
+      if (status !== 403) toast.error("Could not save admin settings")
     }
   }
 
@@ -519,6 +575,114 @@ export function AdminSettings() {
           className="mt-1 inline-flex items-center gap-1 rounded-md border border-[var(--edh-border)] px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
         >
           <Plus className="h-4 w-4" /> Add fingerprint
+        </button>
+
+        {/* Domain registration reputation (pm/checks/domain_reputation.mdx §4 "Global admin
+            settings"): the curated parking-nameserver / high-abuse-TLD / registrar-reputation
+            reference lists and the RDAP request budget + cache TTL. Admin-only. */}
+        <h3 className="mb-1 mt-4 text-sm font-medium">
+          Domain registration reputation (WHOIS/RDAP)
+        </h3>
+        <p className="mb-1 text-xs text-[var(--edh-muted)]">
+          Registration data is stale-tolerant and RDAP endpoints rate-limit hard — snapshots are
+          cached for the TTL below and each run spends at most the request budget. The reference
+          lists feed <code>infra.parking_nameservers</code>, <code>infra.tld_risk</code>, and{" "}
+          <code>infra.registrar_reputation</code>.
+        </p>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <NumberInput
+            label="RDAP cache TTL (hours, default 24)"
+            value={draft.repCacheTtlHours}
+            onChange={(v) => set({ repCacheTtlHours: v })}
+          />
+          <NumberInput
+            label="RDAP request budget per run (default 5)"
+            value={draft.repRdapBudget}
+            onChange={(v) => set({ repRdapBudget: v })}
+          />
+        </div>
+        <LabeledInput
+          label="Parking-provider nameserver suffixes (comma-separated, e.g. sedoparking.com)"
+          value={draft.repParkingNs}
+          onChange={(v) => set({ repParkingNs: v })}
+          wide
+        />
+        <LabeledInput
+          label="High-abuse TLDs (comma-separated, e.g. top, xyz — Spamhaus TLD stats)"
+          value={draft.repHighAbuseTlds}
+          onChange={(v) => set({ repHighAbuseTlds: v })}
+          wide
+        />
+        <h4 className="mb-1 mt-3 text-xs font-medium text-slate-600">
+          Registrar abuse-reputation watchlist
+        </h4>
+        {draft.repWatchlist.map((entry, i) => {
+          const setEntry = (patch: Partial<RegistrarReputationEntry>) =>
+            set({
+              repWatchlist: draft.repWatchlist.map((r, j) => (j === i ? { ...r, ...patch } : r)),
+            })
+          return (
+            // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional edits
+            <div key={i} className="flex flex-wrap items-center gap-2 py-1">
+              <select
+                value={entry.match_type}
+                onChange={(e) =>
+                  setEntry({
+                    match_type: e.target.value as RegistrarReputationEntry["match_type"],
+                  })
+                }
+                aria-label={`Watchlist entry ${i + 1} match type`}
+                className="rounded-md border border-[var(--edh-border)] px-2 py-1 text-sm"
+              >
+                <option value="registrar_iana_id">Registrar IANA id</option>
+                <option value="registrar_name">Registrar name</option>
+                <option value="tld">TLD</option>
+              </select>
+              <input
+                value={entry.match_value}
+                onChange={(e) => setEntry({ match_value: e.target.value })}
+                placeholder={
+                  entry.match_type === "registrar_iana_id"
+                    ? "IANA id (e.g. 1234)"
+                    : entry.match_type === "tld"
+                      ? "TLD (e.g. top)"
+                      : "Name substring"
+                }
+                aria-label={`Watchlist entry ${i + 1} match value`}
+                className="w-40 rounded-md border border-[var(--edh-border)] px-2 py-1 font-mono text-sm"
+              />
+              <input
+                value={entry.note ?? ""}
+                onChange={(e) => setEntry({ note: e.target.value })}
+                placeholder="Note (optional)"
+                aria-label={`Watchlist entry ${i + 1} note`}
+                className="w-56 rounded-md border border-[var(--edh-border)] px-2 py-1 text-sm"
+              />
+              <button
+                type="button"
+                onClick={() => set({ repWatchlist: draft.repWatchlist.filter((_, j) => j !== i) })}
+                aria-label={`Remove watchlist entry ${entry.match_value || i + 1}`}
+                title="Remove this watchlist entry"
+                className="rounded p-1 text-[var(--edh-muted)] hover:bg-slate-100 hover:text-slate-700"
+              >
+                <Minus className="h-4 w-4" />
+              </button>
+            </div>
+          )
+        })}
+        <button
+          type="button"
+          onClick={() =>
+            set({
+              repWatchlist: [
+                ...draft.repWatchlist,
+                { match_type: "registrar_name", match_value: "", note: "" },
+              ],
+            })
+          }
+          className="mt-1 inline-flex items-center gap-1 rounded-md border border-[var(--edh-border)] px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+        >
+          <Plus className="h-4 w-4" /> Add watchlist entry
         </button>
       </Panel>
 

@@ -3,7 +3,7 @@ import { ArrowLeft, ChevronLeft, ChevronRight, Star } from "lucide-react"
 import { useMemo } from "react"
 import { useAuditResults, useAuditRuns } from "@/api/audit"
 import { useDomains } from "@/api/domains"
-import type { AuditResult, DmarcResults } from "@/api/types"
+import type { ArcResults, AuditResult, DmarcResults } from "@/api/types"
 import { ProblemDrilldown } from "@/components/ProblemDrilldown"
 import { normalizeDmarcSection } from "@/lib/dmarc"
 import { problemStateById } from "@/lib/dmarc-problems"
@@ -124,10 +124,117 @@ export function DmarcProblemPage() {
       ) : (
         <>
           <ProblemDrilldown ps={ps} domainName={name} />
-          <YourRunData record={record} />
+          {/* ARC-nn drill-downs (pm/checks/arc.mdx §10) show this run's `results.arc` observation;
+              PS-nn pages keep the dmarc record. Both share the same route + chrome. */}
+          {ps.id.startsWith("ARC-") ? (
+            <ArcRunData arc={result?.results?.arc} />
+          ) : (
+            <YourRunData record={record} />
+          )}
+          {ps.id.startsWith("ARC-") && (
+            <p className="mt-4 text-sm">
+              <button
+                type="button"
+                onClick={() =>
+                  runId && result?.runId
+                    ? navigate({
+                        to: "/domains/$id/runs/$runId/dmarc/check/$checkKey",
+                        params: { id, runId: result.runId, checkKey: "arc" },
+                      })
+                    : navigate({
+                        to: "/domains/$id/dmarc/check/$checkKey",
+                        params: { id, checkKey: "arc" },
+                      })
+                }
+                className="text-[var(--edh-primary)] underline"
+              >
+                Full ARC sub-test explainer ›
+              </button>
+            </p>
+          )}
         </>
       )}
     </div>
+  )
+}
+
+/**
+ * This run's actual `results.arc` observation for the ARC-nn drill-downs (pm/checks/arc.mdx §10
+ * "Your data"): the applicability verdict, per-forwarder signer rows, and the sample-derived
+ * fields grayed "— not yet sampled" while null.
+ */
+function ArcRunData({ arc }: { arc: ArcResults | undefined }) {
+  if (!arc) return null
+  const sampled = (v: boolean | number | string | null | undefined): string =>
+    v === null || v === undefined ? "— not yet sampled" : String(v)
+  const rows: [string, string][] = [
+    ["applicable", arc.applicable === null ? "— not determined" : String(arc.applicable)],
+    ["forwardingRisk", arc.forwardingRisk === null ? "—" : String(arc.forwardingRisk)],
+    ["dmarcPolicy", arc.dmarcPolicy ? `p=${arc.dmarcPolicy}` : "—"],
+    ["policySource", arc.policySource ?? "—"],
+    ["messageSampleId", sampled(arc.messageSampleId)],
+    ["chainPresent / chainLength", `${sampled(arc.chainPresent)} / ${sampled(arc.chainLength)}`],
+    ["cvResult / sealValid / amsValid", `${sampled(arc.cvResult)} / ${sampled(arc.sealValid)} / ${sampled(arc.amsValid)}`],
+    ["instancesOk / oldestPass", `${sampled(arc.instancesOk)} / ${sampled(arc.oldestPass)}`],
+    ["probeSentAt", arc.probeSentAt ?? "— never"],
+    ["notes", arc.notes ?? "—"],
+  ]
+  return (
+    <section className="mt-6">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--edh-muted)]">
+        Your data — this run
+      </h2>
+      <div className="mt-2 overflow-hidden rounded-lg border border-[var(--edh-border)] bg-white">
+        <table className="w-full text-sm">
+          <tbody>
+            {rows.map(([field, value]) => (
+              <tr key={field} className="border-t border-[var(--edh-border)] first:border-t-0">
+                <td className="w-56 px-3 py-1.5 align-top font-mono text-xs font-semibold">
+                  {field}
+                </td>
+                <td className="break-all px-3 py-1.5 align-top font-mono text-xs text-slate-700">
+                  {value}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {arc.forwarders.length > 0 && (
+        <div className="mt-2 overflow-hidden rounded-lg border border-[var(--edh-border)] bg-white">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-[var(--edh-muted)]">
+                <th className="px-3 py-1.5 font-medium">forwarder</th>
+                <th className="px-3 py-1.5 font-medium">signer (d= / s=)</th>
+                <th className="px-3 py-1.5 font-medium">resolves</th>
+                <th className="px-3 py-1.5 font-medium">key</th>
+              </tr>
+            </thead>
+            <tbody>
+              {arc.forwarders.map((fw) => (
+                <tr key={fw.label + fw.forwardAddress} className="border-t border-[var(--edh-border)]">
+                  <td className="break-all px-3 py-1.5 font-mono text-xs">
+                    {fw.label} · {fw.forwardAddress}
+                  </td>
+                  <td className="break-all px-3 py-1.5 font-mono text-xs">
+                    {fw.signerDomain && fw.signerSelector
+                      ? `${fw.signerDomain} / ${fw.signerSelector}`
+                      : "— unknown"}
+                  </td>
+                  <td className="px-3 py-1.5 font-mono text-xs">
+                    {fw.selectorResolves === null ? "—" : fw.selectorResolves ? "✓ yes" : "✗ no"}
+                  </td>
+                  <td className="px-3 py-1.5 font-mono text-xs">
+                    {fw.keyType ? `${fw.keyType}${fw.keyBits ? ` ~${fw.keyBits}-bit` : ""}` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   )
 }
 

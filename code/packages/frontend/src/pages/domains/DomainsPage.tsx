@@ -569,6 +569,14 @@ function DomainDialog({
   const [urlAllowedDomains, setUrlAllowedDomains] = useState(
     (domain?.linkUrl?.allowedDomains ?? []).join(", "),
   )
+  // List-management config (pm/checks/list_unsubscribe.mdx §4 per-domain config inputs): the
+  // isBulkSender escalator (> 5,000 msgs/day — escalates one-click/https/header gaps from warning
+  // to critical) and the opt-in probeUnsubEndpoint toggle (default off) for the live RFC 8058
+  // one-click POST probe, which MAY unsubscribe the sampled recipient.
+  const [unsubBulkSender, setUnsubBulkSender] = useState(domain?.listUnsub?.isBulkSender ?? false)
+  const [unsubProbeEndpoint, setUnsubProbeEndpoint] = useState(
+    domain?.listUnsub?.probeUnsubEndpoint ?? false,
+  )
   // The optional fields live behind an "Advanced (optional)" disclosure (pm/domains.mdx §4.1).
   // Collapsed by default when adding (only the domain is required); expanded when editing, since
   // those fields are the point of the edit.
@@ -640,6 +648,10 @@ function DomainDialog({
       skipSmtpProbe: mxSkipSmtpProbe,
     }
     const mxConfigured = !mxReceivesMail || mx.expectedHosts.length > 0 || mxSkipSmtpProbe
+    // List-management config (pm/checks/list_unsubscribe.mdx §4); the server collapses an
+    // all-default block (not a bulk sender, probe off) back to "absent" so domains.yaml stays clean.
+    const listUnsub = { isBulkSender: unsubBulkSender, probeUnsubEndpoint: unsubProbeEndpoint }
+    const listUnsubConfigured = unsubBulkSender || unsubProbeEndpoint
     if (editing && domain) {
       update.mutate(
         {
@@ -655,6 +667,7 @@ function DomainDialog({
             mx,
             domainReputation,
             linkUrl,
+            listUnsub,
           },
         },
         {
@@ -693,6 +706,9 @@ function DomainDialog({
       // Only send an mx block when the operator changed something off the defaults
       // (pm/checks/mx_routing.mdx §4).
       ...(mxConfigured ? { mx } : {}),
+      // Only send a listUnsub block when the operator flagged bulk-sender or opted into the probe
+      // (pm/checks/list_unsubscribe.mdx §4).
+      ...(listUnsubConfigured ? { listUnsub } : {}),
     }
     create.mutate(input, {
       onSuccess: () => {
@@ -1103,6 +1119,43 @@ function DomainDialog({
                     off-brand by the body-link alignment check.
                   </span>
                 </label>
+              </fieldset>
+              {/* List-Unsubscribe / one-click (pm/checks/list_unsubscribe.mdx §4 per-domain config
+                  inputs): the isBulkSender escalator (> 5,000 msgs/day escalates one-click gaps to
+                  critical) and the opt-in live endpoint probe (default off — a live POST may
+                  unsubscribe the sampled recipient). */}
+              <fieldset className="rounded-md border border-[var(--edh-border)] p-3">
+                <legend className="px-1 text-sm font-medium">List-Unsubscribe / one-click</legend>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={unsubBulkSender}
+                    onChange={(e) => setUnsubBulkSender(e.target.checked)}
+                    className="h-4 w-4 rounded border-[var(--edh-border)]"
+                  />
+                  <span className="font-medium">
+                    Bulk sender (&gt; 5,000 msgs/day) — escalates a missing one-click header to
+                    critical
+                  </span>
+                </label>
+                <label className="mt-3 flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={unsubProbeEndpoint}
+                    onChange={(e) => setUnsubProbeEndpoint(e.target.checked)}
+                    className="h-4 w-4 rounded border-[var(--edh-border)]"
+                  />
+                  <span className="font-medium">
+                    Probe the one-click unsubscribe endpoint (live RFC 8058 POST)
+                  </span>
+                </label>
+                {unsubProbeEndpoint && (
+                  <p className="mt-1 pl-6 text-xs text-amber-700">
+                    Warning: a live one-click POST may unsubscribe the sampled recipient. Use a
+                    seed/test recipient's sample where possible. Requires the probe to be globally
+                    permitted in Settings → Admin.
+                  </p>
+                )}
               </fieldset>
             </div>
           )}

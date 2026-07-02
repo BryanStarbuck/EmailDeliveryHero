@@ -53,6 +53,21 @@ export interface DanglingEntry {
 }
 
 /**
+ * One CNAME chain observed by the dangling sweep, live ones included
+ * (pm/checks/dns_health.mdx §12 `cname_chains`): powers the raw panel's chain lines and lets the
+ * history strip see a chain re-point BEFORE it dangles.
+ */
+export interface CnameChainEntry {
+  /** The owner name the chain starts at. */
+  name: string
+  /** The CNAME nodes visited, in order (the owner name first). */
+  chain: string[]
+  /** The final non-CNAME target. */
+  final: string
+  status: "live" | "dead" | "loop"
+}
+
+/**
  * The structured zone snapshot persisted at results["infra.dns_health"] (pm/checks/dns.mdx §5 +
  * pm/checks/dns_health.mdx §5 — the `dns_health_results` summary + `dns_nameservers` rows mapped
  * onto today's per-run store) — what the DNS page's Zone panel renders. `parent_child_match` and
@@ -96,6 +111,18 @@ export interface DnsHealthResults {
   txt_record_count: number
   /** How many v=spf1 TXT records the apex publishes (>1 = permerror, infra.multi_txt_spf). */
   spf_record_count: number
+  /** §12: apex TXT set size in octets — the parsed-table row and the octets sparkline. */
+  txt_total_octets: number
+  /** §12: the labels the dangling sweep actually resolved this run (base set + DKIM selectors + MX hosts + operator extras). */
+  scanned_labels: string[]
+  /** §12: every CNAME chain observed this run, live ones included. */
+  cname_chains: CnameChainEntry[]
+  /**
+   * §12: zone-file-style render strings built at check time so the explainer's raw panel renders
+   * verbatim with no reconstruction drift. The apex TXT set is summarized as count/octets/spf-count
+   * — never full verification-token values.
+   */
+  raw: { ns_lines: string[]; soa_line: string | null; apex_txt_meta: string | null }
   /** `dns_health_results.glue_ok` — NULL until the parent-glue probe (future). */
   glue_ok: boolean | null
   /** `dns_health_results.axfr_open` — NULL until the AXFR probe (future). */
@@ -124,6 +151,10 @@ function emptySnapshot(): DnsHealthResults {
     dangling: [],
     txt_record_count: 0,
     spf_record_count: 0,
+    txt_total_octets: 0,
+    scanned_labels: [],
+    cname_chains: [],
+    raw: { ns_lines: [], soa_line: null, apex_txt_meta: null },
     glue_ok: null,
     axfr_open: null,
     worst_severity: "ok",
@@ -344,6 +375,13 @@ async function checkNs(
   snap.lame_ns = nsInfos
     .filter((n) => n.dead)
     .map((n) => ({ host: n.host, reason: "resolves to no A/AAAA address (inferred lame)" }))
+  // §12 raw.ns_lines — zone-file-style delegation lines, rendered verbatim by the raw panel.
+  snap.raw.ns_lines = nsInfos.map(
+    (n) =>
+      `${domain}. IN NS ${n.host}. ; ${n.ips.join(" ") || "unresolved"} · net ${
+        n.groups.join("+") || "?"
+      } · lame: ${n.dead ? "yes" : "no"}`,
+  )
 
   const evidence = nsInfos.map((n) => `${n.host}=${n.ips.join("/") || "?"}`).join(", ")
 
@@ -466,6 +504,8 @@ async function checkSoa(
     min_ttl: r.minttl,
   }
   snap.soa_serial = r.serial
+  // §12 raw.soa_line — the zone-file-style SOA render string for the raw panel.
+  snap.raw.soa_line = `${domain}. IN SOA ${fqdnLower(r.nsname)}. ${fqdnLower(r.hostmaster)}. ( ${r.serial} ${r.refresh} ${r.retry} ${r.expire} ${r.minttl} )`
 
   const soaEvidence = `mname=${r.nsname} rname=${r.hostmaster} serial=${r.serial} refresh=${r.refresh} retry=${r.retry} expire=${r.expire} minimum=${r.minttl}`
 
@@ -785,11 +825,15 @@ async function checkDanglingCname(
   snap: DnsHealthResults,
 ): Promise<void> {
   const labels = await danglingLabels(domain, selectors, extraLabels)
+  // §12 scanned_labels — what the sweep actually resolved this run, so the explainer can render
+  // its "N labels scanned" line and scope changes across runs are explainable.
+  snap.scanned_labels = labels
   for (const label of labels) {
     const c = await resolveCname(label)
     if (c.error || c.records.length === 0) continue // no CNAME here (or transient) — nothing to flag.
     const { final, chain, status: chainStatus } = await followCname(label)
     if (chainStatus === "loop") {
+      snap.cname_chains.push({ name: label, chain, final, status: "loop" })
       // The 8-hop loop guard tripped (spec §3 edge cases): a CNAME loop never resolves, so every
       // lookup through this name SERVFAILs — flag it rather than silently classifying the target.
       findings.push({
@@ -806,6 +850,9 @@ async function checkDanglingCname(
     const fp = matchFingerprint(final, fingerprints)
     const status = await classifyTarget(final)
     if (status === "transient") continue
+    // §12 cname_chains — every chain observed, live ones included (a re-point is trend-worthy
+    // before it dangles).
+    snap.cname_chains.push({ name: label, chain, final, status })
     const chainStr = [...chain, final].join(" → ")
     if (status === "dead") {
       snap.dangling.push({ name: label, type: "CNAME", target: final, kind: "cname" })
@@ -1032,6 +1079,10 @@ async function checkTxt(
   }
 
   const totalOctets = records.reduce((n, r) => n + r.length, 0)
+  // §12 txt_total_octets + raw.apex_txt_meta — the apex TXT set summarized as count/octets/
+  // spf-count (never full verification-token values) for the parsed table and octets sparkline.
+  snap.txt_total_octets = totalOctets
+  snap.raw.apex_txt_meta = `apex TXT (${records.length} record${records.length === 1 ? "" : "s"}, ${totalOctets} octets · ${spfRecs.length} × v=spf1)`
   const dups = detectTxtDuplicates(records)
   const bloat: string[] = []
   if (totalOctets > 1200)

@@ -1,10 +1,10 @@
 import { Link, useNavigate } from "@tanstack/react-router"
 import { Ban, ChevronRight, ExternalLink, Mailbox, RefreshCw } from "lucide-react"
-import { useRunAllAudits, useRunAudit } from "@/api/audit"
 import { useBlacklistRegistry, useBlacklistRuns } from "@/api/blacklists"
 import { useDomains } from "@/api/domains"
 import type { BlacklistRunResults, BlacklistZoneResult, Severity } from "@/api/types"
 import { cn } from "@/lib/utils"
+import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext"
 
 /**
  * The Blacklists Dashboard — what the left-bar Blacklists tab opens (pm/checks/blacklists.mdx §17).
@@ -71,8 +71,10 @@ export function BlacklistsPage() {
   const { data: runs, isLoading: runsLoading } = useBlacklistRuns()
   const { data: domains, isLoading: domainsLoading } = useDomains()
   const { data: registry } = useBlacklistRegistry()
-  const runAll = useRunAllAudits()
-  const runOne = useRunAudit()
+  // Manual scans route through the shared per-domain fan-out (pm/progress_ui.mdx §4.1) — never the
+  // blocking POST /audit/run — so each domain gets its own "Running <domain>" card in the dock.
+  const runDomains = useScanRunner()
+  const scanning = useScanProgress().length > 0
   const navigate = useNavigate()
 
   const isLoading = runsLoading || domainsLoading
@@ -138,11 +140,11 @@ export function BlacklistsPage() {
         <h1 className="text-2xl font-bold">Blacklists</h1>
         <button
           type="button"
-          onClick={() => runAll.mutate()}
-          disabled={runAll.isPending || (domains ?? []).length === 0}
+          onClick={() => runDomains((domains ?? []).map((d) => ({ id: d.id, name: d.name })))}
+          disabled={scanning || (domains ?? []).length === 0}
           className="flex items-center gap-2 rounded-md bg-green-700 px-3 py-1.5 text-sm font-semibold text-white hover:bg-green-800 disabled:opacity-50"
         >
-          <RefreshCw className={cn("h-4 w-4", runAll.isPending && "animate-spin")} />
+          <RefreshCw className={cn("h-4 w-4", scanning && "animate-spin")} />
           Re-check all
         </button>
       </div>
@@ -273,8 +275,8 @@ export function BlacklistsPage() {
                       </div>
                       <button
                         type="button"
-                        onClick={() => runOne.mutate(d.id)}
-                        disabled={runOne.isPending}
+                        onClick={() => runDomains([{ id: d.id, name: d.name }])}
+                        disabled={scanning}
                         className="rounded-md border border-[var(--edh-border)] px-2 py-1 text-xs font-semibold hover:bg-gray-50 disabled:opacity-50"
                       >
                         Run check

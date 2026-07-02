@@ -279,12 +279,17 @@ export function resolveSoa(
  * emit a graceful finding rather than crash. First-round checkers should degrade to an `info`
  * finding when `error` is set (transient) and treat `empty` as "no such record".
  */
-export function dig(name: string, type: string): Promise<DnsLookup<string>> {
+export function dig(
+  name: string,
+  type: string,
+  opts: { resolver?: string } = {},
+): Promise<DnsLookup<string>> {
   // Same per-run memo + one-retry-on-transient pipeline as the node:dns wrappers; a missing `dig`
-  // binary (ENOENT) is a capability downgrade, not a transient — never retried.
+  // binary (ENOENT) is a capability downgrade, not a transient — never retried. The optional
+  // resolver (`@8.8.8.8`) powers the SPF cross-resolver public-view probe (pm/checks/spf.mdx §3).
   return lookup(
-    `DIG:${type}:${name}`,
-    () => digOnce(name, type),
+    `DIG:${opts.resolver ?? "default"}:${type}:${name}`,
+    () => digOnce(name, type, opts.resolver),
     (r) => Boolean(r.error) && r.error !== "ENOENT",
   )
 }
@@ -303,9 +308,13 @@ function classifyExecError(
   return { exitCode, error: typeof e.code === "string" ? e.code : e.message }
 }
 
-async function digOnce(name: string, type: string): Promise<DnsLookup<string>> {
+async function digOnce(
+  name: string,
+  type: string,
+  resolver?: string,
+): Promise<DnsLookup<string>> {
   const { execFile } = await import("node:child_process")
-  const args = ["+short", "+time=3", "+tries=1", type, name]
+  const args = [...(resolver ? [`@${resolver}`] : []), "+short", "+time=3", "+tries=1", type, name]
   const command = ["dig", ...args].join(" ")
   const startedAt = new Date().toISOString()
   const t0 = Date.now()

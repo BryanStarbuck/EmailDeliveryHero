@@ -31,6 +31,21 @@ export interface DnskeyAlgoInfo {
   bits: number | null
 }
 
+/** One published DS record, parsed (pm/checks/dnssec.mdx §11 `dsRecords[]` element). */
+export interface DsRecordInfo {
+  keyTag: number
+  algorithm: number
+  digestType: number
+}
+
+/** One apex RRSIG, parsed — deep path only (pm/checks/dnssec.mdx §11 `rrsigs[]` element). */
+export interface RrsigRecordInfo {
+  typeCovered: string
+  keyTag: number
+  /** Signature Expiration as ISO date-time; null when the timestamp was unparseable. */
+  expiration: string | null
+}
+
 /**
  * The structured DNSSEC state persisted at results["infra.dnssec"]. Two documented shapes overlap
  * here and both are kept in sync:
@@ -57,6 +72,17 @@ export interface DnssecResults {
   bogus: boolean
   /** The parsed apex DNSKEY set: [{keyTag, flags, alg, algName, bits}]. */
   dnskeyAlgos: DnskeyAlgoInfo[]
+  /**
+   * The parsed DS RRset, one entry per published DS (pm/checks/dnssec.mdx §11) — lets the
+   * explainer's parsed breakdown render one row per DS with its own SHA-1/SHA-256 + match chip.
+   * Empty when no DS is published or the DS lookup failed.
+   */
+  dsRecords: DsRecordInfo[]
+  /**
+   * The parsed apex RRSIGs behind `rrsigEarliestExpiry` (pm/checks/dnssec.mdx §11) — deep path
+   * only; stays empty on the presence-only first round.
+   */
+  rrsigs: RrsigRecordInfo[]
   /** Digest type of the DS that matched a live KSK (1=SHA1, 2=SHA256); else the published type. */
   dsDigestType: number | null
   /** Published DS matches a live KSK (mirrors ds_matches_dnskey). */
@@ -82,6 +108,7 @@ function futureFieldDefaults(): Pick<
   | "nsec3Iterations"
   | "nsec3Optout"
   | "rrsigEarliestExpiry"
+  | "rrsigs"
   | "resolverUsed"
 > {
   return {
@@ -91,6 +118,7 @@ function futureFieldDefaults(): Pick<
     nsec3Iterations: null,
     nsec3Optout: null,
     rrsigEarliestExpiry: null,
+    rrsigs: [],
     resolverUsed: null,
   }
 }
@@ -352,6 +380,8 @@ interface DeepOutcome {
   nsec3Iterations: number | null
   nsec3Optout: boolean | null
   rrsigEarliestExpiry: string | null
+  /** The parsed apex RRSIGs (pm/checks/dnssec.mdx §11) — which RRset expires when. */
+  rrsigs: RrsigRecordInfo[]
   resolverUsed: string | null
 }
 
@@ -381,6 +411,7 @@ async function runDeepChecks(
     nsec3Iterations: null,
     nsec3Optout: null,
     rrsigEarliestExpiry: null,
+    rrsigs: [],
     resolverUsed: null,
   }
 
@@ -477,6 +508,13 @@ async function runDeepChecks(
     .filter((a) => a.type.toUpperCase() === "RRSIG")
     .map((a) => parseRrsig(a.rdata))
     .filter((r): r is RrsigInfo => r !== null)
+  // Record the parsed apex RRSIGs (pm/checks/dnssec.mdx §11) so the explainer's parsed breakdown
+  // can show which RRset expires when, not only the earliest timestamp.
+  out.rrsigs = rrsigs.map((r) => ({
+    typeCovered: r.typeCovered,
+    keyTag: r.keyTag,
+    expiration: r.expiration ? r.expiration.toISOString() : null,
+  }))
 
   // ---- infra.dnssec_rrsig_expiry: apex RRSIG Signature Expiration vs now + lead time ----
   const expirations = rrsigs
@@ -803,6 +841,7 @@ export const dnssecCheck: Checker = {
           dane_ready: false,
           dsPresent: null,
           dnskeyAlgos: [],
+          dsRecords: [],
           dsDigestType: null,
           dsAlgoMatch: null,
           ...futureFieldDefaults(),
@@ -1079,6 +1118,12 @@ export const dnssecCheck: Checker = {
           algName: reg.name(k.algorithm),
           bits: k.bits,
         })),
+        // One entry per published DS (pm/checks/dnssec.mdx §11) — empty when none/unavailable.
+        dsRecords: dsRecordsParsed.map((d) => ({
+          keyTag: d.keyTag,
+          algorithm: d.algorithm,
+          digestType: d.digestType,
+        })),
         dsDigestType,
         dsAlgoMatch: dsMatches,
         ...futureFieldDefaults(),
@@ -1090,6 +1135,7 @@ export const dnssecCheck: Checker = {
               nsec3Iterations: deep.nsec3Iterations,
               nsec3Optout: deep.nsec3Optout,
               rrsigEarliestExpiry: deep.rrsigEarliestExpiry,
+              rrsigs: deep.rrsigs,
               resolverUsed: deep.resolverUsed,
             }
           : {}),

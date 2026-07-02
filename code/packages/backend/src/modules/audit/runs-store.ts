@@ -55,10 +55,11 @@ interface RunBlock {
   counts: Record<Severity, number>
   new_problem_count?: number
   /**
-   * Category scope (pm/checks/blacklists.mdx §21/AC 26): "blacklists" / "dkim" on a
-   * category-scoped re-run; absent on a full run of all six categories.
+   * Category scope (pm/checks/blacklists.mdx §21/AC 26; pm/checks/dns.mdx §15.1): "blacklists" /
+   * "dkim" / "dns" on a category-scoped re-run, "dns.<family_key>" on a single DNS &
+   * Infrastructure family re-run; absent on a full run of all six categories.
    */
-  scope?: "blacklists" | "dkim"
+  scope?: "blacklists" | "dkim" | "dns" | `dns.${string}`
   /**
    * Category prefixes a scoped re-run executed (pm/checks/spf.mdx §6.5 — `checks: [spf]` on a
    * `?checks=spf` run); absent on a full run. Powers the Runs-table "SPF only" badge.
@@ -197,8 +198,95 @@ function encodeDnsInfraTest(finding: Finding): DnsInfraTestRow {
   }
 }
 
+/** One spam_content.tests[] row (pm/checks/spam_content.mdx §4) — the finding, in on-disk terms. */
+function encodeContentTest(finding: Finding): DnsInfraTestRow {
+  return {
+    id: finding.id,
+    family: contentFamilyOf(finding),
+    title: finding.title,
+    result: SEVERITY_TO_RESULT[finding.severity] ?? "info",
+    ...(finding.detail ? { detail: finding.detail } : {}),
+    ...(finding.evidence ? { evidence: finding.evidence } : {}),
+    ...(finding.remediation ? { fix: finding.remediation } : {}),
+  }
+}
+
 /** dns_infra keys that are projections of the run's findings — never re-hydrated into `results`. */
 const DNS_INFRA_DERIVED_KEYS = new Set(["status", "tests", "families", "problem_states"])
+
+/** spam_content keys that are projections of the run's findings — never re-hydrated into `results`. */
+const SPAM_CONTENT_DERIVED_KEYS = new Set(["status", "tests", "families", "problem_states"])
+
+/** Content-scoring finding ids (pm/checks/spam_content.mdx §1) — they share no common id prefix. */
+const CONTENT_SCORING_FINDING_IDS = new Set([
+  "content.spamassassin_score",
+  "content.subject",
+  "content.image_text_ratio",
+  "content.multipart",
+  "content.mime_valid",
+  "content.spammy_phrases",
+  "content.header_sanity",
+  "content.attachment_risk",
+  "content.html_hygiene",
+  "content.encoding",
+  "content.charset",
+  "content.bayes",
+  "content.short_body",
+  "content.no_sample",
+  "content.engine_missing",
+  "content.engine_unavailable",
+  "content.sample_unreadable",
+])
+
+/** Sender-reputation finding-id stems (pm/checks/spam_content.mdx §1 prefix table). */
+const CONTENT_REPUTATION_STEMS = [
+  "complaint_rate",
+  "bounce_rate",
+  "gpt_",
+  "fbl_",
+  "engagement",
+  "warmup",
+  "volume_consistency",
+  "blocklist_history",
+  "reputation_data_available",
+  "reputation",
+  "postmaster_verified",
+  "delivery_errors",
+]
+
+/**
+ * Which of the seven Spam & Content families a `content.*` finding rolls into (pm/checks/
+ * spam_content.mdx §1/§4 — the `families` chip strip + `tests[].family`), matched by the §1
+ * id-prefix table. Three families stamp their own checker id as `checkId`; the other four share
+ * the bare `content` checkId, so ownership is by finding-id prefix. Returns null when unrecognized.
+ */
+function contentFamilyOf(finding: Finding): string | null {
+  const { id, checkId } = finding
+  if (checkId === "content.scoring" || CONTENT_SCORING_FINDING_IDS.has(id)) return "content_score"
+  if (checkId === "content.bimi" || id.startsWith("content.bimi")) return "bimi"
+  if (checkId === "content.report_emails" || id.startsWith("content.report_")) return "report_emails"
+  if (
+    checkId === "content.list_unsubscribe" ||
+    id.startsWith("content.list_") ||
+    id === "content.from_alignment" ||
+    id === "content.precedence" ||
+    id === "content.no_priority_abuse"
+  ) {
+    return "list_unsubscribe"
+  }
+  if (id.startsWith("content.url")) return "link_reputation"
+  if (
+    id.startsWith("content.inbox_placement") ||
+    id.startsWith("content.placement_") ||
+    id.startsWith("content.seed")
+  ) {
+    return "inbox_placement"
+  }
+  if (CONTENT_REPUTATION_STEMS.some((stem) => id.startsWith(`content.${stem}`))) {
+    return "sender_reputation"
+  }
+  return null
+}
 
 /**
  * Render the run's start instant as the filename timestamp (pm/storage.mdx §7.2):
@@ -270,16 +358,46 @@ function encodeRunFile(result: AuditResult): RunFile {
     }
     dnsInfra.status = worst
   }
+  // The spam_content section's own status + per-family roll-up + per-sub-test rows (pm/checks/
+  // spam_content.mdx §4): worst severity across every `content.*` finding, the seven-family chip
+  // strip, and the tests[] projection. Content findings share the bare `content` checkId for four
+  // of the seven families, so membership is by finding-id prefix (id always starts "content.").
+  const contentFindings = (result.findings ?? []).filter((f) => f.id.startsWith("content."))
+  if (contentFindings.length > 0) {
+    let worst: Severity = "ok"
+    const families: Record<string, { status: Severity; tests: number }> = {}
+    for (const f of contentFindings) {
+      if (SEVERITY_RANK[f.severity] > SEVERITY_RANK[worst]) worst = f.severity
+      const family = contentFamilyOf(f)
+      if (family) {
+        const row = families[family] ?? { status: "ok" as Severity, tests: 0 }
+        row.tests += 1
+        if (SEVERITY_RANK[f.severity] > SEVERITY_RANK[row.status]) row.status = f.severity
+        families[family] = row
+      }
+    }
+    spamContent.status = worst
+    spamContent.families = families
+  }
   for (const [id, payload] of Object.entries(results)) {
     if (id.startsWith("infra.")) dnsInfra[id.slice("infra.".length)] = payload
     else if (id.startsWith("content.")) spamContent[id.slice("content.".length)] = payload
   }
   if (infraFindings.length > 0) dnsInfra.tests = infraFindings.map(encodeDnsInfraTest)
+  if (contentFindings.length > 0) spamContent.tests = contentFindings.map(encodeContentTest)
   const dmarcBase = results.dmarc
   const arcPayload = results.arc
+  // The ingested-reports aggregate snapshot (pm/emails.mdx §16.3): results["dmarc.reports"]
+  // nests under the run file's dmarc section as `reports`, like arc — the explainer page's
+  // run-scoped breakdown/per-source tables read it back from the viewed run.
+  const reportsPayload = results["dmarc.reports"]
+  const dmarcExtras: Record<string, unknown> = {
+    ...(arcPayload !== undefined ? { arc: arcPayload } : {}),
+    ...(reportsPayload !== undefined ? { reports: reportsPayload } : {}),
+  }
   const dmarcSection =
-    arcPayload !== undefined
-      ? { ...(isPlainObject(dmarcBase) ? dmarcBase : {}), arc: arcPayload }
+    Object.keys(dmarcExtras).length > 0
+      ? { ...(isPlainObject(dmarcBase) ? dmarcBase : {}), ...dmarcExtras }
       : (dmarcBase ?? {})
   doc.spf = results.spf ?? {}
   doc.dkim = results.dkim ?? {}
@@ -304,9 +422,11 @@ function decodeRunFile(doc: unknown): AuditResult | null {
   addSection("spf", doc.spf)
   addSection("dkim", doc.dkim)
   addSection("blacklist", doc.blacklists)
-  if (isPlainObject(doc.dmarc) && "arc" in doc.dmarc) {
-    const { arc, ...rest } = doc.dmarc
+  if (isPlainObject(doc.dmarc) && ("arc" in doc.dmarc || "reports" in doc.dmarc)) {
+    const { arc, reports, ...rest } = doc.dmarc
     addSection("arc", arc)
+    // The §16.3 ingested-reports snapshot round-trips back to results["dmarc.reports"].
+    addSection("dmarc.reports", reports)
     addSection("dmarc", rest)
   } else {
     addSection("dmarc", doc.dmarc)
@@ -320,8 +440,11 @@ function decodeRunFile(doc: unknown): AuditResult | null {
     }
   }
   if (isPlainObject(doc.spam_content)) {
-    for (const [key, payload] of Object.entries(doc.spam_content))
+    for (const [key, payload] of Object.entries(doc.spam_content)) {
+      // status/families/tests are projections of run.findings — never round-tripped into `results`.
+      if (SPAM_CONTENT_DERIVED_KEYS.has(key)) continue
       addSection(`content.${key}`, payload)
+    }
   }
   return {
     runId: run.run_id,

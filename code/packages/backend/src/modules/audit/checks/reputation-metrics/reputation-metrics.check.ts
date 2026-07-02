@@ -1,3 +1,4 @@
+import { readBlacklistRuns } from "../blacklist/store"
 import { resolve4, resolveMx, resolveTxt } from "../dns-util"
 import type { Checker, Finding } from "../types"
 
@@ -12,15 +13,24 @@ import type { Checker, Finding } from "../types"
  *   - content.reputation_data_available  (info: no integration connected → metrics unknown)
  *   - content.postmaster_verified        (DNS: is a Google verification TXT published?)
  *   - content.fbl_enrollment             (advisory: enroll the sending IPs' networks in provider FBLs)
- *   - content.blocklist_history          (trend of stored ./blacklists results — needs the cross-run
- *                                         store, which is not reachable from a stateless Checker, so it
- *                                         degrades to an info until the store is wired in)
+ *   - content.blocklist_history          (trend of stored ./blacklists results across audit runs —
+ *                                         warns when the same DNSBL listed the domain/IP >= 2 times in
+ *                                         the trailing window; reads the blacklist store, no integration)
  *
  * Every FUTURE metric sub-check emits exactly ONE `info` "not connected" finding — never a
  * warning/critical — so an un-integrated domain never produces a false positive (spec §8.1).
  */
 
 const CHECK_ID = "content"
+
+/**
+ * Trailing window (days) over which `content.blocklist_history` counts recurring DNSBL listings —
+ * matches the "last 30 days" reputation sparkline in the spec's UI section (§4).
+ */
+const BLOCKLIST_HISTORY_WINDOW_DAYS = 30
+
+/** A listing on the same DNSBL zone this many times in the window is a recurrence (spec §8 AC #7). */
+const BLOCKLIST_RECURRENCE_THRESHOLD = 2
 
 /** Provider feedback-loop programs to enroll in, with the exact signup URL for each. */
 const FBL_PROGRAMS = [
@@ -208,6 +218,79 @@ async function fblEnrollment(domain: string, configured: string[]): Promise<Find
   }
 }
 
+/**
+ * content.blocklist_history — a pure TREND over the app's own stored ./blacklists results across
+ * audit runs (spec §2/§7, AC #7). Reads the blacklist store (keyed by domain NAME, same key this
+ * checker receives as ctx.domain) and flags any DNSBL zone that has listed the domain/IP
+ * >= BLOCKLIST_RECURRENCE_THRESHOLD times within the trailing window. Needs NO external integration.
+ * A (zone, target) counts at most once per run, so recurrence means "listed on distinct runs",
+ * not "many targets in one run".
+ */
+export function blocklistHistory(domain: string): Finding {
+  const runs = readBlacklistRuns(domain)
+  const cutoff = Date.now() - BLOCKLIST_HISTORY_WINDOW_DAYS * 24 * 60 * 60 * 1000
+  const windowed = runs.filter((r) => {
+    const t = Date.parse(r.ran_at)
+    return Number.isNaN(t) || t >= cutoff
+  })
+
+  if (windowed.length === 0) {
+    return {
+      id: "content.blocklist_history",
+      checkId: CHECK_ID,
+      title: "No stored blacklist history yet",
+      severity: "info",
+      detail: `Recurring DNSBL listings over time are a reputation signal, but ${domain} has no stored blacklist results in the trailing ${BLOCKLIST_HISTORY_WINDOW_DAYS} days to trend yet. Once the Blacklists check has run across several audits, this flags any DNSBL that lists the domain/IP repeatedly.`,
+      remediation:
+        "Run the Blacklists check across a few audits to build history; then this will surface any recurring listings.",
+    }
+  }
+
+  // Count distinct runs (within the window) that listed each (zone, target) pair.
+  const counts = new Map<string, { zone: string; name: string; target: string; runs: number }>()
+  for (const run of windowed) {
+    const seenThisRun = new Set<string>()
+    for (const zr of run.results) {
+      if (!zr.listed) continue
+      const key = `${zr.zone} ${zr.target}`
+      if (seenThisRun.has(key)) continue
+      seenThisRun.add(key)
+      const entry = counts.get(key) ?? { zone: zr.zone, name: zr.name, target: zr.target, runs: 0 }
+      entry.runs++
+      counts.set(key, entry)
+    }
+  }
+
+  const recurring = [...counts.values()]
+    .filter((c) => c.runs >= BLOCKLIST_RECURRENCE_THRESHOLD)
+    .sort((a, b) => b.runs - a.runs)
+
+  if (recurring.length === 0) {
+    return {
+      id: "content.blocklist_history",
+      checkId: CHECK_ID,
+      title: "No recurring DNSBL listings",
+      severity: "ok",
+      detail: `Across ${windowed.length} stored blacklist run(s) in the trailing ${BLOCKLIST_HISTORY_WINDOW_DAYS} days, no DNSBL has listed ${domain} or its IPs ${BLOCKLIST_RECURRENCE_THRESHOLD} or more times — no recurring-listing reputation pattern.`,
+    }
+  }
+
+  const listSummary = recurring
+    .slice(0, 6)
+    .map((c) => `${c.name} (${c.zone}) → ${c.target}: ${c.runs}×`)
+    .join("; ")
+  return {
+    id: "content.blocklist_history",
+    checkId: CHECK_ID,
+    title: "Recurring DNSBL listings over time",
+    severity: "warning",
+    detail: `Across ${windowed.length} stored blacklist run(s) in the trailing ${BLOCKLIST_HISTORY_WINDOW_DAYS} days, the same DNSBL(s) listed ${domain} or its IPs ${BLOCKLIST_RECURRENCE_THRESHOLD}+ times — a recurrence pattern, not a one-off: ${listSummary}. Repeated listings mean the underlying cause was never fixed, only delisted.`,
+    remediation:
+      "Fix the root cause (complaint source, compromised account, or open relay), not just the delisting request; cross-reference the current listing in the blacklists check.",
+    evidence: recurring.map((c) => `${c.zone}|${c.target}=${c.runs}`).join(", "),
+  }
+}
+
 export const reputationMetricsCheck: Checker = {
   id: "content.reputation",
   label: "Sender Reputation Metrics",
@@ -233,20 +316,10 @@ export const reputationMetricsCheck: Checker = {
     findings.push(await fblEnrollment(ctx.domain, ctx.sendingIps))
 
     // content.blocklist_history — a pure TREND over the app's own stored ./blacklists results across
-    // audit runs. That cross-run history is not reachable from a stateless Checker (CheckContext only
-    // exposes domain/dkimSelectors/sendingIps), so it degrades to an `info` rather than fabricating a
-    // recurrence verdict. Once the store is wired in, this becomes a `warning` when the same DNSBL has
-    // listed the domain/IP >= 2 times in the trailing window.
-    findings.push({
-      id: "content.blocklist_history",
-      checkId: CHECK_ID,
-      title: "DNSBL recurrence trend pending stored history",
-      severity: "info",
-      detail:
-        "Recurring DNSBL listings over time are a reputation signal, but this trend reads the app's own stored blacklist results across prior audit runs, which are not available from a single stateless run. It will flag the domain/IP being listed on the same DNSBL >= 2 times in the trailing window once the audit-history store is wired in.",
-      remediation:
-        "When a listing recurs, fix the root cause (complaint source, compromised account, or open relay) rather than only requesting delisting; cross-reference the current listing in the blacklists check.",
-    })
+    // audit runs (needs NO external integration, spec §7). Reads the blacklist store (keyed by the
+    // same domain NAME this checker receives) and warns when the same DNSBL has listed the domain/IP
+    // >= 2 times in the trailing window.
+    findings.push(blocklistHistory(ctx.domain))
 
     // FUTURE metric sub-checks — one `info` "not connected" each; never warning/critical.
     for (const p of PENDING) {

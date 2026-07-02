@@ -29,6 +29,11 @@ export const CHECK_DEPENDENCIES: Record<string, string[]> = {
   "infra.dane_tlsa": ["infra.mx_routing", "infra.dnssec"],
   "infra.tls_transport": ["infra.mx_routing"],
   "infra.smtp_security": ["infra.mx_routing"],
+  // The report-email corpus scan runs FIRST, then the per-category report derivations read the
+  // store it just refreshed (pm/emails.mdx §13.1 "Ordering" / AC 14): dmarc.reports emits the §5
+  // dmarc.report_* findings, infra.tls_rpt appends infra.tls_rpt_reports_ingested.
+  "dmarc.reports": ["content.report_emails"],
+  "infra.tls_rpt": ["content.report_emails"],
 }
 
 /**

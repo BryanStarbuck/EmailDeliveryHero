@@ -1,5 +1,41 @@
 import { resolveMx } from "../dns-util"
-import type { Checker, Finding } from "../types"
+import type { Checker, CheckOutcome } from "../types"
+
+/**
+ * Why the SMTP+TLS probe did not run this round (pm/checks/tls_transport.mdx §9.3-A / §9.7.1).
+ * `probe_not_enabled` is the pending-era default (the probe harness has not shipped);
+ * `mx_lookup_failed` / `no_mx` are the two DNS branches; `port25_blocked` is reserved for the
+ * probe-era admin toggle (surfaced once the harness exists).
+ */
+type TlsPendingReason = "probe_not_enabled" | "mx_lookup_failed" | "no_mx" | "port25_blocked"
+
+/**
+ * The structured snapshot persisted at results["infra.tls_transport"]
+ * (pm/checks/tls_transport.mdx §9.7.1 — the run-YAML `dns_infra.tls_transport` shape). In the
+ * pending era it records only that the probe has not run and why, plus the MX host list the future
+ * probe would connect to. The explainer page's §9.3-A parsed table reads this instead of
+ * string-parsing the finding `detail`. snake_case mirrors the run-YAML convention.
+ */
+export interface TlsTransportResults {
+  status: "info"
+  tests: number
+  snapshot: {
+    /** false in the pending era — no live SMTP+TLS handshake was attempted. */
+    probe_available: boolean
+    pending_reason: TlsPendingReason
+    /** Priority-sorted MX hostnames reused from mx_routing (empty when none / lookup failed). */
+    mx_hosts: string[]
+  }
+}
+
+/** Build the §9.7.1 pending snapshot payload from the resolved (or empty) MX host list. */
+function pendingSnapshot(hosts: string[], reason: TlsPendingReason): TlsTransportResults {
+  return {
+    status: "info",
+    tests: 1,
+    snapshot: { probe_available: false, pending_reason: reason, mx_hosts: hosts },
+  }
+}
 
 /**
  * STARTTLS Transport Encryption & MX TLS Certificate Health (pm/checks/tls_transport.mdx).
@@ -21,7 +57,7 @@ import type { Checker, Finding } from "../types"
 export const tlsTransportCheck: Checker = {
   id: "infra.tls_transport",
   label: "STARTTLS & MX TLS",
-  async run(ctx): Promise<Finding[]> {
+  async run(ctx): Promise<CheckOutcome> {
     // The spec's sole first-round-safe DNS dependency: the MX host list. Resolve it gracefully so
     // the pending finding can name the hosts a future probe would connect to. Any failure here
     // still degrades to the same single `info` — never a crash, never a false critical.
@@ -39,45 +75,54 @@ export const tlsTransportCheck: Checker = {
     if (mx.error) {
       // Transient DNS failure (SERVFAIL/timeout) — distinct from "genuinely no MX". Still info: the
       // probe is future regardless, and we must not manufacture a problem.
-      return [
-        {
-          id: "infra.tls_transport.pending",
-          checkId: "infra",
-          title: "TLS transport probe pending (MX lookup failed)",
-          severity: "info",
-          detail: `The STARTTLS & MX TLS audit is an outbound SMTP+TLS probe that is not yet enabled in this round, and the MX lookup for ${ctx.domain} failed transiently (${mx.error}), so the host list could not be enumerated. ${willVerify}`,
-          remediation:
-            "Retry the audit later; if it persists, verify the domain's authoritative nameservers. Enable the TLS probe once the SMTP+TLS harness (and the admin toggle for port-25-blocked hosts) ships.",
-        },
-      ]
+      return {
+        findings: [
+          {
+            id: "infra.tls_transport.pending",
+            checkId: "infra",
+            title: "TLS transport probe pending (MX lookup failed)",
+            severity: "info",
+            detail: `The STARTTLS & MX TLS audit is an outbound SMTP+TLS probe that is not yet enabled in this round, and the MX lookup for ${ctx.domain} failed transiently (${mx.error}), so the host list could not be enumerated. ${willVerify}`,
+            remediation:
+              "Retry the audit later; if it persists, verify the domain's authoritative nameservers. Enable the TLS probe once the SMTP+TLS harness (and the admin toggle for port-25-blocked hosts) ships.",
+          },
+        ],
+        results: pendingSnapshot(hosts, "mx_lookup_failed"),
+      }
     }
 
     if (hosts.length === 0) {
       // No MX at all: the spec says skip with info and defer to the MX-routing finding.
-      return [
+      return {
+        findings: [
+          {
+            id: "infra.tls_transport.pending",
+            checkId: "infra",
+            title: "TLS transport probe pending (no MX records)",
+            severity: "info",
+            detail: `${ctx.domain} has no MX records, so there are no inbound mail hosts to probe for STARTTLS/MX TLS. This audit consumes the MX host list rather than re-deriving it — see the MX routing check for the missing-MX finding. ${willVerify}`,
+            remediation:
+              "Publish MX records for the domain (see the MX routing check), then enable the TLS probe once the SMTP+TLS harness ships to audit each MX host's transport encryption.",
+          },
+        ],
+        results: pendingSnapshot(hosts, "no_mx"),
+      }
+    }
+
+    return {
+      findings: [
         {
           id: "infra.tls_transport.pending",
           checkId: "infra",
-          title: "TLS transport probe pending (no MX records)",
+          title: "TLS transport probe pending",
           severity: "info",
-          detail: `${ctx.domain} has no MX records, so there are no inbound mail hosts to probe for STARTTLS/MX TLS. This audit consumes the MX host list rather than re-deriving it — see the MX routing check for the missing-MX finding. ${willVerify}`,
+          detail: `The STARTTLS & MX TLS certificate audit is an outbound SMTP+TLS probe (EHLO -> STARTTLS -> handshake -> certificate inspection) that is not part of this first round, so no TLS/certificate findings are reported yet for ${ctx.domain}'s ${hosts.length} MX host(s). ${willVerify}`,
           remediation:
-            "Publish MX records for the domain (see the MX routing check), then enable the TLS probe once the SMTP+TLS harness ships to audit each MX host's transport encryption.",
+            "Enable the TLS probe once the SMTP+TLS harness ships (and configure the admin 'TLS probe' toggle for hosts where outbound port 25 is blocked). No DNS-only fix applies — this audit requires a live handshake to each MX host.",
+          evidence: hosts.join(", "),
         },
-      ]
+      ],
+      results: pendingSnapshot(hosts, "probe_not_enabled"),
     }
-
-    return [
-      {
-        id: "infra.tls_transport.pending",
-        checkId: "infra",
-        title: "TLS transport probe pending",
-        severity: "info",
-        detail: `The STARTTLS & MX TLS certificate audit is an outbound SMTP+TLS probe (EHLO -> STARTTLS -> handshake -> certificate inspection) that is not part of this first round, so no TLS/certificate findings are reported yet for ${ctx.domain}'s ${hosts.length} MX host(s). ${willVerify}`,
-        remediation:
-          "Enable the TLS probe once the SMTP+TLS harness ships (and configure the admin 'TLS probe' toggle for hosts where outbound port 25 is blocked). No DNS-only fix applies — this audit requires a live handshake to each MX host.",
-        evidence: hosts.join(", "),
-      },
-    ]
   },
 }

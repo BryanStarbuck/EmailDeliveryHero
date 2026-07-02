@@ -110,8 +110,15 @@ describe("arcCheck (pm/checks/arc.mdx)", () => {
         signerDomain: "lists.acme.org",
         signerSelector: "arc1",
         selectorResolves: true,
+        // §9.11 recorded data — the explainer's signer-key card renders from these, never live DNS.
+        rawKeyRecord: `v=DKIM1; k=rsa; p=${GOOD_P}`,
+        keyType: "rsa",
+        keyBits: expect.any(Number),
       },
     ])
+    // §9.11: the applicability verdict's policy + provenance persist on results.arc.
+    expect(results.dmarcPolicy).toBe("reject")
+    expect(results.policySource).toBe("dns")
   })
 
   it("flags an NXDOMAIN signer selector as critical (arc.selector_dns)", async () => {
@@ -200,6 +207,8 @@ describe("arcCheck (pm/checks/arc.mdx)", () => {
     }
     const { findings, results } = await run(c)
     expect(results.applicable).toBe(true)
+    expect(results.dmarcPolicy).toBe("reject")
+    expect(results.policySource).toBe("sibling")
     expect(byId(findings, "arc.applicable")?.detail).toContain("p=reject")
     expect(byId(findings, "arc.selector_dns.acme-users")?.severity).toBe("ok")
     const queried = mockResolveTxt.mock.calls.map((call) => call[0])

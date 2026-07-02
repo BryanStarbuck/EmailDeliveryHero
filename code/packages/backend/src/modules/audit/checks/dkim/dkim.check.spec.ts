@@ -1,5 +1,13 @@
 import { generateKeyPairSync } from "node:crypto"
-import { analyzeSelectorRecord, decodeDkimKey, parseDkimRecord } from "./dkim.check"
+import {
+  analyzeAdspLegacy,
+  analyzeSelectorRecord,
+  decodeDkimKey,
+  deriveDkimProblemStates,
+  type DkimResults,
+  parseDkimRecord,
+  recordSetsEqual,
+} from "./dkim.check"
 
 /** Generate a real RSA public key of the given size, base64-encoded the way DKIM publishes it. */
 function rsaP(bits: number): string {
@@ -167,5 +175,95 @@ describe("analyzeSelectorRecord", () => {
     expect(byId(analyze(`v=DKIM1; x=oops; p=${rsaP(2048)}`), "dkim.flags.s1")?.severity).toBe(
       "info",
     )
+  })
+})
+
+describe("recordSetsEqual", () => {
+  it("compares record SETS, ignoring answer order (round-robin is never a disagreement)", () => {
+    expect(recordSetsEqual(["a", "b"], ["b", "a"])).toBe(true)
+    expect(recordSetsEqual([], [])).toBe(true)
+    expect(recordSetsEqual(["a"], [])).toBe(false)
+    expect(recordSetsEqual(["a"], ["b"])).toBe(false)
+    expect(recordSetsEqual(["a", "a"], ["a", "b"])).toBe(false)
+  })
+})
+
+describe("analyzeAdspLegacy (pm/checks/dkim.mdx §4 dkim.adsp_legacy)", () => {
+  it("returns a single ok finding when neither legacy name answers", () => {
+    const out = analyzeAdspLegacy("example.com", [], [])
+    expect(out.findings).toHaveLength(1)
+    expect(out.findings[0]?.id).toBe("dkim.adsp_legacy")
+    expect(out.findings[0]?.severity).toBe("ok")
+    expect(out.adsp).toEqual({ present: false, record: null, practice: null })
+    expect(out.legacy_domainkeys).toEqual({ present: false, record: null })
+  })
+
+  it("flags ADSP dkim=discardable as warning with the parsed practice", () => {
+    const out = analyzeAdspLegacy("example.com", ["dkim=discardable"], [])
+    expect(out.adsp).toEqual({ present: true, record: "dkim=discardable", practice: "discardable" })
+    const f = out.findings.find((x) => x.id === "dkim.adsp_legacy.adsp")
+    expect(f?.severity).toBe("warning")
+  })
+
+  it("flags any other ADSP value as info", () => {
+    const out = analyzeAdspLegacy("example.com", ["dkim=all"], [])
+    expect(out.adsp.practice).toBe("all")
+    expect(out.findings.find((x) => x.id === "dkim.adsp_legacy.adsp")?.severity).toBe("info")
+  })
+
+  it("flags a DomainKeys o= policy leftover as info and records it", () => {
+    const out = analyzeAdspLegacy("example.com", [], ["o=-; n=notes"])
+    expect(out.legacy_domainkeys).toEqual({ present: true, record: "o=-; n=notes" })
+    expect(out.findings.find((x) => x.id === "dkim.adsp_legacy.domainkeys")?.severity).toBe("info")
+  })
+
+  it("calls out a key record at the bare _domainkey name as a key at the wrong name", () => {
+    const out = analyzeAdspLegacy("example.com", [], [`v=DKIM1; p=${rsaP(1024)}`])
+    // Not a policy leftover — the observation block stays empty, the finding explains the mistake.
+    expect(out.legacy_domainkeys.present).toBe(false)
+    const f = out.findings.find((x) => x.id === "dkim.adsp_legacy.domainkeys")
+    expect(f?.severity).toBe("info")
+    expect(f?.title).toContain("bare _domainkey")
+  })
+})
+
+describe("deriveDkimProblemStates — PS-17 / PS-18 (append-only ids)", () => {
+  const baseResults = { working_selectors: 1 } as DkimResults
+  const finding = (id: string, severity: "ok" | "info" | "warning" | "critical") => ({
+    id,
+    checkId: "dkim",
+    title: id,
+    severity,
+    detail: id,
+  })
+
+  it("maps a resolver split view to PS-18", () => {
+    const states = deriveDkimProblemStates(
+      [finding("dkim.resolver_agreement.s1", "warning")],
+      baseResults,
+    )
+    expect(states).toContain("PS-18")
+  })
+
+  it("never maps the info 'could not cross-check' to PS-18", () => {
+    const states = deriveDkimProblemStates(
+      [finding("dkim.resolver_agreement.s1", "info")],
+      baseResults,
+    )
+    expect(states).not.toContain("PS-18")
+    expect(states).toContain("PS-00")
+  })
+
+  it("maps ADSP/DomainKeys leftovers to PS-17 at warning AND info severity", () => {
+    expect(
+      deriveDkimProblemStates([finding("dkim.adsp_legacy.adsp", "warning")], baseResults),
+    ).toContain("PS-17")
+    expect(
+      deriveDkimProblemStates([finding("dkim.adsp_legacy.domainkeys", "info")], baseResults),
+    ).toContain("PS-17")
+    // The healthy ok row never matches.
+    const healthy = deriveDkimProblemStates([finding("dkim.adsp_legacy", "ok")], baseResults)
+    expect(healthy).not.toContain("PS-17")
+    expect(healthy).toContain("PS-00")
   })
 })

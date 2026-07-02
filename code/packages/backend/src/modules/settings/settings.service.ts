@@ -82,6 +82,8 @@ export class SettingsService {
         tools: app.tools,
         access: app.access,
         dns_health: app.dns_health,
+        domain_reputation: app.domain_reputation,
+        seedList: app.seedList,
       },
       me: {
         sub: user.userId,
@@ -123,8 +125,25 @@ export class SettingsService {
         if (dto.checks.dnsbl?.zones) cfg.checks.dnsbl.zones = cleanList(dto.checks.dnsbl.zones)
         // Content-scoring admin settings (pm/checks/content_scoring.mdx §4): threshold override,
         // inbox-safe target, network content tests on/off.
-        if (dto.checks.content)
-          cfg.checks.content = { ...cfg.checks.content, ...dto.checks.content }
+        if (dto.checks.content) {
+          const { url, ...content } = dto.checks.content
+          cfg.checks.content = { ...cfg.checks.content, ...content, url: cfg.checks.content.url }
+          // Link/URL-reputation admin settings (pm/checks/link_url_reputation.mdx §4/§5): the
+          // shortener domain list matched by content.url_shortener and the Safe Browsing API key
+          // ("" clears the key = not configured; the checker degrades to one info note).
+          if (url) {
+            cfg.checks.content.url = {
+              shorteners:
+                url.shorteners !== undefined
+                  ? cleanList(url.shorteners.map((s) => s.toLowerCase()))
+                  : (cfg.checks.content.url?.shorteners ?? []),
+              safeBrowsingKey:
+                url.safeBrowsingKey !== undefined
+                  ? url.safeBrowsingKey.trim()
+                  : (cfg.checks.content.url?.safeBrowsingKey ?? ""),
+            }
+          }
+        }
         // BIMI admin settings (pm/checks/bimi.mdx §4/§5): the recognized-MVA allow-list the future
         // VMC/CMC certificate round matches issuer DNs against. Admin-only; replaces the list.
         if (dto.checks.bimi?.mvaAllowList)
@@ -139,6 +158,10 @@ export class SettingsService {
         // DANE / TLSA admin settings (pm/checks/dane_tlsa.mdx §4): the FUTURE :25 cert-match
         // probe toggle + timeout and the require-AD-bit validating-resolver switch.
         if (dto.checks.dane) cfg.checks.dane = { ...cfg.checks.dane, ...dto.checks.dane }
+        // List-Unsubscribe / one-click admin settings (pm/checks/list_unsubscribe.mdx §4): the
+        // bulk-sender daily threshold, probe timeout, global probe permission, and probe cadence.
+        if (dto.checks.listUnsub)
+          cfg.checks.listUnsub = { ...cfg.checks.listUnsub, ...dto.checks.listUnsub }
         if (dto.checks.thresholds)
           cfg.checks.thresholds = { ...cfg.checks.thresholds, ...dto.checks.thresholds }
         if (dto.checks.weights)
@@ -192,6 +215,84 @@ export class SettingsService {
             seen.add(key)
             return true
           })
+      }
+      // Domain-registration-reputation settings (pm/checks/domain_reputation.mdx §4 "Global admin
+      // settings" / §5): the RDAP cache TTL + per-run request budget and the curated reference
+      // lists (parking-provider nameservers, high-abuse TLDs, registrar abuse-reputation
+      // watchlist). The lists replace wholesale; the watchlist dedupes (match_type, match_value)
+      // pairs, mirroring the SQL UNIQUE constraint.
+      if (dto.domain_reputation) {
+        const dr = dto.domain_reputation
+        if (dr.cache_ttl_hours !== undefined)
+          cfg.domain_reputation.cache_ttl_hours = dr.cache_ttl_hours
+        if (dr.rdap_request_budget !== undefined)
+          cfg.domain_reputation.rdap_request_budget = dr.rdap_request_budget
+        if (dr.parking_nameservers)
+          cfg.domain_reputation.parking_nameservers = cleanList(
+            dr.parking_nameservers.map((p) => p.toLowerCase().replace(/^\./, "")),
+          )
+        if (dr.high_abuse_tlds)
+          cfg.domain_reputation.high_abuse_tlds = cleanList(
+            dr.high_abuse_tlds.map((t) => t.toLowerCase().replace(/^\./, "")),
+          )
+        if (dr.registrar_reputation) {
+          const seen = new Set<string>()
+          cfg.domain_reputation.registrar_reputation = dr.registrar_reputation
+            .map((r) => ({
+              match_type: r.match_type,
+              match_value: r.match_value.trim(),
+              ...(r.note?.trim() ? { note: r.note.trim() } : {}),
+            }))
+            .filter((r) => {
+              if (!r.match_value) return false
+              const key = `${r.match_type}|${r.match_value.toLowerCase()}`
+              if (seen.has(key)) return false
+              seen.add(key)
+              return true
+            })
+        }
+      }
+      // Seed-list inbox-placement settings (pm/checks/inbox_placement.mdx §4 "Admin-only
+      // settings" / §5 `seedList:` block / §6 gating): the seed source ("" keeps the whole
+      // placement family dark), tested providers, slow dedicated cadence, overall inbox-rate
+      // warn/critical bands (defaults 80/50), the settle-window poll backoff, the monthly probe
+      // budget, and the self-hosted seed mailboxes (`seed_list_config`; deduped on seed_address).
+      // The seed-service API key / mailbox credentials live in the out-of-repo credentials file,
+      // never in config.yaml.
+      if (dto.seedList) {
+        const sl = dto.seedList
+        if (sl.service !== undefined) cfg.seedList.service = sl.service.trim().toLowerCase()
+        if (sl.providers)
+          cfg.seedList.providers = cleanList(sl.providers.map((p) => p.toLowerCase()))
+        if (sl.cadence !== undefined) cfg.seedList.cadence = sl.cadence
+        if (sl.thresholds) {
+          cfg.seedList.thresholds = { ...cfg.seedList.thresholds, ...sl.thresholds }
+          // Keep the bands ordered: critical must sit at or below warning (spec §3 mapping).
+          if (cfg.seedList.thresholds.criticalBelowPct > cfg.seedList.thresholds.warnBelowPct) {
+            cfg.seedList.thresholds.criticalBelowPct = cfg.seedList.thresholds.warnBelowPct
+          }
+        }
+        if (sl.settlePollMinutes)
+          cfg.seedList.settlePollMinutes = [
+            ...new Set(sl.settlePollMinutes.filter((m) => m > 0)),
+          ].sort((a, b) => a - b)
+        if (sl.monthlyBudget !== undefined) cfg.seedList.monthlyBudget = sl.monthlyBudget
+        if (sl.seeds) {
+          const seen = new Set<string>()
+          cfg.seedList.seeds = sl.seeds
+            .map((s) => ({
+              provider: s.provider.trim().toLowerCase(),
+              seed_address: s.seed_address.trim().toLowerCase(),
+              read_method: s.read_method,
+              active: s.active,
+            }))
+            .filter((s) => {
+              if (!s.provider || !s.seed_address) return false
+              if (seen.has(s.seed_address)) return false
+              seen.add(s.seed_address)
+              return true
+            })
+        }
       }
     })
     if (dto.schedule) {

@@ -57,6 +57,20 @@ export interface SettingsView {
      * subdomain-takeover fingerprint list (`takeover_fingerprints` mapped onto config.yaml).
      */
     dns_health: AppConfigFile["dns_health"]
+    /**
+     * Domain Registration Reputation (pm/checks/domain_reputation.mdx §4 "Global admin settings" /
+     * §5): the RDAP cache TTL + per-run request budget and the admin-editable reference lists —
+     * parking-provider nameservers, high-abuse TLDs, and the registrar abuse-reputation watchlist
+     * (the `parking_nameservers` / `registrar_reputation` reference tables mapped onto config.yaml).
+     */
+    domain_reputation: AppConfigFile["domain_reputation"]
+    /**
+     * Seed-list inbox-placement testing (pm/checks/inbox_placement.mdx §4 "Admin-only settings"):
+     * the seed source, tested providers, slow dedicated cadence, overall inbox-rate warn/critical
+     * thresholds (defaults 80/50), settle-window poll schedule, monthly test budget, and the
+     * self-hosted seed mailboxes (`seed_list_config` mapped onto config.yaml → seedList).
+     */
+    seedList: AppConfigFile["seedList"]
   }
   /** The caller's own per-user block (defaults when the user has never saved). */
   me: {

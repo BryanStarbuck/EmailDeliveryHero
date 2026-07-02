@@ -1,0 +1,581 @@
+---
+title: EmailDeliveryHero — Installing the Brew / OS Tools
+description: The product + engineering spec for the Install page and the Homebrew/OS-tool install flow. A check run shells out to CLI tools (dig, doggo, swaks, openssl, checkdmarc, parsedmarc, SpamAssassin…); many are not present on a fresh machine. Before a run, preflight detects which tools are missing and — instead of silently degrading — offers a dedicated Install page: one checkbox row per missing tool (rounded card, multi-line), Install buttons at top and bottom, live per-row install output. This spec owns the SHARED Install UI/flow (used by both this brew side and the npm side, pm/install_npm.mdx), the CANONICAL Homebrew formula catalog (verified against the live Homebrew API 2026-07-02, with every drift/gotcha baked in: drill=ldns, whois keg-only, SpamAssassin→cpanm, dog→doggo, mailhog→mailpit, opendkim/opendmarc/rspamd/rblcheck not-in-brew), how we check what is installed (`brew list`/`locateTool`), how we install (execFile `brew install`, no shell, streamed), and CONTINUING — returning to the origin page (query-param `from`) and resuming whatever run the user was starting (`intent`) once the installs finish.
+---
+
+# EmailDeliveryHero — Installing the Brew / OS Tools
+
+The audit engine shells out to CLI tools. [run_checks.mdx §5](./run_checks.mdx) names them — `dig`,
+`doggo`, `kdig`, `drill`, `dnsx`, `swaks`, `openssl`, `checkdmarc`, `parsedmarc`, `testssl`,
+`spamassassin`/`spamc`, `whois`, and more — and the per-check "Testing toolbox" sections
+([checks/dns.mdx](./checks/dns.mdx), [checks/dkim.mdx](./checks/dkim.mdx),
+[checks/spam_content.mdx](./checks/spam_content.mdx)…) name the rest. On a fresh machine **most of
+these are absent.**
+
+The engine already degrades gracefully — a missing tool is a capability downgrade, never a failure
+([run_checks.mdx §5.3](./run_checks.mdx)). This spec is the **other half of that story**: rather than
+quietly running a thinner audit forever, we give the user a **one-click path to a full-fidelity
+audit** — a dedicated **Install** page that detects what's missing, lets them choose, installs it
+through Homebrew, and then **resumes exactly the run they were starting.**
+
+This file owns:
+
+* The **shared Install page** (§4) — the UI and flow used by **both** package managers. The
+  companion [install_npm.mdx](./install_npm.mdx) owns the npm/pnpm mechanics and reuses this page.
+* The **canonical Homebrew catalog** (§3) — the single source of truth for *which formula provides
+  which tool*, superseding the scattered "Testing toolbox" mentions across the check specs.
+* Detection (§5), installation (§6), the API + child-process contract (§7), and **continuing** —
+  return-to-origin + resume-the-pending-run (§8).
+
+Siblings: [run_checks.mdx](./run_checks.mdx) (the `ToolRunner`/`ToolLocator` contract we reuse),
+[settings.mdx §6](./settings.mdx) (Tools & environment — the *status* surface this page makes
+*actionable*), [errors.mdx](./errors.mdx) (log lines), [engineering.mdx](./engineering.mdx) (module
+layout), [install_npm.mdx](./install_npm.mdx) (the npm sibling).
+
+---
+
+## 1. Where Install sits — preflight before a run
+
+The trigger funnel from [run_checks.mdx §1](./run_checks.mdx) grows **one gate** at the front. When
+the user starts a run (Dashboard **Run checks**, a Domains **Run audit now**, a **Run all**, or a
+per-check **Run this check now**), the frontend first asks the backend *what would this run need
+that isn't installed?* If the answer is non-empty, we **divert to the Install page** carrying two
+pieces of state — where we came from and what the user was trying to do — then come back and finish
+the job.
+
+```
+ user clicks "Run all" on /            preflight: GET /api/install/preflight?scope=run-all
+        │                                          │
+        ▼                                          ▼
+ nothing missing ──▶ run proceeds normally    missing = [doggo, checkdmarc, spamassassin]
+                                                   │
+                                                   ▼
+                              navigate /install?manager=brew&from=%2F&intent=run-all
+                                                   │  user picks rows, clicks Install, waits
+                                                   ▼
+                              installs finish ──▶ navigate back to `from` (/) ──▶ replay `intent` (run-all)
+```
+
+The gate is **advisory, never mandatory.** A run is always *allowed* to proceed with missing tools
+(the engine degrades). The Install page is offered, not forced: it is reachable any time from
+**Settings → Tools & environment** (§9), and the preflight diversion can be dismissed
+("Run anyway") — see §4.6.
+
+---
+
+## 2. Use cases
+
+| # | Use case | Entry | Outcome |
+| --- | --- | --- | --- |
+| U1 | **Run diverted to install** — user starts a run; required tools are missing. | Any run trigger → preflight → `/install?...&from&intent` | User installs the checked tools; the app returns to `from` and **replays the pending run** (§8). |
+| U2 | **Proactive install from Settings** — user opens the Install page directly to top up their toolbox. | Settings → Tools & environment → **Install missing tools** (`/install?manager=brew`) | Tools install; no pending run — user stays on the page (or navigates away freely). |
+| U3 | **Partial install** — user unchecks tools they don't want. | Install page checkboxes | Only checked rows install; unchecked rows are left absent and the audit keeps degrading for those (honestly reported). |
+| U4 | **Homebrew itself missing** — `brew` is not on the machine. | Preflight/detection finds no `brew` | The page shows a **"Homebrew not installed"** banner with the official one-line install command to copy — we never try to install brew *for* them (§6.5). |
+| U5 | **Non-brew tool** — a needed tool has no Homebrew formula (SpamAssassin, rspamd, opendkim…). | Catalog entry flagged `manager: special` | The row renders with its **real** install path (`cpanm`, `pipx`, Docker, apt) — auto-installable where safe (`cpanm`), copy-command where it needs root/Docker (§3.3, §6.4). |
+| U6 | **Re-run detection** — user installed something in another terminal. | **Re-detect** button (§4.5) | The list re-probes and drops the now-present tools. |
+| U7 | **Install fails** — a formula errors mid-install. | Any install | The row goes red with the tail of `brew` stderr; other rows are unaffected; the pending run still offers to proceed with what succeeded (§6.3, §8.4). |
+
+---
+
+## 3. The canonical Homebrew catalog
+
+This section is the **single source of truth** for the brew side. Every formula below was verified
+against the live Homebrew API (`formulae.brew.sh/api/formula/<name>.json`) on **2026-07-02**. The
+scattered "Testing toolbox" install lines in the check specs are downstream of this table — where
+they disagree, **this table wins**, and §3.4 records the drift to fix.
+
+The catalog lives in the repo as data (§9): `code/packages/backend/src/modules/install/catalog/brew.ts`.
+Each entry is:
+
+```ts
+export interface ToolCatalogEntry {
+  id: string;              // stable id, e.g. 'doggo', 'spamassassin'
+  manager: 'brew' | 'special';   // 'special' = installs via cpanm/pipx/docker/apt (§3.3)
+  formula: string;         // brew formula name (may differ from the binary! e.g. drill→ldns)
+  binaries: string[];      // the executables it provides — what detection looks for on PATH
+  category: Category;      // 'dns' | 'spf' | 'dkim' | 'dmarc' | 'blacklist' | 'spam' | 'tls' | 'general'
+  tier: 'default' | 'extended';  // default = preselected baseline; extended = opt-in
+  summary: string;         // one line shown on the row
+  usedBy: string[];        // checkIds that shell out to it — drives per-scope preflight (§5.3)
+  installArgs?: string[];  // override for 'special' entries (e.g. cpanm invocation)
+  notes?: string;          // the gotcha, shown as row subtext (keg-only, needs Docker…)
+}
+```
+
+### 3.1 Default baseline (preselected) — all Homebrew core, no root
+
+The lean set that lights up the **entire first-round audit path** (DNS, SPF/DKIM/DMARC records,
+DNSBL — which is just reverse-IP lookups via `dig`/`doggo`/`dnsx` — and TLS transport). These rows
+are **checked by default** on the Install page.
+
+| id | `brew install` | Provides (binaries) | Category | Serves |
+| --- | --- | --- | --- | --- |
+| `bind` | `bind` | `dig` · `host` · `nslookup` · `delv` | dns | every record lookup; `delv` DNSSEC-validated resolution |
+| `knot` | `knot` | `kdig` · `kzonecheck` | dns | dig-compatible with native DoH/DoT + `+json`; cross-resolver agreement |
+| `ldns` | `ldns` | **`drill`** · `ldns-*` | dns (dnssec) | DNSSEC-aware chain tracing (`drill -TD`). **NB: `drill` comes from `ldns`, not `brew install drill`** (§3.4) |
+| `doggo` | `doggo` | `doggo` | dns | modern dig with native JSON (successor to the removed `dog`) |
+| `dnsx` | `dnsx` | `dnsx` | dns | bulk/NDJSON resolution; bulk DKIM-selector probing |
+| `whois` | `whois` | `whois` | dns | registrar/expiry/EPP; netblock owner for delisting. **Keg-only** (§3.4) |
+| `openssl@3` | `openssl@3` | `openssl` | tls | MX cert chain / TLS version; decode DKIM `p=` key size |
+| `swaks` | `swaks` | `swaks` | tls | live SMTP transaction / seed-send probe (STARTTLS, AUTH, delivery) |
+| `testssl` | `testssl` | `testssl.sh` | tls | full cipher/protocol/vuln audit of an MX endpoint |
+| `checkdmarc` | `checkdmarc` | `checkdmarc` | dmarc | cross-validation oracle: SPF/DMARC/MTA-STS/TLS-RPT/BIMI/MX/DNSSEC in one JSON pass |
+| `parsedmarc` | `parsedmarc` | `parsedmarc` | dmarc | parse DMARC `rua`/`ruf` report files or an IMAP mailbox → JSON (report ingestion, [emails.mdx](./emails.mdx)) |
+
+> The brew-research pass initially reported `checkdmarc`/`parsedmarc` as pip-only; a direct API
+> check (2026-07-02) confirms **both are Homebrew-core formulas** (the maintainers publish
+> `python-app` wrappers). We install them via `brew`, not `pip`, to keep one manager on the brew side.
+
+### 3.2 Extended / diagnostic (opt-in) — all Homebrew core
+
+Unchecked by default; a user or an advanced check can add them. These deepen coverage but are not
+required for the core audit.
+
+| id | `brew install` | Binaries | Category | Serves |
+| --- | --- | --- | --- | --- |
+| `q` | `q` | `q` | dns | tiny DNS client (UDP/TCP/DoT/DoH/DoQ) — resolver-consistency cross-checks |
+| `zns` | `zns` | `zns` | dns | readable colorized record dumps |
+| `rdap` | `rdap` | `rdap` | dns | structured JSON registration data (WHOIS successor) |
+| `asn` | `asn` | `asn` | dns/blacklist | ASN/prefix lookup — sending-IP network neighborhood |
+| `dnstwist` | `dnstwist` | `dnstwist` | dns/blacklist | typosquat/lookalike generation → `infra.name_similarity` |
+| `dnsviz` | `dnsviz` | `dnsviz` | dns (dnssec) | DNSSEC chain-of-trust grading (`probe … \| grok`) |
+| `dnstracer` | `dnstracer` | `dnstracer` | dns | delegation-chain trace / lame-delegation hunting |
+| `dnsperf` | `dnsperf` | `dnsperf` | dns | per-NS latency (future `ns_response_time` probe) |
+| `massdns` | `massdns` | `massdns` | dns | very-large-volume sweeps (future subdomain/dangling PS) |
+| `ipcalc` | `ipcalc` | `ipcalc` | dns/blacklist | IP-class sanity (private/CGNAT/loopback); allocation width |
+| `sslscan` | `sslscan` | `sslscan` | tls | fast cipher enumeration |
+| `gnutls` | `gnutls` | `gnutls-cli` | tls | DANE-aware TLS client — validates TLSA vs the live cert |
+| `certigo` | `certigo` | `certigo` | tls | cert-chain parse: expiry, SAN coverage of the MX name |
+| `nmap` | `nmap` | `nmap` | tls | NSE `smtp-commands`/`smtp-open-relay`/`ssl-enum-ciphers` |
+| `socat` | `socat` | `socat` | tls | raw banner reads / scripted SMTP dialogs |
+| `tidy-html5` | `tidy-html5` | `tidy` | spam | HTML well-formedness lint → `content.html_hygiene` |
+| `lychee` | `lychee` | `lychee` | spam | bulk link liveness + redirect JSON (future `url_reachable`) |
+| `curl` | `curl` | `curl` | spam | single-URL redirect-chain expansion for shorteners (also ships with the OS) |
+| `msmtp` | `msmtp` | `msmtp` | dkim/tls | lightweight MTA capability probe (STARTTLS, size) |
+| `mailpit` | `mailpit` | `mailpit` | general | local SMTP sink (`:1025`) + JSON API to test our own probe-signing (successor to the removed `mailhog`) |
+
+### 3.3 Not on Homebrew — the `special` entries
+
+These tools are **not** in Homebrew core (verified 404 on 2026-07-02). They still appear on the
+Install page — flagged with their real install path — so the user sees the full picture. Where the
+path is **safe and non-interactive** (`cpanm`) we run it for them; where it needs **root, a
+password, or a Docker daemon** we render a **copy-the-command** row instead of pretending to
+automate it (§6.4).
+
+| id | Tool | Real install | manager | Auto? | Category |
+| --- | --- | --- | --- | --- | --- |
+| `spamassassin` | `spamassassin` · `spamc` | `brew install perl cpanminus` then `cpanm --notest Mail::SpamAssassin` | special (cpanm) | **yes** (after its `perl`+`cpanminus` deps, which are brew-core) | spam |
+| `rspamd` | `rspamadm` · `rspamc` | Docker image (no brew formula; MacPorts stale) | special (docker) | no — copy command | spam |
+| `opendkim` | `opendkim-testkey` | macOS: MacPorts `port install opendkim`; Linux: `apt install opendkim-tools` | special (os) | no — copy command | dkim |
+| `opendmarc` | `opendmarc-check` | Linux: `apt install opendmarc`; macOS: build from source | special (os) | no — copy command | dmarc |
+| `rblcheck` | `rblcheck` | Linux: `apt install rblcheck`; macOS: build from `logic/rblcheck` | special (os) | no — copy command | blacklist |
+| `dkimpy` | `dkimverify` · `dknewkey` | `pipx install dkimpy` | special (pipx) | **yes** (if `pipx` present, else copy command) | dkim |
+| `oletools` | `olevba` | `pipx install oletools` | special (pipx) | yes (if `pipx`) | spam |
+| `sslyze` | `sslyze` | `pipx install sslyze` | special (pipx) | yes (if `pipx`) | tls |
+| `zonemaster-cli` | `zonemaster-cli` | Perl/CPAN or Docker | special (docker) | no — copy command | dns |
+
+> **DNSBL and DKIM key checks need no `special` tool.** DNSBL is a reverse-IP A/TXT query handled by
+> `dig`/`doggo`/`dnsx` (default tier) against the checked-in `blacklists.yaml` zones; DKIM key
+> inspection is `dig` + `openssl`. `rblcheck`/`opendkim` are *optional* second opinions, never on the
+> critical path — so the core audit is fully installable with **zero root, zero Docker, zero pip.**
+
+### 3.4 Drift the catalog corrects (carry these into the check specs)
+
+1. **`drill` is provided by `ldns`, not `drill`.** `brew install drill` installs an **unrelated Rust
+   HTTP load-tester** (`desc: "HTTP load testing application written in Rust"`). The DNS `drill`
+   tool ships in the `ldns` formula. The catalog's `ldns` entry owns the `drill` binary; the code
+   must **never** emit `brew install drill`.
+2. **`whois` is keg-only.** Homebrew's `whois` does not symlink into `/opt/homebrew/bin` (it would
+   shadow the macOS system `whois`); the binary lives at `/opt/homebrew/opt/whois/bin/whois`.
+   Detection (§5) must check the keg path, and the ToolLocator fallback already knows it.
+3. **SpamAssassin / rspamd are NOT brew formulas.** Any spec, code, or UI string that says
+   `brew install spamassassin` or `brew install rspamd` is **wrong**. The canonical path is
+   `cpanm --notest Mail::SpamAssassin` (SpamAssassin) or Docker (rspamd). This corrects the stale
+   phrasing flagged in [checks/content_scoring.mdx](./checks/content_scoring.mdx) and
+   [spam_checks.mdx](./spam_checks.mdx) (which still say "Homebrew spamassassin"); the authoritative
+   path is [checks/spam_content.mdx §3](./checks/spam_content.mdx).
+4. **`dog` is gone** (disabled in Homebrew 2024-08-01) → use **`doggo`**. **`mailhog` is gone** →
+   use **`mailpit`**. **`opendkim`/`opendmarc`** were removed from brew. The catalog carries only the
+   live successors.
+
+---
+
+## 4. The Install page — user interface
+
+Route **`/install`**, rendered inside the standard `AppShell` (256px left bar + content). It is a
+single scrollable column of **tool rows** bracketed by two identical **Install** action bars.
+
+### 4.1 Layout
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Install tools                                    [ Re-detect ]           │  ← header
+│  10 tools missing for this run · 6 selected                               │
+│                                                                            │
+│  [ ☐ Homebrew not detected — copy install command ▸ ]        (only if U4) │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │            Install 6 selected tools            [ Install ▸ ]        │   │  ← TOP action bar
+│  └────────────────────────────────────────────────────────────────────┘   │
+│                                                                            │
+│  ┌──[✓]────────────────────────────────────────────────────────────────┐ │  ← tool row (card)
+│  │  doggo                                                    DNS  ·  brew │ │
+│  │  Modern dig with native JSON — record lookups for SPF/DKIM/DMARC.     │ │
+│  │  brew install doggo                                        ● missing  │ │
+│  └──────────────────────────────────────────────────────────────────────┘ │
+│  ┌──[✓]────────────────────────────────────────────────────────────────┐ │
+│  │  spamassassin  spamc                                     SPAM · cpanm │ │
+│  │  Content spam scoring. Installs via perl + cpanminus, then CPAN.      │ │
+│  │  brew install perl cpanminus && cpanm --notest Mail::SpamAssassin    │ │
+│  │  ⚠ Not a Homebrew formula — installed through CPAN (may take minutes).│ │
+│  └──────────────────────────────────────────────────────────────────────┘ │
+│                              … more rows …                                 │
+│                                                                            │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │            Install 6 selected tools            [ Install ▸ ]        │   │  ← BOTTOM action bar
+│  └────────────────────────────────────────────────────────────────────┘   │
+│                                                                            │
+│  [ Skip — run anyway ]                            [ Cancel run ]           │  ← only when ?intent set
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### 4.2 The tool row (rounded card)
+
+Each missing tool is a **rounded rectangle** (`rounded-lg border border-edh-border p-4`), able to
+span **multiple lines**, with a **checkbox on the left**:
+
+* **Checkbox** — left edge, vertically centered. Checked = "install this". Default-tier rows start
+  **checked**; extended and `special` rows start **unchecked** (the user opts into the heavier ones).
+  Toggling recomputes the "N selected" counters in both action bars.
+* **Line 1** — the tool name(s) (the `binaries`, e.g. `spamassassin  spamc`) in `font-medium`, with a
+  right-aligned pair of chips: the **category** (DNS/SPF/DKIM/DMARC/BLACKLIST/SPAM/TLS) and the
+  **manager** (`brew` / `cpanm` / `pipx` / `docker` / `os`).
+* **Line 2** — the one-line `summary`.
+* **Line 3** — the exact **install command** in a mono chip, and a **status dot**: `● missing`
+  (grey) → `◐ installing` (amber, animated) → `✓ installed` (green) → `✗ failed` (red).
+* **Line 4** (only when present) — the `notes` gotcha as amber subtext (keg-only, "needs Docker",
+  "may take minutes").
+* When a row is `special` and **not auto-installable** (Docker/os/root), the checkbox is replaced by
+  a **Copy** button and the row cannot be selected for the batch install (it's copy-and-run-yourself).
+
+Rows are **grouped by category** with small section headers (DNS, then TLS, then SPAM…), and within
+a category, default tier before extended.
+
+### 4.3 The Install action bars (top and bottom)
+
+Two **identical** bars — one above the rows, one below — so the button is always in reach on a long
+list. Each shows the live count ("Install 6 selected tools") and one primary **Install** button.
+They are the same control; clicking either starts the same batch (§6). While a batch runs, both
+bars switch to a **progress state**: "Installing 3 of 6…" with a determinate bar, and the button
+becomes **Cancel** (aborts the *remaining* queue; the in-flight formula finishes or is killed on the
+child-process timeout, §7).
+
+### 4.4 Live install output
+
+When the batch runs, each installing row **expands** to show a live, auto-scrolling tail of that
+formula's `brew` stdout/stderr (last ~12 lines, monospace, muted) — streamed from the backend (§7.3).
+On success the tail collapses to `✓ installed`; on failure it stays open, red, showing the last
+lines of stderr so the user sees *why*.
+
+### 4.5 Re-detect
+
+A **Re-detect** button (header, top-right) re-runs detection (§5) and rebuilds the list — dropping
+tools that appeared since the page loaded (U6) and re-adding any that vanished. It's also run
+**automatically** once when every selected install has settled, so the list reflects reality before
+the "continue" step (§8).
+
+### 4.6 The run-context footer (only under `?intent`)
+
+When the page was reached from a diverted run (U1, i.e. `?intent` is present), a footer offers the
+two escape hatches the advisory gate promises (§1):
+
+* **Skip — run anyway** — abandon installing and go straight to §8's continue step with whatever is
+  currently installed (the run degrades honestly).
+* **Cancel run** — drop the pending intent and return to `from` **without** running.
+
+When there is no `?intent` (U2, proactive), the footer is absent; the user simply navigates away
+when done.
+
+---
+
+## 5. How we check what's installed
+
+Detection answers two questions: *is the package manager itself present?* and *for each catalog
+entry, is its tool on this machine?*
+
+### 5.1 Is Homebrew present?
+
+`locateTool('brew')` ([run_checks.mdx §5.2](./run_checks.mdx)) — an in-process PATH search plus the
+conventional fallback dirs (`/opt/homebrew/bin`, `/usr/local/bin`, Linuxbrew's
+`/home/linuxbrew/.linuxbrew/bin`). If it resolves, we run `brew --version` once (cached) to confirm
+it executes. If it does **not** resolve, the page shows the **U4** banner (§6.5) and every `brew`
+row becomes copy-only.
+
+### 5.2 Is a given tool installed?
+
+Two complementary signals, cheap-first:
+
+1. **`locateTool(binary)`** — the authoritative check, because it's exactly what a *run* will use. A
+   tool counts as installed iff at least one of its `binaries` resolves to an executable path
+   (honoring the `whois` keg path, §3.4). This is pure Node `fs.access`, no child process.
+2. **`brew list --formula --versions` (one call, cached per detection)** — a single spawn that lists
+   every installed formula with its version. We cross-reference by `formula` id to (a) show versions
+   on already-installed tools in Settings, and (b) catch a formula that's installed but whose binary
+   isn't yet on PATH (rare; relink needed). `locateTool` is truth for "can the run use it"; `brew
+   list` enriches.
+
+`special` entries detect by their **binary only** (`locateTool('spamc')`, `locateTool('rspamc')`,
+`locateTool('olevba')`) — they're not brew formulas, so `brew list` never sees them.
+
+### 5.3 What does *this run* need? (scoped preflight)
+
+Preflight is **scope-aware** so we never nag about a tool the pending run won't touch. Each catalog
+entry lists the `checkIds` that shell out to it (`usedBy`). Given a run scope we compute the set of
+checks that will execute (all enabled checks for `run-all`/`run-domain`; the single family for
+`run-check`), union their tools, subtract what's installed, and return the **missing** remainder.
+A `run-check=spf` preflight therefore lists only SPF/DNS tools, never `swaks` or `spamassassin`.
+
+`GET /api/install/preflight?manager=brew&scope=<scope>&domainId=<id?>` →
+`{ brewPresent, missing: ToolStatus[], installed: ToolStatus[] }`. The default tier of the missing
+set is what the page pre-checks.
+
+---
+
+## 6. How we install them
+
+### 6.1 The batch
+
+`POST /api/install/run` with the selected `ids`. The backend installs them **one at a time**
+(serial — brew's own locking makes parallel installs unsafe, and serial output is what the row-by-row
+UI shows). For each id:
+
+* **`brew` entries** → `runTool('brew', ['install', formula], { timeoutMs, stream })` via the
+  `ToolRunner` contract (§7). No shell, ever — `formula` is a fixed catalog string, never user input.
+* **`special` / cpanm** (`spamassassin`) → first ensure its brew deps (`perl`, `cpanminus`) via the
+  same brew path, then `runTool('cpanm', ['--notest', 'Mail::SpamAssassin'])`.
+* **`special` / pipx** (`dkimpy`…) → if `locateTool('pipx')`, `runTool('pipx', ['install', pkg])`;
+  else the row is copy-only.
+* **`special` / docker · os · root** → **not auto-run.** The row is copy-only (§6.4).
+
+### 6.2 Streaming per-row status
+
+Each install streams progress to the UI (§7.3) so rows animate `missing → installing → installed/
+failed` live. The batch endpoint returns a summary `{ results: [{ id, ok, code, tailStderr }] }`
+when the queue drains; the stream is the live view, the summary is the settled truth.
+
+### 6.3 Isolation — one failure never sinks the batch
+
+A formula that fails (non-zero `brew` exit, or the child-process timeout) marks **that row** failed
+and the queue **continues** to the next id. The batch never throws; the user ends with a mix of ✓
+and ✗ rows, and §8 offers to continue with whatever succeeded.
+
+### 6.4 Root, Docker, and the honesty rule
+
+The app runs as an unprivileged localhost process and **cannot** type a sudo password or start a
+Docker daemon for the user. So the rule is: **anything that needs root, a password, or Docker is
+never silently attempted** — the row is **copy-only**, showing the exact command to paste into a
+terminal (`docker run …`, `sudo apt install opendmarc`). Homebrew itself **never needs sudo** (that
+is the whole point of brew), so the entire `brew` tier is genuinely one-click. `cpanm --notest
+Mail::SpamAssassin` installs into the user's perl and needs no root either — hence it's the one
+`special` path we automate.
+
+### 6.5 Homebrew missing (U4)
+
+We do **not** run the Homebrew bootstrap (a `curl | bash` from a web app is exactly the shell-piping
+we forbid). Instead the page shows a banner with the official command to **copy**:
+
+```
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+…a "Re-detect" button, and a short note that after installing brew and re-detecting, all rows become
+one-click. On Linux without brew, the banner offers the distro path (`apt`/`dnf`) alongside
+Linuxbrew.
+
+---
+
+## 7. How we call them — the API + child-process contract
+
+### 7.1 REST surface (backend `install` module)
+
+| Endpoint | Purpose | Access |
+| --- | --- | --- |
+| `GET /api/install/catalog?manager=brew` | The full catalog (§3) with each entry's live status merged in. | signed-in |
+| `GET /api/install/preflight?manager=brew&scope=&domainId=` | The scoped missing/installed split (§5.3). | signed-in |
+| `POST /api/install/run` `{ ids: string[] }` | Install the selected ids serially (§6); returns the settled summary. | signed-in |
+| `GET /api/install/run/:jobId/stream` | SSE stream of `{ id, phase, line }` events for the live per-row tail (§7.3). | signed-in |
+| `POST /api/install/detect` | Force a fresh detection (Re-detect, §4.5) — returns the recomputed catalog+status. | signed-in |
+
+All are **signed-in** (usable by the `default` user — the app is optional-login,
+[security.mdx](./security.mdx)); none are admin-gated, because installing local CLI tools on your
+own machine is the app's core job, not a privileged config change. *(If a deployment wants to lock
+this down, `@RequirePermission('tools:install')` is the single-decorator hook — noted, not imposed.)*
+
+### 7.2 The child-process contract (reused verbatim)
+
+Every spawn — `brew`, `cpanm`, `pipx` — goes through the **existing `ToolRunner`**
+([run_checks.mdx §5.1](./run_checks.mdx), `shared/tool-runner.ts`): `execFile` with an **args array,
+no shell**; a hard timeout (installs get a **generous budget — 10 min** default, since a cold
+`brew install nmap` or `cpanm SpamAssassin` is slow — versus the 30s of a check); a `maxBuffer` cap;
+and a **structured result** (`{ code, stdout, stderr, timedOut }`) where a non-zero exit is *data*
+(the row failed) not an exception. `brew`/`cpanm` resolve through `locateTool` (§5.1) so the absolute
+path is used even under a minimal PATH.
+
+### 7.3 Streaming
+
+Installs are long, so unlike a check (which returns one structured result) an install **streams**.
+The `install` service spawns with `execFile` but attaches `child.stdout`/`stderr` line readers and
+publishes `{ id, phase: 'installing'|'done'|'failed', line }` events over an **SSE** channel
+(`GET …/stream`), keyed by a `jobId` the `POST /run` returns. This is additive to the ToolRunner
+contract — the same `execFile`, with the streams tee'd to the SSE bus and still captured for the
+final `ToolResult`. If SSE is unavailable, the UI falls back to polling `GET /api/install/run/:jobId`
+for coarse per-row status.
+
+---
+
+## 8. Continuing — return to origin and resume the pending run
+
+This is the payoff: the user started a run, we detoured through Install, and now we must land them
+**back where they were, doing what they asked** — and **only after the installs finish.**
+
+### 8.1 The two carried params
+
+When the run funnel (§1) diverts, it navigates to
+**`/install?manager=brew&from=<encoded route>&intent=<intent>`**:
+
+* **`from`** — the URL-encoded route the user was on (e.g. `%2F` for the Dashboard,
+  `%2Fdomains%2Fabc123` for a domain page). One of ~20 app routes; we don't enumerate them, we just
+  round-trip the string.
+* **`intent`** — what to replay. A small, explicit vocabulary (not arbitrary code):
+  `run-all` · `run-domain:<domainId>` · `run-check:<checkId>:<domainId>` · `none`. The frontend
+  builds it from the button that was clicked; the Install page treats it as opaque-but-typed data.
+
+Because both are in the **URL**, the detour survives a refresh and is shareable/back-button-safe —
+no hidden global state. (A copy is also mirrored to `sessionStorage` so an accidental param loss
+still resumes.)
+
+### 8.2 The wait
+
+The continue step **must not fire until every selected install has settled** (§6.2). The page tracks
+the batch's settled promise; **Skip — run anyway** (§4.6) is the only way to shortcut it, and even
+that waits for any *in-flight* formula to stop (we never leave a `brew` child orphaned). Once
+settled, we run one final **Re-detect** (§4.5) so the resumed run sees the freshly installed tools
+on PATH.
+
+### 8.3 The replay
+
+With installs settled and detection refreshed, the Install page:
+
+1. Navigates to `from`.
+2. Dispatches the `intent` on arrival — the exact same call the origin button would have made
+   ([run_checks.mdx §1](./run_checks.mdx)): `run-all` → the Dashboard fan-out;
+   `run-domain:<id>` → `POST /api/audit/run/:id`; `run-check:<checkId>:<id>` → the per-check run.
+   The scan-progress dock ([progress_ui.mdx](./progress_ui.mdx)) lights up exactly as if the user had
+   never left.
+
+The replay uses a one-shot query param on `from` (`?resume=<intent>`) that the destination page reads
+and clears, so a later manual refresh of `from` does **not** re-trigger the run.
+
+### 8.4 Partial success
+
+If some installs failed (§6.3), the continue step still proceeds — the run degrades for the tools
+that didn't make it, exactly as a normal run would, and the failures were already shown red on their
+rows. We never block the user's audit on a formula that wouldn't install; the whole point of the
+engine's graceful degradation is that a full toolbox is *better*, never *required*.
+
+---
+
+## 9. Data model, config, and where Install lives
+
+* **Catalog** — `code/packages/backend/src/modules/install/catalog/brew.ts` (this file's §3 as
+  data). The npm catalog is the sibling `catalog/npm.ts` ([install_npm.mdx](./install_npm.mdx)); a
+  small `catalog/index.ts` merges them so the page can show "all missing tools" across managers when
+  reached from Settings.
+* **No new state on disk.** Install writes nothing to `~/.email_delivery_hero/` — installed tools
+  live in Homebrew's own prefix, and detection is computed fresh (with a short in-memory cache).
+  The only config touch-point is the existing `config.yaml → tools.paths.<name>` override
+  ([settings.mdx §6](./settings.mdx)), which `locateTool` already honors.
+* **Settings integration.** [settings.mdx §6](./settings.mdx) (Tools & environment) gains an
+  **"Install missing tools →"** action linking to `/install?manager=brew` (U2), and its read-only
+  status rows are backed by the same detection (§5) this page uses — one detector, two surfaces.
+* **Left bar.** Install is **not** a primary nav item (it's a task page, reached by diversion or from
+  Settings), so `left_bar.yaml` is unchanged. The route is registered in `router.tsx` under the
+  `AppShell` layout, like `scheduled-checks`.
+
+---
+
+## 10. Cross-platform
+
+* **macOS** — the primary path. Homebrew, no sudo. `whois` keg path handled (§3.4).
+* **Linux** — Linuxbrew (`/home/linuxbrew/.linuxbrew/bin`) is detected the same way; where a user
+  prefers the distro manager, the `special`/copy rows show `apt`/`dnf` commands. We never `sudo apt`
+  from the app (§6.4).
+* **Windows** — Homebrew doesn't exist; the page detects no `brew` and shows the U4 banner pointing
+  at **WSL** as the realistic path (consistent with [run_checks.mdx §8](./run_checks.mdx)). Pure-Node
+  checks still run; tool-backed checks degrade. `winget`-installable equivalents (`dig` via
+  `ISC.BIND`) are noted as copy rows, not automated in the first round.
+
+---
+
+## 11. Security
+
+* **No shell, ever.** Every install is `execFile('brew'|'cpanm'|'pipx', [args])` with a fixed catalog
+  formula string. There is **no** interpolation of user input into a command line — the only inputs
+  are catalog `id`s validated against the in-repo catalog (an unknown id is a `400`, never a spawn).
+* **No `curl | bash`.** The one thing that would need it (installing Homebrew itself) is deliberately
+  **copy-only** (§6.5). We surface the command; we never pipe the internet into a shell on the user's
+  behalf.
+* **No privilege escalation.** The app never invokes `sudo`; root-needing installs are copy-only
+  (§6.4). The brew/cpanm tier runs entirely as the unprivileged user.
+* **Localhost only.** These endpoints install software on the machine running the app; they inherit
+  the app's localhost binding and auth ([security.mdx](./security.mdx)). The `tools:install`
+  permission hook (§7.1) exists for anyone who wants to gate them further.
+
+---
+
+## 12. Acceptance criteria
+
+1. Starting a run whose enabled checks need an absent tool **diverts** to `/install?manager=brew&from=&intent=`;
+   starting a run with everything present proceeds with **no** diversion.
+2. The Install page lists exactly the **scope-missing** tools (§5.3): a `run-check:spf` preflight
+   shows SPF/DNS tools only, never `swaks`/`spamassassin`.
+3. Each row is a rounded, multi-line card with a **left checkbox**, name/category/manager chips, the
+   summary, the exact install command, a live status dot, and (where relevant) the gotcha note.
+   Default-tier rows start checked; extended and `special` rows start unchecked.
+4. There are **two** Install bars (top and bottom); both show the live selected-count and start the
+   same batch; unchecked rows are **not** installed.
+5. Installs run **serially** via `execFile` (no shell) through the existing `ToolRunner`, with a
+   generous timeout; each row animates `missing → installing → installed/failed` from a **live
+   stream**, and one failure never aborts the batch.
+6. The catalog **never** emits `brew install drill` (uses `ldns`), `brew install spamassassin`
+   (uses `cpanm Mail::SpamAssassin`), or `brew install rspamd`/`opendkim`/`opendmarc`; `whois` is
+   detected at its keg path.
+7. When `brew` is absent, the page shows the **copy-only** Homebrew bootstrap banner and turns every
+   `brew` row copy-only — it never runs `curl | bash` itself.
+8. Root/Docker/pip-less tools (`rspamd`, `opendmarc`, `opendkim`, `rblcheck`, `zonemaster-cli`) render
+   as **copy-only** rows; `spamassassin` (cpanm) and pipx tools (when `pipx` is present) are
+   one-click; **the entire default tier is one-click with zero root.**
+9. **Continuing:** once every selected install settles (and a final re-detect runs), the page
+   navigates back to `from` and **replays `intent`** (run-all / run-domain / run-check) exactly as the
+   origin button would have — the scan dock lights up — and a later refresh of `from` does **not**
+   re-trigger the run.
+10. **Skip — run anyway** proceeds to the continue step with the current toolbox; **Cancel run**
+    returns to `from` without running; a proactive visit (no `intent`) shows neither and just installs.
+11. Re-detect re-probes and drops now-present tools; Settings → Tools & environment links here and
+    shares the same detector.
+12. Every install endpoint validates `ids` against the in-repo catalog; an unknown id is a `400`,
+    never a spawn.
+
+<!--
+  install_brew.mdx maintenance: this file owns (a) the SHARED Install page/flow — reused by the npm
+  side, pm/install_npm.mdx — and (b) the CANONICAL Homebrew catalog (§3), which supersedes the
+  "Testing toolbox" mentions scattered across checks/*.mdx. When a check starts shelling out to a new
+  tool, add ONE catalog row here (formula, binaries, category, tier, usedBy) rather than a new install
+  line in the check spec. Keep §3.4's drift list honest against the live Homebrew API
+  (formulae.brew.sh/api/formula/<name>.json) — re-verify formula names before adding them; the
+  drill=ldns / whois-keg-only / SpamAssassin=cpanm / dog→doggo / mailhog→mailpit / opendkim-opendmarc-
+  rspamd-not-in-brew facts are load-bearing. The child-process contract is NOT re-specified here — it
+  reuses ToolRunner from run_checks.mdx §5 (only the timeout budget and the SSE stream are added). The
+  continue/resume vocabulary (from + intent: run-all | run-domain | run-check) must stay in lockstep
+  with the trigger funnel in run_checks.mdx §1. Detection (§5) shares one detector with
+  settings.mdx §6.
+-->

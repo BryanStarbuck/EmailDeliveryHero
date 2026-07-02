@@ -1,7 +1,8 @@
-import { Link, useNavigate } from "@tanstack/react-router"
+import { Link, useNavigate, useSearch } from "@tanstack/react-router"
 import { ChevronRight, Loader2, Play, RefreshCw } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useAuditResults, useAuditRuns, useDeleteRun } from "@/api/audit"
+import { fetchPreflight } from "@/api/install"
 import { useDeleteDomain, useDomains, useUpdateDomain } from "@/api/domains"
 import { useSchedulerStatus, useSetScheduleEnabled } from "@/api/scheduler"
 import type { AuditResult, MonitoredDomain } from "@/api/types"
@@ -32,11 +33,41 @@ export function DashboardPage() {
   const { data: runs } = useAuditRuns()
   const runDomains = useScanRunner()
   const scanning = useScanProgress().length > 0
+  const navigate = useNavigate()
+  const { resume } = useSearch({ from: "/" })
   const list = domains ?? []
 
-  // Fan out one scan per domain so they run in parallel and each shows its own progress card
-  // (pm/progress_ui.mdx §4.1); the dock drains card-by-card as domains finish.
-  const onRunChecks = () => runDomains(list.map((d) => ({ id: d.id, name: d.name })))
+  const runAll = useCallback(
+    () => runDomains(list.map((d) => ({ id: d.id, name: d.name }))),
+    [runDomains, list],
+  )
+
+  // Preflight gate (pm/install_brew.mdx §1): before fanning out, ask the backend what this run needs
+  // that isn't installed. If anything is missing, divert to the Install page carrying `from`+`intent`
+  // so it can resume this exact run afterward (§8); otherwise run now.
+  const onRunChecks = useCallback(async () => {
+    if (list.length === 0) return
+    try {
+      const pf = await fetchPreflight("brew", "run-all")
+      if (pf.missing.length > 0) {
+        navigate({ to: `/install?manager=brew&from=%2F&intent=run-all` })
+        return
+      }
+    } catch {
+      // Preflight is advisory — if it fails, never block the run.
+    }
+    runAll()
+  }, [list.length, navigate, runAll])
+
+  // Resume after an install diversion: fire the run once, then clear the token so a manual refresh
+  // of "/" doesn't re-trigger it (pm/install_brew.mdx §8.3).
+  const resumedRef = useRef(false)
+  useEffect(() => {
+    if (!resume || resumedRef.current || isLoading || list.length === 0) return
+    resumedRef.current = true
+    if (resume === "run-all" || resume.startsWith("run-domain")) runAll()
+    navigate({ to: "/", search: {}, replace: true })
+  }, [resume, isLoading, list.length, runAll, navigate])
 
   return (
     <div className="mx-auto max-w-6xl">
@@ -283,8 +314,10 @@ function RunsTable({ runs }: { runs: AuditResult[] }) {
                       // (pm/checks/dkim.mdx §6.1 — the Runs-table cell opens THAT run's DKIM
                       // page), DMARC too (pm/checks/dmarc.mdx §6.1 — the Runs-row cell opens
                       // THAT run's DMARC page), and so does DNS & Infrastructure
-                      // (pm/checks/dns.mdx §6.1 — the cell opens THAT run's DNS page); tests
-                      // without a run-scoped page yet fall through to the row.
+                      // (pm/checks/dns.mdx §6.1 — the cell opens THAT run's DNS page), and now
+                      // SPF (pm/checks/spf.mdx) and Blacklists (pm/checks/blacklists.mdx §13.2)
+                      // have run-scoped pages too; Spam & Content has no run-scoped page yet, so
+                      // it falls through to the row.
                       const onOpen =
                         c.key === "dkim" && r.runId
                           ? () =>
@@ -304,7 +337,19 @@ function RunsTable({ runs }: { runs: AuditResult[] }) {
                                     to: "/domains/$id/runs/$runId/dns",
                                     params: { id: r.domainId, runId: r.runId as string },
                                   })
-                              : undefined
+                              : c.key === "spf" && r.runId
+                                ? () =>
+                                    navigate({
+                                      to: "/domains/$id/runs/$runId/spf",
+                                      params: { id: r.domainId, runId: r.runId as string },
+                                    })
+                                : c.key === "blacklists" && r.runId
+                                  ? () =>
+                                      navigate({
+                                        to: "/domains/$id/runs/$runId/blacklists",
+                                        params: { id: r.domainId, runId: r.runId as string },
+                                      })
+                                  : undefined
                       return (
                         <td key={c.key} className="px-2 py-2">
                           <TestCell
@@ -412,8 +457,9 @@ function fmtRunDate(iso: string): string {
  * The toggle reflects/sets whether recurring checks are enabled through the scheduler contract
  * (GET /api/scheduler + PUT /api/scheduler/config, pm/scheduled_checks.mdx). While the scheduler
  * module isn't reachable it degrades to the client-side preference so the switch stays usable.
- * The chevron only navigates to the Scheduled Checks configuration page — it never flips the
- * toggle; its tooltip shows the next scheduled run time when one is armed.
+ * The chevron only navigates to the Scheduling settings page at /settings/scheduling
+ * (pm/ui.mdx §4, pm/dashboard.mdx §7.2) — it never flips the toggle; its tooltip shows the next
+ * scheduled run time when one is armed.
  */
 function ScheduledToggle() {
   const status = useSchedulerStatus()
@@ -448,7 +494,8 @@ function ScheduledToggle() {
         />
       </button>
       <Link
-        to="/scheduled-checks"
+        to="/settings/$section"
+        params={{ section: "scheduling" }}
         aria-label="Configure scheduled checks"
         title={
           status.data?.nextRunAt

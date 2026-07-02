@@ -1,4 +1,5 @@
 import { createHash, createPublicKey, randomBytes } from "node:crypto"
+import { Resolver } from "node:dns/promises"
 import { mapLimit } from "@shared/concurrency"
 import { readAppConfig } from "@shared/config-store"
 import { resolveCname, resolveMx, resolveTxt } from "../dns-util"
@@ -9,10 +10,12 @@ import { DkimToolBench, type DkimToolRun } from "./dkim-tools"
  * DKIM (pm/checks/dkim.mdx). Audits the DNS-published key side of DKIM per selector: presence
  * (TXT or CNAME→TXT), record parse + key decode (RSA modulus bits via node:crypto; raw-32-byte
  * Ed25519), revocation (empty p=), key strength (RFC 8301), test flag, SHA-1 restriction, tag
- * sanity, single-record rule (RFC 6376 §3.6.2.2), record size, CNAME delegation health — plus the
- * domain-scoped checks: working-selector count, Ed25519-only, duplicate keys (within the run and
- * against the other monitored domains), rotation age, wildcard-TXT shadowing, and MX-guided
- * common-selector discovery when no selectors are configured. Returns findings plus the structured
+ * sanity, single-record rule (RFC 6376 §3.6.2.2), record size, CNAME delegation health, and the
+ * multi-resolver agreement cross-check (local vs 8.8.8.8/1.1.1.1 through node:dns Resolver) — plus
+ * the domain-scoped checks: working-selector count, Ed25519-only, duplicate keys (within the run
+ * and against the other monitored domains), rotation age, wildcard-TXT shadowing, legacy
+ * ADSP/DomainKeys leftovers (RFC 5617/4870), and MX-guided common-selector discovery when no
+ * selectors are configured. Returns findings plus the structured
  * `results.dkim` payload (pm/checks/dkim.mdx §5) that the DKIM detail page renders.
  */
 
@@ -120,6 +123,12 @@ export interface DkimSelectorResult {
   txt_record_count: number
   oversize_chunk: boolean
   flags: Record<string, string>
+  /**
+   * Local vs 8.8.8.8/1.1.1.1 view (pm/checks/dkim.mdx §2.2 `dkim.resolver_agreement`):
+   * true = all reachable public resolvers agree with the local answer, false = a split view,
+   * null = could not cross-check (no public resolver reachable / selector never queried).
+   */
+  resolvers_agree: boolean | null
   first_seen_at: string | null
 }
 
@@ -149,13 +158,32 @@ export interface DkimResults {
   working_selectors: number
   wildcard_shadow: boolean
   duplicate_keys: { key_sha256: string; seen_on: string[] }[]
+  /** Historic ADSP leftover at `_adsp._domainkey.<domain>` (RFC 5617 — pm/checks/dkim.mdx §4/§5). */
+  adsp: AdspObservation
+  /** Pre-DKIM DomainKeys policy record at `_domainkey.<domain>` (RFC 4870 — §4/§5). */
+  legacy_domainkeys: LegacyDomainKeysObservation
   selectors: DkimSelectorResult[]
   /** Every external tool invocation this run made, in execution order (§3 capture contract). */
   tool_runs: DkimToolRun[]
   /** The per-sub-test rows (§5 `tests[]`) — the findings mapped 1:1, pass and fail alike. */
   tests: DkimTestRow[]
-  /** Matched §9 problem-state ids (PS-00…PS-12), derived from the finding ids — never stored separately. */
+  /** Matched §9 problem-state ids (PS-00…PS-12, PS-17, PS-18), derived from the finding ids — never stored separately. */
   problem_states: string[]
+}
+
+/** The `dkim.adsp` observation block (pm/checks/dkim.mdx §5) — RFC 5617 ADSP leftover. */
+export interface AdspObservation {
+  present: boolean
+  /** The raw TXT when present, e.g. "dkim=discardable". */
+  record: string | null
+  practice: "unknown" | "all" | "discardable" | null
+}
+
+/** The `dkim.legacy_domainkeys` observation block (§5) — RFC 4870 DomainKeys policy leftover. */
+export interface LegacyDomainKeysObservation {
+  present: boolean
+  /** The raw TXT when present, e.g. "o=-; n=notes". */
+  record: string | null
 }
 
 /** Tokenize a raw DKIM key record into a tag map (names lower-cased, first occurrence wins). */
@@ -275,6 +303,7 @@ export function analyzeSelectorRecord(
     txt_record_count: records.length,
     oversize_chunk: opts.chunkLengths.some((l) => l > 255),
     flags: {},
+    resolvers_agree: null,
     first_seen_at: null,
   }
   for (const [k, v] of Object.entries(tags)) if (k !== "p") result.flags[k] = v
@@ -544,6 +573,192 @@ export function analyzeSelectorRecord(
   return { findings, result }
 }
 
+/** The public resolvers the `dkim.resolver_agreement` cross-check queries (pm/checks/dkim.mdx §4). */
+const PUBLIC_RESOLVERS = ["8.8.8.8", "1.1.1.1"]
+
+/** Compare record SETS, order-insensitive (§4 edge case h — round-robin is never a disagreement). */
+export function recordSetsEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  const sa = [...a].sort()
+  const sb = [...b].sort()
+  return sa.every((v, i) => v === sb[i])
+}
+
+/**
+ * Query one public resolver for the TXT record set at `name` through a dedicated node:dns
+ * Resolver ({timeout: 3000, tries: 1} — pm/checks/dkim.mdx §4 multi-resolver agreement). Returns
+ * the joined record set, [] for a definitive no-record answer, or null when the resolver was
+ * unreachable — an unreachable cross-check must never fabricate a disagreement.
+ */
+async function publicResolverTxtSet(server: string, name: string): Promise<string[] | null> {
+  const resolver = new Resolver({ timeout: 3_000, tries: 1 })
+  resolver.setServers([server])
+  try {
+    const chunks = await resolver.resolveTxt(name)
+    return chunks.map((parts) => parts.join(""))
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code
+    if (code === "ENOTFOUND" || code === "ENODATA") return []
+    return null
+  }
+}
+
+/**
+ * The §2.2 `dkim.resolver_agreement` sub-check, per selector: re-query the selector name through
+ * 8.8.8.8 and 1.1.1.1 (pure node:dns — deterministic, no binary; the kdig capture stays
+ * evidence-only) and compare the joined record SETS against the local view. All agree → ok;
+ * any reachable resolver differs → warning with both views in the evidence; no public resolver
+ * reachable → info "could not cross-check" (`resolvers_agree: null`) — never escalated.
+ */
+async function assessResolverAgreement(
+  name: string,
+  selector: string,
+  localRecords: string[],
+  analysis: { findings: Finding[]; result: DkimSelectorResult | null },
+): Promise<void> {
+  const views = await Promise.all(
+    PUBLIC_RESOLVERS.map(async (server) => ({
+      server,
+      records: await publicResolverTxtSet(server, name),
+    })),
+  )
+  const reachable = views.filter(
+    (v): v is { server: string; records: string[] } => v.records !== null,
+  )
+  if (reachable.length === 0) {
+    if (analysis.result) analysis.result.resolvers_agree = null
+    analysis.findings.push({
+      id: `dkim.resolver_agreement.${selector}`,
+      checkId: "dkim",
+      title: `Could not cross-check "${selector}" against public resolvers`,
+      severity: "info",
+      detail: `Neither 8.8.8.8 nor 1.1.1.1 could be reached to cross-check ${name}, so the local answer could not be compared with the public view. An unreachable cross-check is informational only — it never fabricates a disagreement.`,
+    })
+    return
+  }
+  const split = reachable.filter((v) => !recordSetsEqual(localRecords, v.records))
+  if (split.length === 0) {
+    if (analysis.result) analysis.result.resolvers_agree = true
+    analysis.findings.push({
+      id: `dkim.resolver_agreement.${selector}`,
+      checkId: "dkim",
+      title: `Resolvers agree on "${selector}"`,
+      severity: "ok",
+      detail: `The local resolver and ${reachable.map((v) => v.server).join(" and ")} return the same record set for ${name}.`,
+    })
+    return
+  }
+  if (analysis.result) analysis.result.resolvers_agree = false
+  const fmt = (records: string[]) =>
+    records.length === 0
+      ? "(no record)"
+      : records.map((r) => (r.length > 80 ? `${r.slice(0, 80)}…` : r)).join(" | ")
+  analysis.findings.push({
+    id: `dkim.resolver_agreement.${selector}`,
+    checkId: "dkim",
+    title: `Resolver split view on "${selector}"`,
+    severity: "warning",
+    detail: `The public resolver${split.length === 1 ? ` ${split[0].server} sees` : `s ${split.map((v) => v.server).join(" and ")} see`} a different record than the local resolver for ${name} — part of the world already verifies against a different key (or none). If you just edited DNS this is propagation lag that self-heals within the old record's TTL; if it persists, the authoritative nameservers are serving divergent zone data or a split-horizon override is leaking.`,
+    remediation: `If you just edited DNS, wait out the old record's TTL. If the split persists, make every authoritative NS serve the same record (dig +short NS <domain>, then dig @<each-ns> +short TXT ${name}) and remove split-horizon overrides for _domainkey names.`,
+    evidence: `local: ${fmt(localRecords)}${views
+      .map((v) => ` · ${v.server}: ${v.records === null ? "(unreachable)" : fmt(v.records)}`)
+      .join("")}`,
+  })
+}
+
+/**
+ * The domain-scoped §2.2 `dkim.adsp_legacy` analysis (pure — the lookups happen in run()): a
+ * historic ADSP record at `_adsp._domainkey.<domain>` (RFC 5617, Historic since 2013) or a
+ * pre-DKIM DomainKeys policy record at `_domainkey.<domain>` (RFC 4870). `dkim=discardable` →
+ * warning (implementations that still honor ADSP silently DISCARD forwarded/unsigned mail); any
+ * other leftover → info. A `v=DKIM1`/`p=` record at the bare `_domainkey` name is not a policy
+ * leftover — it is a key published at the wrong name (the selector label was forgotten).
+ */
+export function analyzeAdspLegacy(
+  domain: string,
+  adspRecords: string[],
+  domainkeyRecords: string[],
+): {
+  findings: Finding[]
+  adsp: AdspObservation
+  legacy_domainkeys: LegacyDomainKeysObservation
+} {
+  const findings: Finding[] = []
+  const adspName = `_adsp._domainkey.${domain}`
+  const dkName = `_domainkey.${domain}`
+  const adsp: AdspObservation = { present: false, record: null, practice: null }
+  const legacy: LegacyDomainKeysObservation = { present: false, record: null }
+
+  if (adspRecords.length > 0) {
+    adsp.present = true
+    adsp.record = adspRecords[0]
+    const practice = parseDkimRecord(adsp.record).dkim?.toLowerCase() ?? null
+    adsp.practice =
+      practice === "unknown" || practice === "all" || practice === "discardable" ? practice : null
+    if (adsp.practice === "discardable") {
+      findings.push({
+        id: "dkim.adsp_legacy.adsp",
+        checkId: "dkim",
+        title: "Historic ADSP record publishes dkim=discardable",
+        severity: "warning",
+        detail: `An ADSP record (RFC 5617 — declared Historic in 2013; DMARC replaced it) still lives at ${adspName} with dkim=discardable. Implementations that still honor ADSP will silently DISCARD mail that arrives without a valid first-party signature — exactly what happens to legitimate mail after most forwarding.`,
+        remediation: `Delete the TXT record at ${adspName} — publish sender policy in DMARC (_dmarc.${domain}) instead.`,
+        evidence: adsp.record,
+      })
+    } else {
+      findings.push({
+        id: "dkim.adsp_legacy.adsp",
+        checkId: "dkim",
+        title: "Historic ADSP record leftover",
+        severity: "info",
+        detail: `An ADSP record (RFC 5617 — declared Historic in 2013) still lives at ${adspName}. It dates the zone, confuses tooling and audits, and buys nothing — DMARC replaced ADSP.`,
+        remediation: `Delete the TXT record at ${adspName}; confirm your DMARC record exists at _dmarc.${domain} first.`,
+        evidence: adsp.record,
+      })
+    }
+  }
+
+  if (domainkeyRecords.length > 0) {
+    const record = domainkeyRecords[0]
+    if (looksLikeDkim(record)) {
+      // Not a policy leftover: a key record at the wrong name — the selector label was forgotten.
+      findings.push({
+        id: "dkim.adsp_legacy.domainkeys",
+        checkId: "dkim",
+        title: "A DKIM key is published at the bare _domainkey name",
+        severity: "info",
+        detail: `The TXT at ${dkName} looks like an actual DKIM key record (v=DKIM1/p=), not a DomainKeys policy — the key was published at the wrong name with the selector label forgotten. Verifiers query <selector>._domainkey.${domain} and will never find it there.`,
+        remediation: `Move the record to <selector>._domainkey.${domain} using the exact selector your signer stamps in its DKIM-Signature s= tag, then delete the record at ${dkName}.`,
+        evidence: record,
+      })
+    } else {
+      legacy.present = true
+      legacy.record = record
+      findings.push({
+        id: "dkim.adsp_legacy.domainkeys",
+        checkId: "dkim",
+        title: "Legacy DomainKeys policy record leftover",
+        severity: "info",
+        detail: `A pre-DKIM DomainKeys policy record (RFC 4870, 2007) still lives at ${dkName}. It is harmless to modern verifiers but dates the zone and confuses audits — DMARC replaced it.`,
+        remediation: `Delete the TXT record at ${dkName} — publish sender policy in DMARC (_dmarc.${domain}) instead.`,
+        evidence: record,
+      })
+    }
+  }
+
+  if (findings.length === 0) {
+    findings.push({
+      id: "dkim.adsp_legacy",
+      checkId: "dkim",
+      title: "No legacy ADSP / DomainKeys leftovers",
+      severity: "ok",
+      detail: `Nothing is published at ${adspName} or ${dkName} — no historic policy records linger.`,
+    })
+  }
+
+  return { findings, adsp, legacy_domainkeys: legacy }
+}
+
 export const dkimCheck: Checker = {
   id: "dkim",
   label: "DKIM keys",
@@ -561,6 +776,8 @@ export const dkimCheck: Checker = {
       working_selectors: 0,
       wildcard_shadow: false,
       duplicate_keys: [],
+      adsp: { present: false, record: null, practice: null },
+      legacy_domainkeys: { present: false, record: null },
       selectors: [],
       tool_runs: bench.runs,
       tests: [],
@@ -768,6 +985,19 @@ export const dkimCheck: Checker = {
       })
     }
 
+    // Legacy ADSP / DomainKeys leftovers (dkim.adsp_legacy — §4), once per domain, with the §3
+    // row 7–8 doggo evidence captures (the decision itself is the node:dns lookup).
+    const adspName = `_adsp._domainkey.${domain}`
+    const legacyName = `_domainkey.${domain}`
+    const adspLookup = await resolveTxt(adspName)
+    const legacyLookup = await resolveTxt(legacyName)
+    await bench.doggoTxt(adspName) // §3 row 7
+    await bench.doggoTxt(legacyName) // §3 row 8
+    const adspOutcome = analyzeAdspLegacy(domain, adspLookup.records, legacyLookup.records)
+    findings.push(...adspOutcome.findings)
+    results.adsp = adspOutcome.adsp
+    results.legacy_domainkeys = adspOutcome.legacy_domainkeys
+
     // ---- The §5 `dkim:` section tail — status (worst severity), tests[], problem_states ------
     results.status = worstDkimSeverity(findings)
     results.tests = buildDkimTests(findings, new Set(results.selectors.map((s) => s.selector)))
@@ -819,7 +1049,8 @@ export function buildDkimTests(findings: Finding[], selectors: Set<string>): Dki
  * The §9 problem-state mapping: finding ids at warning/critical severity, matched on their
  * `dkim.<subcheck>` prefix (per-selector ids keep their suffix), → PS ids. PS-00 is the healthy
  * goal state (no open warnings/criticals and ≥1 working selector); PS-13…PS-16 are FUTURE
- * (message/rua layers) and never derived here.
+ * (message/rua layers) and never derived here; PS-17 additionally matches info-severity
+ * `dkim.adsp_legacy` leftovers (the §9 table lists it at warning AND info). Ids are append-only.
  */
 export function deriveDkimProblemStates(findings: Finding[], results: DkimResults): string[] {
   const failing: string[] = []
@@ -841,6 +1072,13 @@ export function deriveDkimProblemStates(findings: Finding[], results: DkimResult
   if (has("dkim.duplicate_key")) out.push("PS-10")
   if (has("dkim.ed25519_only")) out.push("PS-11")
   if (has("dkim.unsigned")) out.push("PS-12")
+  const adspLeftover = findings.some(
+    (f) =>
+      (f.severity === "warning" || f.severity === "info") &&
+      f.id.startsWith("dkim.adsp_legacy."),
+  )
+  if (adspLeftover) out.push("PS-17")
+  if (has("dkim.resolver_agreement")) out.push("PS-18")
   if (out.length === 0 && failing.length === 0 && results.working_selectors >= 1) out.push("PS-00")
   return out
 }
@@ -1021,6 +1259,7 @@ async function probeSelector(
     txt_record_count: 0,
     oversize_chunk: false,
     flags: {},
+    resolvers_agree: null,
     first_seen_at: null,
   })
 
@@ -1086,6 +1325,7 @@ async function probeSelector(
       })
     }
     await captureSelectorEvidence(bench, name, selector, lookup.records.length, analysis)
+    await assessResolverAgreement(name, selector, lookup.records, analysis)
     return analysis
   }
 
@@ -1109,6 +1349,8 @@ async function probeSelector(
       })
       await captureSelectorEvidence(bench, name, selector, 0, analysis)
       await bench.doggoTxt(target) // §3 row 2 tail — #1 re-run against the CNAME target
+      // Public resolvers follow the CNAME, so the effective local view is the target's record set.
+      await assessResolverAgreement(name, selector, targetLookup.records, analysis)
       return analysis
     }
     // Dangling delegation: the CNAME exists, the target does not answer.
@@ -1127,6 +1369,7 @@ async function probeSelector(
       result: emptyResult("cname", target),
     }
     await captureSelectorEvidence(bench, name, selector, 0, analysis)
+    await assessResolverAgreement(name, selector, [], analysis)
     return analysis
   }
 
@@ -1140,6 +1383,8 @@ async function probeSelector(
   }
   const analysis = { findings: [missingFinding], result: emptyResult("none", null) }
   await captureSelectorEvidence(bench, name, selector, 0, analysis)
+  // A record visible at a public resolver but not locally is exactly the split view to surface.
+  await assessResolverAgreement(name, selector, [], analysis)
   return analysis
 }
 

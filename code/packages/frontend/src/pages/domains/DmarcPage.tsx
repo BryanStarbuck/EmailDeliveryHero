@@ -9,16 +9,25 @@ import {
   ShieldCheck,
   Star,
 } from "lucide-react"
-import { useEffect, useMemo, useState } from "react"
+import { type ReactNode, useEffect, useMemo, useState } from "react"
 import { useAuditResults, useAuditRun, useAuditRuns } from "@/api/audit"
 import { useDomains } from "@/api/domains"
-import type { AuditResult, DmarcResults, DmarcToolRun, Finding } from "@/api/types"
+import type { AuditResult, DmarcResults, DmarcToolRun, Finding, Severity } from "@/api/types"
 import { CopyFixButton } from "@/components/CopyFixButton"
+import { RunHistoryStrip } from "@/components/RunHistoryStrip"
 import { StatusCell } from "@/components/StatusCell"
 import { TestResultsTable } from "@/components/TestResultsTable"
 import { NEVER_CELL, rollupCategories } from "@/lib/categories"
 import { normalizeDmarcSection } from "@/lib/dmarc"
-import { matchProblemStates, problemStateById } from "@/lib/dmarc-problems"
+import {
+  DMARC_CHECK_UNITS,
+  DMARC_TAG_TO_CHECK_KEY,
+  dmarcBandOrder,
+  dmarcUnitForFindingId,
+  dmarcUnitResult,
+  type UnitResult,
+} from "@/lib/dmarc-checks"
+import { matchArcProblemStates, matchProblemStates, problemStateById } from "@/lib/dmarc-problems"
 import { cn } from "@/lib/utils"
 import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext"
 
@@ -62,6 +71,131 @@ function fmtRunStamp(iso: string): string {
   if (Number.isNaN(d.getTime())) return iso
   const p = (n: number): string => String(n).padStart(2, "0")
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+const SEVERITY_TO_RESULT: Record<Severity, UnitResult> = {
+  ok: "pass",
+  info: "info",
+  warning: "warn",
+  critical: "fail",
+}
+const RESULT_RANK: Record<UnitResult, number> = { pass: 0, info: 1, warn: 2, fail: 3 }
+
+/** The DMARC (+ARC companion) findings of one run — the band/history data source. */
+function dmarcCategoryFindings(run: AuditResult): Finding[] {
+  return (run.findings ?? []).filter(
+    (f) => f.checkId === "dmarc" || f.checkId === "arc" || f.checkId === "dmarc.reports",
+  )
+}
+
+/**
+ * The category's worst result in one run (pm/checks/dmarc.mdx §6.7 category scope): the worst
+ * severity across every DMARC finding in that run; null = the category was not measured.
+ */
+function categoryResultFor(run: AuditResult): UnitResult | null {
+  const fs = dmarcCategoryFindings(run)
+  if (fs.length === 0) return null
+  let worst: UnitResult = "pass"
+  for (const f of fs) {
+    const r = SEVERITY_TO_RESULT[f.severity]
+    if (RESULT_RANK[r] > RESULT_RANK[worst]) worst = r
+  }
+  return worst
+}
+
+/** Small colored status chip for the sub-tests band rows (§6.3). */
+function BandChip({ result }: { result: UnitResult | null }) {
+  const meta: Record<UnitResult, { cls: string; icon: ReactNode }> = {
+    pass: { cls: "bg-emerald-50 text-emerald-700", icon: <ShieldCheck className="h-3.5 w-3.5" /> },
+    info: { cls: "bg-slate-100 text-slate-600", icon: <ShieldCheck className="h-3.5 w-3.5" /> },
+    warn: { cls: "bg-amber-50 text-amber-700", icon: <ShieldAlert className="h-3.5 w-3.5" /> },
+    fail: { cls: "bg-red-50 text-red-700", icon: <ShieldAlert className="h-3.5 w-3.5" /> },
+  }
+  const m = result ? meta[result] : undefined
+  return (
+    <span
+      className={cn(
+        "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase",
+        m ? m.cls : "bg-slate-100 text-slate-500",
+      )}
+    >
+      {m?.icon}
+      {result ?? "—"}
+    </span>
+  )
+}
+
+/**
+ * The sub-tests band (pm/checks/dmarc.mdx §6.2 item 2 / §6.3): the clickable directory of every
+ * unit in the DMARC category — all 11 dmarc units plus the sibling ARC and Ingested-reports rows.
+ * Fail-first order (fail → warn → info → not-measured → pass, then registry order). Each row is a
+ * whole-row click target into the unit's explainer, carrying a small ⟳ "run this check now" icon
+ * button (§6.5) before the chevron.
+ */
+function SubTestsBand({
+  result,
+  goToCheck,
+  onRunNow,
+  scanning,
+}: {
+  result: AuditResult
+  goToCheck: (checkKey: string) => void
+  onRunNow: () => void
+  scanning: boolean
+}) {
+  const { tests } = normalizeDmarcSection(result.results?.dmarc)
+  const findings = dmarcCategoryFindings(result)
+  const rows = DMARC_CHECK_UNITS.map((unit) => ({
+    unit,
+    result: dmarcUnitResult(unit, tests, findings),
+  })).sort((a, b) => dmarcBandOrder(a.result) - dmarcBandOrder(b.result))
+  return (
+    <section className="mt-4">
+      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--edh-muted)]">
+        Sub-tests
+      </h2>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {rows.map(({ unit, result: r }) => (
+          <div
+            key={unit.key}
+            className="group flex items-center gap-2 rounded-lg border border-[var(--edh-border)] bg-white p-2 hover:border-[var(--edh-primary)]"
+          >
+            <button
+              type="button"
+              onClick={() => goToCheck(unit.key)}
+              className="flex min-w-0 flex-1 items-center gap-2 text-left"
+            >
+              <BandChip result={r} />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-medium">
+                  {unit.title}
+                  {unit.sibling && (
+                    <span className="ml-1 text-[10px] uppercase text-[var(--edh-muted)]">
+                      (sibling)
+                    </span>
+                  )}
+                </span>
+                <span className="block truncate text-xs text-slate-500">{unit.oneLiner}</span>
+              </span>
+            </button>
+            {!unit.sibling && (
+              <button
+                type="button"
+                onClick={onRunNow}
+                disabled={scanning}
+                aria-label={`Run ${unit.title} now`}
+                title="Run this check now"
+                className="shrink-0 rounded p-1 text-[var(--edh-muted)] opacity-0 hover:bg-slate-100 disabled:opacity-50 group-hover:opacity-100"
+              >
+                <RefreshCw className={scanning ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"} />
+              </button>
+            )}
+            <ChevronRight className="h-4 w-4 shrink-0 text-[var(--edh-muted)] group-hover:text-[var(--edh-primary)]" />
+          </div>
+        ))}
+      </div>
+    </section>
+  )
 }
 
 /**
@@ -111,6 +245,19 @@ export function DmarcPage() {
     }
   }
 
+  // Deep-link to a sub-test explainer (pm/checks/dmarc.mdx §6.3), staying run-scoped when a
+  // specific run is being viewed so the user never loses run context (§6.4).
+  const goToCheck = (checkKey: string): void => {
+    if (runId && result?.runId) {
+      navigate({
+        to: "/domains/$id/runs/$runId/dmarc/check/$checkKey",
+        params: { id, runId: result.runId, checkKey },
+      })
+    } else {
+      navigate({ to: "/domains/$id/dmarc/check/$checkKey", params: { id, checkKey } })
+    }
+  }
+
   // Keyboard ←/→ steps the pager (pm/checks/dmarc.mdx §7), ignoring keystrokes inside inputs.
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -140,12 +287,17 @@ export function DmarcPage() {
   const cell = rollupCategories(result?.findings, result?.results).dmarc ?? NEVER_CELL
 
   // Problem cards: prefer the backend-derived §9 ids; fall back to finding-id matching for runs
-  // persisted before the backend derivation existed.
-  const problems = problemStates
+  // persisted before the backend derivation existed. Matched ARC-nn cards (the advisory companion,
+  // pm/checks/arc.mdx §10) append AFTER the PS-nn cards, same card anatomy, same drill-down route.
+  const dmarcProblems = problemStates
     ? problemStates
         .map((psId) => problemStateById(psId))
         .filter((ps): ps is NonNullable<typeof ps> => ps !== undefined)
     : matchProblemStates(findings)
+  const problems = [
+    ...dmarcProblems,
+    ...matchArcProblemStates((result?.findings ?? []).filter((f) => f.checkId === "arc")),
+  ]
 
   // Re-run (pm/checks/dmarc.mdx §6.2): starts a NEW run for just this domain; the alias route then
   // shows the new run once the scan lands, so navigate there when viewing an older snapshot.
@@ -215,6 +367,34 @@ export function DmarcPage() {
               <Star className="h-3 w-3" /> newest
             </span>
           )}
+          {domainRuns.length > 0 && (
+            <>
+              <span>·</span>
+              <RunHistoryStrip
+                runs={domainRuns}
+                currentRunId={result?.runId}
+                resultFor={categoryResultFor}
+                deltaFor={(r, prev) => {
+                  if (!prev) return null
+                  const a = categoryResultFor(prev) ?? "not measured"
+                  const b = categoryResultFor(r) ?? "not measured"
+                  return a === b ? null : `${a} → ${b}`
+                }}
+                onSelect={goToRun}
+                overflow={
+                  <Link
+                    to="/domains/$id"
+                    params={{ id }}
+                    title="All runs for this domain"
+                    className="px-0.5 text-xs text-[var(--edh-muted)] hover:text-slate-700"
+                  >
+                    …
+                  </Link>
+                }
+                ariaLabel="DMARC category result across the last 10 runs"
+              />
+            </>
+          )}
         </div>
       )}
 
@@ -231,17 +411,32 @@ export function DmarcPage() {
         </div>
       ) : (
         <>
-          <PolicyLadder dmarc={dmarc} findings={findings} />
+          <SubTestsBand
+            result={result}
+            goToCheck={goToCheck}
+            onRunNow={onRunAgain}
+            scanning={scanning}
+          />
+
+          <PolicyLadder dmarc={dmarc} findings={findings} goToCheck={goToCheck} />
 
           <div className="mt-4 grid gap-4 lg:grid-cols-2">
-            <RecordPanel dmarc={dmarc} />
-            <ReportDestinations dmarc={dmarc} domainName={domain?.name ?? id} />
+            <RecordPanel dmarc={dmarc} goToCheck={goToCheck} />
+            <ReportDestinations
+              dmarc={dmarc}
+              domainName={domain?.name ?? id}
+              goToCheck={goToCheck}
+            />
           </div>
 
           <TestResultsTable
             findings={findings}
             emptyText="No DMARC tests in this run."
             expectedById={expectedById}
+            titleLinkFor={(findingId) => {
+              const unit = dmarcUnitForFindingId(findingId)
+              return unit ? () => goToCheck(unit.key) : undefined
+            }}
           />
 
           {problems.length > 0 && (
@@ -301,7 +496,15 @@ export function DmarcPage() {
  * The none → quarantine → reject progress visual with the recommended next step
  * (pm/checks/dmarc.mdx §8 state machine).
  */
-function PolicyLadder({ dmarc, findings }: { dmarc?: DmarcResults; findings: Finding[] }) {
+function PolicyLadder({
+  dmarc,
+  findings,
+  goToCheck,
+}: {
+  dmarc?: DmarcResults
+  findings: Finding[]
+  goToCheck: (checkKey: string) => void
+}) {
   const steps = ["none", "quarantine", "reject"] as const
   const policy = dmarc?.policy ?? null
   const stepIndex = policy ? steps.indexOf(policy) : -1
@@ -346,9 +549,12 @@ function PolicyLadder({ dmarc, findings }: { dmarc?: DmarcResults; findings: Fin
                 )}
               />
             )}
-            <span
+            <button
+              type="button"
+              onClick={() => goToCheck("policy")}
+              title="What do these policy levels mean?"
               className={cn(
-                "rounded-full px-3 py-1 text-xs font-medium",
+                "rounded-full px-3 py-1 text-xs font-medium hover:ring-2 hover:ring-[var(--edh-primary)]/40",
                 i === stepIndex && !testing
                   ? "bg-[var(--edh-primary)] text-white"
                   : i < stepIndex
@@ -357,7 +563,7 @@ function PolicyLadder({ dmarc, findings }: { dmarc?: DmarcResults; findings: Fin
               )}
             >
               {s}
-            </span>
+            </button>
           </div>
         ))}
       </div>
@@ -368,7 +574,13 @@ function PolicyLadder({ dmarc, findings }: { dmarc?: DmarcResults; findings: Fin
 }
 
 /** Raw TXT record (copyable) over the parsed-tag table with grayed inherited defaults. */
-function RecordPanel({ dmarc }: { dmarc?: DmarcResults }) {
+function RecordPanel({
+  dmarc,
+  goToCheck,
+}: {
+  dmarc?: DmarcResults
+  goToCheck: (checkKey: string) => void
+}) {
   return (
     <section className="rounded-lg border border-[var(--edh-border)] bg-white p-4">
       <div className="mb-2 flex items-center justify-between">
@@ -396,8 +608,16 @@ function RecordPanel({ dmarc }: { dmarc?: DmarcResults }) {
                 const published = dmarc.parsed?.[meta.tag]
                 const value = published ?? (meta.fallback ? meta.fallback(dmarc) : null)
                 if (value === null || value === undefined) return null
+                const checkKey = DMARC_TAG_TO_CHECK_KEY[meta.tag]
                 return (
-                  <tr key={meta.tag} className="border-t border-[var(--edh-border)]">
+                  <tr
+                    key={meta.tag}
+                    onClick={checkKey ? () => goToCheck(checkKey) : undefined}
+                    className={cn(
+                      "border-t border-[var(--edh-border)]",
+                      checkKey && "cursor-pointer hover:bg-slate-50",
+                    )}
+                  >
                     <td className="py-1.5 pr-3 align-top font-mono text-xs font-semibold">
                       <span className={cn(meta.obsolete && "line-through opacity-60")}>
                         {meta.tag}
@@ -429,7 +649,15 @@ function RecordPanel({ dmarc }: { dmarc?: DmarcResults }) {
 }
 
 /** One card per rua/ruf destination with its _report._dmarc authorization state. */
-function ReportDestinations({ dmarc, domainName }: { dmarc?: DmarcResults; domainName: string }) {
+function ReportDestinations({
+  dmarc,
+  domainName,
+  goToCheck,
+}: {
+  dmarc?: DmarcResults
+  domainName: string
+  goToCheck: (checkKey: string) => void
+}) {
   const uris = [
     ...(dmarc?.rua_uris ?? []).map((u) => ({ kind: "rua" as const, uri: u })),
     ...(dmarc?.ruf_uris ?? []).map((u) => ({ kind: "ruf" as const, uri: u })),
@@ -450,12 +678,19 @@ function ReportDestinations({ dmarc, domainName }: { dmarc?: DmarcResults; domai
             const auth = authByUri.get(uri)
             const external = Boolean(auth)
             const ok = !external || auth?.authorized
+            // §6.3: external destinations open the external-authorization explainer; in-domain
+            // mailboxes open the reporting explainer.
+            const checkKey = external ? "external-authorization" : "reporting"
             return (
               <li
                 key={`${kind}:${uri}`}
-                className="rounded-md border border-[var(--edh-border)] p-2 text-sm"
+                className="rounded-md border border-[var(--edh-border)] p-2 text-sm hover:border-[var(--edh-primary)]"
               >
-                <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => goToCheck(checkKey)}
+                  className="flex w-full items-center gap-2 text-left"
+                >
                   {ok ? (
                     <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-600" />
                   ) : (
@@ -465,7 +700,7 @@ function ReportDestinations({ dmarc, domainName }: { dmarc?: DmarcResults; domai
                   <span className="ml-auto shrink-0 text-[10px] uppercase text-[var(--edh-muted)]">
                     {kind}
                   </span>
-                </div>
+                </button>
                 {external && auth && (
                   <div className="mt-1 pl-6 text-xs text-slate-500">
                     <span className="font-mono">{auth.auth_name}</span> →{" "}

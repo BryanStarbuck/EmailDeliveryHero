@@ -82,6 +82,7 @@ export const DNS_PROBLEM_STATES: DnsProblemState[] = [
       "mx_redundancy",
       "mx_dup_targets",
       "mx_target_count",
+      "mx_expected_drift",
     ],
     concept: [
       "An absent, dangling, CNAME'd, or private-IP MX doesn't just break inbound mail: receivers check that the From: domain has a valid MX or A record (a Gmail requirement), and a domain that can't take bounces or feedback-loop mail accumulates reputation damage invisibly.",
@@ -163,6 +164,7 @@ export const DNS_PROBLEM_STATES: DnsProblemState[] = [
       "ns_all_answer",
       "ns_response_time",
       "ns_no_cname",
+      "ns_expected_drift",
       "glue_records",
       "recursion_open",
       "zone_transfer",
@@ -295,6 +297,7 @@ export const DNS_PROBLEM_STATES: DnsProblemState[] = [
     findingPrefixes: [
       "dane_tlsa",
       "dane_all_mx",
+      "dane_no_mx",
       "dane_ttl_sane",
       "dane_mx_lookup",
       "dane_rollover",
@@ -440,13 +443,13 @@ export const DNS_PROBLEM_STATES: DnsProblemState[] = [
     title: "Dangling records / takeover exposure",
     hook: "A dead CNAME or expired SPF include is a reputation hijack waiting to be claimed.",
     severity: "critical",
-    findingPrefixes: ["dangling_cname", "dangling_include"],
+    findingPrefixes: ["dangling_cname", "dangling_include", "dangling_ns"],
     concept: [
-      "CNAMEs to unclaimed SaaS endpoints, MX targets on expired domains, and SPF include: chains through re-registerable domains all hand an attacker a hostname — or an SPF authorization — inside your domain.",
+      "CNAMEs to unclaimed SaaS endpoints, MX targets on expired domains, SPF include: chains through re-registerable domains, and lame sub-delegations to dead nameservers all hand an attacker a hostname — or an SPF authorization — inside your domain.",
       "The 2024 SubdoMailing campaign rode exactly this (~8,800 hijacked domains): the attacker registers the dangling target, inherits the org's SPF pass and reputation, spams, and the org domain lands on the Spamhaus DBL.",
     ],
     dataFields: [
-      "dangling_cname.<name> / dangling_include[.mx].<domain> finding evidence — the dead target and which record references it",
+      "dangling_cname.<name> / dangling_include[.mx].<domain> / dangling_ns.<label> finding evidence — the dead target and which record references it",
     ],
     commands: [
       "dig CNAME mail.<domain> +short   # then resolve the target",

@@ -159,6 +159,16 @@ export interface ReverseDnsIpResult {
   ptr: string | null
   forward_confirmed: boolean
   generic: boolean
+  /** Every PTR host returned for this IP (multi-PTR evidence) — pm/checks/reverse_dns.mdx §11. */
+  ptrs: string[]
+  /** Number of PTR records returned (drives the parsed-table row + trend marker). */
+  ptr_count: number
+  /** Addresses the PTR host(s) forward-resolved to (raw panel / FCrDNS loop). */
+  forward_ips: string[]
+  /** Which §3 generic/dynamic pattern matched, for transparency; null when non-generic. */
+  generic_pattern: string | null
+  /** Transient resolver error observed this run (ETIMEOUT | ESERVFAIL | …), else null. */
+  error: string | null
 }
 
 export interface ReverseDnsResults {
@@ -179,6 +189,11 @@ async function auditIp(ip: string, domain: string, source: "mx" | "sending_ip"):
     ptr: null,
     forward_confirmed: false,
     generic: false,
+    ptrs: [],
+    ptr_count: 0,
+    forward_ips: [],
+    generic_pattern: null,
+    error: null,
   }
   const v6 = isIPv6(ip)
   const family = v6 ? "IPv6" : "IPv4"
@@ -186,6 +201,7 @@ async function auditIp(ip: string, domain: string, source: "mx" | "sending_ip"):
   const rev = await reverseWithRetry(ip)
 
   if (rev.error) {
+    snap.error = rev.error
     findings.push({
       id: `infra.ptr_transient.${ip}`,
       checkId: "infra",
@@ -226,6 +242,8 @@ async function auditIp(ip: string, domain: string, source: "mx" | "sending_ip"):
 
   const hosts = rev.records
   snap.ptr = hosts[0] ?? null
+  snap.ptrs = [...hosts]
+  snap.ptr_count = hosts.length
   let problem = false
 
   if (hosts.length > 1) {
@@ -245,6 +263,7 @@ async function auditIp(ip: string, domain: string, source: "mx" | "sending_ip"):
   const want = normIp(ip)
   let fcrdnsOk = false
   let fcrdnsTransient = false
+  let fcrdnsError: string | null = null
   const observed: string[] = []
   for (const host of hosts) {
     const fwd = v6
@@ -252,6 +271,7 @@ async function auditIp(ip: string, domain: string, source: "mx" | "sending_ip"):
       : await withTimeout(resolve4(host), TIMED_OUT)
     if (fwd.error) {
       fcrdnsTransient = true
+      fcrdnsError = fwd.error
       continue
     }
     const norm = fwd.records.map(normIp)
@@ -262,8 +282,10 @@ async function auditIp(ip: string, domain: string, source: "mx" | "sending_ip"):
     }
   }
   snap.forward_confirmed = fcrdnsOk
+  snap.forward_ips = [...new Set(observed)]
 
   if (!fcrdnsOk && fcrdnsTransient && observed.length === 0) {
+    if (!snap.error) snap.error = fcrdnsError
     findings.push({
       id: `infra.fcrdns_transient.${ip}`,
       checkId: "infra",
@@ -295,6 +317,7 @@ async function auditIp(ip: string, domain: string, source: "mx" | "sending_ip"):
   if (generic) {
     problem = true
     snap.generic = true
+    snap.generic_pattern = generic
     findings.push({
       id: `infra.ptr_generic.${ip}`,
       checkId: "infra",
@@ -310,6 +333,7 @@ async function auditIp(ip: string, domain: string, source: "mx" | "sending_ip"):
   if (literal) {
     problem = true
     snap.generic = true
+    if (!snap.generic_pattern) snap.generic_pattern = `embedded-ip:${literal}`
     findings.push({
       id: `infra.ptr_no_ip_literal.${ip}`,
       checkId: "infra",

@@ -187,6 +187,13 @@ export interface CheckContext {
    * the per-domain report store `<state>/reports/<domainId>/`, pm/emails.mdx §9).
    */
   domainId?: string
+  /**
+   * The envelope run id this checker execution belongs to (timestamp-prefixed, generated at run
+   * start). A checker with its own deep store records it as/with its store id so the run-record
+   * snapshot and the deep-store copy join (pm/storage.mdx §7A/§16 D8+D12 — e.g. the blacklist
+   * store's `audit_id`). Absent on spot checks and probes, which never persist.
+   */
+  runId?: string
   /** DKIM selectors to probe, e.g. ["google", "default"]. */
   dkimSelectors: string[]
   /** Sending IPs to test against DNS blacklists (optional; MX IPs are used when empty). */
@@ -309,12 +316,14 @@ export interface AuditResult {
   /** Which trigger started this run (pm/run_checks.mdx §9). Absent on pre-history data. */
   trigger?: AuditTrigger
   /**
-   * Category scope of the run (pm/checks/blacklists.mdx §21 / AC 26; pm/checks/dkim.mdx §7.7):
-   * absent = a full run of all six categories; "blacklists" / "dkim" = a category-scoped re-run
-   * that executed only that category and whose run file carries `run.scope: <category>`. Scoped
-   * runs appear in prev/next stepping and the history strip chip-tagged with this value.
+   * Category scope of the run (pm/checks/blacklists.mdx §21 / AC 26; pm/checks/dkim.mdx §7.7;
+   * pm/checks/dns.mdx §15.1): absent = a full run of all six categories; "blacklists" / "dkim" /
+   * "dns" = a category-scoped re-run that executed only that category; "dns.<family_key>" (e.g.
+   * "dns.reverse_dns") = a single DNS & Infrastructure family re-run. The run file carries
+   * `run.scope: <value>`. Scoped runs appear in prev/next stepping and the history strip
+   * chip-tagged with this value.
    */
-  scope?: "blacklists" | "dkim"
+  scope?: "blacklists" | "dkim" | "dns" | `dns.${string}`
   /**
    * Category prefixes a scoped re-run executed (pm/checks/spf.mdx §6.5 — e.g. ["spf"] on a
    * `POST /audit/run/:domainId?checks=spf` run whose sibling categories were carried forward
