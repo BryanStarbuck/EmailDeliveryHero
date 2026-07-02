@@ -62,6 +62,14 @@ function DebugDrawer({ run, row }: { run: BlacklistRunResults; row: BlacklistZon
         : null,
     ],
     ["ASN", ipTarget?.asn ? `AS${ipTarget.asn.number} — ${ipTarget.asn.org ?? "?"}` : null],
+    [
+      "Target source",
+      ipTarget
+        ? ipTarget.source === "email_report"
+          ? "via DMARC reports (§19 — observed sending as this domain)"
+          : ipTarget.source
+        : null,
+    ],
     ["Auto-expires", row.auto_expires],
   ]
   const ps = row.problem_state ? problemState(row.problem_state) : null
