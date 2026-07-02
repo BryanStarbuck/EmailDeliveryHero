@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — DMARC Check
-description: Engineering spec for the DMARC test (category) — the sub-tests we run against the _dmarc TXT record (presence, single-record, syntax, policy enforcement, subdomain/np policy, alignment, reporting, external-report authorization, tree-walk coverage), the Brew/npm testing toolbox and how a run executes each tool (exact command lines, timeouts, JSON capture into dmarc.tool_runs[]), the per-run test-results YAML (the top-level dmarc key inside ~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml), the dashboard summary surface and the run-scoped full DMARC page (/domains/:domainId/runs/:runId/dmarc with run context strip and prev/next run navigation), the fix recommendations and rollout state machine, and the catalog of DMARC problem states with a deep-dive (data fields, diagnosis, tools, drill-down UI) for each.
+description: Engineering spec for the DMARC test (category) — the sub-tests we run against the _dmarc TXT record (presence, single-record, syntax, policy enforcement, subdomain/np policy, alignment, reporting, external-report authorization, tree-walk coverage), the Brew/npm testing toolbox and how a run executes each tool (exact command lines, timeouts, JSON capture into dmarc.tool_runs[]), the per-run test-results YAML (the top-level dmarc key inside ~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml), the dashboard summary surface and the run-scoped full DMARC page (/domains/:domainId/runs/:runId/dmarc with run context strip, prev/next run navigation, and the clickable sub-tests band), the sub-test explainer pages (/domains/:domainId/runs/:runId/dmarc/check/:checkKey) with the locked five-block what/state/meaning/fix/re-run contract, per-unit run-history strip and references footer, the scoped re-run endpoint (POST /api/audit/run/:domainId/check/dmarc), the run-report DMARC section growth, the fix recommendations and rollout state machine, and the catalog of DMARC problem states with a deep-dive (data fields, diagnosis, tools, drill-down UI) for each.
 ---
 
 # EmailDeliveryHero — DMARC Check
@@ -427,29 +427,45 @@ Contents, in order (exact layout in §7):
    DMARC page), and a back link to this run's report. Directly beneath: the **run context strip**
    — the run's timestamp (`startedAt`, `YYYY-MM-DD HH:mm`), a **‹ prev / next ›** run pager
    stepping through this domain's runs in `startedAt` order (each step swaps `:runId` in the
-   route; ends disabled), and a **"newest"** badge when this run is the domain's latest (always
-   shown when the page was reached via the alias route).
-2. **Policy ladder** — a three-step `none → quarantine → reject` progress visual with the current
-   step highlighted and the recommended next step (from §8) as a CTA.
-3. **Parsed record panel** — the raw TXT string (copyable, monospace) above a two-column tag table:
+   route; ends disabled), a **"newest"** badge when this run is the domain's latest (always
+   shown when the page was reached via the alias route), and the **run-history strip** (§6.7) —
+   the category's last 10 runs as clickable colored chips.
+2. **Sub-tests band** — the clickable directory of **every test unit in the DMARC category**
+   (§6.3): one row per `checkKey` — status chip (this run's worst result for that unit's finding
+   ids), unit name, one-line meaning, chevron — clicking through to that unit's **explainer page**
+   (`/domains/:domainId/runs/:runId/dmarc/check/:checkKey`, §6.4). The band includes the two
+   sibling units owned by other specs — **ARC** ([./arc.mdx](./arc.mdx)) and **Ingested aggregate
+   reports** ([../emails.mdx](../emails.mdx)) — so the whole category is navigable from one place;
+   sibling rows render a "not measured" slate chip when their data is absent from this run.
+3. **Policy ladder** — a three-step `none → quarantine → reject` progress visual with the current
+   step highlighted and the recommended next step (from §8) as a CTA. Each step chip is a link to
+   the policy explainer (`…/dmarc/check/policy`) — the "what do these levels actually mean?" page.
+4. **Parsed record panel** — the raw TXT string (copyable, monospace) above a two-column tag table:
    every published tag (`v`, `p`, `sp`, `np`, `adkim`, `aspf`, `pct`, `rua`, `ruf`, `fo`, `ri`,
    `rf`, `t`) with its value, its effective default when absent (grayed, e.g. `sp → none
-   (inherits p)`), and a one-line meaning. Obsolete tags get a strikethrough badge.
-4. **Test results table** — one row per §2 test: pass/fail/warn/info icon, test name, the observed
+   (inherits p)`), and a one-line meaning. Obsolete tags get a strikethrough badge. **Every tag
+   row is clickable** and routes to the explainer page of the unit that owns that tag (the
+   tag → `checkKey` map in §6.3), so any concept the user can see is one click from its full
+   what/state/meaning/fix explanation.
+5. **Test results table** — one row per §2 test: pass/fail/warn/info icon, test name, the observed
    value (DNS value / URI / policy), and — expanded via row accordion — the full detail, the
    evidence (exact DNS name + TXT answer), the expected value, and the **Fix** block with a
-   copy-to-clipboard button carrying the exact record to publish.
-5. **Report destinations panel** — one card per `rua`/`ruf` URI: destination mailbox, report
+   copy-to-clipboard button carrying the exact record to publish. The **test name is a link** to
+   the owning unit's explainer page via the §6.3 finding-id → `checkKey` map; ids with no unit
+   (e.g. the environmental `dmarc.tool_missing` advisory) render as plain text.
+6. **Report destinations panel** — one card per `rua`/`ruf` URI: destination mailbox, report
    domain, external? yes/no, authorization DNS name and its observed answer, authorized ✓/✗.
-6. **Problem states** — cards for each matched §9 problem state, each with a one-paragraph
+   Clicking an external destination card opens the `external-authorization` explainer; an
+   in-domain card opens the `reporting` explainer.
+7. **Problem states** — cards for each matched §9 problem state, each with a one-paragraph
    explanation and a **"Learn more ›"** chevron that opens the per-problem drill-down page
    (`/domains/:domainId/runs/:runId/dmarc/:problemId`, newest alias
    `/domains/:domainId/dmarc/:problemId`) — concept, diagnosis, and the step-by-step path forward.
-7. **Tool runs** — a collapsed provenance footer listing this run's `dmarc.tool_runs[]` entries
+8. **Tool runs** — a collapsed provenance footer listing this run's `dmarc.tool_runs[]` entries
    (§3/§5): tool, the exact command line (copyable — the user can reproduce it in a terminal),
    duration, exit code, and an expandable view of the captured `parsed` output. Failed
    invocations render their `error` in red.
-8. **Sources (future)** — once `rua` ingestion lands: a per-source-IP table (IP, PTR, message
+9. **Sources (future)** — once `rua` ingestion lands: a per-source-IP table (IP, PTR, message
    count, SPF/DKIM aligned pass, disposition) feeding PS-11/PS-12.
 
 **Empty / never-run / loading states.** Never-run → gray header cell + "No audit yet — run one"
@@ -459,6 +475,164 @@ critical with the concrete publish-this remediation and the policy ladder at ste
 **Per-domain config inputs.** DMARC needs no extra per-domain input (unlike DKIM selectors). The
 page offers an optional **"Suggested record" builder**: a small form (desired `p`, rua mailbox,
 cover subdomains?) that emits a ready-to-publish TXT string — advisory only, never auto-published.
+
+### 6.3 The sub-tests band and the `checkKey` registry
+
+Every clickable concept in the DMARC category resolves to one **sub-test explainer page** (§6.4)
+under one **LOCKED route pattern**, shared by every unit in the category — including the two units
+whose content is owned by sibling specs:
+
+```
+/domains/:domainId/runs/:runId/dmarc/check/:checkKey     (canonical, run-scoped)
+/domains/:domainId/dmarc/check/:checkKey                 (newest-run alias)
+```
+
+The literal `check` segment keeps the pattern disjoint from the problem-state drill-down
+(`/dmarc/:problemId`, whose ids are always `PS-nn`); the router must register the static
+`check/:checkKey` routes ahead of the `:problemId` param route. Paging (‹ prev / next ›) on an
+explainer swaps `:runId` exactly as on the category page.
+
+**The `checkKey` registry.** One row per explainer unit. A unit groups the §2 finding ids that
+share one concept (the band chip = the worst result among the unit's ids in this run; a unit with
+none of its ids in `tests[]` renders a slate "not measured" chip). This table is the single source
+for the band rows, the finding-id → explainer link map, and the tag → explainer link map:
+
+| `checkKey` | Sub-test unit (band row title) | Finding ids covered | Record tags owned | One-line meaning (band row) |
+| --- | --- | --- | --- | --- |
+| `presence` | Record presence & tree walk | `dmarc.present`, `dmarc.missing`, `dmarc.lookup_failed` | — | Is a `v=DMARC1` TXT published at `_dmarc.<domain>` (or a covering parent)? |
+| `single-record` | Exactly one record | `dmarc.multiple` | — | Two DMARC records make receivers discard both. |
+| `syntax` | Record syntax & tag order | `dmarc.syntax`, `dmarc.syntax_p_position` | `v` | `v=DMARC1` first, `p=` second — or the record is ignored. |
+| `policy` | Policy level | `dmarc.policy`, `dmarc.no_policy`, `dmarc.p_none`, `dmarc.policy_ok` | `p` | none / quarantine / reject — the protection dial. |
+| `testing-mode` | Testing flag | `dmarc.testing` | `t` | `t=y` silently turns enforcement off. |
+| `subdomain-policy` | Subdomain & non-existent-subdomain policy | `dmarc.subdomain`, `dmarc.subdomain_ok`, `dmarc.np` | `sp`, `np` | Are subdomains as protected as the org domain? |
+| `alignment` | Alignment modes | `dmarc.alignment`, `dmarc.adkim_strict`, `dmarc.aspf_strict` | `adkim`, `aspf` | Strict alignment breaks ESP and subdomain mail. |
+| `pct` | Legacy percentage sampling | `dmarc.pct` | `pct` | Partial, non-deterministic enforcement — removed in RFC 9989. |
+| `reporting` | Reporting tags | `dmarc.rua`, `dmarc.rua_invalid`, `dmarc.rua_ok`, `dmarc.ruf`, `dmarc.fo`, `dmarc.ri`, `dmarc.rf`, `dmarc.report_uri_size` | `rua`, `ruf`, `fo`, `ri`, `rf` | Are aggregate/failure reports requested and well-formed? |
+| `external-authorization` | External report authorization | `dmarc.external_report_auth`, `dmarc.external_report_auth_ok` | — | Third-party report destinations must authorize you or reports vanish. |
+| `tag-hygiene` | Tag hygiene | `dmarc.deprecated_tags` | — | Obsolete or typo'd tags lingering in the record. |
+| `arc` | ARC chain *(sibling — [./arc.mdx](./arc.mdx))* | `arc.*` | — | Preserves authentication through forwarders and mailing lists. |
+| `reports` | Ingested aggregate reports *(sibling — [../emails.mdx](../emails.mdx))* | `dmarc.real_pass_rate` *(future)* + the ingestion pipeline's ids | — | What receivers actually saw: real pass rates and spoof sources. |
+
+Mapping rules:
+
+- **Band** (§6.2 item 2): one row per registry row, in table order, each row = status chip + unit
+  name + one-line meaning + chevron to `…/dmarc/check/<checkKey>`. Two-column grid on desktop.
+- **Test-results table**: each row's test name links to the unit owning that finding id. Ids
+  outside the registry (`dmarc.tool_missing`) do not link.
+- **Parsed-record tag rows**: `v → syntax`, `p → policy`, `t → testing-mode`,
+  `sp`/`np → subdomain-policy`, `adkim`/`aspf → alignment`, `pct → pct`,
+  `rua`/`ruf`/`fo`/`ri`/`rf → reporting`.
+- **Sibling units** (`arc`, `reports`): this spec owns only their **band row** (chip source, title,
+  one-liner, route) so the category page is complete; the content of their explainer pages — the
+  §6.4 five blocks — is owned by [./arc.mdx](./arc.mdx) and [../emails.mdx](../emails.mdx), which
+  slot into the same route pattern and page chrome. The `arc` chip derives from `arc.*` findings in
+  this run (the ARC checker already runs in the category); the `reports` chip derives from the
+  ingestion pipeline's freshness state (or "not measured" until it lands).
+
+### 6.4 The sub-test explainer page — the five-block contract
+
+`/domains/:domainId/runs/:runId/dmarc/check/:checkKey` (newest alias
+`/domains/:domainId/dmarc/check/:checkKey`) reuses the category page's header row **and run
+context strip** (back link targets the run's DMARC page), then renders **five locked blocks, in
+this order** — the contract every unit (including the sibling specs') must fill:
+
+1. **What this is** — the concept, 2–4 short paragraphs in plain language: the tag(s)/record/
+   mechanism this unit concerns, what problem the standard is solving, and one concrete example.
+   Written for a non-expert; jargon gets a one-line gloss on first use.
+2. **Your current state** — this run's live status for the unit: a large **status/severity chip**
+   (✓ pass green / ⓘ info slate / ⚠ warn amber / ✗ fail red / "not measured" gray — the same
+   colors as the Dashboard cells), followed by the unit's `tests[]` rows (observed value, evidence
+   — exact DNS name + raw TXT answer, monospace — and expected value), the **raw record** with the
+   unit's owned tags visually highlighted, and a **scoped parsed-field table**: only the fields
+   this unit reads, each with published value, effective default when absent (grayed), and
+   meaning. Everything rendered comes from **this run's** YAML — an older run stays a snapshot.
+3. **What it means** — deliverability impact in plain language, keyed to the current result: one
+   paragraph for the passing state ("what this is protecting you from") and one per failing state
+   ("what receivers do to your mail while this is broken"), reusing the §9 problem-state copy
+   where the unit maps to one.
+4. **What you can do about it** — numbered, copy-pasteable fix steps: the exact TXT record or tag
+   edit (copy button carries the publishable value, never prose), where to paste it (the DNS
+   provider's TXT editor), the propagation wait, and the verify command from §3 (copyable). When
+   the unit is healthy this block collapses to a single "nothing to do — keep it this way" line
+   plus the §8 standing recommendation that applies.
+5. **Run this check now** — the scoped re-run affordance (§6.5): button, what it executes, and how
+   the page refreshes.
+
+Below the five blocks, every explainer carries:
+
+- **Run history strip** (§6.7) scoped to this unit — the unit's result across the domain's last
+  10 runs, so "did my fix work?" and "when did this regress?" are answerable on sight.
+- **References footer** — external links, per unit: the owning RFC section (RFC 9989 core; 9990
+  aggregate reporting for `reporting`/`external-authorization`/`reports`; 9991 failure reporting
+  for `ruf`; RFC 8617 for `arc`), the Gmail bulk-sender requirements and Yahoo sender-hub pages
+  (for `policy`/`presence`), learndmarc.com (interactive debugging), and one "edit a TXT record"
+  doc link per common provider (Cloudflare, Route 53, Namecheap, Google Domains/Squarespace).
+  Links open in a new tab and are the only external navigation on the page.
+
+**States.** Loading → five skeleton blocks. Unknown `checkKey` → a "No such sub-test" panel
+naming the key with a link back to the run's DMARC page (never a blank screen). Unit not measured
+in this run (sibling data absent, or a unit whose ids never fired because a prerequisite failed,
+e.g. `syntax` when there is no record) → blocks 1/3 render normally (the concept never disappears),
+block 2 shows the "not measured" chip with one line explaining why, block 4 shows the
+prerequisite's fix first. Run-fetch error → error strip with a Retry button above block 1.
+
+### 6.5 "Run this check now" — the scoped re-run
+
+Every explainer page's block 5, plus a smaller icon button on each band row, offers **Run this
+check now** — re-running **just this category** for the domain and refreshing the view:
+
+- **v1 wiring (works today).** The button calls the existing `POST /api/audit/run/:domainId`
+  (audit.controller.ts) — a full six-category run. DMARC is one TXT lookup plus a handful of
+  probes, so a full run is acceptable; the button's tooltip says "Re-runs all checks for
+  <domain>". While the scan is in flight the button spins and is disabled (as is the header's
+  Re-run); on completion the page navigates to the **newest alias** of the same explainer
+  (`/domains/:domainId/dmarc/check/:checkKey`) so the fresh run resolves automatically; on failure
+  a toast reports the error and the page stays on the old run.
+- **Target endpoint (small backend addition).** `POST /api/audit/run/:domainId/check/dmarc` →
+  `202 { runId }` — executes **only this category's checkers** (the `dmarc` checker and its `arc`
+  companion), persists a **new run file** in which the five sibling category sections are copied
+  from the domain's newest run, each carrying a `carried_from: <run_id>` marker so the report UI
+  can badge them "not re-checked in this run". The run-file `carried_from` marker is a one-line
+  amendment owned by [../storage.mdx](../storage.mdx) (integrator note — do not implement the
+  endpoint before that lands). The category page and explainers treat the returned `runId` exactly
+  like any other run.
+- **Scope exceptions.** The `reports` unit's freshness is the ingestion job's, not a DNS run's —
+  its block-5 button reads **"Check for new reports"** and triggers the
+  [../emails.mdx](../emails.mdx) ingestion poll instead. Future message-sample units (mailauth)
+  re-run only when a sample exists.
+- **Keyboard**: `r` triggers the button (same input-field guard as the pager's `←`/`→`).
+
+### 6.6 The run report's DMARC section — growth
+
+On the full run report (`/domains/:domainId/runs/:runId`, RunDetailPage) the DMARC category
+surface grows from "chip + findings list" to:
+
+1. **Category chip** — keeps the policy-level label (§6.1) and gains a count sub-line
+   (`N passed · M ⚠ · K ✗`) computed from this run's `dmarc.tests[]` (plus `arc.*`). The chevron
+   still opens the **same run's** category page.
+2. **Per-unit mini-list** — the §6.3 band condensed to one line per unit (chip + unit name, no
+   one-liners), rendered above the finding rows inside the expanded section; each mini-row links
+   to the run-scoped explainer. Units that are all-pass collapse into a single trailing
+   "✓ 8 more passing" chip that expands on click, so the section stays triage-sized.
+3. **Clickable finding rows** — every DMARC finding row in the section gains a right-edge chevron
+   to its owning unit's explainer (same finding-id → `checkKey` map). The ARC rows that already
+   render inside this section link to `…/dmarc/check/arc`.
+
+### 6.7 Run-history strip — trend across previous runs
+
+One reusable element, two scopes: on the **category page** (in the run context strip) it shows the
+**category's** worst result per run; on an **explainer page** it shows **that unit's** result per
+run. Rendering: the domain's last 10 runs as small square chips, oldest → newest left-to-right,
+colored by result (green/slate/amber/red, gray = not measured in that run), the currently viewed
+run outlined. Hover: the run's timestamp plus a one-line delta versus the previous run ("p=none →
+p=quarantine", "external authorization lost"). Click: swaps `:runId` — same navigation as the
+pager. Overflow beyond 10 runs: a leading "…" chip linking to the domain's runs table.
+
+**Data.** Derived client-side from the existing `GET /api/audit/runs` (filtered to the domain,
+`startedAt` order) plus each run's already-cached results; the strip renders progressively as run
+files load and never blocks the page. If the per-run fan-out proves heavy, the optional future
+endpoint `GET /api/audit/history/:domainId?category=dmarc&unit=<checkKey>` returns the compact
+`[{ run_id, started_at, result }]` series in one call — client behavior is identical.
 
 ---
 
@@ -472,7 +646,12 @@ first, evidence second, work items third, education last.
 ┌────────────────────────────────────────────────────────────────────────────┐
 │ ‹ Back to this run's report     DMARC                        [Re-run ⟳]   │  header row
 │ example.com  ·  [ amber: p=none ]                                          │
-│ Run 2026-07-01 09:14  ·  [‹ prev]  [next ›]  ·  ★ newest                   │  run context strip
+│ Run 2026-07-01 09:14  ·  [‹ prev]  [next ›]  ·  ★ newest  ·  ▪▪▪▪▪▪▪▪▪▣    │  run context strip
+├────────────────────────────────────────────────────────────────────────────┤
+│  SUB-TESTS                                                                  │  sub-tests band
+│  [✗ External report authorization ›]  [⚠ Policy level ›]                   │  (§6.3 registry,
+│  [⚠ Reporting tags ›]  [✓ Record presence ›]  [✓ Syntax ›]  [✓ …]          │   2-col grid)
+│  [— ARC chain ›]  [— Ingested reports ›]                                    │
 ├────────────────────────────────────────────────────────────────────────────┤
 │  POLICY LADDER      ( none ●───○ quarantine ───○ reject )                  │  hero band
 │  "Monitoring only — spoofed mail is still delivered."                      │
@@ -510,9 +689,17 @@ Placement rules and rationale:
   **‹ prev / next ›** pager (same domain, `startedAt` order, keyboard `←`/`→`; ends disabled),
   and the **★ newest** badge on the domain's latest run. Paging swaps `:runId` in the route and
   re-renders every band below from that run's YAML file — the strip is the only element that
-  changes meaning between runs, so it sits above everything. The **policy ladder hero** under it
-  is the one visual a non-expert needs — where am I on none→quarantine→reject and what's my next
-  move. One accent CTA maximum on the page (the ladder's "next step").
+  changes meaning between runs, so it sits above everything — and it now ends with the ten-chip
+  **run-history strip** (§6.7; the ▪▪▪▣ chips), the smallest possible trend view. The **policy
+  ladder hero** under it is the one visual a non-expert needs — where am I on
+  none→quarantine→reject and what's my next move. One accent CTA maximum on the page (the
+  ladder's "next step").
+- **Sub-tests band between the strip and the hero.** The §6.3 band is the category's clickable
+  table of contents — failing units first (fail → warn → not-measured → pass, then registry
+  order), two columns, each row `chip · unit name · ›`. It sits above the ladder because it is
+  navigation, not verdict: a user who already knows the concept jumps straight to the explainer
+  without scrolling the whole page. Rows are whole-row click targets; each also carries the small
+  ⟳ "run this check now" icon button (§6.5) on hover, right-aligned before the chevron.
 - **Second band, two-up:** left = **Published record** (the ground truth users paste elsewhere;
   monospace, copy button top-right, tag table beneath with grayed inherited defaults); right =
   **Report destinations** (the most-missed failure — external authorization — gets its own card
@@ -541,6 +728,58 @@ Placement rules and rationale:
   run's `dmarc` section), **Diagnose it yourself** (copyable terminal commands from §3), **Path
   forward** (numbered steps with copyable records), and a further-reading footer. Back chevron
   returns to the run's DMARC page anchor.
+
+### The sub-test explainer page — wireframe
+
+The §6.4 five-block contract, drawn for the `external-authorization` unit on the §5 example run.
+Every unit — including the sibling `arc` and `reports` pages — uses this exact skeleton; only the
+block contents change:
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Back to DMARC     External report authorization            [Re-run ⟳]   │  header row
+│ example.com  ·  DMARC › sub-test                                           │
+│ Run 2026-07-01 09:14  ·  [‹ prev]  [next ›]  ·  ★ newest  ·  ▪▪▪▪▪▪▪▪▪▣    │  run context strip
+├────────────────────────────────────────────────────────────────────────────┤
+│  WHAT THIS IS                                                               │  block 1
+│  When rua= points at another company's domain, that company must publish   │
+│  <your-domain>._report._dmarc.<their-domain> = "v=DMARC1" — otherwise      │
+│  compliant receivers silently skip sending your reports…                    │
+├────────────────────────────────────────────────────────────────────────────┤
+│  YOUR CURRENT STATE                                   [ ✗ FAIL — critical ] │  block 2
+│  ✗ Report destination thirdparty.net is not authorized                     │
+│    observed:  example.com._report._dmarc.thirdparty.net → NXDOMAIN         │
+│    expected:  TXT "v=DMARC1"                                                │
+│  record: v=DMARC1; p=none; rua=mailto:reports@thirdparty.net; …            │
+│                              └──────── highlighted ────────┘               │
+│  ┌ field ──────── value ─────────────────── meaning ─────────────────┐    │
+│  │ rua            mailto:reports@thirdparty.net   external destination │    │
+│  │ authorized     false                           reports discarded    │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+├────────────────────────────────────────────────────────────────────────────┤
+│  WHAT IT MEANS                                                              │  block 3
+│  You believe you are monitoring, but zero reports arrive — you cannot see  │
+│  spoofers or failing legitimate mail, and policy promotion stays blocked.  │
+├────────────────────────────────────────────────────────────────────────────┤
+│  WHAT YOU CAN DO ABOUT IT                                                   │  block 4
+│  1. Ask thirdparty.net to publish:                                          │
+│     example.com._report._dmarc.thirdparty.net TXT "v=DMARC1"   [copy]      │
+│  2. …or point rua= at a mailbox you own:  rua=mailto:dmarc@example.com     │
+│  3. Verify: doggo example.com._report._dmarc.thirdparty.net TXT   [copy]   │
+├────────────────────────────────────────────────────────────────────────────┤
+│  RUN THIS CHECK NOW                                        [ Run check ⟳ ] │  block 5
+│  Re-runs the DMARC category for example.com and refreshes this page.       │
+├────────────────────────────────────────────────────────────────────────────┤
+│  HISTORY   ▪▪▪▪▪▪▪▪▪▣   (this sub-test, last 10 runs — click to view)      │  history strip
+│  REFERENCES  RFC 9990 §3 · Gmail bulk-sender rules · Cloudflare TXT how-to │  references footer
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+Placement rationale mirrors the category page: concept before verdict (block 1 is short — two to
+four paragraphs — so the status chip is visible without scrolling on a 1080p display), evidence in
+monospace, exactly one accent CTA per page (block 5's Run check; block 4's copy buttons are
+secondary). The header's Re-run and block 5's Run check do the same thing at v1 (§6.5) — both stay
+so the affordance is present wherever the user's eye lands.
 
 ---
 
@@ -880,6 +1119,11 @@ file→DB move is a single-module change.
 - **On-demand.** Runs on every manual audit (`POST /api/audit/run/:domainId` and the run-all
   endpoint). DMARC is cheap (one TXT lookup + tree-walk fallbacks + deduped `_report._dmarc`
   probes), so it always runs inline with the rest of the engine.
+- **Scoped re-run (§6.5).** The explainer pages' "Run this check now" wires to the full
+  `POST /api/audit/run/:domainId` at v1; the category-scoped
+  `POST /api/audit/run/:domainId/check/dmarc` (dmarc + arc checkers only, sibling sections
+  carried forward with `carried_from`) is the small backend addition, gated on the
+  [../storage.mdx](../storage.mdx) `carried_from` amendment.
 - **Periodic.** The in-process scheduler re-audits each monitored domain on the configured cadence.
   Each run's `dmarc.*` findings are diffed against the previous run; any newly appearing or
   worsened finding is a **new problem** surfaced on the Dashboard. High-value regressions: a record
@@ -976,6 +1220,37 @@ file→DB move is a single-module change.
     resolver disagreement or lookup failure; mailauth only with a user-supplied `.eml`; parsedmarc
     only inside the future ingestion job — and each entry's `parsed` output feeds exactly the
     structured fields that table names.
+17. The category page renders the §6.3 **sub-tests band** — one clickable row per registry unit
+    (all 11 `dmarc` units plus the sibling `arc` and `reports` rows), fail-first order, each with
+    a status chip derived from this run's `tests[]` (slate "not measured" when the unit's ids are
+    absent), a one-line meaning, and a chevron to the unit's explainer page. Sibling rows are
+    present even when their data is absent.
+18. The explainer route pattern is honored exactly: canonical
+    `/domains/:domainId/runs/:runId/dmarc/check/:checkKey` plus the newest alias
+    `/domains/:domainId/dmarc/check/:checkKey`; the static `check` segment is registered ahead of
+    the `:problemId` param route; an unknown `checkKey` renders the "No such sub-test" panel with
+    a back link, never a blank screen.
+19. Every explainer page renders the §6.4 **five blocks in locked order** (what this is / your
+    current state / what it means / what you can do about it / run this check now), followed by
+    the unit-scoped run-history strip and the references footer; block 2's status chip, evidence,
+    highlighted raw record, and scoped field table all come from the viewed run only, and the
+    loading / unknown-key / not-measured / fetch-error states of §6.4 are all implemented.
+20. Every clickable concept on the category page deep-links per the §6.3 maps: test-table names →
+    owning unit, parsed-record tag rows → owning unit, ladder steps → `policy`, report-destination
+    cards → `external-authorization` (external) or `reporting` (in-domain); `dmarc.tool_missing`
+    does not link.
+21. "Run this check now" (block 5 and the band's ⟳) triggers a re-run at v1 via
+    `POST /api/audit/run/:domainId`, disables while a scan is in flight, lands on the newest alias
+    of the same explainer on success, and toasts on failure; when the scoped
+    `POST /api/audit/run/:domainId/check/dmarc` endpoint exists it returns `202 { runId }`, runs
+    only the dmarc + arc checkers, and marks carried-forward sibling sections `carried_from`. The
+    `reports` unit's button triggers the ingestion poll instead ("Check for new reports").
+22. The run-history strip shows up to the last 10 runs as clickable chips (category-worst on the
+    category page, unit result on explainers, gray = not measured), outlines the viewed run, and
+    clicking a chip swaps `:runId`; the run report's DMARC section shows the pass/warn/fail count
+    sub-line, the condensed per-unit mini-list with all-pass units collapsed behind a "✓ N more
+    passing" chip, and per-finding chevrons into the run-scoped explainers (ARC rows →
+    `…/dmarc/check/arc`).
 
 <!--
   Maintenance notes:
@@ -998,6 +1273,21 @@ file→DB move is a single-module change.
     /domains/:domainId/runs/:runId (newest alias /domains/:domainId). DMARC CELL click opens the
     category page (Domain-health cell = newest run, Runs-row cell = that run); anywhere else in
     a row opens the whole run report. Keep in sync with ../dashboard.mdx §6.
+  * SUB-TEST EXPLAINER route is LOCKED and SHARED with the sibling specs:
+    /domains/:domainId/runs/:runId/dmarc/check/:checkKey (newest alias
+    /domains/:domainId/dmarc/check/:checkKey). The §6.3 checkKey registry is the single source for
+    band rows, finding-id → checkKey links, and tag → checkKey links — keep it in sync with §2's
+    finding ids and with the checker. The `arc` and `reports` rows are OWNED here only as band
+    rows/routes; their explainer CONTENT is owned by ./arc.mdx and ../emails.mdx respectively —
+    both must fill the §6.4 five-block contract on this route pattern. Register the static
+    `check/:checkKey` routes ahead of the `:problemId` param route.
+  * SCOPED RE-RUN: v1 = existing POST /api/audit/run/:domainId (full run). The category-scoped
+    POST /api/audit/run/:domainId/check/dmarc (202 { runId }; dmarc + arc checkers only; sibling
+    sections copied from the newest run with a carried_from marker) is GATED on ../storage.mdx
+    adopting the carried_from amendment — flag to the integrator; do not implement first.
+  * The five-block explainer contract (§6.4), the run-history strip (§6.7), and the run-report
+    section growth (§6.6) mirror the equivalent surfaces the other five category specs are
+    growing — keep block names and states aligned if a shared component spec emerges.
   * Toolbox (§3) re-verified against formulae.brew.sh + npm registry 2026-07: brew checkdmarc
     5.17.3, brew parsedmarc 10.2.0, npm mailauth 4.13.3 (2026-05); bind, doggo, q, dnsx, ldns,
     knot, swaks all present. `dog` and `opendmarc` are GONE from Homebrew; npm `dmarc-parse`

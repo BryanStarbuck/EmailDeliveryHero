@@ -8,7 +8,12 @@ import { readJson, writeJson } from "@shared/json-store"
 import { logError, logInfo } from "@shared/logging"
 import { resolveStateDir } from "@shared/state-dir"
 import { computeNextRun } from "./next-run"
-import { installArtifact, previewArtifact, uninstallArtifact } from "./os-artifact"
+import {
+  artifactInstalled,
+  installArtifact,
+  previewArtifact,
+  uninstallArtifact,
+} from "./os-artifact"
 import type {
   OsArtifactPreview,
   RunTrigger,
@@ -46,8 +51,6 @@ interface SchedulerState {
 export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   private readonly stateFile = join(resolveStateDir(), "scheduler-state.json")
   private timer: NodeJS.Timeout | null = null
-  /** The instant the armed in-process timer will fire (also reported for the os runner). */
-  private armedFor: string | null = null
   /** Guard so overlapping triggers (timer + POST /run) never run two audits at once. */
   private running = false
 
@@ -128,7 +131,10 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
       running: this.running,
       domainsCovered: this.scopedDomains(cfg).length,
       domainsTotal: all.length,
-      os: cfg.os,
+      // Report the artifact's ACTUAL on-disk presence on this machine, not the persisted flag —
+      // `just build` installs the launchd plist outside the API, and state files synced between
+      // computers can carry the other machine's value.
+      os: { ...cfg.os, installed: artifactInstalled(cfg) },
     }
   }
 
@@ -232,7 +238,6 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   private disarm(): void {
     if (this.timer) clearTimeout(this.timer)
     this.timer = null
-    this.armedFor = null
   }
 
   /**
@@ -249,7 +254,6 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     // config change mid-wait (rearm already ran) or clock drift never fires stale.
     const MAX_CHUNK = 2 ** 31 - 1
     const delay = Math.max(0, Date.parse(nextIso) - Date.now())
-    this.armedFor = nextIso
     this.timer = setTimeout(
       () => {
         if (delay > MAX_CHUNK) {

@@ -41,6 +41,46 @@ export interface DnsHealthConfig {
   skipAxfrProbe: boolean
 }
 
+/**
+ * Per-domain Domain-Registration-Reputation config (pm/checks/domain_reputation.mdx §4 per-domain
+ * config inputs, admin-only) — mirrors the backend DomainReputationConfigDto.
+ */
+export interface DomainReputationConfig {
+  /** Org brand string(s) compared against the apex for lookalike/cousin detection. */
+  brands: string[]
+  /** Days-to-expiry below which infra.domain_expiry warns (default 30). */
+  expiryWarnDays?: number
+  /** Registration age (days) below which infra.domain_age warns (default 30). */
+  ageWarnDays?: number
+  /** The registrant contact is deliberately public — silences infra.registrant_privacy. */
+  registrantPublicIntentional?: boolean
+  /** Enable the (future) active cousin-domain scan (default off — RDAP cost/rate limits). */
+  cousinScan?: boolean
+}
+
+/**
+ * Per-domain mail-routing expectations (pm/checks/mx_routing.mdx §4 per-domain config inputs —
+ * the "Mail routing" panel, the §5 `mx_expectations` shape) — mirrors the backend
+ * MxRoutingConfigDto.
+ */
+export interface MxRoutingConfig {
+  /** Declared intent: the domain is expected to receive mail (default true). */
+  receivesMail?: boolean
+  /** Optional allow-list of MX FQDNs; the checker flags drift when the published set differs. */
+  expectedHosts?: string[]
+  /** Skip the (future) TCP/25 SMTP probes for this domain (egress-blocked hosts). */
+  skipSmtpProbe?: boolean
+}
+
+/**
+ * Per-domain Link / URL-reputation config (pm/checks/link_url_reputation.mdx §4 per-domain config
+ * inputs) — mirrors the backend LinkUrlConfigDto.
+ */
+export interface LinkUrlDomainConfig {
+  /** Registrable domains treated as aligned (own/related/allow-listed), e.g. ["clicks.example.net"]. */
+  allowedDomains: string[]
+}
+
 export interface MonitoredDomain {
   id: string
   name: string
@@ -55,6 +95,15 @@ export interface MonitoredDomain {
   bimi?: BimiDomainConfig
   /** DNS-health expectations (pm/checks/dns_health.mdx §4). Absent = defaults only. */
   dnsHealth?: DnsHealthConfig
+  /**
+   * Mail-routing expectations (pm/checks/mx_routing.mdx §4): receives-mail intent, expected-MX
+   * allow-list (drift detection), and the skip-SMTP-probe toggle. Absent = receives mail.
+   */
+  mx?: MxRoutingConfig
+  /** Registration-reputation config (pm/checks/domain_reputation.mdx §4). Absent = defaults. */
+  domainReputation?: DomainReputationConfig
+  /** Link / URL-reputation config (pm/checks/link_url_reputation.mdx §4). Absent = sender-domain only. */
+  linkUrl?: LinkUrlDomainConfig
   addedBy: string
   createdAt: string
   updatedAt: string
@@ -131,6 +180,8 @@ export interface DmarcTestRow {
   result: "pass" | "fail" | "warn" | "info"
   detail?: string
   evidence?: string
+  /** The exact DNS record the fix expects, e.g. `<auth_name> TXT "v=DMARC1"` (§5 example). */
+  dns_value_expected?: string
   fix?: string
 }
 
@@ -257,8 +308,22 @@ export interface DkimToolRun {
   error: string | null
 }
 
+/** One per-sub-test row (`results.dkim.tests[]`, pm/checks/dkim.mdx §5). */
+export interface DkimTestRow {
+  id: string
+  /** Present on per-selector rows (finding ids are suffixed `.<selector>`). */
+  selector?: string
+  title: string
+  result: "pass" | "fail" | "warn" | "info"
+  detail?: string
+  evidence?: string
+  fix?: string
+}
+
 /** The parsed DKIM observation (`results.dkim`, pm/checks/dkim.mdx §5). */
 export interface DkimResults {
+  /** Worst severity across the run's DKIM tests. Absent on older persisted runs. */
+  status?: Severity
   selectors_configured: string[]
   discovery_ran: boolean
   working_selectors: number
@@ -267,22 +332,62 @@ export interface DkimResults {
   selectors: DkimSelectorResult[]
   /** Absent on runs persisted before the tool-runs capture landed. */
   tool_runs?: DkimToolRun[]
+  /** The per-sub-test rows (§5 `tests[]`). Absent on older persisted runs. */
+  tests?: DkimTestRow[]
+  /** Matched §9 problem-state ids (PS-00…PS-12). Absent on older persisted runs. */
+  problem_states?: string[]
 }
 
 // ---- DNS & Infrastructure snapshots (pm/checks/dns.mdx §5 — snake_case mirrors the YAML) -------
 
-/** The MX topology snapshot (`results["infra.mx_routing"]`). */
+/**
+ * The topology-level MX verdict — the JSON analog of one `mx_check_results` row
+ * (pm/checks/mx_routing.mdx §5). Absent on runs persisted before the summary landed.
+ */
+export interface MxCheckSummary {
+  /** Number of MX RRs returned (null-MX records included). */
+  mx_count: number
+  /** RFC 7505 "." present. */
+  has_null_mx: boolean
+  distinct_priorities: number
+  /** >= 2 resolvable hosts. */
+  redundant: boolean
+  /** null until an ASN feed exists (future) — first round approximates by /24,/48 prefixes. */
+  asn_diverse: boolean | null
+  /** No MX, but the domain's A record exists (RFC 5321 implicit MX). */
+  implicit_a_fallback: boolean
+  /** null in the first round — node:dns does not expose the RRset TTL (needs dig, future). */
+  rrset_ttl: number | null
+  /** Declared intent snapshot (pm/checks/mx_routing.mdx §4 "This domain receives mail"). */
+  receives_mail: boolean
+  worst_severity: Severity
+  checked_at: string
+}
+
+/** The MX topology snapshot (`results["infra.mx_routing"]` — pm/checks/mx_routing.mdx §5). */
 export interface MxRoutingResults {
   mx_found: boolean
   null_mx: boolean
   implicit_a_fallback: boolean
+  /** The mx_check_results row (§5). Absent on older persisted runs. */
+  summary?: MxCheckSummary
   hosts: {
     host: string
     priority: number
     is_cname: boolean
     cname_target: string | null
     ips: string[]
+    /** Spec-named mirror of `ips` (the mx_records.resolved_ips column). Absent on older runs. */
+    resolved_ips?: string[]
+    /** false when any resolved address is RFC1918/loopback/link-local/CGNAT/unspecified. */
+    is_public?: boolean
     non_public: { ip: string; cls: string }[]
+    /** null until the SMTP probe round (future). */
+    reachable?: boolean | null
+    /** 220 greeting (future). */
+    banner?: string | null
+    /** Resolved ASN (future). */
+    asn?: number | null
   }[]
   redundancy: { host_count: number; network_count: number }
 }
@@ -325,6 +430,13 @@ export interface DnsHealthResults {
   }[]
   ns_count: number
   network_count: number
+  /**
+   * `dns_health_results.ns_asn_diverse` (pm/checks/dns_health.mdx §5): false = all NS share one
+   * /24+/48 prefix; null = pending the real-ASN feed. Absent on pre-upgrade runs.
+   */
+  ns_asn_diverse?: boolean | null
+  /** Lame/no-answer NS observed this run (first-round inference); absent on pre-upgrade runs. */
+  lame_ns?: { host: string; reason: string }[]
   parent_child_match: boolean | null
   soa: {
     mname: string
@@ -335,15 +447,29 @@ export interface DnsHealthResults {
     expire: number
     min_ttl: number
   } | null
+  /** Extracted SOA serial for the cross-run monotonic compare; absent on pre-upgrade runs. */
+  soa_serial?: number | null
   ttls: Record<string, number> | null
   wildcard: { detected: boolean; probe: string; types: string[] }
+  /** Spec-named mirror of `wildcard.types` (`dns_health_results.wildcard_types`); absent on pre-upgrade runs. */
+  wildcard_types?: string[]
   cname_at_apex: boolean
+  /** Spec-named mirror of `cname_at_apex` (`dns_health_results.apex_is_cname`); absent on pre-upgrade runs. */
+  apex_is_cname?: boolean
   /** Dangling CNAME / SPF-include / MX / sub-delegated-NS targets; absent on pre-upgrade runs. */
   dangling?: DnsDanglingEntry[]
   /** Apex TXT RRset size; absent on pre-upgrade runs. */
   txt_record_count?: number
   /** How many v=spf1 TXT records the apex publishes (>1 = permerror); absent on pre-upgrade runs. */
   spf_record_count?: number
+  /** NULL until the parent-glue probe ships (future); absent on pre-upgrade runs. */
+  glue_ok?: boolean | null
+  /** NULL until the AXFR probe ships (future); absent on pre-upgrade runs. */
+  axfr_open?: boolean | null
+  /** The worst DNS-health severity this run; absent on pre-upgrade runs. */
+  worst_severity?: Severity
+  /** ISO timestamp of the DNS-health pass; absent on pre-upgrade runs. */
+  checked_at?: string
 }
 
 /** One apex DNSKEY, parsed (pm/checks/dnssec.mdx §5 `dnskey_algos` element). */
@@ -399,6 +525,24 @@ export interface InfraToolRun {
   error: string | null
 }
 
+/**
+ * One live re-run of a single DNS & Infrastructure family checker (pm/checks/dns.mdx §6.2 item 6
+ * — the ⟳ spot-check / the explainer page's "run this check now"). Never persisted: run files are
+ * immutable history; this is a fresh observation returned straight to the UI.
+ */
+export interface DnsSpotCheckResult {
+  checkId: string
+  domainId: string
+  domain: string
+  startedAt: string
+  finishedAt: string
+  findings: Finding[]
+  /** The checker's structured payload (its §5 snapshot shape), when it produces one. */
+  results?: unknown
+  /** Every external-tool invocation the spot check made (pm/checks/dns.mdx §3.1 shape). */
+  toolRuns: InfraToolRun[]
+}
+
 /** One TLSA RR observed at `_25._tcp.<mx>` (pm/checks/dane_tlsa.mdx §5 `tlsa_records`). */
 export interface DaneTlsaRecord {
   usage: number
@@ -429,6 +573,54 @@ export interface DaneHostResult {
 }
 
 export type DaneTlsaResults = DaneHostResult[]
+
+/**
+ * POST /api/audit/tlsa-record response (pm/checks/dane_tlsa.mdx §4 — the DANE subsection's
+ * one-click generator): the exact `3 1 1` record to publish for a pasted PEM certificate.
+ */
+export interface GeneratedTlsaRecord {
+  mxHost: string
+  /** The TLSA owner name, e.g. `_25._tcp.mail.example.com.` */
+  recordName: string
+  /** Hex SHA-256 of the certificate's DER SubjectPublicKeyInfo. */
+  spkiSha256: string
+  /** The complete zone-file line: `_25._tcp.<mx>. <ttl> IN TLSA 3 1 1 <digest>`. */
+  record: string
+  /** Certificate subject — confirms the right cert was pasted. */
+  subject: string
+  /** Certificate notAfter. */
+  validTo: string
+}
+
+/**
+ * The persisted domain-registration snapshot (`results["infra.domain_reputation"]`,
+ * pm/checks/domain_reputation.mdx §5 — snake_case exactly mirrors the target `domain_registration`
+ * columns; dates as ISO strings). Powers the Registration summary panel on the DNS page (§4).
+ */
+export interface DomainRegistrationResults {
+  registrar: string | null
+  registrar_iana_id: number | null
+  created_date: string | null
+  expiry_date: string | null
+  updated_date: string | null
+  transfer_date: string | null
+  /** Normalized camelCase EPP status codes, e.g. ["clientTransferProhibited"]. */
+  statuses: string[]
+  privacy_enabled: boolean | null
+  dnssec_at_registrar: boolean | null
+  /** null = unknown (registrar-API confirmation is a future round). */
+  auto_renew: boolean | null
+  /** null = the HTTP landing-page classification is a future round. */
+  parked: boolean | null
+  parking_nameservers: boolean | null
+  nameservers: string[]
+  age_days: number | null
+  days_to_expiry: number | null
+  source: "rdap" | "whois"
+  /** Full RDAP JSON (or parsed WHOIS map) for the audit trail. */
+  raw_record: unknown
+  checked_at: string
+}
 
 // ---- Content scoring (pm/checks/content_scoring.mdx §5 — snake_case mirrors the backend) -------
 
@@ -480,6 +672,80 @@ export interface BimiResults extends BimiSelectorResult {
   selectors: BimiSelectorResult[]
 }
 
+// ---- Link / URL reputation (pm/checks/link_url_reputation.mdx §5 — mirrors the backend payload) --
+
+/** One decoded URI-zone answer for a link domain (`message_urls.listings[]` element). */
+export interface UrlZoneListing {
+  zone: string
+  listed: boolean
+  /** The 127.0.0.x / 127.0.1.x return code. */
+  code: string
+  /** Decoded sub-list / bitmask label, e.g. "phishing domain" or "black". */
+  bit: string
+}
+
+/** One extracted URL (= one `message_urls` row, camelCase per the spec §5 JSON example). */
+export interface UrlLinkResult {
+  url: string
+  /** PSL-registrable domain of the URL host (the raw IP for IP-literal hosts). */
+  linkDomain: string
+  /** Registrable domain after redirect/shortener expansion — null until the probe round. */
+  finalDomain: string | null
+  isShortener: boolean
+  isHttps: boolean
+  isIpLiteral: boolean
+  isPunycode: boolean
+  /** Brand a punycode host impersonates (critical homograph), or null. */
+  homographOf: string | null
+  /** Redirect hops followed — null while the probe is disabled (first round). */
+  redirectHops: number | null
+  listings: UrlZoneListing[]
+  /** Link domain matches sender/org/allow-list; null = not evaluated (e.g. IP literal). */
+  aligned: boolean | null
+}
+
+/** The per-run roll-up (= the `url_check_results` row of spec §5). */
+export interface UrlCheckSummary {
+  totalLinks: number
+  uniqueDomains: number
+  listedDomains: number
+  shortenerCount: number
+  httpCount: number
+  ipLiteralCount: number
+  punycodeCount: number
+  offbrandCount: number
+  /** Zone(s) unavailable / paid feed unconfigured / redirect probe disabled. */
+  inconclusive: boolean
+  weightedWorst: Severity
+}
+
+/** §6 scheduler diff over the pinned sample's link-domain set (inconclusive transitions ignored). */
+export interface UrlRunDiff {
+  /** clean → listed this run: "zone|domain" pairs. */
+  newListings: string[]
+  /** listed → clean this run (domain still linked, zone conclusive both runs). */
+  resolved: string[]
+  /** The compared runs used different samples (diff is advisory across a sample change). */
+  sampleChanged: boolean
+}
+
+/** `results["content.url"]` — the audit-JSON `content.url` payload (spec §5). */
+export interface LinkUrlResults {
+  schema_version: 1
+  /** The pinned content_sample_messages id this audit ran against. */
+  sampleId: string | null
+  summary: UrlCheckSummary
+  links: UrlLinkResult[]
+  /** URI zones queried conclusively this run. */
+  zonesQueried: string[]
+  /** Zones whose RFC 5782 test point failed — inconclusive, never listed. */
+  zonesInconclusive: string[]
+  /** Zones skipped for missing registration/paid credentials. */
+  zonesSkipped: Array<{ zone: string; reason: string }>
+  diff: UrlRunDiff
+  checkedAt: string
+}
+
 /** One stored sample message (GET/PUT /audit/content-sample/:domainId). */
 export interface ContentSampleView {
   id: string
@@ -510,6 +776,18 @@ export interface AuditResult {
    * regression detection). 0 on a domain's first run; absent on pre-history persisted data.
    */
   newProblemCount?: number
+  /**
+   * Category scope of the run (pm/checks/blacklists.mdx §21 / AC 26): absent = a full run of all
+   * six categories; "blacklists" = a category-scoped re-run (run.scope: blacklists) — the UI
+   * chip-tags it `blacklists-only` wherever the run is named so a partial run is never mistaken
+   * for a full audit.
+   */
+  scope?: "blacklists"
+  /**
+   * Category scope of the run (pm/checks/blacklists.mdx §21 / AC 26): absent = a full run;
+   * "blacklists" = a category-scoped re-run (chip-tagged `blacklists-only` in run history).
+   */
+  scope?: "blacklists"
   /** Structured per-check payloads keyed by checker id (e.g. results.dmarc, results.spf). */
   results?: {
     dmarc?: DmarcSection | DmarcResults
@@ -522,9 +800,11 @@ export interface AuditResult {
     "infra.dns_health"?: DnsHealthResults
     "infra.dnssec"?: DnssecResults
     "infra.dane_tlsa"?: DaneTlsaResults
+    "infra.domain_reputation"?: DomainRegistrationResults
     "infra.tool_runs"?: InfraToolRun[]
     "content.scoring"?: ContentScoreResults
     "content.bimi"?: BimiResults
+    "content.url"?: LinkUrlResults
   } & Record<string, unknown>
 }
 
@@ -681,6 +961,13 @@ export interface BlacklistHistoryEntry {
   worst_severity: Severity
 }
 
+/** Meaning of one decoded return code (or bitmask bit) — the §20.6 decoder table rows. */
+export interface BlacklistCodeMeaning {
+  label: string
+  severity: Severity
+  problem_state?: ProblemStateId
+}
+
 /** One effective catalog row from GET /blacklists/zones (pm/checks/blacklists.mdx §18). */
 export interface BlocklistZoneRow {
   zone: string
@@ -692,6 +979,14 @@ export interface BlocklistZoneRow {
   delist_url: string
   enabled: boolean
   severity: Severity
+  /** Registry prose — the §20.3 zone explainer's "What this is" block (never computed). */
+  description?: string
+  /** Operator homepage from the registry — the explainer's References block. */
+  url?: string
+  /** Exact return-code map — feeds the zone explainer's decoder table (§20.6). */
+  codes?: Record<string, BlacklistCodeMeaning>
+  /** Bitmask decode of the answer's last octet (SURBL/URIBL style). */
+  bitmask?: Record<string, BlacklistCodeMeaning>
   requires_registration?: boolean
   is_paid?: boolean
   paid_delist_offered?: boolean
@@ -707,6 +1002,30 @@ export interface BlacklistRegistryInfo {
   zones: BlocklistZoneRow[]
   dead_zones: Array<{ zone: string; name: string; died?: string | number; reason?: string }>
   aggregators: Array<{ name: string; url: string; description: string }>
+}
+
+/** Overlay verdict of one live-recheck row vs the stored run (pm/checks/blacklists.mdx §21.3). */
+export type BlacklistRecheckChange =
+  | "now_listed"
+  | "now_clean"
+  | "unchanged"
+  | "inconclusive"
+  | "untracked"
+
+/** One live-recheck row — a ZoneResult plus its diff against the compared stored run. */
+export interface BlacklistRecheckRow extends BlacklistZoneResult {
+  stored_listed: boolean | null
+  change: BlacklistRecheckChange
+}
+
+/** POST /blacklists/:domainId/recheck — ephemeral live recheck; never writes a run file (AC 27). */
+export interface BlacklistLiveRecheck {
+  domain: string
+  checked_at: string
+  resolver: { mode: "system" | "custom"; server: string | null }
+  compared_run_id: string | null
+  results: BlacklistRecheckRow[]
+  summary: { listed: number; clean: number; inconclusive: number; pairs_queried: number }
 }
 
 // ---- Report-email ingestion (pm/emails.mdx §7.1 — mirrors backend modules/reports) -------------

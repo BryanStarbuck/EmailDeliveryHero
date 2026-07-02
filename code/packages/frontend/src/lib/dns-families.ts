@@ -40,7 +40,8 @@ export const DNS_FAMILIES: DnsFamilyDef[] = [
     key: "reverse_dns",
     chip: "rDNS",
     header: "Reverse DNS / PTR / FCrDNS",
-    prefixes: ["ptr_", "fcrdns", "helo_match"],
+    // "reverse_dns" catches the checker-scoped ids (infra.reverse_dns, .error, .did_not_complete).
+    prefixes: ["ptr_", "fcrdns", "helo_match", "reverse_dns"],
   },
   {
     key: "tls_transport",
@@ -52,7 +53,8 @@ export const DNS_FAMILIES: DnsFamilyDef[] = [
   { key: "tls_rpt", chip: "TLS-RPT", header: "TLS-RPT", prefixes: ["tls_rpt"] },
   { key: "dane_tlsa", chip: "DANE", header: "DANE / TLSA", prefixes: ["dane_"] },
   // dnssec_ds_at_registrar is emitted by the registration checker — listed there, checked first.
-  { key: "dnssec", chip: "DNSSEC", header: "DNSSEC", prefixes: ["dnssec_"] },
+  // The bare "dnssec" prefix catches checker-scoped ids (infra.dnssec.error, .did_not_complete).
+  { key: "dnssec", chip: "DNSSEC", header: "DNSSEC", prefixes: ["dnssec_", "dnssec"] },
   {
     key: "dns_health",
     chip: "Zone",

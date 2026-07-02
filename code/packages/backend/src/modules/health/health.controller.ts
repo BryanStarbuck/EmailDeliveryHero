@@ -42,7 +42,11 @@ export class HealthController {
   @Public()
   @Get("auth-config")
   @ApiOperation({ summary: "Whether Google OAuth is configured (drives the sign-in page state)" })
-  authConfig(): { googleConfigured: boolean; credentialsFilePresent: boolean; redirectUri: string } {
+  authConfig(): {
+    googleConfigured: boolean
+    credentialsFilePresent: boolean
+    redirectUri: string
+  } {
     const { clientId, clientSecret } = googleCredentialsFromFile()
     const fromEnv = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET)
     return {

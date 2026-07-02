@@ -21,6 +21,12 @@ export interface DnsLookup<T> {
   records: T[]
   /** True when the name genuinely has no such record (NXDOMAIN / no data). */
   empty: boolean
+  /**
+   * Which negative answer produced `empty` (pm/checks/dmarc.mdx §4 edge cases: both mean
+   * "no record" but checkers distinguish them in the finding detail): `nxdomain` = the name does
+   * not exist (ENOTFOUND); `nodata` = the name exists but has no record of this type (ENODATA).
+   */
+  negative?: "nxdomain" | "nodata"
   /** Set when the lookup failed for a reason other than "no record" (timeout, servfail). */
   error?: string
 }
@@ -74,9 +80,15 @@ function recordToolRun(rec: ToolRunRecord): void {
   log.push({ check_id: checkTagStorage.getStore() ?? "", ...rec })
 }
 
-function classify(err: unknown): { empty: boolean; error?: string } {
+function classify(err: unknown): {
+  empty: boolean
+  negative?: "nxdomain" | "nodata"
+  error?: string
+} {
   const code = (err as NodeJS.ErrnoException)?.code
-  if (code === "ENOTFOUND" || code === "ENODATA") return { empty: true }
+  if (code === "ENOTFOUND" || code === "ENODATA") {
+    return { empty: true, negative: code === "ENOTFOUND" ? "nxdomain" : "nodata" }
+  }
   return { empty: false, error: code ?? (err instanceof Error ? err.message : String(err)) }
 }
 
@@ -417,8 +429,12 @@ async function digAnswerOnce(name: string, type: string): Promise<DnsLookup<DigA
   })
 }
 
-/** Parse `dig +noall +answer` output lines into DigAnswer RRs of the requested type (exported for tests). */
-export function parseDigAnswer(stdout: string, type: string): DigAnswer[] {
+/**
+ * Parse `dig +noall +answer` output lines into DigAnswer RRs (exported for tests). With `type` the
+ * answer is filtered to that RR type (CNAME-chase lines skipped); without it every RR is returned —
+ * the `+dnssec` path needs the RRSIGs that ride alongside the queried type.
+ */
+export function parseDigAnswer(stdout: string, type?: string): DigAnswer[] {
   const records: DigAnswer[] = []
   for (const line of stdout.split("\n")) {
     const l = line.trim()
@@ -426,7 +442,8 @@ export function parseDigAnswer(stdout: string, type: string): DigAnswer[] {
     const tok = l.split(/\s+/)
     if (tok.length < 5) continue
     const [owner, ttl, cls, rtype] = tok
-    if (cls !== "IN" || rtype.toUpperCase() !== type.toUpperCase()) continue
+    if (cls !== "IN") continue
+    if (type !== undefined && rtype.toUpperCase() !== type.toUpperCase()) continue
     const ttlNum = Number(ttl)
     if (!Number.isInteger(ttlNum) || ttlNum < 0) continue
     records.push({
@@ -437,4 +454,107 @@ export function parseDigAnswer(stdout: string, type: string): DigAnswer[] {
     })
   }
   return records
+}
+
+/** Options for the DNSSEC-aware dig probe (pm/checks/dnssec.mdx §3). */
+export interface DigDnssecOptions {
+  /** Validating resolver to query (e.g. "1.1.1.1"); absent = the system default. */
+  resolver?: string
+  /** Set the CD (Checking Disabled) bit — the bogus-disambiguation probe (spec acceptance #6). */
+  cd?: boolean
+}
+
+/**
+ * A `dig +dnssec` response with the header the DNSSEC deep check reads: the rcode (`status`), the
+ * AD (Authenticated Data) flag, and EVERY answer-section RR — including the RRSIGs that ride along
+ * with the queried type. `status` is data, never an error: SERVFAIL here is a real DNSSEC verdict
+ * (bogus disambiguation). `error` is set only on an exec-level failure (dig missing, timeout).
+ */
+export interface DigDnssecResponse {
+  status: string | null
+  adFlag: boolean
+  answers: DigAnswer[]
+  error?: string
+}
+
+/**
+ * DNSSEC-aware dig (pm/checks/dnssec.mdx §3 FUTURE path): queries with `+dnssec` (sets the DO bit
+ * so RRSIGs are returned), optionally against an explicit validating resolver and/or with `+cd`,
+ * and parses the header `flags:` line for the AD flag plus the `status:` rcode. Same per-run memo
+ * + one-retry-on-transient pipeline as `dig`; a missing binary (ENOENT) is never retried.
+ */
+export function digDnssec(
+  name: string,
+  type: string,
+  opts: DigDnssecOptions = {},
+): Promise<DigDnssecResponse> {
+  const key = `DIGSEC:${opts.resolver ?? "default"}:${opts.cd ? "cd" : "nocd"}:${type}:${name}`
+  return memo(key, async () => {
+    const first = await digDnssecOnce(name, type, opts)
+    return first.error && first.error !== "ENOENT" ? digDnssecOnce(name, type, opts) : first
+  })
+}
+
+async function digDnssecOnce(
+  name: string,
+  type: string,
+  opts: DigDnssecOptions,
+): Promise<DigDnssecResponse> {
+  const { execFile } = await import("node:child_process")
+  const args = [
+    ...(opts.resolver ? [`@${opts.resolver}`] : []),
+    "+dnssec",
+    ...(opts.cd ? ["+cd"] : []),
+    "+time=3",
+    "+tries=1",
+    "+noall",
+    "+comments",
+    "+answer",
+    type,
+    name,
+  ]
+  const command = ["dig", ...args].join(" ")
+  const startedAt = new Date().toISOString()
+  const t0 = Date.now()
+  return await new Promise<DigDnssecResponse>((resolve) => {
+    execFile("dig", args, { timeout: 4000 }, (err, stdout) => {
+      if (err) {
+        const code = (err as NodeJS.ErrnoException).code
+        const { exitCode, error } = classifyExecError(err, 4000)
+        recordToolRun({
+          tool: "dig",
+          command,
+          started_at: startedAt,
+          duration_ms: Date.now() - t0,
+          exit_code: exitCode,
+          output_format: "text",
+          parsed: stdout ? { raw: stdout } : null,
+          error,
+        })
+        resolve({
+          status: null,
+          adFlag: false,
+          answers: [],
+          error: typeof code === "string" ? code : err.message,
+        })
+        return
+      }
+      const status = /status: ([A-Z]+)/.exec(stdout)?.[1] ?? null
+      // Header flags line, e.g. `;; flags: qr rd ra ad; QUERY: 1, ...` — AD = validated (RFC 6840).
+      const flagsLine = /;; flags:([^;]*);/.exec(stdout)?.[1] ?? ""
+      const adFlag = flagsLine.split(/\s+/).includes("ad")
+      const answers = parseDigAnswer(stdout)
+      recordToolRun({
+        tool: "dig",
+        command,
+        started_at: startedAt,
+        duration_ms: Date.now() - t0,
+        exit_code: 0,
+        output_format: "text",
+        parsed: { answers, ...(status ? { rcode: status } : {}), ad: adFlag },
+        error: null,
+      })
+      resolve({ status, adFlag, answers })
+    })
+  })
 }

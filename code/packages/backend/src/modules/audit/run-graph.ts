@@ -13,11 +13,18 @@ import type { Checker } from "./checks/types"
  *  - mta_sts ← mx_routing       the policy's mx: patterns are validated against the real MX list
  *  - dane_tlsa ← mx_routing + dnssec   TLSA lives at _25._tcp.<mx>; DANE without DNSSEC is meaningless
  *  - tls_transport / smtp_security ← mx_routing   the future SMTP probes consume the Stage-1 MX list
+ *  - content.scoring ← dmarc + the DNS foundations   SpamAssassin scoring is CPU-bound, so it runs
+ *    after the pure-DNS checks (pm/checks/content_scoring.mdx §3/§6)
  */
 export const CHECK_DEPENDENCIES: Record<string, string[]> = {
   dmarc: ["spf", "dkim"],
   arc: ["dmarc"],
   "content.bimi": ["dmarc"],
+  "content.scoring": ["dmarc", "infra.mx_routing", "infra.dnssec", "infra.dns_health"],
+  // The unsubscribe-host reputation cross-check reuses content.url's URI-zone answers
+  // (pm/checks/list_unsubscribe.mdx §2 content.list_unsub_url_reputation / §6 "reuses
+  // link_url_reputation"), so the list-management pass starts after the link scan publishes.
+  "content.list_unsubscribe": ["content.url"],
   "infra.mta_sts": ["infra.mx_routing"],
   "infra.dane_tlsa": ["infra.mx_routing", "infra.dnssec"],
   "infra.tls_transport": ["infra.mx_routing"],

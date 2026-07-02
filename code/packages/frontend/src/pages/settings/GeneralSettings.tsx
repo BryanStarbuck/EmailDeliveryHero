@@ -91,7 +91,15 @@ function AccountPanel() {
       <p className="mt-3 text-sm text-[var(--edh-muted)]">
         Identity is asserted by OpenAuthFederated (Google Workspace SSO) — there is no password to
         manage here, and the sign-in allowlist is enforced on the OpenAuthFederated side. Admins
-        edit it from the <Link to="/settings/$section" params={{ section: "admin" }} className="text-[var(--edh-primary)] underline">Admin</Link> section.
+        edit it from the{" "}
+        <Link
+          to="/settings/$section"
+          params={{ section: "admin" }}
+          className="text-[var(--edh-primary)] underline"
+        >
+          Admin
+        </Link>{" "}
+        section.
       </p>
       <div className="mt-3">
         {isSignedIn ? (
@@ -498,8 +506,8 @@ function StoragePanel() {
         </button>
       </div>
       <p className="mt-3 text-xs text-[var(--edh-muted)]">
-        Import and the destructive Reset actions are admin-only and live in the Admin section.
-        There is no database — everything is YAML/JSON files under the state dir.
+        Import and the destructive Reset actions are admin-only and live in the Admin section. There
+        is no database — everything is YAML/JSON files under the state dir.
       </p>
     </Panel>
   )

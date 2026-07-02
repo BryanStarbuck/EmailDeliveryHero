@@ -298,6 +298,43 @@ place that changes. No new reference/config table is required for DANE (MX come 
 12. `dane_check_results` has PK `id`, FKs to `audit_runs` and `domains`, and index
     `(domain_id, mx_host)`; the JSON `checkResults.dane[]` shape maps 1:1 to its columns.
 
+*Explainer-page criteria (§9-§12):*
+
+13. The DANE explainer renders at `/domains/:domainId/runs/:runId/dns/check/dane-tlsa` with newest
+    alias `/domains/:domainId/dns/check/dane-tlsa`; the static `check` segment outranks the
+    `:problemId` drill-down route; the header row label is **DANE / TLSA** and the one-line meaning
+    is exactly the [../dns.mdx](../dns.mdx) §14.1 row-6 string.
+14. Block 1 contains the four mapped anchors `#concept-dane`, `#concept-tlsa`, `#concept-3-1-1`,
+    `#concept-tlsa-rollover`; every underlined DANE/TLSA/"3 1 1"/rollover term anywhere in the app
+    routes to them **run-scoped** (preserving the viewed `:runId`).
+15. Block 2 renders **every** `infra.dane_*` finding of the viewed run, grouped per MX host in
+    priority order (fail rows pre-expanded), plus the per-MX matrix of §4, sourced only from the
+    run file — never re-queried at render time.
+16. The raw pane shows the observed TLSA RRset (dig answer lines) per host with a copy button and
+    a link to the matching `tool_runs[]` entry; the parsed pane renders the §9.3 field table with
+    a per-field ✓/✗/⚠/ⓘ verdict chip; uncaptured fields render "not captured this run";
+    `certMatch`/`starttlsOffered` render as **pending**, never as ✗, while the probe is off (AC9).
+17. Block 4 renders, for each non-`ok` finding present, the matching §9.5 fix recipe with a copy
+    button carrying the exact publishable record/step (the checker's remediation strings and the
+    §9.5 recipes stay word-for-word in sync); when the zone is unsigned, block 4 leads with the
+    "sign the zone first" cross-link to the DNSSEC explainer before any TLSA advice.
+18. The TLSA generator panel accepts a pasted PEM and renders `generateTlsa311`'s output
+    (record name, SPKI SHA-256, full zone-file line, cert subject, notAfter); a parse failure
+    surfaces the generator's user-readable message inline (HTTP 400), never a blank state.
+19. Block 5's button POSTs `/api/audit/run/:domainId/check/dns/dane-tlsa`, which writes a **new**
+    run tagged `run.scope: dns.dane_tlsa`, then navigates to the new run's explainer with the
+    §15.2 diff flash; the button is disabled with an inline reason while any run for the domain is
+    in flight (409).
+20. The history strip (≤30 cells) marks a change-dot whenever the per-MX TLSA record set changed;
+    the trend glyph shows ▲ when the record count drops ≥2→1, when `dnssecSigned` flips
+    true→false, or when any new `critical` appears.
+21. The references footer renders the §9.7 family rows plus the three category-common provider
+    rows; all links are plain new-tab anchors.
+22. Every `infra.dane_*` finding row exposes a story link to the **PS-07** drill-down
+    (`/domains/:domainId/dns/PS-07?run=`); `dane_dnssec_prereq.*` / `dane_without_dnssec.*` rows
+    additionally cross-link **PS-06**; mechanism terms go to explainer anchors, story terms to
+    drill-downs, per the §10 map.
+
 <!--
 MAINTENANCE NOTES
 - Keep RFC refs current: DANE base RFC 6698, updated ops RFC 7671, SMTP DANE RFC 7672; DNSSEC

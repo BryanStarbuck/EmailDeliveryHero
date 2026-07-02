@@ -11,6 +11,7 @@ import { resolveStateDir } from "@shared/state-dir"
 import { locateTools } from "@shared/tool-runner"
 import { CHECKERS } from "./checks"
 import { isContentScoringFinding } from "./checks/content-scoring/content-scoring.check"
+import { type DkimDiscoveryOutcome, discoverDkimSelectors } from "./checks/dkim/dkim.check"
 import {
   type TaggedToolRun,
   type ToolRunRecord,
@@ -53,6 +54,45 @@ const DOMAIN_DEADLINE_MS = 5 * 60 * 1000
 
 /** Race marker resolved when the per-domain deadline expires (never a value a checker returns). */
 const DEADLINE = Symbol("domain-deadline")
+
+/**
+ * The ten DNS & Infrastructure family keys (pm/checks/dns.mdx §2), each mapping 1:1 to the
+ * checker id `infra.<key>` — the vocabulary of the single-check spot-check endpoint (the
+ * check-detail explainer page's "run this check now", pm/checks/dns.mdx §6.2 item 6).
+ */
+const DNS_INFRA_FAMILY_KEYS = new Set([
+  "mx_routing",
+  "reverse_dns",
+  "tls_transport",
+  "mta_sts",
+  "tls_rpt",
+  "dane_tlsa",
+  "dnssec",
+  "dns_health",
+  "domain_reputation",
+  "smtp_security",
+])
+
+/** One spot-check's wall-clock deadline — a single family, so far tighter than a full run. */
+const SPOT_CHECK_DEADLINE_MS = 60 * 1000
+
+/**
+ * The result of re-running ONE DNS & Infrastructure family checker live (pm/checks/dns.mdx §6.2
+ * item 6 — the ⟳ spot-check / "run this check now" action). A spot check is a LIVE VIEW: it is
+ * never persisted — run files are immutable history and stay untouched.
+ */
+export interface SpotCheckResult {
+  checkId: string
+  domainId: string
+  domain: string
+  startedAt: string
+  finishedAt: string
+  findings: Finding[]
+  /** The checker's structured payload (the §5 snapshot shape), when it produces one. */
+  results?: unknown
+  /** Every external-tool invocation the spot check made (pm/checks/dns.mdx §3.1 shape). */
+  toolRuns: ToolRunRecord[]
+}
 
 function onAbort(signal: AbortSignal): Promise<typeof DEADLINE> {
   return new Promise((resolve) => {
@@ -254,6 +294,135 @@ export class AuditService {
   }
 
   /**
+   * Category-scoped re-run (pm/checks/blacklists.mdx §21 / AC 26): execute ONLY the Blacklists
+   * category for one domain and write a NEW run file with `run.scope: blacklists`. The viewed run
+   * is never mutated — a scoped run is its own immutable YAML file, so prev/next stepping and the
+   * history strip include it (the UI chip-tags it `blacklists-only` via `scope`). The domain's
+   * latest-result cache is merged surgically (only blacklist findings/payload swap) so the
+   * dashboard cell refreshes without degrading the other five categories.
+   */
+  async runBlacklistsForDomain(
+    domainId: string,
+    trigger: AuditTrigger = "manual",
+  ): Promise<AuditResult> {
+    // AC 28: a run already in flight for the same domain wins — join it rather than double-query
+    // the same DNSBL mirrors (mirrors rate-limit; pm/checks/blacklists.mdx §10.4 etiquette).
+    const existing = this.inFlight.get(domainId)
+    if (existing) {
+      logInfo(
+        `Audit already in flight for domain ${domainId} — joining it (blacklists-scoped request)`,
+        "AuditService",
+      )
+      return existing
+    }
+    const run = (async () => {
+      const domain = this.domains.get(domainId)
+      logInfo(
+        `${TRIGGER_LABEL[trigger]} Blacklists-scoped check started for ${domain.name} (trigger: ${trigger})`,
+        "AuditService",
+      )
+      const checker = CHECKERS.find((c) => c.id === "blacklist")
+      if (!checker) throw new Error("blacklist checker not registered")
+      const startedAt = new Date().toISOString()
+      const latest = this.latest(domainId)
+      const findings: Finding[] = []
+      let payload: unknown
+      try {
+        const outcome = await checker.run({
+          domain: domain.name,
+          domainId: domain.id,
+          dkimSelectors: domain.dkimSelectors,
+          sendingIps: domain.sendingIps,
+          previousResults: latest?.results,
+          trigger,
+          tools: locateTools(),
+        })
+        if (Array.isArray(outcome)) {
+          findings.push(...outcome)
+        } else {
+          findings.push(...outcome.findings)
+          payload = outcome.results
+        }
+      } catch (err) {
+        logError(`Blacklists-scoped check failed for ${domain.name}`, err, "AuditService")
+        findings.push({
+          id: "blacklist.error",
+          checkId: "blacklist",
+          title: "DNS blacklists check errored",
+          severity: "warning",
+          detail: `The blacklist check could not complete: ${err instanceof Error ? err.message : String(err)}`,
+          remediation: "Re-run the check. If it keeps failing, this may be a transient DNS issue.",
+        })
+      }
+      // Regression detection against the previous run's blacklist findings only — a scoped run
+      // must never flag the untouched categories as new/resolved.
+      flagNewProblems(
+        (latest?.findings ?? []).filter((f) => f.checkId === "blacklist"),
+        findings,
+      )
+      const weights = readAppConfig().checks.weights
+      const { score, status, counts } = summarize(findings, weights)
+      const finishedAt = new Date().toISOString()
+      const result: AuditResult = {
+        runId: randomUUID(),
+        domainId: domain.id,
+        domain: domain.name,
+        startedAt,
+        finishedAt,
+        ranAt: finishedAt,
+        trigger,
+        scope: "blacklists",
+        score,
+        status,
+        findings,
+        counts,
+        newProblemCount: findings.filter((f) => f.isNew).length,
+        results: payload !== undefined ? { blacklist: payload } : {},
+      }
+      // Persist: the scoped run gets its own immutable run file (run.scope: blacklists); the
+      // latest cache is merged surgically so other categories' state survives untouched.
+      const write = this.writeChain.then(() => {
+        const config = readAppConfig()
+        saveRun(result, config.schedule.timezone)
+        pruneRuns(config.storage.retentionDays, RUNS_KEPT_PER_DOMAIN)
+        const map = this.loadAll()
+        const prior = map[domainId]
+        if (prior) {
+          const mergedFindings = [
+            ...prior.findings.filter((f) => f.checkId !== "blacklist"),
+            ...findings,
+          ]
+          const rollup = summarize(mergedFindings, weights)
+          map[domainId] = {
+            ...prior,
+            findings: mergedFindings,
+            score: rollup.score,
+            status: rollup.status,
+            counts: rollup.counts,
+            newProblemCount: mergedFindings.filter((f) => f.isNew).length,
+            results: {
+              ...prior.results,
+              ...(payload !== undefined ? { blacklist: payload } : {}),
+            },
+          }
+        } else {
+          map[domainId] = result
+        }
+        this.saveAll(map)
+      })
+      this.writeChain = write.catch(() => {})
+      await write
+      logInfo(
+        `Blacklists-scoped check finished for ${domain.name}: ${result.status}`,
+        "AuditService",
+      )
+      return result
+    })().finally(() => this.inFlight.delete(domainId))
+    this.inFlight.set(domainId, run)
+    return run
+  }
+
+  /**
    * Re-run JUST the content-scoring checker for one domain and merge its findings/payload into
    * the domain's latest result (pm/checks/content_scoring.mdx §6 — the dedicated "Re-score"
    * action after a sample is uploaded/edited, without a full re-audit). With no prior run, a
@@ -301,7 +470,18 @@ export class AuditService {
     const results = { ...latest.results }
     if (payload !== undefined) results["content.scoring"] = payload
     const { score, status, counts } = summarize(merged, readAppConfig().checks.weights)
-    const updated: AuditResult = { ...latest, findings: merged, score, status, counts, results }
+    const updated: AuditResult = {
+      ...latest,
+      findings: merged,
+      score,
+      status,
+      counts,
+      results,
+      // The checker flags its own §6 regressions (band crossing / newly fired high-weight rule)
+      // via `isNew`, so a re-score keeps the latest run's new-problem count honest
+      // (pm/checks/content_scoring.mdx §8 AC 9).
+      newProblemCount: merged.filter((f) => f.isNew).length,
+    }
 
     // Latest-cache-only persist: a re-score refreshes the dashboard/current view but never
     // rewrites the immutable per-run YAML history (pm/storage.mdx §7.2).
@@ -314,6 +494,112 @@ export class AuditService {
     await write
     logInfo(`Content re-score finished for ${domain.name}: score ${updated.score}`, "AuditService")
     return updated
+  }
+
+  /**
+   * Re-run ONE DNS & Infrastructure family checker for a domain and return its findings live —
+   * the spot-check endpoint behind the DNS page's ⟳ button and the check-detail explainer page's
+   * "run this check now" (pm/checks/dns.mdx §6.2 item 6). Never persisted: run files are
+   * immutable history, and a spot check is a fresh observation, not a run.
+   */
+  async spotCheck(domainId: string, checkKey: string): Promise<SpotCheckResult> {
+    if (!DNS_INFRA_FAMILY_KEYS.has(checkKey)) {
+      throw new Error(`Unknown DNS & Infrastructure check "${checkKey}"`)
+    }
+    const checkerId = `infra.${checkKey}`
+    const checker = CHECKERS.find((c) => c.id === checkerId)
+    if (!checker) throw new Error(`No checker registered for ${checkerId}`)
+    const domain = this.domains.get(domainId)
+    const latest = this.latest(domainId)
+    logInfo(`Spot check ${checkerId} started for ${domain.name}`, "AuditService")
+
+    const startedAt = new Date().toISOString()
+    const deadline = new AbortController()
+    const deadlineTimer = setTimeout(() => deadline.abort(), SPOT_CHECK_DEADLINE_MS)
+    deadlineTimer.unref?.()
+    // The same context shape a full run builds (minus peer-domain data the infra families never
+    // read); the latest run's structured results stand in as the shared upstream map so families
+    // that consume mx_routing's resolved MX list (mta_sts, dane_tlsa) never re-derive it.
+    const ctx = {
+      domain: domain.name,
+      domainId: domain.id,
+      dkimSelectors: domain.dkimSelectors,
+      sendingIps: domain.sendingIps,
+      previousResults: latest?.results,
+      arc: domain.arc,
+      bimi: domain.bimi,
+      dnsHealth: domain.dnsHealth,
+      mx: domain.mx,
+      domainReputation: domain.domainReputation,
+      dane: domain.dane,
+      linkUrl: domain.linkUrl,
+      // A spot check is always user-initiated — the registration checker bypasses its RDAP cache.
+      trigger: "manual" as AuditTrigger,
+      signal: deadline.signal,
+      tools: locateTools(),
+      upstream: { ...(latest?.results ?? {}) },
+    }
+    const findings: Finding[] = []
+    let payload: unknown
+    const toolRunLog: TaggedToolRun[] = []
+    try {
+      const outcome = await withToolRunLog(toolRunLog, () =>
+        withDnsMemo(() => withCheckTag(checker.id, () => Promise.resolve(checker.run(ctx)))),
+      )
+      if (Array.isArray(outcome)) findings.push(...outcome)
+      else {
+        findings.push(...outcome.findings)
+        payload = outcome.results
+      }
+    } catch (err) {
+      logError(`Spot check ${checkerId} failed for ${domain.name}`, err, "AuditService")
+      findings.push({
+        id: `${checker.id}.error`,
+        checkId: checker.id,
+        title: `${checker.label} check errored`,
+        severity: "warning",
+        detail: `The ${checker.label} spot check could not complete: ${err instanceof Error ? err.message : String(err)}`,
+        remediation: "Run it again. If it keeps failing, this may be a transient DNS issue.",
+      })
+    } finally {
+      clearTimeout(deadlineTimer)
+    }
+    const finishedAt = new Date().toISOString()
+    logInfo(
+      `Spot check ${checkerId} finished for ${domain.name}: ${findings.length} finding(s)`,
+      "AuditService",
+    )
+    return {
+      checkId: checkerId,
+      domainId: domain.id,
+      domain: domain.name,
+      startedAt,
+      finishedAt,
+      findings,
+      ...(payload !== undefined ? { results: payload } : {}),
+      toolRuns: toolRunLog.map(({ check_id: _checkId, ...rest }) => rest),
+    }
+  }
+
+  /**
+   * On-demand DKIM selector discovery (pm/checks/dkim.mdx §6.2 item 6 — the selectors editor's
+   * "Run discovery now" action): probes the MX-guided common-selector wordlist live and returns
+   * the hits for one-click import. This is a probe, not a run — nothing is persisted, and a
+   * wildcard-TXT domain suppresses the hits (§4 edge case c) rather than reporting junk.
+   */
+  async dkimDiscovery(domainId: string): Promise<DkimDiscoveryOutcome> {
+    const domain = this.domains.get(domainId)
+    logInfo(`DKIM selector discovery started for ${domain.name}`, "AuditService")
+    const outcome = await discoverDkimSelectors(domain.name)
+    logInfo(
+      `DKIM selector discovery for ${domain.name}: ${
+        outcome.wildcard_shadow
+          ? "wildcard TXT shadow — results suppressed"
+          : `${outcome.hits.length} hit(s) over ${outcome.probed} probe(s)`
+      }`,
+      "AuditService",
+    )
+    return outcome
   }
 
   private async auditDomain(domain: MonitoredDomain, trigger: AuditTrigger): Promise<AuditResult> {
@@ -365,9 +651,23 @@ export class AuditService {
       // Per-domain DNS-health expectations (pm/checks/dns_health.mdx §4) — extra dangling-scan
       // labels, expected-NS drift detection, and the skip-AXFR toggle.
       dnsHealth: domain.dnsHealth,
+      // Per-domain mail-routing expectations (pm/checks/mx_routing.mdx §4) — the receives-mail
+      // intent (infra.mx_present / infra.mx_null severity), the expected-MX allow-list
+      // (infra.mx_expected_drift), and the skip-SMTP-probe toggle.
+      mx: domain.mx,
       // Per-domain registration-reputation config (pm/checks/domain_reputation.mdx §4) — brands,
       // expiry/age thresholds, registrant-public + cousin-scan toggles.
       domainReputation: domain.domainReputation,
+      // Per-domain DANE config (pm/checks/dane_tlsa.mdx §4) — the optional pinned expected
+      // next-cert SPKI digest that infra.dane_rollover verifies is pre-staged in DNS.
+      dane: domain.dane,
+      // Per-domain Link/URL-reputation config (pm/checks/link_url_reputation.mdx §4) — the
+      // own/related/allow-listed link domains for content.url_domain_alignment.
+      linkUrl: domain.linkUrl,
+      // Per-domain list-management config (pm/checks/list_unsubscribe.mdx §3/§4) — the
+      // isBulkSender severity escalator and the opt-in probeUnsubEndpoint toggle for the
+      // one-click POST probe.
+      listUnsub: domain.listUnsub,
       // Pure data (pm/run_checks.mdx §9): the registration checker reads it only to bypass its
       // long-TTL RDAP cache on a manual run-now (pm/checks/domain_reputation.mdx §6).
       trigger,
@@ -450,7 +750,12 @@ export class AuditService {
     // Regression detection (pm/engineering.mdx §8): diff against the domain's previous run so any
     // finding that newly appears — or worsens in severity — is flagged as a NEW problem and the
     // dashboard can surface it. First run for a domain has no baseline, so nothing is flagged.
-    const newProblemCount = flagNewProblems(all[domain.id]?.findings, findings)
+    // The count is taken from the findings themselves (not the differ's return) because some
+    // checkers flag their own domain-specific regressions — e.g. content scoring marks a band
+    // crossing or newly fired high-weight rule as new even when the finding id/severity is
+    // unchanged (pm/checks/content_scoring.mdx §6 / §8 AC 9).
+    flagNewProblems(all[domain.id]?.findings, findings)
+    const newProblemCount = findings.filter((f) => f.isNew).length
     // Score with the operator-configured severity weights (config.yaml → checks.weights,
     // pm/settings.mdx §2) so the roll-up reflects real-world impact (pm/spam_checks.mdx).
     const { score, status, counts } = summarize(findings, readAppConfig().checks.weights)

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "./axios"
-import type { AuditResult } from "./types"
+import type { AuditResult, DnsSpotCheckResult } from "./types"
 
 const RESULTS_KEY = ["audit", "results"] as const
 
@@ -58,6 +58,48 @@ export function useRunAudit() {
     mutationFn: async (domainId: string) =>
       (await api.post<AuditResult>(`/audit/run/${domainId}`)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: RESULTS_KEY }),
+  })
+}
+
+/**
+ * Re-run ONE DNS & Infrastructure family checker live (pm/checks/dns.mdx §6.2 item 6 — the
+ * DNS page's ⟳ spot-check button and the check-detail explainer's "run this check now").
+ * The result is a fresh observation, never persisted — no query invalidation needed.
+ */
+export function useDnsSpotCheck() {
+  return useMutation({
+    mutationFn: async ({ domainId, checkKey }: { domainId: string; checkKey: string }) =>
+      (await api.post<DnsSpotCheckResult>(`/audit/spot-check/${domainId}/${checkKey}`)).data,
+  })
+}
+
+/** One hit from an on-demand DKIM selector discovery probe (pm/checks/dkim.mdx §6.2 item 6). */
+export interface DkimDiscoveryHit {
+  selector: string
+  query_name: string
+  key_type: string | null
+  key_bits: number | null
+  is_revoked: boolean
+}
+
+/** The on-demand discovery outcome the selectors editor renders for one-click import. */
+export interface DkimDiscoveryOutcome {
+  /** True when a wildcard TXT answers every selector — hits are suppressed. */
+  wildcard_shadow: boolean
+  /** How many candidate names were probed (0 when the wildcard guard fired). */
+  probed: number
+  hits: DkimDiscoveryHit[]
+}
+
+/**
+ * "Run discovery now" (pm/checks/dkim.mdx §6.2 item 6): probe the MX-guided common-selector
+ * wordlist live for one domain and return the hits for one-click import. A probe, not a run —
+ * nothing is persisted, so no queries need invalidating.
+ */
+export function useDkimDiscovery() {
+  return useMutation({
+    mutationFn: async (domainId: string) =>
+      (await api.post<DkimDiscoveryOutcome>(`/audit/dkim-discovery/${domainId}`)).data,
   })
 }
 

@@ -1,5 +1,5 @@
 import { resolveTxt } from "../dns-util"
-import type { ArcForwarderConfig, Checker, CheckOutcome, Finding } from "../types"
+import type { ArcForwarderConfig, CheckContext, Checker, CheckOutcome, Finding } from "../types"
 
 /**
  * ARC (Authenticated Received Chain, RFC 8617) — advisory companion to DMARC. ARC lets a forwarder
@@ -95,7 +95,9 @@ function emptyResults(): ArcResults {
  * per-domain config, the `arc_forwarders` table — stored as `arc.forwarders` on the domain record
  * and surfaced on the CheckContext).
  */
-function declaredForwarders(ctx: { arc?: { forwarders: ArcForwarderConfig[] } }): ArcForwarderConfig[] {
+function declaredForwarders(ctx: {
+  arc?: { forwarders: ArcForwarderConfig[] }
+}): ArcForwarderConfig[] {
   return ctx.arc?.forwarders ?? []
 }
 
@@ -105,6 +107,30 @@ function dmarcPolicy(records: string[]): string | null {
   if (!rec) return null
   const m = /(?:^|;)\s*p\s*=\s*([a-zA-Z]+)/.exec(rec)
   return m ? m[1].toLowerCase() : null
+}
+
+/**
+ * The sibling `dmarc` checker's already-parsed policy from THIS run (pm/checks/arc.mdx §2/§3 —
+ * "read the DMARC policy the DMARC checker already parsed"). The run graph guarantees dmarc
+ * finishes before arc starts (run-graph.ts: `arc: ["dmarc"]`), so the policy is read from
+ * `ctx.upstream.dmarc` instead of re-querying `_dmarc.<domain>`. The dmarc checker publishes its
+ * §5 `dmarc:` section — `{ record: { policy, is_enforcing, … }, … }`; a flat shape is tolerated
+ * for older persisted payloads. Returns null when the sibling result is absent (checker disabled
+ * or errored) — the caller then falls back to its own memoized DNS lookup.
+ */
+function dmarcFromSibling(ctx: CheckContext): { policy: string | null; enforcing: boolean } | null {
+  const dmarc = ctx.upstream?.dmarc
+  if (!dmarc || typeof dmarc !== "object") return null
+  const record = (dmarc as { record?: unknown }).record
+  const src = (record && typeof record === "object" ? record : dmarc) as {
+    policy?: unknown
+    is_enforcing?: unknown
+  }
+  if (typeof src.is_enforcing !== "boolean") return null
+  return {
+    policy: typeof src.policy === "string" ? src.policy.toLowerCase() : null,
+    enforcing: src.is_enforcing,
+  }
 }
 
 /** A stable, filesystem/id-safe token derived from a human label. */
@@ -267,29 +293,39 @@ export const arcCheck: Checker = {
   async run(ctx): Promise<CheckOutcome> {
     const results = emptyResults()
 
-    // 1. Applicability rests on the DMARC policy — resolve it ourselves (CheckContext has no policy).
-    const dmarc = await resolveTxt(`_dmarc.${ctx.domain}`)
-    if (dmarc.error) {
-      results.notes = `DMARC policy lookup failed transiently (${dmarc.error}); applicability not evaluated.`
-      return {
-        results,
-        findings: [
-          {
-            id: "arc.applicable",
-            checkId: "arc",
-            title: "Could not determine ARC applicability",
-            severity: "info",
-            detail: `DNS lookup for TXT _dmarc.${ctx.domain} failed transiently (${dmarc.error}); ARC applicability depends on the DMARC policy, so it could not be evaluated this run.`,
-            remediation:
-              "Retry the audit. If it persists, check the domain's authoritative nameservers.",
-            evidence: `_dmarc.${ctx.domain}`,
-          },
-        ],
+    // 1. Applicability rests on the DMARC policy. Prefer the policy the sibling dmarc checker
+    //    already parsed this run (pm/checks/arc.mdx §3.1; the run graph orders arc after dmarc).
+    //    Fall back to resolving `_dmarc.<domain>` ourselves only when the sibling result is absent
+    //    (dmarc checker disabled/errored) — the per-run DNS memo makes the fallback cost one query.
+    let policy: string | null
+    let enforcing: boolean
+    const sibling = dmarcFromSibling(ctx)
+    if (sibling) {
+      policy = sibling.policy
+      enforcing = sibling.enforcing
+    } else {
+      const dmarc = await resolveTxt(`_dmarc.${ctx.domain}`)
+      if (dmarc.error) {
+        results.notes = `DMARC policy lookup failed transiently (${dmarc.error}); applicability not evaluated.`
+        return {
+          results,
+          findings: [
+            {
+              id: "arc.applicable",
+              checkId: "arc",
+              title: "Could not determine ARC applicability",
+              severity: "info",
+              detail: `DNS lookup for TXT _dmarc.${ctx.domain} failed transiently (${dmarc.error}); ARC applicability depends on the DMARC policy, so it could not be evaluated this run.`,
+              remediation:
+                "Retry the audit. If it persists, check the domain's authoritative nameservers.",
+              evidence: `_dmarc.${ctx.domain}`,
+            },
+          ],
+        }
       }
+      policy = dmarcPolicy(dmarc.records)
+      enforcing = policy === "quarantine" || policy === "reject"
     }
-
-    const policy = dmarcPolicy(dmarc.records)
-    const enforcing = policy === "quarantine" || policy === "reject"
 
     // 2. Not enforcing → ARC brings nothing; a directly-sent or p=none message is never rescued by it.
     if (!enforcing) {

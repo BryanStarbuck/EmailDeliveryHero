@@ -1,6 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "./axios"
-import type { ArcConfig, BimiDomainConfig, DnsHealthConfig, MonitoredDomain } from "./types"
+import type {
+  ArcConfig,
+  BimiDomainConfig,
+  DnsHealthConfig,
+  DomainReputationConfig,
+  LinkUrlDomainConfig,
+  MonitoredDomain,
+  MxRoutingConfig,
+} from "./types"
 
 export interface CreateDomainInput {
   name: string
@@ -14,6 +22,12 @@ export interface CreateDomainInput {
   bimi?: BimiDomainConfig
   /** DNS-health expectations (pm/checks/dns_health.mdx §4 per-domain config inputs). */
   dnsHealth?: DnsHealthConfig
+  /** Mail-routing expectations (pm/checks/mx_routing.mdx §4 per-domain config inputs). */
+  mx?: MxRoutingConfig
+  /** Registration-reputation config (pm/checks/domain_reputation.mdx §4 per-domain inputs). */
+  domainReputation?: DomainReputationConfig
+  /** Link / URL-reputation config (pm/checks/link_url_reputation.mdx §4 per-domain inputs). */
+  linkUrl?: LinkUrlDomainConfig
 }
 
 export interface UpdateDomainInput {
@@ -27,6 +41,12 @@ export interface UpdateDomainInput {
   bimi?: BimiDomainConfig
   /** DNS-health expectations (pm/checks/dns_health.mdx §4 per-domain config inputs). */
   dnsHealth?: DnsHealthConfig
+  /** Mail-routing expectations (pm/checks/mx_routing.mdx §4 per-domain config inputs). */
+  mx?: MxRoutingConfig
+  /** Registration-reputation config (pm/checks/domain_reputation.mdx §4 per-domain inputs). */
+  domainReputation?: DomainReputationConfig
+  /** Link / URL-reputation config (pm/checks/link_url_reputation.mdx §4 per-domain inputs). */
+  linkUrl?: LinkUrlDomainConfig
 }
 
 const KEY = ["domains"] as const

@@ -41,7 +41,7 @@ import type { AuditResult, Finding, Severity } from "./checks/types"
  */
 
 /** The six locked category keys, in run-file order (pm/storage.mdx §7.3). */
-const CATEGORY_KEYS = ["spf", "dkim", "dmarc", "blacklists", "dns_infra", "spam_content"] as const
+const _CATEGORY_KEYS = ["spf", "dkim", "dmarc", "blacklists", "dns_infra", "spam_content"] as const
 
 /** The `run:` metadata block — snake_case on disk (pm/storage.mdx §7.3). */
 interface RunBlock {
@@ -54,6 +54,16 @@ interface RunBlock {
   status: Severity
   counts: Record<Severity, number>
   new_problem_count?: number
+  /**
+   * Category scope (pm/checks/blacklists.mdx §21/AC 26): "blacklists" on a category-scoped
+   * re-run; absent on a full run of all six categories.
+   */
+  scope?: "blacklists"
+  /**
+   * Category prefixes a scoped re-run executed (pm/checks/spf.mdx §6.5 — `checks: [spf]` on a
+   * `?checks=spf` run); absent on a full run. Powers the Runs-table "SPF only" badge.
+   */
+  checks?: string[]
   /** The flat finding list (the per-sub-test rows), kept verbatim for the run report API. */
   findings: Finding[]
 }
@@ -85,6 +95,110 @@ export function sanitizeDomainDir(name: string): string {
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
+
+// ------------------------------------------------------------------------------------------------
+// The dns_infra category section extras (pm/checks/dns.mdx §5, pm/storage.mdx §7.3): alongside the
+// structured snapshots and tool_runs[], the section carries its worst-severity `status` and the
+// per-sub-test `tests[]` rows (result: pass|fail|warn|info ⇔ severity ok|critical|warning|info,
+// `family` derived from the finding id per the §2 prefix table). `families` and `problem_states`
+// are derived at render time and never stored.
+// ------------------------------------------------------------------------------------------------
+
+const SEVERITY_RANK: Record<Severity, number> = { ok: 0, info: 1, warning: 2, critical: 3 }
+
+/** severity ok|critical|warning|info ⇔ tests[].result pass|fail|warn|info (pm/checks/dns.mdx §5). */
+const SEVERITY_TO_RESULT: Record<Severity, "pass" | "fail" | "warn" | "info"> = {
+  ok: "pass",
+  critical: "fail",
+  warning: "warn",
+  info: "info",
+}
+
+/**
+ * Finding-id prefix (after "infra.") → family key (pm/checks/dns.mdx §2). Many ids carry a
+ * `.<host>` / `.<ip>` suffix so matching is by prefix, longest/most-specific first (e.g.
+ * `dnssec_ds_at_registrar` belongs to the registration family even though it starts `dnssec_`).
+ * Mirrors the frontend's lib/dns-families.ts — keep the two in lockstep.
+ */
+const DNS_INFRA_FAMILY_PREFIXES: { prefix: string; family: string }[] = [
+  { prefix: "mx_", family: "mx_routing" },
+  { prefix: "backup_mx_hygiene", family: "mx_routing" },
+  { prefix: "ptr_", family: "reverse_dns" },
+  { prefix: "fcrdns", family: "reverse_dns" },
+  { prefix: "helo_match", family: "reverse_dns" },
+  { prefix: "reverse_dns", family: "reverse_dns" },
+  { prefix: "tls_transport", family: "tls_transport" },
+  { prefix: "mta_sts", family: "mta_sts" },
+  { prefix: "tls_rpt", family: "tls_rpt" },
+  { prefix: "dane_", family: "dane_tlsa" },
+  { prefix: "dnssec_ds_at_registrar", family: "domain_reputation" },
+  { prefix: "dnssec_", family: "dnssec" },
+  // Bare checker-scoped ids (infra.dnssec.error / .did_not_complete) — after dnssec_* by length.
+  { prefix: "dnssec", family: "dnssec" },
+  { prefix: "ns_", family: "dns_health" },
+  { prefix: "soa_", family: "dns_health" },
+  { prefix: "ttl_sanity", family: "dns_health" },
+  { prefix: "wildcard", family: "dns_health" },
+  { prefix: "cname_at_apex", family: "dns_health" },
+  { prefix: "multi_txt_spf", family: "dns_health" },
+  { prefix: "txt_bloat", family: "dns_health" },
+  { prefix: "glue_records", family: "dns_health" },
+  { prefix: "recursion_open", family: "dns_health" },
+  { prefix: "zone_transfer", family: "dns_health" },
+  { prefix: "dangling_", family: "dns_health" },
+  { prefix: "dns_health", family: "dns_health" },
+  { prefix: "domain_", family: "domain_reputation" },
+  { prefix: "registrar_", family: "domain_reputation" },
+  { prefix: "registrant_privacy", family: "domain_reputation" },
+  { prefix: "auto_renew", family: "domain_reputation" },
+  { prefix: "hold_status", family: "domain_reputation" },
+  { prefix: "pending_delete", family: "domain_reputation" },
+  { prefix: "recent_transfer", family: "domain_reputation" },
+  { prefix: "record_available", family: "domain_reputation" },
+  { prefix: "parked", family: "domain_reputation" },
+  { prefix: "parking_nameservers", family: "domain_reputation" },
+  { prefix: "tld_risk", family: "domain_reputation" },
+  { prefix: "name_similarity", family: "domain_reputation" },
+  { prefix: "idn_homograph", family: "domain_reputation" },
+  { prefix: "update_lock", family: "domain_reputation" },
+  { prefix: "delete_lock", family: "domain_reputation" },
+  { prefix: "smtp_security", family: "smtp_security" },
+].sort((a, b) => b.prefix.length - a.prefix.length)
+
+/** Which of the ten §2 families an `infra.*` finding id rolls into (null when unrecognized). */
+function dnsInfraFamilyOf(findingId: string): string | null {
+  const bare = findingId.startsWith("infra.") ? findingId.slice("infra.".length) : findingId
+  for (const { prefix, family } of DNS_INFRA_FAMILY_PREFIXES) {
+    if (bare.startsWith(prefix)) return family
+  }
+  return null
+}
+
+/** One dns_infra.tests[] row (pm/checks/dns.mdx §5) — the finding, in on-disk vocabulary. */
+interface DnsInfraTestRow {
+  id: string
+  family: string | null
+  title: string
+  result: "pass" | "fail" | "warn" | "info"
+  detail?: string
+  evidence?: string
+  fix?: string
+}
+
+function encodeDnsInfraTest(finding: Finding): DnsInfraTestRow {
+  return {
+    id: finding.id,
+    family: dnsInfraFamilyOf(finding.id),
+    title: finding.title,
+    result: SEVERITY_TO_RESULT[finding.severity] ?? "info",
+    ...(finding.detail ? { detail: finding.detail } : {}),
+    ...(finding.evidence ? { evidence: finding.evidence } : {}),
+    ...(finding.remediation ? { fix: finding.remediation } : {}),
+  }
+}
+
+/** dns_infra keys that are projections of the run's findings — never re-hydrated into `results`. */
+const DNS_INFRA_DERIVED_KEYS = new Set(["status", "tests", "families", "problem_states"])
 
 /**
  * Render the run's start instant as the filename timestamp (pm/storage.mdx §7.2):
@@ -135,16 +249,31 @@ function encodeRunFile(result: AuditResult): RunFile {
       score: result.score,
       status: result.status,
       counts: result.counts,
-      ...(result.newProblemCount !== undefined ? { new_problem_count: result.newProblemCount } : {}),
+      ...(result.newProblemCount !== undefined
+        ? { new_problem_count: result.newProblemCount }
+        : {}),
+      ...(result.scope !== undefined ? { scope: result.scope } : {}),
       findings: result.findings,
     },
   }
   const dnsInfra: Record<string, unknown> = {}
   const spamContent: Record<string, unknown> = {}
+  // The dns_infra section's own status + per-sub-test rows (pm/checks/dns.mdx §5): worst severity
+  // across every `infra.*` finding, then the tests[] projection of those findings. Written before
+  // the snapshots so the section reads verdict-first.
+  const infraFindings = (result.findings ?? []).filter((f) => f.checkId.startsWith("infra."))
+  if (infraFindings.length > 0) {
+    let worst: Severity = "ok"
+    for (const f of infraFindings) {
+      if (SEVERITY_RANK[f.severity] > SEVERITY_RANK[worst]) worst = f.severity
+    }
+    dnsInfra.status = worst
+  }
   for (const [id, payload] of Object.entries(results)) {
     if (id.startsWith("infra.")) dnsInfra[id.slice("infra.".length)] = payload
     else if (id.startsWith("content.")) spamContent[id.slice("content.".length)] = payload
   }
+  if (infraFindings.length > 0) dnsInfra.tests = infraFindings.map(encodeDnsInfraTest)
   const dmarcBase = results.dmarc
   const arcPayload = results.arc
   const dmarcSection =
@@ -182,10 +311,16 @@ function decodeRunFile(doc: unknown): AuditResult | null {
     addSection("dmarc", doc.dmarc)
   }
   if (isPlainObject(doc.dns_infra)) {
-    for (const [key, payload] of Object.entries(doc.dns_infra)) addSection(`infra.${key}`, payload)
+    for (const [key, payload] of Object.entries(doc.dns_infra)) {
+      // status/tests (and any derived keys) are projections of run.findings — the findings list
+      // is the source of truth in memory, so they never round-trip into `results`.
+      if (DNS_INFRA_DERIVED_KEYS.has(key)) continue
+      addSection(`infra.${key}`, payload)
+    }
   }
   if (isPlainObject(doc.spam_content)) {
-    for (const [key, payload] of Object.entries(doc.spam_content)) addSection(`content.${key}`, payload)
+    for (const [key, payload] of Object.entries(doc.spam_content))
+      addSection(`content.${key}`, payload)
   }
   return {
     runId: run.run_id,
@@ -199,6 +334,7 @@ function decodeRunFile(doc: unknown): AuditResult | null {
     findings: Array.isArray(run.findings) ? run.findings : [],
     counts: run.counts ?? { ok: 0, info: 0, warning: 0, critical: 0 },
     ...(run.new_problem_count !== undefined ? { newProblemCount: run.new_problem_count } : {}),
+    ...(run.scope !== undefined ? { scope: run.scope } : {}),
     ...(Object.keys(results).length > 0 ? { results } : {}),
   }
 }

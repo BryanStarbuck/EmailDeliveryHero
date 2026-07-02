@@ -1,7 +1,7 @@
 import type { Finding } from "@module/audit/checks/types"
 import { readAppConfig } from "@shared/config-store"
-import { listDmarcReports, listTlsRptReports } from "./report-store"
 import type { DmarcReportRow, ParsedDmarcReport, ParsedTlsRptReport } from "./report.types"
+import { listDmarcReports, listTlsRptReports } from "./report-store"
 
 /**
  * Report → Finding derivation (pm/emails.mdx §3/§5). Aggregates the stored, parsed reports over a
@@ -99,9 +99,15 @@ function windowFor(newestEnd: string, windowDays: number): { begin: string; end:
 }
 
 export function aggregateDmarc(reports: ParsedDmarcReport[], windowDays: number): DmarcAggregate {
-  const newestEnd = reports.map((r) => r.window.end).sort().at(-1) ?? new Date().toISOString()
+  const newestEnd =
+    reports
+      .map((r) => r.window.end)
+      .sort()
+      .at(-1) ?? new Date().toISOString()
   const window = windowFor(newestEnd, windowDays)
-  const current = reports.filter((r) => inWindow(r.window.begin, r.window.end, window.begin, window.end))
+  const current = reports.filter((r) =>
+    inWindow(r.window.begin, r.window.end, window.begin, window.end),
+  )
 
   const bySource = new Map<string, DmarcSourceRow>()
   let total = 0
@@ -116,15 +122,22 @@ export function aggregateDmarc(reports: ParsedDmarcReport[], windowDays: number)
       const merged = bySource.get(key)
       if (merged) {
         merged.count += row.count
-        if ((DISPOSITION_RANK[row.disposition] ?? 0) > (DISPOSITION_RANK[merged.disposition] ?? 0)) {
+        if (
+          (DISPOSITION_RANK[row.disposition] ?? 0) > (DISPOSITION_RANK[merged.disposition] ?? 0)
+        ) {
           merged.disposition = row.disposition
         }
         for (const d of row.dkimSigningDomains) {
           if (!merged.dkimSigningDomains.includes(d)) merged.dkimSigningDomains.push(d)
         }
-        if (!merged.reporters.includes(report.reporterOrg)) merged.reporters.push(report.reporterOrg)
+        if (!merged.reporters.includes(report.reporterOrg))
+          merged.reporters.push(report.reporterOrg)
       } else {
-        bySource.set(key, { ...row, dkimSigningDomains: [...row.dkimSigningDomains], reporters: [report.reporterOrg] })
+        bySource.set(key, {
+          ...row,
+          dkimSigningDomains: [...row.dkimSigningDomains],
+          reporters: [report.reporterOrg],
+        })
       }
     }
   }
@@ -142,11 +155,23 @@ export function aggregateDmarc(reports: ParsedDmarcReport[], windowDays: number)
   }
 }
 
-export function aggregateTlsRpt(reports: ParsedTlsRptReport[], windowDays: number): TlsRptAggregate {
-  const newestEnd = reports.map((r) => r.window.end || r.reportDate).sort().at(-1) ?? new Date().toISOString()
+export function aggregateTlsRpt(
+  reports: ParsedTlsRptReport[],
+  windowDays: number,
+): TlsRptAggregate {
+  const newestEnd =
+    reports
+      .map((r) => r.window.end || r.reportDate)
+      .sort()
+      .at(-1) ?? new Date().toISOString()
   const window = windowFor(newestEnd, windowDays)
   const current = reports.filter((r) =>
-    inWindow(r.window.begin || r.reportDate, r.window.end || r.reportDate, window.begin, window.end),
+    inWindow(
+      r.window.begin || r.reportDate,
+      r.window.end || r.reportDate,
+      window.begin,
+      window.end,
+    ),
   )
 
   const rows: TlsRptReporterDay[] = []
@@ -197,7 +222,8 @@ export function ingestionDisabledFinding(id: string, checkId: string): Finding {
     severity: "info",
     detail:
       "Report-email ingestion is switched off in Settings → Admin, so this check contributes nothing to the score.",
-    remediation: "Enable report ingestion under Settings → Admin to feed this check with real receiver data.",
+    remediation:
+      "Enable report ingestion under Settings → Admin to feed this check with real receiver data.",
     source: "report",
   }
 }
@@ -262,7 +288,9 @@ export function deriveDmarcReportFindings(domainId: string, domain: string): Fin
       findings.push({
         id: `dmarc.report_unaligned_source.${row.sourceIp}`,
         checkId: DMARC_CHECK_ID,
-        title: known ? `Own stream failing all authentication (${row.sourceIp})` : `Unauthorized sender ${row.sourceIp}`,
+        title: known
+          ? `Own stream failing all authentication (${row.sourceIp})`
+          : `Unauthorized sender ${row.sourceIp}`,
         severity: known ? "warning" : "critical",
         detail: `Source ${row.sourceIp} sent ${row.count} msg(s) as ${row.headerFrom || domain} — SPF ${row.spfEvaluated}/aligned ${row.spfAligned}, DKIM ${row.dkimEvaluated}/aligned ${row.dkimAligned} (disposition: ${row.disposition}).`,
         remediation: known
@@ -298,7 +326,8 @@ export function deriveDmarcReportFindings(domainId: string, domain: string): Fin
       checkId: DMARC_CHECK_ID,
       title: "All passing streams are dual-aligned",
       severity: "ok",
-      detail: "Every known stream that passes DMARC aligns on both SPF and DKIM — no single point of failure.",
+      detail:
+        "Every known stream that passes DMARC aligns on both SPF and DKIM — no single point of failure.",
       source: "report",
     })
   } else {
@@ -309,7 +338,9 @@ export function deriveDmarcReportFindings(domainId: string, domain: string): Fin
       findings.push({
         id: `dmarc.report_alignment_fragility.${envelope}`,
         checkId: DMARC_CHECK_ID,
-        title: s.dkimOnly ? `Stream is DKIM-only (${envelope})` : `Stream is SPF-only (${envelope})`,
+        title: s.dkimOnly
+          ? `Stream is DKIM-only (${envelope})`
+          : `Stream is SPF-only (${envelope})`,
         severity: "warning",
         detail: s.dkimOnly
           ? `${s.count} msg(s) from ${[...s.ips].slice(0, 4).join(", ")} (envelope ${envelope}) pass DMARC via DKIM only — SPF alignment fails under aspf=${aspf}. One DKIM key rotation/breakage and the whole stream fails DMARC${(agg.policyPublished?.p ?? "") === "reject" ? " and is rejected under p=reject" : ""}.`
@@ -317,14 +348,18 @@ export function deriveDmarcReportFindings(domainId: string, domain: string): Fin
         remediation: s.dkimOnly
           ? `Set aspf=r on _dmarc.${domain}, or brand the Return-Path (e.g. bounces.${domain} CNAME'd at the ESP) so the envelope aligns and the stream has dual-auth resilience.`
           : `Enable DKIM signing with a selector under ${domain} (selector._domainkey.${domain}) at this sender, and/or set adkim=r.`,
-        evidence: s.dkimOnly ? `v=DMARC1; p=${agg.policyPublished?.p ?? "reject"}; aspf=r` : `selector._domainkey.${domain}`,
+        evidence: s.dkimOnly
+          ? `v=DMARC1; p=${agg.policyPublished?.p ?? "reject"}; aspf=r`
+          : `selector._domainkey.${domain}`,
         source: "report",
       })
     }
   }
 
   // dmarc.report_enforcement — own mail actively quarantined/rejected (§5 row 4).
-  const enforcedRows = agg.rows.filter((r) => r.disposition === "quarantine" || r.disposition === "reject")
+  const enforcedRows = agg.rows.filter(
+    (r) => r.disposition === "quarantine" || r.disposition === "reject",
+  )
   if (enforcedRows.length === 0) {
     findings.push({
       id: "dmarc.report_enforcement",
@@ -360,7 +395,12 @@ export function deriveDmarcReportFindings(domainId: string, domain: string): Fin
         checkId: DMARC_CHECK_ID,
         title: `${fresh.length} new sending source(s) appeared this window`,
         severity: "info",
-        detail: `New sending source(s) ${fresh.slice(0, 5).map((r) => r.sourceIp).join(", ")}${fresh.length > 5 ? ", …" : ""} (${totalNew} msg(s)) appeared this window and were absent from prior windows.`,
+        detail: `New sending source(s) ${fresh
+          .slice(0, 5)
+          .map((r) => r.sourceIp)
+          .join(
+            ", ",
+          )}${fresh.length > 5 ? ", …" : ""} (${totalNew} msg(s)) appeared this window and were absent from prior windows.`,
         remediation: `Reconcile against your known senders; add to SPF/DKIM if yours, else monitor for spoofing.`,
         source: "report",
       })
@@ -396,9 +436,7 @@ export function deriveTlsRptFindings(domainId: string, domain: string): Finding[
   const findings: Finding[] = []
 
   if (agg.totalFailure > 0) {
-    const types = [
-      ...new Set(agg.rows.flatMap((r) => r.failureDetails.map((d) => d.resultType))),
-    ]
+    const types = [...new Set(agg.rows.flatMap((r) => r.failureDetails.map((d) => d.resultType)))]
     const fixes: Record<string, string> = {
       "starttls-not-supported": "ensure every MX offers STARTTLS",
       "certificate-host-mismatch": "replace the MX certificate so its name matches the MX host",
@@ -406,7 +444,7 @@ export function deriveTlsRptFindings(domainId: string, domain: string): Finding[
       "validation-failure": "install a certificate from a trusted CA on the MX",
       "tlsa-invalid": "repair the TLSA record after the key roll",
       "dnssec-invalid": "fix the DNSSEC chain for the TLSA record",
-      "sts-policy-fetch-error": "make https://mta-sts." + domain + "/.well-known/mta-sts.txt reachable",
+      "sts-policy-fetch-error": `make https://mta-sts.${domain}/.well-known/mta-sts.txt reachable`,
       "sts-policy-invalid": "correct the MTA-STS policy file syntax",
       "sts-webpki-invalid": "fix the certificate on the mta-sts policy host",
     }

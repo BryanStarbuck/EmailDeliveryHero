@@ -13,6 +13,7 @@ import { DkimPage } from "@/pages/domains/DkimPage"
 import { DkimProblemPage } from "@/pages/domains/DkimProblemPage"
 import { DmarcPage } from "@/pages/domains/DmarcPage"
 import { DmarcProblemPage } from "@/pages/domains/DmarcProblemPage"
+import { DnsCheckPage } from "@/pages/domains/DnsCheckPage"
 import { DnsPage } from "@/pages/domains/DnsPage"
 import { DnsProblemPage } from "@/pages/domains/DnsProblemPage"
 import { DomainReportsPage } from "@/pages/domains/DomainReportsPage"
@@ -86,9 +87,7 @@ const domainsRoute = createRoute({
   // list (pm/domains.mdx §1 — the /domains/new "`?new` side panel" form).
   validateSearch: (search: Record<string, unknown>): { edit?: string; new?: boolean } => ({
     ...(typeof search.edit === "string" && search.edit ? { edit: search.edit } : {}),
-    ...("new" in search && search.new !== undefined && search.new !== false
-      ? { new: true }
-      : {}),
+    ...("new" in search && search.new !== undefined && search.new !== false ? { new: true } : {}),
   }),
 })
 const runDetailRoute = createRoute({
@@ -137,6 +136,13 @@ const dnsRunRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "/domains/$id/runs/$runId/dns",
   component: DnsPage,
+})
+// The run-scoped check-detail explainer page — one per test family (pm/checks/dns.mdx §6.2
+// item 6/8): what it is, current state, what it means, how to fix it, run-this-check-now.
+const dnsCheckRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "/domains/$id/runs/$runId/dns/check/$checkKey",
+  component: DnsCheckPage,
 })
 const dnsProblemRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
@@ -264,6 +270,7 @@ const routeTree = rootRoute.addChildren([
     runDmarcProblemRoute,
     dnsRoute,
     dnsRunRoute,
+    dnsCheckRoute,
     dnsProblemRoute,
     dkimRoute,
     dkimProblemRoute,

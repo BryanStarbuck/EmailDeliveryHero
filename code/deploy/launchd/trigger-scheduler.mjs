@@ -27,7 +27,9 @@ async function main() {
     })
     const body = await res.text().catch(() => "")
     if (!res.ok) {
-      console.error(`[${stamp()}] scheduler run failed: HTTP ${res.status} ${res.statusText} ${body}`)
+      console.error(
+        `[${stamp()}] scheduler run failed: HTTP ${res.status} ${res.statusText} ${body}`,
+      )
       process.exit(1)
     }
     console.log(`[${stamp()}] scheduler run OK: ${body || res.status}`)

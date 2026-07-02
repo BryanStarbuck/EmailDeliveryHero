@@ -1,9 +1,11 @@
 import { Link, useNavigate, useParams } from "@tanstack/react-router"
 import { ArrowLeft, ChevronDown, ChevronRight, RefreshCw, Wrench } from "lucide-react"
 import { useState } from "react"
+import { toast } from "sonner"
 import { useAuditResults, useAuditRun } from "@/api/audit"
+import { useRescoreContent } from "@/api/content-sample"
 import { useDomains } from "@/api/domains"
-import type { Finding } from "@/api/types"
+import type { ContentScoreResults, Finding } from "@/api/types"
 import { ScoreBadge, SeverityBadge } from "@/components/Badges"
 import { CopyFixButton } from "@/components/CopyFixButton"
 import { RemediationText } from "@/components/FindingsList"
@@ -15,7 +17,9 @@ import {
   rollupCategories,
   techPageRoute,
 } from "@/lib/categories"
+import { isContentScoringFinding } from "@/lib/content-scoring"
 import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext"
+import { FiredRulesPanel } from "./ContentScoringPage"
 
 const ORDER = { critical: 0, warning: 1, info: 2, ok: 3 } as const
 
@@ -112,6 +116,17 @@ export function RunDetailPage() {
                       >
                         <ChevronRight className="h-3.5 w-3.5" />
                       </Link>
+                    ) : c.key === "dmarc" && runId ? (
+                      // The DMARC chevron stays run-scoped on a historical run (pm/checks/dmarc.mdx
+                      // §6.2 — the run report's DMARC chip opens THAT run's DMARC page).
+                      <Link
+                        to="/domains/$id/runs/$runId/dmarc"
+                        params={{ id, runId }}
+                        aria-label={`Open the ${c.header} page for this run`}
+                        className="hover:text-slate-700"
+                      >
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      </Link>
                     ) : c.key === "dnsInfra" && runId ? (
                       // The DNS & Infrastructure chevron routes to the SAME run's DNS page
                       // (pm/checks/dns.mdx §6.1 — the run report's section chevron is run-scoped).
@@ -157,6 +172,12 @@ export function RunDetailPage() {
                   catKey={c.key}
                   header={c.header}
                   findings={findings}
+                  domainId={id}
+                  contentScore={
+                    c.key === "spamContent"
+                      ? (result.results?.["content.scoring"] as ContentScoreResults | undefined)
+                      : undefined
+                  }
                 />
               )
             })}
@@ -175,10 +196,14 @@ function CategorySection({
   catKey,
   header,
   findings,
+  domainId,
+  contentScore,
 }: {
   catKey: string
   header: string
   findings: Finding[]
+  domainId: string
+  contentScore?: ContentScoreResults
 }) {
   const problems = findings.filter(
     (f) => f.severity === "warning" || f.severity === "critical",
@@ -192,11 +217,23 @@ function CategorySection({
   // inside that section (pm/checks/bimi.mdx §4 — "Spam & Content › BIMI").
   const bimiFindings =
     catKey === "spamContent" ? findings.filter((f) => f.checkId === "content.bimi") : []
+  // Content scoring renders grouped under its own "Content scoring" subhead with the score gauge,
+  // sample line, fired-rule rows, and actions (pm/checks/content_scoring.mdx §4 — "Spam &
+  // Content ▸ Content scoring", §8 AC 8).
+  const contentScoringFindings =
+    catKey === "spamContent" ? findings.filter(isContentScoringFinding) : []
   const mainFindings = findings.filter(
     (f) =>
       !(arcFindings.length > 0 && f.checkId === "arc") &&
-      !(bimiFindings.length > 0 && f.checkId === "content.bimi"),
+      !(bimiFindings.length > 0 && f.checkId === "content.bimi") &&
+      !(contentScoringFindings.length > 0 && isContentScoringFinding(f)),
   )
+  // A bogus DNSSEC chain is a domain-wide outage: when infra.dnssec_validates is critical the
+  // DNS & Infrastructure group carries a "Domain may be unresolvable" banner and the (already
+  // severity-sorted) finding sits at the top of the group (pm/checks/dnssec.mdx §4).
+  const dnssecBogus =
+    catKey === "dnsInfra" &&
+    findings.some((f) => f.checkId === "infra.dnssec_validates" && f.severity === "critical")
 
   return (
     <section id={`cat-${catKey}`}>
@@ -222,6 +259,15 @@ function CategorySection({
       </button>
       {open && (
         <>
+          {dnssecBogus && (
+            <div
+              role="alert"
+              className="mb-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm font-medium text-red-800"
+            >
+              Domain may be unresolvable — the DNSSEC chain is bogus, so validating resolvers
+              (including most large mailbox providers) SERVFAIL every lookup for this domain.
+            </div>
+          )}
           <ul className="space-y-2">
             {mainFindings.map((f) => (
               <FindingRow key={f.id} finding={f} />
@@ -229,9 +275,115 @@ function CategorySection({
           </ul>
           {arcFindings.length > 0 && <ArcSubGroup findings={arcFindings} />}
           {bimiFindings.length > 0 && <BimiSubGroup findings={bimiFindings} />}
+          {contentScoringFindings.length > 0 && (
+            <ContentScoringSubGroup
+              domainId={domainId}
+              score={contentScore}
+              findings={contentScoringFindings}
+            />
+          )}
         </>
       )}
     </section>
+  )
+}
+
+/**
+ * The Content-scoring sub-group inside the Spam & Content section (pm/checks/content_scoring.mdx
+ * §4 — "Spam & Content ▸ Content scoring"). The header shows the headline SpamAssassin score as a
+ * colored gauge chip (< 2 green, 2–5 amber, ≥ 5 red); beneath it the scored sample's
+ * subject/from, one row per fired rule sorted by points descending with a copy-to-clipboard fix,
+ * the grouped finding rows, and the Re-score / Upload-new-sample / View-raw actions (§8 AC 8).
+ * Never-run / no-sample states show "Not scored yet."
+ */
+function ContentScoringSubGroup({
+  domainId,
+  score,
+  findings,
+}: {
+  domainId: string
+  score?: ContentScoreResults
+  findings: Finding[]
+}) {
+  const rescore = useRescoreContent(domainId)
+  const problems = findings.filter(
+    (f) => f.severity === "warning" || f.severity === "critical",
+  ).length
+  // Gauge banding mirrors the check's §3.5 severity bands (inbox-safe target 2.0).
+  const gaugeStyle = score
+    ? score.total_score >= score.threshold
+      ? "bg-red-100 text-red-800"
+      : score.total_score >= 2.0
+        ? "bg-amber-100 text-amber-800"
+        : "bg-emerald-100 text-emerald-800"
+    : null
+  return (
+    <div className="mt-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+          Content scoring
+          {score && gaugeStyle && (
+            <span className={`rounded-md px-2 py-0.5 text-xs font-bold ${gaugeStyle}`}>
+              {score.total_score.toFixed(1)} / {score.threshold.toFixed(1)}
+            </span>
+          )}
+        </h3>
+        <span className="text-xs text-[var(--edh-muted)]">
+          {problems === 0 ? "all healthy" : `${problems} problem${problems === 1 ? "" : "s"}`}
+        </span>
+      </div>
+      {score ? (
+        <p className="mb-2 text-xs text-[var(--edh-muted)]">
+          sample:{" "}
+          <span className="font-medium text-slate-700">"{score.subject ?? "(no subject)"}"</span>{" "}
+          from {score.from_header ?? "(unknown sender)"} · scored{" "}
+          {new Date(score.checked_at).toLocaleString()}
+        </p>
+      ) : (
+        <p className="mb-2 text-xs text-[var(--edh-muted)]">Not scored yet.</p>
+      )}
+      {score && score.rules_fired.length > 0 && (
+        <div className="mb-2">
+          <FiredRulesPanel score={score} findings={findings} />
+        </div>
+      )}
+      <ul className="space-y-2">
+        {findings.map((f) => (
+          <FindingRow key={f.id} finding={f} />
+        ))}
+      </ul>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() =>
+            rescore.mutate(undefined, {
+              onSuccess: () => toast.success("Content re-scored"),
+              onError: (err) =>
+                toast.error(`Re-score failed: ${err instanceof Error ? err.message : err}`),
+            })
+          }
+          disabled={rescore.isPending}
+          className="inline-flex items-center gap-1 rounded-md border border-[var(--edh-border)] px-2 py-1 text-xs font-medium hover:bg-slate-50 disabled:opacity-50"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${rescore.isPending ? "animate-spin" : ""}`} />
+          {rescore.isPending ? "Scoring…" : "Re-score"}
+        </button>
+        <Link
+          to="/domains/$id/content"
+          params={{ id: domainId }}
+          className="rounded-md border border-[var(--edh-border)] px-2 py-1 text-xs font-medium hover:bg-slate-50"
+        >
+          Upload new sample
+        </Link>
+        <Link
+          to="/domains/$id/content"
+          params={{ id: domainId }}
+          className="rounded-md border border-[var(--edh-border)] px-2 py-1 text-xs font-medium hover:bg-slate-50"
+        >
+          View raw .eml
+        </Link>
+      </div>
+    </div>
   )
 }
 

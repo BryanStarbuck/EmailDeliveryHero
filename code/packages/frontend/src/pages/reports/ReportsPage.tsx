@@ -1,11 +1,12 @@
 import { Link, useNavigate } from "@tanstack/react-router"
-import { ChevronRight, Mailbox, MoreVertical } from "lucide-react"
-import { useEffect, useState } from "react"
+import { ChevronRight, Mailbox } from "lucide-react"
+import { useEffect } from "react"
 import { toast } from "sonner"
 import { useAuditRuns, useDeleteRun } from "@/api/audit"
 import { useDomains } from "@/api/domains"
 import type { AuditResult } from "@/api/types"
 import { ScoreBadge } from "@/components/Badges"
+import { RowMenu } from "@/components/RowMenu"
 import { StatusCell } from "@/components/StatusCell"
 import { CATEGORIES, NEVER_CELL, rollupCategories } from "@/lib/categories"
 import { useScanRunner } from "@/scan/ScanProgressContext"
@@ -123,8 +124,8 @@ function IngestedReportsSection() {
       </header>
       <p className="mb-3 text-sm text-[var(--edh-muted)]">
         The machine reports receivers send back to your domains — who sent mail as you and whether
-        it authenticated, and whether inbound TLS worked. Open a domain to see the ingested
-        reports, the problems they reveal, and the fixes.
+        it authenticated, and whether inbound TLS worked. Open a domain to see the ingested reports,
+        the problems they reveal, and the fixes.
       </p>
       {list.length === 0 ? (
         <div className="rounded-lg border border-dashed border-[var(--edh-border)] p-6 text-center text-sm text-slate-600">
@@ -195,17 +196,14 @@ function ReportRow({ run, onOpen }: { run: AuditResult; onOpen: (r: AuditResult)
 
 /** The ⋮ menu — Open report / Run checks again / Delete report (pm/reports.mdx §3.4). */
 function ReportMenu({ run, onOpen }: { run: AuditResult; onOpen: (r: AuditResult) => void }) {
-  const [open, setOpen] = useState(false)
   const runDomains = useScanRunner()
   const del = useDeleteRun()
 
   const onRunAgain = () => {
-    setOpen(false)
     runDomains([{ id: run.domainId, name: run.domain }])
   }
 
   const onDelete = () => {
-    setOpen(false)
     if (!window.confirm(`Delete this report for ${run.domain}? The domain itself is unaffected.`)) {
       return
     }
@@ -220,69 +218,14 @@ function ReportMenu({ run, onOpen }: { run: AuditResult; onOpen: (r: AuditResult
   }
 
   return (
-    <div className="relative">
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation()
-          setOpen((o) => !o)
-        }}
-        aria-label={`Actions for the ${run.domain} report`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        className="text-[var(--edh-muted)] hover:text-slate-700"
-      >
-        <MoreVertical className="h-4 w-4" />
-      </button>
-      {open && (
-        <>
-          {/* Click-away backdrop — closes the menu without triggering anything underneath. */}
-          <button
-            type="button"
-            aria-label="Close menu"
-            onClick={(e) => {
-              e.stopPropagation()
-              setOpen(false)
-            }}
-            className="fixed inset-0 z-10 cursor-default"
-          />
-          <div
-            role="menu"
-            className="absolute right-0 z-20 mt-1 w-44 overflow-hidden rounded-md border border-[var(--edh-border)] bg-white py-1 text-left shadow-lg"
-          >
-            <MenuItem label="Open report" onClick={() => onOpen(run)} />
-            <MenuItem label="Run checks again" onClick={onRunAgain} />
-            <MenuItem label="Delete report" destructive onClick={onDelete} />
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
-
-function MenuItem({
-  label,
-  onClick,
-  destructive = false,
-}: {
-  label: string
-  onClick: () => void
-  destructive?: boolean
-}) {
-  return (
-    <button
-      type="button"
-      role="menuitem"
-      onClick={(e) => {
-        e.stopPropagation()
-        onClick()
-      }}
-      className={`block w-full px-3 py-1.5 text-left text-sm hover:bg-slate-50 ${
-        destructive ? "text-red-700" : "text-slate-700"
-      }`}
-    >
-      {label}
-    </button>
+    <RowMenu
+      label={`Actions for the ${run.domain} report`}
+      items={[
+        { label: "Open report", onClick: () => onOpen(run) },
+        { label: "Run checks again", onClick: onRunAgain },
+        { label: "Delete report", danger: true, onClick: onDelete },
+      ]}
+    />
   )
 }
 

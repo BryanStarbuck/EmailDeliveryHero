@@ -1,4 +1,6 @@
+import { readAppConfig } from "@shared/config-store"
 import { type DigAnswer, dig, digAnswer, resolveCname, resolveMx } from "../dns-util"
+import type { DnssecResults } from "../dnssec/dnssec.check"
 import type { MxRoutingResults } from "../mx-routing/mx-routing.check"
 import type { Checker, CheckOutcome, Finding } from "../types"
 
@@ -135,6 +137,8 @@ async function observeDnssec(host: string): Promise<{ signed: boolean; error: bo
 
 const REM_UNSIGNED =
   "Either sign the MX host's zone (publish DNSKEY, add a DS record at the parent registrar) — preferred — or remove the TLSA record so it is not mistaken for protection. A sending MTA MUST ignore an unsigned TLSA."
+const REM_UNSIGNED_NO_TLSA =
+  "Sign the MX host's zone first (publish DNSKEY, add a DS record at the parent registrar — see the DNSSEC check), then publish `_25._tcp.<mx>. 3600 IN TLSA 3 1 1 <sha256-of-SPKI>` for the host. DANE is impossible on an unsigned zone."
 const REM_PARAMS =
   "Republish the record as `3 1 1` (DANE-EE, SPKI, SHA-256): `_25._tcp.<mx>. 3600 IN TLSA 3 1 1 <sha256-of-SPKI>`. Remove any usage-0/1 (PKIX) records — they are unusable for SMTP per RFC 7672."
 const REM_DIGEST =
@@ -158,6 +162,17 @@ export interface HostObservation {
   cnamed: boolean
   tlsa: { records: DigAnswer[]; error?: string }
   dnssec: { signed: boolean; error: boolean }
+  /**
+   * The admin-pinned expected next-cert SPKI digest (pm/checks/dane_tlsa.mdx §4, optional): when
+   * set, `infra.dane_rollover` proactively warns until a TLSA record with this digest is staged.
+   */
+  expectedNextSpki?: string
+  /**
+   * The admin "require the DNSSEC AD bit from a validating resolver" toggle (spec §4). First
+   * round only OBSERVES DS/DNSKEY/RRSIG; with this on, a met prerequisite is reported as `info`
+   * (not `ok`) until the FUTURE validating-resolver round can actually confirm the AD bit.
+   */
+  requireAdBit?: boolean
   checkedAt?: string
 }
 
@@ -267,7 +282,7 @@ export function analyzeHost(obs: HostObservation): {
         title: `No DANE and zone unsigned: ${host}`,
         severity: "warning",
         detail: `${host} has no TLSA record and its zone shows no DNSSEC chain (no DS/DNSKEY observed). DANE is impossible until the zone is signed.`,
-        remediation: REM_UNSIGNED,
+        remediation: REM_UNSIGNED_NO_TLSA,
         evidence: tlsaName,
       })
     }
@@ -302,6 +317,18 @@ export function analyzeHost(obs: HostObservation): {
       detail: `${host} publishes a TLSA record but its zone shows no DNSSEC chain (no DS/DNSKEY observed). Sending MTAs MUST ignore an unsigned TLSA, so this record gives false confidence and provides no protection.`,
       remediation: REM_UNSIGNED,
       evidence: records.map((r) => r.raw).join(" | "),
+    })
+  } else if (obs.requireAdBit) {
+    // Admin requires AD-bit confirmation (spec §4): first round can only observe the chain, so a
+    // met prerequisite stays `info` until the FUTURE validating-resolver round confirms the AD bit.
+    findings.push({
+      id: `infra.dane_dnssec_prereq.${tag}`,
+      checkId: "infra",
+      title: `DNSSEC chain observed for ${host} (AD-bit confirmation pending)`,
+      severity: "info",
+      detail: `${host}'s zone shows a DNSSEC chain (DS/DNSKEY observed), but admin settings require the AD bit from a validating resolver before the prerequisite counts as authoritatively met — that validating-resolver round is a future capability.`,
+      remediation:
+        'No DNS change needed. Either keep this setting and wait for the validating-resolver round, or disable "require AD bit" in Settings → Admin → DANE to accept the first-round DS/DNSKEY observation.',
     })
   } else {
     findings.push({
@@ -446,6 +473,14 @@ export function analyzeHost(obs: HostObservation): {
   }
 
   // --- infra.dane_rollover ---------------------------------------------------------------
+  // Optional proactive pin (spec §4): the admin can configure the NEXT cert's SPKI digest so the
+  // app warns while the planned rollover record is missing, not just on the record-count heuristic.
+  const expectedNext =
+    obs.expectedNextSpki
+      ?.trim()
+      .toLowerCase()
+      .replace(/[^0-9a-f]/g, "") ?? ""
+  const nextStaged = expectedNext !== "" && records.some((r) => r.data === expectedNext)
   if (records.length < 2) {
     findings.push({
       id: `infra.dane_rollover.${tag}`,
@@ -462,11 +497,74 @@ export function analyzeHost(obs: HostObservation): {
       checkId: "infra",
       title: `Rollover staged on ${host}`,
       severity: "ok",
-      detail: `${host} has ${records.length} TLSA records staged (current + next), so a cert renewal will not break DANE.`,
+      detail: `${host} has ${records.length} TLSA records staged (current + next), so a cert renewal will not break DANE.${nextStaged ? " The pinned expected next-cert SPKI digest is among them." : ""}`,
+    })
+  }
+  if (expectedNext !== "" && !nextStaged) {
+    findings.push({
+      id: `infra.dane_rollover.next_missing.${tag}`,
+      checkId: "infra",
+      title: `Expected next-cert TLSA digest not staged on ${host}`,
+      severity: "warning",
+      detail: `An expected next-certificate SPKI digest is pinned in this domain's DANE settings, but no TLSA record at ${tlsaName} carries it. Renewing to that certificate now would break DANE for every DANE-aware sender.`,
+      remediation: `Publish the pre-staged rollover record before renewing: \`${tlsaName}. 3600 IN TLSA 3 1 1 ${expectedNext}\` — keep it alongside the current record, and remove the old one only after the new cert is live.`,
+      evidence: records.map((r) => r.raw).join(" | ") || tlsaName,
     })
   }
 
   return { findings, summary, row }
+}
+
+/**
+ * The domain-zone half of `infra.dane_dnssec_prereq` (spec §2 row 1: "the domain zone AND each MX
+ * host's zone are DNSSEC-signed"). DANE delivery starts with the sender's MX lookup on the domain
+ * itself — if THAT zone is unsigned the MX RRset is forgeable and an attacker steers delivery to a
+ * host with no (or their own) TLSA, so published TLSA records give false confidence. Delegates to
+ * the upstream `infra.dnssec` checker's structured result (spec §3 step 4); returns nothing when
+ * that result is unavailable (standalone run) — the per-host observations still apply.
+ */
+export function domainZonePrereqFindings(
+  domain: string,
+  dnssec: DnssecResults | undefined,
+  anyTlsaPresent: boolean,
+): Finding[] {
+  if (!dnssec) return []
+  if (dnssec.signed) {
+    if (!anyTlsaPresent) return []
+    return [
+      {
+        id: "infra.dane_dnssec_prereq.domain_zone",
+        checkId: "infra",
+        title: `Domain zone DNSSEC prerequisite met for ${domain}`,
+        severity: "ok",
+        detail: `${domain}'s own zone is DNSSEC-signed, so a DANE-aware sender can validate the MX lookup that leads it to the TLSA-protected hosts.`,
+      },
+    ]
+  }
+  if (anyTlsaPresent) {
+    return [
+      {
+        id: "infra.dane_without_dnssec.domain_zone",
+        checkId: "infra",
+        title: `TLSA published but the domain zone ${domain} is unsigned`,
+        severity: "critical",
+        detail: `TLSA records exist for ${domain}'s MX host(s), but ${domain}'s own zone is not DNSSEC-signed. The sender's MX lookup cannot be validated, so an attacker can forge the MX answer and steer delivery around the pinned hosts — the published TLSA records give false confidence.`,
+        remediation: `Sign the ${domain} zone (publish DNSKEY, add a DS record at the parent registrar — see the DNSSEC check) so the MX RRset that leads senders to the TLSA-protected hosts is itself validatable.`,
+        evidence: domain,
+      },
+    ]
+  }
+  return [
+    {
+      id: "infra.dane_dnssec_prereq.domain_zone",
+      checkId: "infra",
+      title: `No DANE and domain zone unsigned: ${domain}`,
+      severity: "warning",
+      detail: `${domain} publishes no TLSA records and its own zone is not DNSSEC-signed. DANE is impossible until the zone is signed: a DANE-aware sender must be able to validate the MX lookup as well as the TLSA record.`,
+      remediation: `Sign the ${domain} zone first (publish DNSKEY, add a DS record at the parent registrar), then publish \`_25._tcp.<mx>. 3600 IN TLSA 3 1 1 <sha256-of-SPKI>\` for every MX host.`,
+      evidence: domain,
+    },
+  ]
 }
 
 export const daneTlsaCheck: Checker = {
@@ -474,6 +572,15 @@ export const daneTlsaCheck: Checker = {
   label: "DANE / TLSA",
   async run(ctx): Promise<CheckOutcome> {
     const findings: Finding[] = []
+
+    // Admin-only DANE settings (spec §4): the FUTURE :25 cert-match probe toggle + timeout and
+    // the require-AD-bit switch. Config reads always deep-merge over defaults, but guard anyway
+    // so a mocked/partial config in tests can never crash the checker.
+    const daneCfg = readAppConfig().checks?.dane ?? {
+      probeEnabled: false,
+      probeTimeoutMs: 10000,
+      requireAdBit: false,
+    }
 
     // Spec §3 step 1: reuse the MX list resolved by infra.mx_routing when the run published it
     // upstream (pm/run_checks.mdx Stage 1); otherwise resolve it here (deduped by the per-run memo).
@@ -529,11 +636,22 @@ export const daneTlsaCheck: Checker = {
         const host = record.exchange.replace(/\.$/, "")
         const { canonical, cnamed } = await canonicalName(host)
         const tlsaName = `_25._tcp.${canonical}`
-        // TLSA lookup and the DNSSEC observation are independent — run them concurrently per host.
-        const [tlsa, dnssec] = await Promise.all([
+        // TLSA lookup, the zone DNSSEC observation, and an RRSIG observation at the TLSA name are
+        // independent — run them concurrently per host. An RRSIG covering the TLSA name is direct
+        // first-round evidence the zone actually holding the record is signed (spec §3 step 2/4
+        // "dig +dnssec" / "observe RRSIG presence") — stronger than the apex DS/DNSKEY heuristic,
+        // and used as a positive-only signal (resolvers that refuse RRSIG queries never cause a
+        // false "unsigned").
+        const [tlsa, zone, rrsig] = await Promise.all([
           digAnswer(tlsaName, "TLSA"),
           observeDnssec(canonical),
+          dig(tlsaName, "RRSIG"),
         ])
+        const rrsigSeen = rrsig.records.length > 0
+        const dnssec = {
+          signed: zone.signed || rrsigSeen,
+          error: zone.error && !rrsigSeen,
+        }
         return analyzeHost({
           host,
           priority: record.priority,
@@ -541,6 +659,8 @@ export const daneTlsaCheck: Checker = {
           cnamed,
           tlsa: { records: tlsa.records, error: tlsa.error },
           dnssec,
+          expectedNextSpki: ctx.dane?.expectedNextSpki,
+          requireAdBit: daneCfg.requireAdBit,
         })
       }),
     )
@@ -587,19 +707,45 @@ export const daneTlsaCheck: Checker = {
       }
     }
 
+    // --- infra.dane_dnssec_prereq / _without_dnssec (domain zone, spec §2 row 1) ---------------
+    // "The domain zone AND each MX host's zone are DNSSEC-signed": the per-host analysis covered
+    // the MX zones; the domain's own zone is delegated to the upstream infra.dnssec checker's
+    // structured result (run-graph dependency), spec §3 step 4.
+    const domainDnssec = ctx.upstream?.["infra.dnssec"] as DnssecResults | undefined
+    findings.push(
+      ...domainZonePrereqFindings(
+        ctx.domain,
+        domainDnssec,
+        rows.some((r) => r.tlsaPresent),
+      ),
+    )
+
     // --- FUTURE probe sub-checks (cert-match / dangling / STARTTLS) — single info, never fail --
-    // Spec AC9: with the probe disabled the certMatch/starttlsOffered columns stay null and no
-    // false criticals are emitted.
-    findings.push({
-      id: "infra.dane_tlsa_cert_match",
-      checkId: "infra",
-      title: "Certificate-match probe pending",
-      severity: "info",
-      detail:
-        "The live :25 STARTTLS cert-match probe is not run in the first round. When enabled it will connect to each MX on port 25, complete STARTTLS, and verify the pinned digest matches the presented certificate/key (infra.dane_tlsa_cert_match), flag dangling records that match no live/staged cert (infra.dane_tlsa_dangling), and confirm STARTTLS is offered (infra.dane_starttls_offered).",
-      remediation:
-        "Enable the :25 STARTTLS cert-match probe in admin settings to verify the pinned digest matches the live certificate and that STARTTLS is offered.",
-    })
+    // Spec AC9: gated behind the admin probe flag; with the probe disabled (and while the probe
+    // round itself remains future) the certMatch/starttlsOffered columns stay null and no false
+    // criticals are emitted.
+    findings.push(
+      daneCfg.probeEnabled
+        ? {
+            id: "infra.dane_tlsa_cert_match",
+            checkId: "infra",
+            title: "Certificate-match probe enabled (future round)",
+            severity: "info",
+            detail: `The :25 STARTTLS cert-match probe is enabled in admin settings (timeout ${daneCfg.probeTimeoutMs}ms), but the live probe round is not yet available in this version. When it ships it will connect to each MX on port 25, complete STARTTLS, and verify the pinned digest matches the presented certificate/key (infra.dane_tlsa_cert_match), flag dangling records that match no live/staged cert (infra.dane_tlsa_dangling), and confirm STARTTLS is offered (infra.dane_starttls_offered). Until then certMatch/starttlsOffered stay null.`,
+            remediation:
+              "No action needed — the probe will run automatically once the live :25 STARTTLS round ships.",
+          }
+        : {
+            id: "infra.dane_tlsa_cert_match",
+            checkId: "infra",
+            title: "Certificate-match probe disabled",
+            severity: "info",
+            detail:
+              "The live :25 STARTTLS cert-match probe is disabled in admin settings (it opens outbound SMTP connections). When enabled it will connect to each MX on port 25, complete STARTTLS, and verify the pinned digest matches the presented certificate/key (infra.dane_tlsa_cert_match), flag dangling records that match no live/staged cert (infra.dane_tlsa_dangling), and confirm STARTTLS is offered (infra.dane_starttls_offered). Until then certMatch/starttlsOffered stay null.",
+            remediation:
+              "Enable the :25 STARTTLS cert-match probe in Settings → Admin → DANE to verify the pinned digest matches the live certificate and that STARTTLS is offered.",
+          },
+    )
 
     return { findings, results: rows }
   },

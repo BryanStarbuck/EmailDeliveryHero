@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — SPF Check
-description: Engineering spec for the SPF category — the tests we run against the domain's v=spf1 TXT record (presence, single-record, RFC 7208 grammar/macros, the recursive 10-lookup and 2-void expansion, all-qualifier, deprecated ptr, CIDR scope, include health, sending-IP coverage), the Brew/npm testing toolbox with the exact command lines a run executes (argv, timeout, JSON parsing, tool_runs capture), the per-run results YAML (the top-level `spf` key inside `~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml`), the dashboard summary surface and the run-scoped full-page SPF view (`/domains/:domainId/runs/:runId/spf` with run context strip and prev/next run navigation), the fix recommendations, and the catalog of SPF problem states with a deep-dive (data fields, diagnosis, tools, drill-down UI) for each.
+description: Engineering spec for the SPF category — the tests we run against the domain's v=spf1 TXT record (presence, single-record, RFC 7208 grammar/macros, the recursive 10-lookup and 2-void expansion, all-qualifier, deprecated ptr, CIDR scope, include health, sending-IP coverage), the Brew/npm testing toolbox with the exact command lines a run executes (argv, timeout, JSON parsing, tool_runs capture), the per-run results YAML (the top-level `spf` key inside `~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml`), the dashboard summary surface and the run-scoped full-page SPF view (`/domains/:domainId/runs/:runId/spf` with run context strip and prev/next run navigation), the explainer layer (run-scoped sub-check pages at `…/spf/tests/:testId` and concept pages at `…/spf/concepts/:conceptId`, each answering what-it-is / your-status / what-it-means / what-to-do / run-it-now), the scoped re-run (`POST /api/audit/run/:domainId?checks=spf` with carried-forward sibling categories), the cross-run history band and per-test history strips, the richer run-report SPF section, the fix recommendations, and the catalog of SPF problem states with a deep-dive (data fields, diagnosis, tools, drill-down UI) for each.
 ---
 
 # EmailDeliveryHero — SPF Check
@@ -95,9 +95,17 @@ Each remediation is the exact record/term/step to apply.
 | `spf.cidr_scope` | Declared ranges are not absurdly broad. | Prefix size per `ip4`/`ip6` term. | **critical:** `/0` (equivalent to `+all`); **warning:** ip4 < /8 or ip6 < /16. | Narrow the CIDR to the actual sending ranges; never authorize a `/0`. |
 | `spf.length` | The record does not risk UDP truncation. | Byte length of the joined record. | **warning:** > ~450 bytes (truncation/TCP fallback → `temperror` at strict resolvers). | Shorten: drop unused includes, replace `a`/`mx` with explicit ranges, split streams onto subdomains. |
 | `spf.dns_type` | No stale deprecated **SPF type-99** RR lingering next to the TXT. | `dig <domain> SPF` (Brew `bind`; degrades gracefully when dig is absent). | **info:** a type-99 record answers (stale config; receivers ignore it). | Delete the SPF-type (99) record; publish TXT only. |
+| `spf.ttl` | The apex SPF TXT RRset **TTL is operationally sane** — an emergency fix must propagate before the day is out, but sub-minute TTLs hammer resolvers for nothing. | Bench `dig +noall +answer TXT <domain>` captures the TTL (the only first-round path to one; skipped when `dig` absent). | **warning:** TTL > 86 400 s (a broken record stays broken a day+ after the fix); **info:** TTL < 300 s (migration-grade churn — fine short-term, wasteful as steady state); **ok** otherwise, quoting the seconds. | Set the SPF TXT record's TTL to ~3600 s (1 hour) at the DNS console once the record is stable. |
+| `spf.cross_resolver` | The **local resolver and a public resolver (8.8.8.8) see the same `v=spf1` answer** — catches propagation lag after an edit, split-horizon views, and stale caches that make "works for me" lie. | Compare the local `node:dns` `v=spf1` set against bench `dig @8.8.8.8 +short TXT <domain>` (skipped when `dig` absent). | **warning:** the two views disagree — one resolver sees a record (or version of it) the other does not; **ok:** identical `v=spf1` sets. | Wait out the record's TTL after an edit and re-run; if it persists, check for split-horizon DNS or authoritative servers serving different zone versions. |
+| `spf.cross_check` | Our parser agrees with the **`checkdmarc` conformance oracle** (record string, validity verdict, recursive lookup count, void count). | Compare `checkdmarc <domain> -f json` fields against our own observation (skipped when `checkdmarc` absent). | **info:** any disagreement ("ours n, checkdmarc m") — surfaces parser bugs on either side instead of hiding them; agreement emits the **ok** row. | Nothing to change in DNS — a mismatch is a bug in one of the two parsers; the tool-run panel holds both answers verbatim. |
+| `spf.exists_usage` | `exists:` is only used in its sane form — **with a macro**. A macro-less `exists:` matches whenever the fixed name resolves, i.e. for **every** connecting IP. | Inspect each `exists` term for `%{…}` (row emitted only when `exists:` is present). | **warning:** macro-less `exists:` (an accidental pass-everything, one DNS entry away from `+all`); **info:** macro `exists:` (legal; counted but not statically expandable — verify with a live-message evaluation). | Replace a macro-less `exists:` with the intended `ip4:`/`include:`; keep macro `exists:` only if you operate a purpose-built DNS zone for it. |
+| `spf.include_qualifier` | Lookup mechanisms carry the default `+` qualifier. **`-include:` is a semantic trap** — `include` only ever *matches* on the target's `pass`, so `-include:` means "hard-fail exactly the IPs your vendor authorizes". | Read each `include`/`a`/`mx`/`exists` term's qualifier (row emitted only when a non-`+` qualifier is present). | **warning:** `-include:`; **info:** `~`/`?` on any lookup mechanism (legal, rarely what was meant). | Drop the qualifier (plain `include:`) unless you truly mean to fail the target's authorized ranges. |
+| `spf.ipv6` | **IPv6 completeness**: infrastructure that receives on IPv6 usually sends on it too (Gmail prefers AAAA), so a v4-only pass-set silently fails the v6 path. | Count IPv6 entries in the expanded pass-set; probe the MX exchanges for AAAA (audit-side lookups, never SPF-budget-counted). | **warning:** zero IPv6 coverage while the domain's MX hosts publish AAAA; **ok:** v6 authorized, or no v6 mail signal observed. | Add the sending hosts' `ip6:` ranges (or confirm the vendor `include:` already carries them — the include tree shows it). |
+| `spf.mail_posture` | SPF matches the domain's **declared mail role** (RFC 7505): a non-sending domain should publish exactly `v=spf1 -all` + Null MX + DMARC `p=reject`; a Null-MX domain with an authorizing record is send-only (legit — confirm intent). | Read the MX RRset (memoized, shared with the MX check) next to the parsed record (row emitted when either signal is present). | **info:** record is exactly `v=spf1 -all` but Null MX is missing (non-sending trio incomplete); **info:** Null MX + an authorizing record (send-only posture — confirm it is deliberate); locked-down trio emits the **ok** row. | Non-sending: publish `v=spf1 -all`, Null MX `0 .`, DMARC `p=reject`. Send-only: keep the record, document the posture. |
+| `spf.alignment_prep` | The DNS-visible half of DMARC/SPF **alignment posture**: the `_dmarc` record's `aspf=` tag. With `aspf=s` (strict), ESP return-path subdomains (`em1234.<domain>`) contribute **nothing** to DMARC even when raw SPF passes. | `resolveTxt(_dmarc.<domain>)`; read the `aspf=` tag (relaxed is the RFC 7489 default). | **warning:** `aspf=s` — observed live on act3ai.com: the SendGrid stream passed raw SPF at `em2598.act3ai.com` yet every Google/Microsoft rua report scored `policy_evaluated` SPF=fail, leaving DKIM to carry DMARC alone; **info:** no DMARC record yet (alignment not in play); **ok:** relaxed (`aspf=r` or tag absent). | Use relaxed alignment: delete `aspf=s` (or set `aspf=r`) in the `_dmarc` record — keep strict only under a hard requirement, and then make the envelope-from domain exactly match `From:`. |
 | `spf.ip_coverage` | Every configured sending IP (`ctx.sendingIps`, managed on the Domains page) is inside the expanded pass-set. | CIDR-match each IP against collected `ip4`/`ip6`/`a`/`mx` results. | **critical:** a known sending IP is uncovered — mail from it fails SPF. | Add the exact missing `ip4:<ip>` / `ip6:<ip>` (or the vendor's `include:`) before the `all` term. |
 | `spf.lookup_failed` | DNS answered at all (SERVFAIL/timeout is transient, not "no record"). | Distinguish NXDOMAIN/NODATA from resolver errors. | **warning:** could not resolve — re-run. | Retry; verify the domain's authoritative nameservers. |
-| `spf.alignment` *(future)* | The SPF-authenticated envelope-from domain **aligns** with the visible `From:` domain (relaxed = same org-domain), so SPF actually contributes to DMARC. | Needs message-level data (`mailauth` on a live message, or DMARC rua ingestion — [../emails.mdx](../emails.mdx)). | **warning:** SPF passes for the ESP's bounce domain but is unaligned → contributes nothing to DMARC. | Configure the ESP's custom return-path/bounce subdomain (e.g. `bounce.<domain>` CNAME) so envelope-from aligns. |
+| `spf.alignment` *(future)* | The SPF-authenticated envelope-from domain **aligns** with the visible `From:` domain per message — the message-level half of what `spf.alignment_prep` already measures in DNS. | Needs message-level data (`mailauth` on a live message, or DMARC rua ingestion — [../emails.mdx](../emails.mdx)). | **warning:** SPF passes for the ESP's bounce domain but is unaligned → contributes nothing to DMARC. | Configure the ESP's custom return-path/bounce subdomain (e.g. `bounce.<domain>` CNAME) so envelope-from aligns. |
 | `spf.flatten` *(future automation)* | Flags records that would benefit from flattening; the automated rewrite (includes → pinned IPs, kept in sync) is a future maintenance job. | Heuristic on lookup count + include depth. | **info:** fragile / near the ceiling. | Prefer trimming; if flattening, it must be **dynamically maintained** — static flattened lists break silently when providers rotate ranges. |
 
 ---
@@ -165,22 +173,30 @@ apply to every invocation:
 - **JSON output is requested wherever the tool offers it** (`output_format: json`); stdout is
   `JSON.parse`d into `parsed`. Text-only tools store trimmed stdout lines as-is
   (`output_format: text`).
-- Each child process is started with `spawn` and an **argv array** (never a shell string — no
-  injection surface from domain names), runs under a **hard timeout** (killed after it),
-  stdout/stderr captured separately. A non-zero exit, kill-by-timeout, or unparseable stdout sets
-  `error` (a string; `null` on success) and downgrades the dependent sub-test to **warning**
-  ("tool unavailable — re-run"), never a false critical.
-- A **missing binary is not an error**: no `tool_runs` entry is written and the dependent
-  sub-test degrades as documented (e.g. `spf.dns_type` is skipped when `dig` is absent).
+- Each child process is started with `spawn`/`execFile` and an **argv array** (never a shell
+  string — no injection surface from domain names), runs under a **hard timeout** (SIGTERM, then a
+  grace SIGKILL), stdout/stderr captured separately. A non-zero exit, kill-by-timeout, or
+  unparseable stdout sets `error` (a string; `null` on success) and downgrades the dependent
+  sub-test to **warning**/skip ("tool unavailable — re-run"), never a false critical.
+- A **missing binary is not an error**: the entry is still written — `exit_code: null` and
+  `error: "ENOENT — not installed (brew install <formula>)"` — so the UI can offer the install
+  hint, and the dependent sub-test degrades as documented (e.g. `spf.dns_type`, `spf.ttl` and
+  `spf.cross_resolver` are skipped when `dig` is absent; `spf.cross_check` when `checkdmarc` is).
+  This matches the DKIM bench convention ([./dkim.mdx](./dkim.mdx) §3).
+- Binaries are resolved to **absolute paths** via the shared ToolLocator (Stage-0 `ctx.tools`
+  when provided, else the same PATH + conventional-locations search) — scheduled launchd runs do
+  not carry Homebrew's PATH.
 
 The invocations, in run order:
 
 | # | When | Tool | Exact command line | Output | Timeout | Parsed into |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | Every run (when `dig` present) | **dig** | `dig +time=2 +tries=1 +short <domain> SPF` | text | 5 000 ms | Each non-empty stdout line is a stale **type-99** answer → `parsed: [<lines>]`; any line fires the `spf.dns_type` info finding with the lines as evidence. Empty stdout → `parsed: []`, test passes. |
-| 2 | Every run (when `checkdmarc` present) | **checkdmarc** | `checkdmarc <domain> -f json` | json | 30 000 ms | The conformance cross-check: `parsed.spf.record`, `.valid`, `.dns_lookups`, `.dns_void_lookups`, `.warnings[]`, `.error` are compared against our own `raw_record`, `lookup_count`, `void_count`, `eval_result`. Agreement is silent; any disagreement emits an `info` finding ("cross-check mismatch — ours n, checkdmarc m") so parser bugs on either side surface instead of hiding. |
-| 3 | Only when the apex TXT answer was missing or `temperror` | **doggo** | `doggo <domain> TXT @8.8.8.8 --json` | json | 5 000 ms | `parsed.responses[0].answers[]` from a public resolver disambiguates: an answer containing `v=spf1` here but not locally → `spf.lookup_failed` **warning** (local-resolver problem, "re-run"); no answer anywhere → `spf.missing` stands. The tool_run is the evidence either way. |
-| 4 | *Future* — per configured sending IP | **mailauth** | `npx mailauth spf --sender postmaster@<domain> --ip <ip> --helo <domain>` | json | 15 000 ms | `parsed.status.result` (`pass`/`fail`/`softfail`/`neutral`/`permerror`/`temperror`) is the live `check_host()` verdict cross-validating each `ip_coverage[]` row. Preferred form is the **in-process** `spf({sender, ip, helo})` call (same Node process, no child); it is still logged as a `tool_runs` entry with `command` set to the equivalent CLI line above so the user can reproduce it. |
+| 1 | Every run (when `dig` present) | **dig** | `dig +time=2 +tries=1 +short <domain> SPF` | text | 5 000 ms | Each non-empty stdout line is a stale **type-99** answer → `parsed: {answers:[<lines>]}`; any line fires the `spf.dns_type` info finding with the lines as evidence. Empty stdout → empty answers, test passes. |
+| 2 | Every run (when `dig` present) | **dig** | `dig +time=3 +tries=1 +noall +answer TXT <domain>` | text | 5 000 ms | The full-answer form is the only way to see the **TTL** that `+short` hides: the SPF row's TTL lands in `record.ttl` and drives `spf.ttl` (warn > 86 400 s, info < 300 s). |
+| 3 | Every run (when `dig` present) | **dig** | `dig @8.8.8.8 +time=2 +tries=1 +short TXT <domain>` | text | 5 000 ms | The **public-resolver view**: stdout's `v=spf1` strings are compared with the local answer → `record.cross_resolver` (`agrees`, `public_records[]`) and the `spf.cross_resolver` row. Doubles as the missing/temperror disambiguation when doggo (row 5) is absent. |
+| 4 | Every run (when `checkdmarc` present) | **checkdmarc** | `checkdmarc <domain> -f json` | json | 30 000 ms | The conformance cross-check: `parsed.spf.record`, `.valid`, `.dns_lookups`, `.dns_void_lookups`, `.warnings[]`, `.error` are compared against our own `raw_record`, `lookup_count`, `void_count`, `eval_result`. Agreement emits the ok `spf.cross_check` row; any disagreement emits the `info` finding ("cross-check mismatch — ours n, checkdmarc m") so parser bugs on either side surface instead of hiding. |
+| 5 | Only when the apex TXT answer was missing or `temperror` | **doggo** | `doggo <domain> TXT @8.8.8.8 --json` | json | 5 000 ms | `parsed.responses[0].answers[]` from a public resolver disambiguates: an answer containing `v=spf1` here but not locally → `spf.lookup_failed` **warning** (local-resolver problem, "re-run"); no answer anywhere → `spf.missing` stands. The tool_run is the evidence either way. |
+| 6 | *Future* — per configured sending IP | **mailauth** | `npx mailauth spf --sender postmaster@<domain> --ip <ip> --helo <domain>` | json | 15 000 ms | `parsed.status.result` (`pass`/`fail`/`softfail`/`neutral`/`permerror`/`temperror`) is the live `check_host()` verdict cross-validating each `ip_coverage[]` row. Preferred form is the **in-process** `spf({sender, ip, helo})` call (same Node process, no child); it is still logged as a `tool_runs` entry with `command` set to the equivalent CLI line above so the user can reproduce it. |
 
 Everything else in the §3 tables — `kdig`, `drill`, `q`, `dnsx`, `dnsviz`, `swaks`, `spf-parse`,
 `pyspf`, `spf-tools` — is **debug bench only**: surfaced as copyable commands on the drill-down
@@ -188,10 +204,11 @@ pages and used in our own test suites, but never executed by an audit run (swaks
 sends real mail and must stay user-initiated).
 
 Where the captured output lands: every entry is appended to `spf.tool_runs[]` in the run file in
-execution order; row 1 feeds the `spf.dns_type` test row, row 2 feeds the cross-check `info`
-finding and hardens `lookup_count`/`void_count`/`eval_result`, row 3 feeds the
-`spf.lookup_failed`-vs-`spf.missing` decision, and row 4 (future) feeds
-`ip_coverage[].covered` confirmation. The UI's tool-run panel (§6.2) renders the list verbatim.
+execution order; row 1 feeds the `spf.dns_type` test row, row 2 feeds `record.ttl` and the
+`spf.ttl` row, row 3 feeds `record.cross_resolver` and the `spf.cross_resolver` row, row 4 feeds
+the `spf.cross_check` row and hardens `lookup_count`/`void_count`/`eval_result`, row 5 feeds the
+`spf.lookup_failed`-vs-`spf.missing` decision, and row 6 (future) feeds `ip_coverage[].covered`
+confirmation. The UI's tool-run panel (§6.2) renders the list verbatim.
 
 ---
 
@@ -229,7 +246,20 @@ finding and hardens `lookup_count`/`void_count`/`eval_result`, row 3 feeds the
    the count ("4/10"). `void_count > 2` → critical; 1–2 → warning. Terminal `+all` → critical;
    `?all`/absent → warning; `-all`/`~all` → ok. Each uncovered `ctx.sendingIps` entry → critical
    quoting the IP and the exact `ip4:`/`ip6:` line to add.
-5. **eval_result.** `permerror` when any of: syntax/macro errors, multiple records, lookups > 10,
+5. **Posture reads (cheap, memoized).** Alongside the expansion, four side observations complete
+   the picture — none of them SPF-budget-counted:
+   - **TTL** — bench dig `+noall +answer TXT` (§3 row 2) captures the apex TXT RRset TTL into
+     `record.ttl` (`null` when `dig` is absent) → `spf.ttl`.
+   - **Cross-resolver** — bench dig `@8.8.8.8 +short TXT` (§3 row 3) yields the public view; the
+     `v=spf1` string sets are compared verbatim → `record.cross_resolver`, `spf.cross_resolver`.
+   - **Mail posture** — `resolveMx(domain)` (memoized; the MX check resolves it anyway) detects
+     Null MX (`0 .`, RFC 7505) and whether MX exists at all; combined with "is the record exactly
+     `v=spf1 -all`" → `record.mail_posture`, `spf.mail_posture`. The MX exchanges' AAAA records
+     (first 3 exchanges probed) also feed `record.ipv6.mx_has_aaaa` → `spf.ipv6`, judged against
+     the count of IPv6 entries in the expanded pass-set.
+   - **Alignment prep** — `resolveTxt(_dmarc.<domain>)` (memoized; the DMARC check resolves it
+     anyway); the `aspf=` tag (default `r`) lands in `record.alignment` → `spf.alignment_prep`.
+6. **eval_result.** `permerror` when any of: syntax/macro errors, multiple records, lookups > 10,
    voids > 2, a cycle, or a critical include failure. `temperror` on apex resolver failure.
    `none` when missing. Otherwise `valid`.
 
@@ -293,7 +323,23 @@ spf:
     all_qualifier: "~all"            # -all | ~all | ?all | +all | null
     has_redirect: false
     byte_length: 94
+    ttl: 3600                        # apex TXT RRset TTL from dig +noall +answer (null when dig absent)
     eval_result: permerror           # valid | permerror | temperror | none
+    cross_resolver:                  # local vs 8.8.8.8 view (null when dig absent)
+      resolver: 8.8.8.8
+      agrees: true                   # the v=spf1 sets matched verbatim
+      public_records:
+        - "v=spf1 include:_spf.google.com include:sendgrid.net include:old-vendor.com mx a ~all"
+    ipv6:                            # IPv6-completeness posture (spf.ipv6)
+      pass_set_v6_count: 0           # IPv6 entries in the expanded pass-set
+      mx_has_aaaa: true              # an MX exchange publishes AAAA → v6 mail signal
+    mail_posture:                    # declared mail role vs the record (spf.mail_posture)
+      has_mx: true
+      null_mx: false                 # true when the RRset is exactly "0 ."
+      non_sending_record: false      # true when the record is exactly "v=spf1 -all"
+    alignment:                       # DNS-side DMARC alignment posture (spf.alignment_prep)
+      dmarc_found: true
+      aspf: s                        # r | s | null (null = no DMARC record)
     include_tree:                    # the recursively expanded graph (one node per resolved term)
       term: "v=spf1 (example.com)"
       depth: 0
@@ -328,7 +374,29 @@ spf:
       duration_ms: 38
       exit_code: 0
       output_format: text            # json | text
-      parsed: []                     # empty answer — no stale type-99 RR → spf.dns_type passes
+      parsed: { answers: [] }        # empty answer — no stale type-99 RR → spf.dns_type passes
+      error: null
+    - tool: dig
+      command: "dig +time=3 +tries=1 +noall +answer TXT example.com"  # the TTL capture (spf.ttl)
+      started_at: 2026-07-01T09:30:01Z
+      duration_ms: 41
+      exit_code: 0
+      output_format: text
+      parsed:
+        answers:
+          - "example.com. 3600 IN TXT \"v=spf1 include:_spf.google.com …\""
+        spf_ttl: 3600
+      error: null
+    - tool: dig
+      command: "dig @8.8.8.8 +time=2 +tries=1 +short TXT example.com"  # public view (spf.cross_resolver)
+      started_at: 2026-07-01T09:30:01Z
+      duration_ms: 52
+      exit_code: 0
+      output_format: text
+      parsed:
+        spf_records:
+          - "v=spf1 include:_spf.google.com include:sendgrid.net include:old-vendor.com mx a ~all"
+        agrees_with_local: true
       error: null
     - tool: checkdmarc
       command: "checkdmarc example.com -f json"
@@ -363,16 +431,32 @@ spf:
     - id: spf.all
       title: Sane default policy (~all)
       result: pass
+    - id: spf.ttl
+      title: TTL 3600 s — sane
+      result: pass
+    - id: spf.cross_resolver
+      title: Local and 8.8.8.8 answers agree
+      result: pass
+    - id: spf.alignment_prep
+      title: DMARC uses strict SPF alignment (aspf=s)
+      result: warn
+      detail: ESP return-path subdomains (em2598.example.com) will not count toward DMARC SPF.
+      fix: Remove aspf=s from the _dmarc record (relaxed is the default) unless strict is required.
   # ---- matched problem states (see §9) ----
-  problem_states: [PS-03, PS-04, PS-08]
+  problem_states: [PS-03, PS-04, PS-08, PS-11]
 ```
 
 Field-name mapping: `record.*` keys are 1:1 with the `spf_check_results` columns in §10
 (`raw_record`, `mechanisms`, `lookup_count`, `void_count`, `all_qualifier`, `has_redirect`,
-`byte_length`, `eval_result`), with the tree under `include_tree` (maps to `spf_include_tree`) and
-per-IP rows under `ip_coverage` (maps to `spf_ip_coverage`); `tests[]` rows are the `findings`
-(`result: pass|fail|warn|info` ⇔ severity `ok|critical|warning|info`); `problem_states` is derived
-(§9 mapping table) — never stored separately. **`tool_runs[]` lives only in the run file** — it is
+`byte_length`, `ttl`, `eval_result`), with the tree under `include_tree` (maps to
+`spf_include_tree`), per-IP rows under `ip_coverage` (maps to `spf_ip_coverage`), and the four
+posture blocks (`cross_resolver`, `ipv6`, `mail_posture`, `alignment`) as nested objects (JSONB
+column `posture` in a future DB). `tests[]` rows are the `findings` projected into on-disk
+vocabulary (`result: pass|fail|warn|info` ⇔ severity `ok|critical|warning|info`; `fix` ⇔
+`remediation`), and `status`/`problem_states` are the worst severity and the §9 mapping — all
+three are **computed by the checker at run time from its own findings** and written with the
+payload; the canonical findings stay in the `run:` block, so these keys are read-only projections
+for the UI and the differ never diffs them. **`tool_runs[]` lives only in the run file** — it is
 run forensics (what exactly was executed, when, and what came back), not queryable state, so it
 has no §10 table; the §3 execution rules define every field.
 
@@ -392,7 +476,15 @@ domain, per the Run → Test → Sub-test vocabulary in [../dashboard.mdx](../da
 | SPF category run page (one run's SPF results) | `/domains/:domainId/runs/:runId/spf` |
 | Newest-run alias (always the domain's latest run) | `/domains/:domainId/spf` |
 | Problem-state drill-down | `/domains/:domainId/runs/:runId/spf/:problemId` (newest alias `/domains/:domainId/spf/:problemId`) |
+| Sub-check (test) explainer — §6.4 | `/domains/:domainId/runs/:runId/spf/tests/:testId` (newest alias `/domains/:domainId/spf/tests/:testId`) |
+| Concept explainer — §6.4 | `/domains/:domainId/runs/:runId/spf/concepts/:conceptId` (newest alias `/domains/:domainId/spf/concepts/:conceptId`) |
 | The whole run report the page belongs to | `/domains/:domainId/runs/:runId` (newest alias `/domains/:domainId`) |
+
+`tests` and `concepts` are **reserved path segments** under `…/spf/`: the router registers them as
+static routes, and static segments outrank the `:problemId` dynamic match (TanStack Router ranks
+static over dynamic), so a `:testId`/`:conceptId` URL can never be swallowed by the problem-state
+route. `:testId` is the §2 finding id verbatim (`spf.lookups` — dots are legal in a path segment);
+`:conceptId` comes from the §6.4 concept catalog (`lookup-limit`, `mechanism-include`, …).
 
 ### 6.1 The summary surface (main view)
 
@@ -444,7 +536,11 @@ Contents, in order (exact layout in §7):
    the alias route); on an older run the badge is replaced by a **"Jump to newest ›"** link.
 2. **Budget hero** — the verdict banner: the eval result (`valid` / `permerror` / `none`) with a
    **lookup-budget gauge** (`n/10` segments, amber from 8, red past 10), the void count (`n/2`),
-   and the `all`-qualifier chip. One accent CTA: the single next action (from §8).
+   and the `all`-qualifier chip — plus the **posture chips**: TTL (`3600s`, amber when out of the
+   §2 range), cross-resolver (`resolvers ✓` / `resolvers ✗`), and alignment (`aspf=r` / `aspf=s`
+   amber). One accent CTA: the single next action (from §8). Every gauge/counter/chip is a
+   click-through (§6.4 click map): failing chips open the matching §9 drill-down for **this run**,
+   healthy ones the concept page.
 3. **Published record panel** — the raw TXT string (copyable, monospace) above a mechanism table:
    every term in published order with its qualifier, type, value, whether it costs a lookup, and a
    one-line meaning. Dead terms (after `all`) get a strikethrough badge; `ptr` gets a "deprecated"
@@ -459,7 +555,9 @@ Contents, in order (exact layout in §7):
    to publish.
 6. **Sending-IP coverage panel** — one row per configured sending IP: covered ✓/✗ and the pass-set
    entry that matched (or the exact `ip4:`/`ip6:` line to add, copyable). Empty state points at
-   the Domains page where `sendingIps` are managed.
+   the Domains page where `sendingIps` are managed. A footer line renders the **IPv6 posture**
+   (`record.ipv6`): how many v6 CIDRs the pass-set authorizes and whether the MX hosts publish
+   AAAA — amber when the §2 `spf.ipv6` gap fires.
 7. **Tool runs panel** — a collapsed-by-default accordion listing this run's `spf.tool_runs[]`
    (§3/§5) verbatim: tool, the exact command line (monospace, copy button), duration, exit code,
    and the parsed output in a code block. This is the "show your work" surface — the user can
@@ -482,6 +580,154 @@ budget hero at `none`. A `:runId` that does not exist (deleted run) → "Run not
 **Per-domain config inputs.** SPF reads `sendingIps` (managed on the Domains page) for
 `spf.ip_coverage`. No SPF-specific selectors are required (unlike DKIM).
 
+**Everything on the page is clickable.** Every chip, gauge, term, and row on the SPF page is a
+navigation affordance into the §6.4 explainer layer — the full click map is the table at the end
+of §6.4. Hover keeps the quick tooltip; **click always navigates to a run-scoped page** (URL-
+addressable and shareable), never to a modal that vanishes on refresh.
+
+### 6.3 The run report's SPF section — how the cell grows
+
+On the run report (`/domains/:domainId/runs/:runId`, `RunDetailPage`) the SPF category today
+renders a chip plus a flat findings list. It grows to:
+
+1. **Run-scoped chevron.** The SPF chip's chevron routes to **that run's** SPF page
+   (`/domains/:domainId/runs/:runId/spf`) whenever the report shows a historical run — exactly the
+   pattern DKIM/DMARC/DNS already follow in `RunDetailPage.tsx`; on the newest-run route the alias
+   (`/domains/:domainId/spf`) is equivalent.
+2. **Summary strip** at the top of the expanded SPF section, rendered from `results.spf`: the mini
+   lookup gauge (`n/10`), the void count (`n/2`), the `all`-qualifier chip, and the `eval_result`
+   chip — the same four facts as the SPF page's budget hero, at half size. Each element deep-links
+   to its §6.4 concept page.
+3. **Per-test status list.** One compact row per §2 test present in the run (icon + plain-language
+   title + observed value), fail-first. **Each row's title links to the run-scoped test explainer**
+   (`…/spf/tests/:testId`). Non-`ok` rows keep the inline Fix block and Copy-fix button exactly as
+   today — the link adds depth, it removes nothing.
+4. **"Open full SPF page ›"** link at the section's foot → the same run's SPF page.
+
+### 6.4 The explainer layer — every clickable thing gets a page
+
+Two page families sit under the SPF category page. Both reuse the SPF page's header row and **run
+context strip** (§6.2 item 1), both exist at the run-scoped canonical route with the newest-run
+alias, and both render the same fixed five-section contract, in this order:
+
+| # | Section (fixed heading) | Contents |
+| --- | --- | --- |
+| 1 | **What this is** | The concept in 2–3 plain-language paragraphs — the record / mechanism / limit / policy being examined, with the RFC 7208 section it comes from. Static teaching content; identical across runs. |
+| 2 | **Your status in this run** | Live evidence from **this run's** `spf` key (§5): severity chip (`ok`/`info`/`warning`/`critical` in the Dashboard cell colors), the observed value (monospace, copyable), and the relevant §5 fields rendered as a small field table. |
+| 3 | **What it means for deliverability** | Impact in operator terms — what receivers do, what happens to DMARC, what happens to inbox placement. One short paragraph, no jargon without a gloss. |
+| 4 | **What you can do** | Numbered, copy-pasteable fix steps: the exact DNS record/term to publish (copy button holds the publishable value, never prose), plus provider-specific pointers (Google Workspace / Microsoft 365 / SendGrid / Mailchimp / Amazon SES) where the fix lives in an ESP console. Healthy state → "nothing to do; here is how to keep it healthy". |
+| 5 | **Run this check now** | The scoped re-run affordance (§6.5): a button, one sentence saying exactly what it does ("re-runs all SPF tests for `<domain>` — they share one DNS expansion — and opens the new run's view of this page"), and the equivalent `curl` line for the skeptical. |
+
+Below section 5, every explainer page carries: the **per-test history strip** (§6.6, test pages
+only), a **"Diagnose it yourself"** block (the §3 copyable command lines relevant to this
+test/concept — the same argv strings recorded in `tool_runs[]` where the run executed them), and a
+**References footer** (deep links: the RFC 7208 section anchor, and the provider docs named in
+section 4). Back chevron returns to the SPF page for the same run.
+
+**Family 1 — sub-check (test) explainer pages** — `…/spf/tests/:testId`, one per §2 finding id.
+Section 2 shows the test's row from `tests[]` (result, evidence, detail) plus the §5 fields that
+test reads (e.g. `spf.lookups` renders the full-size gauge and the include tree's heaviest
+branches; `spf.ip_coverage` renders the coverage rows). An unknown `:testId` renders the "Unknown
+test" state (below) — never a crash. A test that did not run in this run (e.g. `spf.dns_type` when
+`dig` was absent) renders section 2 as "not measured in this run — <why>", with Run-now offered.
+
+**Family 2 — concept explainer pages** — `…/spf/concepts/:conceptId`. The catalog (LOCKED ids):
+
+| conceptId | Concept | Reached from (click sources) | "Your status" (section 2) shows |
+| --- | --- | --- | --- |
+| `spf-record` | The `v=spf1` TXT record itself | Published-record panel title's ⓘ; dashboard cell tooltip "what is SPF?" link | `raw_record`, `record_count`, `byte_length`, `eval_result` chip |
+| `mechanism-ip4` / `mechanism-ip6` / `mechanism-a` / `mechanism-mx` / `mechanism-include` / `mechanism-exists` / `mechanism-ptr` / `mechanism-all` | Each mechanism type | The mechanism table's term/meaning cells; include-tree nodes (their term's type) | Every apex term of that type in this run (qualifier, value, lookup cost, dead/deprecated badges); `mechanism-ptr` adds the deprecation status |
+| `modifier-redirect` / `modifier-exp` | The two modifiers | Mechanism-table rows | Presence, target, target resolution (`has_redirect`, the `spf.redirect`/`spf.exp` rows) |
+| `qualifiers` | `+` `-` `~` `?` and the `all` decision | The `all`-qualifier chip (hero + summary strips) | This record's `all_qualifier` + per-term qualifiers; the §8 `~all` vs `-all` guidance |
+| `macros` | The `%{…}` macro language (RFC 7208 §7) | Macro-bearing terms in the mechanism table; `spf.macro` rows | Macro terms found and their validity; "counted but not expanded" tree notes |
+| `lookup-limit` | The 10-DNS-lookup budget (§4.6.4) | The lookup gauge (hero + summary strips + run-report strip) | `lookup_count` n/10, the gauge full-size, the heaviest `include_tree` branches ranked |
+| `void-lookups` | The 2-void budget | The voids counter | `void_count`, the `is_void` tree nodes listed |
+| `eval-result` | `none`/`neutral`/`pass`/`fail`/`softfail`/`temperror`/`permerror` | The eval-result chip | This run's `eval_result` and the §4 rule(s) that produced it |
+| `pass-set` | The expanded set of authorized CIDRs | Coverage-panel rows; pass-set entries in the tree | `pass_set[]` with sources; `ip_coverage[]` verdicts |
+| `alignment` | SPF↔DMARC alignment (`aspf`) | The PS-11 card (future); cross-link from [./dmarc.mdx](./dmarc.mdx) | Future (message data) — until then, section 2 explains what would be measured and links the ESP bounce-domain fix |
+| `type-99` | The deprecated SPF RR type | The `spf.dns_type` row; the dig tool-run row | The dig probe's `tool_runs[]` entry verbatim |
+
+**Click map — what navigates where** (the §6.2 panels, top to bottom):
+
+| Clickable element | Destination |
+| --- | --- |
+| Lookup gauge (hero / strips) | `concepts/lookup-limit` |
+| Voids counter | `concepts/void-lookups` |
+| `all`-qualifier chip | `concepts/qualifiers` |
+| `eval_result` chip | `concepts/eval-result` |
+| Published-record panel ⓘ | `concepts/spf-record` |
+| Mechanism-table row (term or meaning cell) | The term type's `concepts/mechanism-*` / `concepts/modifier-*` page |
+| Include-tree node term | Its type's mechanism concept page (the node's own data highlighted in section 2) |
+| Test-results table row title / finding id | `tests/:testId` (the accordion chevron still expands inline — title click navigates, chevron click expands) |
+| Sending-IP coverage row | `concepts/pass-set` |
+| Tool-run row | Expands inline (forensics stay on-page); each row adds an external "tool docs" link |
+| Problem-state card | `:problemId` drill-down (existing, unchanged) |
+
+**Loading / empty / error states (all explainer pages).** Loading → skeleton for sections 2 and
+the history strip only (sections 1/3/4 are static content and render immediately). Unknown
+`:testId`/`:conceptId` → "Unknown test/concept" line + link back to the SPF page (mirrors the
+existing SpfProblemPage behavior). `:runId` not found → the §6.2 "Run not found" state with "Jump
+to newest ›". A run whose file has no `spf` key (category skipped) → section 2 renders "not
+measured in this run" with the Run-now button as the CTA. Never-run domain on the alias route →
+sections 1/3/4 render (the page still teaches), section 2 shows the gray "No audit yet — run one"
+CTA.
+
+### 6.5 "Run this check now" — the scoped re-run
+
+The section-5 affordance on every explainer page, plus a secondary **"Re-run SPF only"** button in
+the SPF page header (next to the existing Re-run, which starts a full six-category run).
+
+**UX.** Click → button shows a spinner ("Running SPF…", disabled; the shared scan dock shows the
+domain as running); on completion the app navigates to the **new run's** version of the current
+page — same `testId`/`conceptId`/`problemId` path with the new `:runId` substituted — so the user
+watches their fix take effect in place. On failure → toast with the error; the page stays on the
+old run. Concurrent scoped runs of the same domain coalesce onto the in-flight run (the existing
+per-domain in-flight guard in `audit.service.ts`).
+
+**Granularity.** The smallest runnable unit is the **whole SPF category**: the §2 sub-tests share
+one recursive DNS expansion, so a single test cannot be re-measured in isolation. Every test
+page's section 5 says so explicitly ("re-runs all SPF tests — they share one DNS expansion").
+
+**API.** `POST /api/audit/run/:domainId?checks=spf` — a small extension of the existing
+`POST /api/audit/run/:domainId` ([audit.controller.ts](../../code/packages/backend/src/modules/audit/audit.controller.ts)
+today runs all six categories; the surgical single-check merge already has a precedent in the
+content-scoring re-score path). Semantics of `checks` (comma-separated category checkId prefixes):
+
+- Only the named checkers execute; the run produces a **new run file** (§5 / [../storage.mdx](../storage.mdx)).
+- The five sibling category keys are **carried forward verbatim** from the domain's previous run,
+  each annotated `carried_forward: true` and keeping its original `checked_at` — the run file is
+  always complete, and every consumer can tell measured from copied data.
+- The `run:` block's `score`/`status` are recomputed over the merged findings, and the block gains
+  `checks: [spf]` so the Runs table can badge the run **"SPF only"**.
+- The regression differ ([../scheduled_checks.mdx](../scheduled_checks.mdx)) **skips
+  carried-forward categories** — they were not re-measured, so they can neither regress nor
+  improve.
+- No `checks` param → today's behavior, unchanged. Unknown prefix → 400.
+
+### 6.6 History & trends across runs
+
+Because every run persists as one YAML file (§5), history is a read over the domain's run list —
+`GET /api/audit/runs?domainId=…` already returns it newest-first; the frontend derives everything
+below client-side in the first round. If run payloads grow heavy, a slim future endpoint
+(`GET /api/audit/history/:domainId?category=spf&limit=20` returning per-run
+`{runId, started_at, status, eval_result, lookup_count, void_count, tests:[{id,result}]}`)
+replaces the client-side derivation without changing the UI.
+
+- **Cross-run history band** on the SPF page, directly under the budget hero: one dot per run
+  (newest right, last ~10), colored by that run's SPF status, over a **lookup-count sparkline**
+  (the creep toward 10 is the single most valuable trend — §11). Hover → run timestamp,
+  `eval_result`, `n/10`, `all_qualifier`. **Click a dot → that run's SPF page** (swaps `:runId`).
+  Runs where SPF was carried forward (§6.5) render as hollow dots and are skipped by the
+  sparkline. Notable transitions get a tick mark: `all` weakened, a record appearing/vanishing,
+  lookup count crossing 8 or 10.
+- **Per-test history strip** on each `tests/:testId` page (below section 5): the last ~10 runs'
+  pass/warn/fail dots **for that one test id**; hover → the run timestamp + that run's observed
+  value; click → the same test page under that run's `:runId`. This is where "did my fix work?"
+  is answered in one glance.
+- **States.** Loading → a skeleton band. One run only → "history appears after your next run"
+  (muted, with a link to [../scheduled_checks.mdx](../scheduled_checks.mdx)-driven scheduling in
+  Settings). Fetch error → muted "history unavailable" line — history never blocks the main page.
+
 ---
 
 ## 7. UX design — what goes where
@@ -499,6 +745,8 @@ first, evidence second, work items third, education last.
 │  LOOKUP BUDGET   ▓▓▓▓▓▓▓▓▓▓▓ 11/10   voids 1/2    [ ~all ]                │  hero band
 │  "permerror — receivers ignore this record; ALL mail fails SPF."           │
 │  Next step: drop include:old-vendor.com, replace mx/a with ip4 ranges [→]  │
+├────────────────────────────────────────────────────────────────────────────┤
+│  HISTORY   ● ● ○ ⚠ ✗ ✗ ✗      lookups ▄▄▄▅▆▇█ 11        (click a dot →)   │  history band
 ├──────────────────────────────────┬─────────────────────────────────────────┤
 │  PUBLISHED RECORD      [copy]    │  INCLUDE TREE                 11 lookups │  two-up band
 │  v=spf1 include:_spf.google.com… │  ● v=spf1 (example.com)                 │
@@ -573,7 +821,66 @@ Placement rules and rationale:
   from **this run**), **Diagnose it yourself** (copyable terminal commands from §3 — the same
   argv strings recorded in `tool_runs[]` where the run executed them), **Path forward** (numbered
   steps with copyable records), and a further-reading footer. Back chevron returns to the SPF page
-  anchor for the same run.
+  anchor for the same run. Each drill-down also carries the §6.4 section-5 **Run this check now**
+  card so the "did my fix work?" loop closes without leaving the page.
+- **History band** — directly under the hero (the sketch's third band): one status dot per run
+  over the lookup-count sparkline, hollow dots for carried-forward runs (§6.6). Small and muted —
+  it is trend context, not the verdict; the hover card carries the detail.
+- **Header buttons** — the primary `[Re-run ⟳]` (full six-category run, unchanged) gains a quieter
+  secondary neighbor `[Re-run SPF only]` (the §6.5 scoped run; outline style, never the accent
+  color — the page keeps exactly one accent CTA, in the hero).
+- **Clickable chips & cells** — every element in the §6.4 click map renders with a subtle
+  affordance: underline-on-hover plus a trailing `ChevronRight` at 60 % opacity on hover. Chips
+  navigate on click; tooltips stay on hover. Never both a tooltip-only and a click-dead element:
+  if it explains something, it links to the page that explains it fully.
+
+### 7.1 The explainer pages (tests/:testId and concepts/:conceptId)
+
+One shared layout for both families (§6.4) — a single centered column (max-w-3xl, like the
+problem drill-downs), the five fixed sections in order, teaching content rendered immediately and
+run data skeleton-loaded:
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│ ‹ Back to SPF                                  [Run this check ⟳]  │  header row
+│ example.com · SPF › spf.lookups          [ ✗ fail · critical ]     │
+│ RUN  ‹ prev    2026-07-01 09:30 AM    next ›          [ NEWEST ]   │  run context strip
+├────────────────────────────────────────────────────────────────────┤
+│ WHAT THIS IS                                                       │
+│  RFC 7208 §4.6.4 allows at most 10 DNS-querying mechanisms across  │
+│  the whole recursive expansion …                                   │
+├────────────────────────────────────────────────────────────────────┤
+│ YOUR STATUS IN THIS RUN                                            │
+│  ▓▓▓▓▓▓▓▓▓▓▓ 11/10        observed: include:… mx a → 11   [copy]  │
+│  heaviest branches: include:sendgrid.net (3) · mx (1) …            │
+├────────────────────────────────────────────────────────────────────┤
+│ WHAT IT MEANS FOR DELIVERABILITY                                   │
+│  Receivers return permerror — under DMARC that is an SPF fail for  │
+│  every message this domain sends …                                 │
+├────────────────────────────────────────────────────────────────────┤
+│ WHAT YOU CAN DO                                                    │
+│  1. Delete include:old-vendor.com (void — dead vendor)  [copy fix] │
+│  2. Replace mx / a with explicit ip4: ranges            [copy fix] │
+│  Provider notes: Google Workspace · Microsoft 365 · SendGrid       │
+├────────────────────────────────────────────────────────────────────┤
+│ RUN THIS CHECK NOW                                                 │
+│  Re-runs all SPF tests for example.com (they share one DNS         │
+│  expansion) and opens the new run's view of this page.  [Run ⟳]    │
+│  curl -X POST …/api/audit/run/<id>?checks=spf              [copy]  │
+├────────────────────────────────────────────────────────────────────┤
+│ HISTORY (this test)   ✓ ✓ ✓ ⚠ ✗ ✗ ✗          (last 7 runs, click →)│  tests/* only
+├────────────────────────────────────────────────────────────────────┤
+│ DIAGNOSE IT YOURSELF      checkdmarc example.com -f json   [copy]  │
+│ REFERENCES   RFC 7208 §4.6.4 · dmarcian SPF Surveyor · …           │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+Placement rules: the status chip lives in the header (identity row) so the verdict is visible
+before scrolling; section 2 reuses the SPF page's own components (gauge, tree fragments, coverage
+rows) at full size rather than re-describing them in prose; section 4's copy buttons carry the
+publishable value only; the Run-now card is the last actionable element, followed only by history
+and references. Concept pages omit the per-test history strip (history is per-test, not
+per-concept) but keep everything else, including Run-now.
 
 ---
 
@@ -901,6 +1208,10 @@ a single-module change.
 - **On-demand.** Runs on every manual audit (`POST /api/audit/run/:domainId` and the run-all
   endpoint). SPF is cheap (worst case ~10–30 DNS queries, bounded by the 10-lookup rule + the MX
   host cap), so it always runs inline with the rest of the engine — no feature gate.
+- **Scoped on-demand.** The §6.5 "Run this check now" affordance triggers
+  `POST /api/audit/run/:domainId?checks=spf`: only the SPF checker executes, the other five
+  category keys are carried forward from the previous run (`carried_forward: true`), and a new
+  run file is written. Cheap enough to click after every DNS edit — that is its purpose.
 - **Periodic.** The in-process scheduler re-audits each monitored domain on the configured
   cadence. Each run's `spf.*` findings are diffed against the previous run; any newly appearing or
   worsened finding is a **new problem** surfaced on the Dashboard. High-value regressions: the
@@ -999,6 +1310,46 @@ a single-module change.
     probe, checkdmarc cross-check, conditional doggo public-resolver probe); processes are
     spawned with argv arrays under hard timeouts, and a missing binary or timeout degrades to
     **warning**/skip, never a false critical.
+17. The run report's SPF section (§6.3) renders the summary strip (mini gauge, voids,
+    `all`-qualifier chip, `eval_result` chip) from `results.spf`, a fail-first per-test status
+    list whose row titles link to the run-scoped test explainer pages, and an "Open full SPF
+    page ›" link; on a historical run the SPF chip's chevron routes to **that run's** SPF page
+    (the DKIM/DMARC/DNS chevron pattern in `RunDetailPage.tsx`).
+18. Every §2 finding id has a **test explainer page** at
+    `/domains/:domainId/runs/:runId/spf/tests/:testId` (newest alias
+    `/domains/:domainId/spf/tests/:testId`) rendering the five fixed §6.4 sections — What this
+    is / Your status in this run / What it means / What you can do / Run this check now — plus
+    the per-test history strip, Diagnose-it-yourself commands, and a references footer; an
+    unknown `:testId` renders the "Unknown test" state, and a test not measured in the run says
+    so instead of faking a verdict.
+19. Every §6.4 catalog `conceptId` has a **concept explainer page** at
+    `/domains/:domainId/runs/:runId/spf/concepts/:conceptId` (newest alias
+    `/domains/:domainId/spf/concepts/:conceptId`) with the same five sections, section 2 rendered
+    from this run's §5 fields per the catalog table; the static `tests`/`concepts` segments never
+    collide with the `:problemId` route (static-over-dynamic route ranking).
+20. The §6.4 click map is fully wired: the lookup gauge, voids counter, `all`-qualifier chip,
+    `eval_result` chip, published-record ⓘ, mechanism-table rows, include-tree node terms,
+    test-row titles, and coverage rows each navigate to their mapped run-scoped explainer page;
+    hover affordances (underline + chevron) mark every clickable element, and nothing that
+    explains is click-dead.
+21. `POST /api/audit/run/:domainId?checks=spf` executes only the SPF checker and writes a **new
+    run file** whose five sibling category keys are carried forward verbatim with
+    `carried_forward: true` and their original `checked_at`; the `run:` block records
+    `checks: [spf]` (Runs-table "SPF only" badge), score/status are recomputed over the merged
+    findings, the regression differ skips carried-forward categories, an unknown `checks` prefix
+    returns 400, and omitting the param preserves today's full-run behavior.
+22. The "Run this check now" / "Re-run SPF only" buttons show a spinner while running (via the
+    shared scan dock), navigate on success to the **new run's** version of the current page
+    (same tail path, new `:runId`), leave the view on the old run with an error toast on
+    failure, and coalesce onto the per-domain in-flight run when one is already going.
+23. The SPF page renders the cross-run history band (one status dot per run over the
+    lookup-count sparkline, hollow dots for carried-forward runs, click → that run's SPF page)
+    and each test explainer renders its per-test history strip (click a dot → the same test page
+    under that run) — both derived from `GET /api/audit/runs?domainId=…`, with the documented
+    loading / single-run / error states, and history failures never block the main content.
+24. All new pages implement the §6.4 state rules: teaching sections render immediately while run
+    data skeleton-loads, "Run not found" and never-run states match §6.2, and a run without an
+    `spf` key renders "not measured in this run" with Run-now as the CTA.
 
 <!--
   Maintenance notes:
@@ -1032,6 +1383,22 @@ a single-module change.
     Runs-row SPF cell → that run's SPF page; the run report's SPF chevron → same run's SPF page.
     The header carries the run context strip (started_at, ‹ prev / next ›, NEWEST badge / "Jump
     to newest"). Keep routes and cell-click semantics in sync with ../dashboard.mdx §6.
+  * Explainer layer (LOCKED, 2026-07): run-scoped test pages at …/spf/tests/:testId (testId = the
+    §2 finding id verbatim) and concept pages at …/spf/concepts/:conceptId (the §6.4 catalog owns
+    the conceptId list — add new ids there first). `tests`/`concepts` are reserved static
+    segments under …/spf/ and must be registered so they outrank the :problemId dynamic route.
+    Every explainer renders the fixed five sections (what-it-is / your-status / what-it-means /
+    what-to-do / run-it-now); keep the §6.4 click map in sync with SpfPage.tsx.
+  * Scoped re-run (2026-07): POST /api/audit/run/:domainId?checks=spf — new-run-file semantics
+    with carried-forward sibling categories (carried_forward: true, original checked_at, run:
+    checks:[spf], differ skips carried categories). Backend today has the endpoint WITHOUT the
+    checks param (audit.controller.ts run()); the content-scoring re-score path is the surgical-
+    merge precedent. Keep the param contract in sync with ../run_checks.mdx and ../storage.mdx
+    if either grows a competing definition.
+  * History (2026-07): the SPF history band + per-test strips derive client-side from
+    GET /api/audit/runs?domainId=… in the first round; the slim
+    GET /api/audit/history/:domainId?category=spf endpoint is FUTURE — spec it before building
+    if run payloads get heavy.
   * spf.alignment (PS-11) stays FUTURE until message-level data exists (mailauth on live mail or
     the rua ingestion pipeline in ../emails.mdx). spf.flatten automation (PS-12) stays FUTURE.
   * SPF is the aspf half of DMARC alignment — keep §8/§9 consistent with ./dmarc.mdx PS-11/PS-13.

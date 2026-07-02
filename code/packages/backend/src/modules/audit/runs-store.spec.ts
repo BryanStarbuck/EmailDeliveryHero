@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { AuditResult } from "./checks/types"
@@ -217,7 +217,12 @@ describe("migrateLegacyRunsJson — pre-§7 single-file history", () => {
     const legacyPath = join(stateDir, "runs.json")
     const legacy = [
       makeRun({ runId: "l1", startedAt: "2026-06-28T13:00:00.000Z" }),
-      makeRun({ runId: "l2", domainId: "dom-2", domain: "act3ai.com", startedAt: "2026-06-29T13:00:00.000Z" }),
+      makeRun({
+        runId: "l2",
+        domainId: "dom-2",
+        domain: "act3ai.com",
+        startedAt: "2026-06-29T13:00:00.000Z",
+      }),
     ]
     writeFileSync(legacyPath, JSON.stringify(legacy), "utf8")
 

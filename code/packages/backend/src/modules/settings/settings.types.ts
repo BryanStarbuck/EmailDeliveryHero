@@ -52,6 +52,11 @@ export interface SettingsView {
     storage: AppConfigFile["storage"]
     tools: AppConfigFile["tools"]
     access: AppConfigFile["access"]
+    /**
+     * DNS Zone & Nameserver Health (pm/checks/dns_health.mdx §4/§5): the bundled, admin-editable
+     * subdomain-takeover fingerprint list (`takeover_fingerprints` mapped onto config.yaml).
+     */
+    dns_health: AppConfigFile["dns_health"]
   }
   /** The caller's own per-user block (defaults when the user has never saved). */
   me: {

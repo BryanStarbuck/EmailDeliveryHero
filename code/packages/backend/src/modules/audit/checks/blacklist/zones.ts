@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { resolveStateDir } from "@shared/state-dir"
-import { readYaml } from "@shared/yaml-store"
+import { readYaml, writeYaml } from "@shared/yaml-store"
 import { parse } from "yaml"
 import type { Severity } from "../types"
 import type { BlocklistZone, CodeMeaning, ProviderPortal, ZoneKind } from "./blacklist-types"
@@ -97,7 +97,8 @@ function fail(entry: string, problem: string): never {
 function validateCodes(entry: string, field: string, codes?: Record<string, CodeMeaning>): void {
   if (codes === undefined) return
   for (const [code, meaning] of Object.entries(codes)) {
-    if (!meaning || typeof meaning.label !== "string") fail(entry, `${field}["${code}"] needs a label`)
+    if (!meaning || typeof meaning.label !== "string")
+      fail(entry, `${field}["${code}"] needs a label`)
     if (!SEVERITIES.includes(meaning.severity)) {
       fail(entry, `${field}["${code}"] has invalid severity "${meaning.severity}"`)
     }
@@ -105,7 +106,7 @@ function validateCodes(entry: string, field: string, codes?: Record<string, Code
 }
 
 function validateRegistry(reg: BlacklistRegistry): BlacklistRegistry {
-  if (!reg || reg.registry_version !== 1) {
+  if (reg?.registry_version !== 1) {
     throw new Error("blacklists.yaml registry invalid — registry_version must be 1")
   }
   if (!Array.isArray(reg.blacklists) || reg.blacklists.length === 0) {
@@ -116,12 +117,14 @@ function validateRegistry(reg: BlacklistRegistry): BlacklistRegistry {
   for (const e of reg.blacklists) {
     const id = e?.name ?? "(unnamed)"
     for (const req of ["name", "url", "type", "description", "lookup_url", "delist_url"] as const) {
-      if (typeof e?.[req] !== "string" || e[req].length === 0) fail(id, `missing required field "${req}"`)
+      if (typeof e?.[req] !== "string" || e[req].length === 0)
+        fail(id, `missing required field "${req}"`)
     }
     if (!TYPES.includes(e.type)) fail(id, `invalid type "${e.type}"`)
     if (!TIERS.includes(e.tier)) fail(id, `invalid tier "${e.tier}"`)
     if (!SEVERITIES.includes(e.severity)) fail(id, `invalid severity "${e.severity}"`)
-    if (typeof e.weight !== "number" || e.weight < 0 || e.weight > 1) fail(id, "weight must be 0..1")
+    if (typeof e.weight !== "number" || e.weight < 0 || e.weight > 1)
+      fail(id, "weight must be 0..1")
     if (typeof e.enabled !== "boolean") fail(id, "enabled must be boolean")
     if (e.query?.method !== "web_only" && typeof e.zone !== "string") {
       fail(id, "a DNS-queryable entry needs a zone (or query.method: web_only)")
@@ -129,7 +132,8 @@ function validateRegistry(reg: BlacklistRegistry): BlacklistRegistry {
     if (e.zone) {
       if (seen.has(e.zone)) fail(id, `duplicate zone "${e.zone}"`)
       seen.add(e.zone)
-      if (deadZoneMatch(e.zone, deadZones)) fail(id, `zone "${e.zone}" is on the dead_zones registry`)
+      if (deadZoneMatch(e.zone, deadZones))
+        fail(id, `zone "${e.zone}" is on the dead_zones registry`)
     }
     validateCodes(id, "return_codes", e.return_codes)
     validateCodes(id, "bitmask", e.bitmask)
@@ -141,7 +145,9 @@ function validateRegistry(reg: BlacklistRegistry): BlacklistRegistry {
   }
   for (const p of reg.provider_portals ?? []) {
     if (!p?.provider || !p?.name || !p?.check_url || !p?.delist_url) {
-      throw new Error("blacklists.yaml registry invalid — provider_portals entries need provider/name/check_url/delist_url")
+      throw new Error(
+        "blacklists.yaml registry invalid — provider_portals entries need provider/name/check_url/delist_url",
+      )
     }
   }
   return reg
@@ -179,6 +185,10 @@ function toZones(e: RegistryEntry): BlocklistZone[] {
     delist_url: e.delist_url,
     enabled: e.enabled,
     severity: e.severity,
+    // Registry prose + operator homepage: the §20.3 zone explainer's "What this is" block and
+    // References block render these registry-driven fields verbatim (never hand-listed in code).
+    ...(e.description ? { description: e.description } : {}),
+    ...(e.url ? { url: e.url } : {}),
     ...(e.return_codes ? { codes: e.return_codes } : {}),
     ...(e.bitmask ? { bitmask: e.bitmask } : {}),
     ...(e.access?.cost === "registration" ? { requires_registration: true } : {}),
@@ -186,7 +196,7 @@ function toZones(e: RegistryEntry): BlocklistZone[] {
     ...(e.paid_delist_offered ? { paid_delist_offered: true } : {}),
     ...(e.auto_expires ? { auto_expires: e.auto_expires } : {}),
     ...(e.positive ? { positive: true } : {}),
-    ...(e.notes ?? e.access?.notes ? { notes: e.notes ?? e.access?.notes } : {}),
+    ...((e.notes ?? e.access?.notes) ? { notes: e.notes ?? e.access?.notes } : {}),
   }))
 }
 
@@ -220,6 +230,39 @@ export const PROVIDER_PORTALS: Array<Omit<ProviderPortal, "user_state">> =
 /** Path of the operator override file (admin "Blocklist Zones" panel writes here). */
 export function zonesOverridePath(): string {
   return join(resolveStateDir(), "blacklist_zones.yaml")
+}
+
+/** The operator-editable subset of a zone row (the §4 admin "Blocklist Zones" panel fields). */
+export interface ZoneOverridePatch {
+  enabled?: boolean
+  weight?: number
+  /** When set, only the matching row of a type:both zone is patched; otherwise both rows. */
+  kind?: ZoneKind
+}
+
+/**
+ * Persist one operator override into <stateDir>/blacklist_zones.yaml (§18.2 merge contract: the
+ * panel writes overrides to the state-dir file, never to the checked-in registry). Overrides are
+ * keyed by `zone` (+ optional `kind`); dead zones can never be enabled from anywhere. Throws on an
+ * unknown zone so the API surfaces a 404, not a silent no-op.
+ */
+export function saveZoneOverride(zone: string, patch: ZoneOverridePatch): void {
+  if (isDeadZone(zone)) {
+    throw new Error(`zone "${zone}" is on the dead_zones registry and can never be enabled`)
+  }
+  const known = DEFAULT_ZONES.some((z) => z.zone === zone)
+  const overrides = readYaml<Partial<BlocklistZone>[]>(zonesOverridePath(), [])
+  const existing = overrides.some(
+    (o) => o?.zone === zone && (patch.kind === undefined || o.kind === patch.kind),
+  )
+  if (!known && !existing) throw new Error(`unknown zone "${zone}"`)
+  const next = overrides.map((o) =>
+    o?.zone === zone && (patch.kind === undefined || o.kind === undefined || o.kind === patch.kind)
+      ? { ...o, ...patch }
+      : o,
+  )
+  if (!existing) next.push({ zone, ...patch })
+  writeYaml(zonesOverridePath(), next)
 }
 
 /**

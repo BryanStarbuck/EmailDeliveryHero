@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "pnpm --filter @edh/frontend --filter @edh/backend --parallel dev",
+    "start": "pnpm --filter @edh/frontend --filter @edh/backend --parallel start",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "lint": "biome check .",

@@ -124,8 +124,20 @@ export function DmarcPage() {
   })
 
   const findings = (result?.findings ?? []).filter((f) => f.checkId === "dmarc")
-  const { record: dmarc, toolRuns, problemStates } = normalizeDmarcSection(result?.results?.dmarc)
-  const cell = rollupCategories(result?.findings).dmarc ?? NEVER_CELL
+  const {
+    record: dmarc,
+    toolRuns,
+    tests,
+    problemStates,
+  } = normalizeDmarcSection(result?.results?.dmarc)
+  // Expected DNS value per test id (§6.2 item 4) — from the §5 tests[] rows' dns_value_expected.
+  const expectedById = new Map(
+    tests
+      .filter((t): t is typeof t & { dns_value_expected: string } => Boolean(t.dns_value_expected))
+      .map((t) => [t.id, t.dns_value_expected]),
+  )
+  // Pass the structured results too so the cell label is the policy level (§6.1).
+  const cell = rollupCategories(result?.findings, result?.results).dmarc ?? NEVER_CELL
 
   // Problem cards: prefer the backend-derived §9 ids; fall back to finding-id matching for runs
   // persisted before the backend derivation existed.
@@ -226,7 +238,11 @@ export function DmarcPage() {
             <ReportDestinations dmarc={dmarc} domainName={domain?.name ?? id} />
           </div>
 
-          <TestResultsTable findings={findings} emptyText="No DMARC tests in this run." />
+          <TestResultsTable
+            findings={findings}
+            emptyText="No DMARC tests in this run."
+            expectedById={expectedById}
+          />
 
           {problems.length > 0 && (
             <section className="mt-6">
@@ -496,8 +512,8 @@ function SuggestedRecordBuilder({
       <h2 className="font-semibold">Suggested record</h2>
       <p className="mt-1 text-xs text-[var(--edh-muted)]">
         Build a ready-to-publish TXT string for{" "}
-        <span className="font-mono">_dmarc.{domainName}</span>. Advisory only — nothing is
-        published automatically.
+        <span className="font-mono">_dmarc.{domainName}</span>. Advisory only — nothing is published
+        automatically.
       </p>
       <div className="mt-3 flex flex-wrap items-center gap-3 text-sm">
         <label className="flex items-center gap-1.5">

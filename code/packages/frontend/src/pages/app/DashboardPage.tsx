@@ -1,5 +1,5 @@
 import { Link, useNavigate } from "@tanstack/react-router"
-import { ChevronRight, Loader2, MoreVertical, Play, RefreshCw } from "lucide-react"
+import { ChevronRight, Loader2, Play, RefreshCw } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useAuditResults, useAuditRuns, useDeleteRun } from "@/api/audit"
 import { useDeleteDomain, useDomains, useUpdateDomain } from "@/api/domains"
@@ -7,6 +7,7 @@ import { useSchedulerStatus, useSetScheduleEnabled } from "@/api/scheduler"
 import type { AuditResult, MonitoredDomain } from "@/api/types"
 import { NewProblemBadge } from "@/components/Badges"
 import { BrandHeader } from "@/components/BrandHeader"
+import { RowMenu } from "@/components/RowMenu"
 import { StatusCell } from "@/components/StatusCell"
 import {
   CATEGORIES,
@@ -157,13 +158,15 @@ function DomainHealthTable({
                   )
                 })}
                 <td className="px-2 py-2">
-                  <span
-                    className="flex items-center justify-end gap-1"
-                    onClick={(e) => e.stopPropagation()}
-                  >
+                  {/* Row controls (§4.3) — each control stops propagation so a click never also
+                      fires the whole-row navigation. */}
+                  <span className="flex items-center justify-end gap-1">
                     <button
                       type="button"
-                      onClick={() => runDomains([{ id: d.id, name: d.name }])}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        runDomains([{ id: d.id, name: d.name }])
+                      }}
                       disabled={domainScanning}
                       aria-label={`Run checks for ${d.name}`}
                       title={`Run checks for ${d.name}`}
@@ -278,9 +281,10 @@ function RunsTable({ runs }: { runs: AuditResult[] }) {
                       // Test-cell click for a HISTORICAL run (pm/dashboard.mdx §6.2) needs the
                       // per-run category routes (/domains/$id/runs/$runId/<slug>). DKIM has one
                       // (pm/checks/dkim.mdx §6.1 — the Runs-table cell opens THAT run's DKIM
-                      // page), and so does DNS & Infrastructure (pm/checks/dns.mdx §6.1 — the
-                      // cell opens THAT run's DNS page); tests without a run-scoped page yet
-                      // fall through to the row.
+                      // page), DMARC too (pm/checks/dmarc.mdx §6.1 — the Runs-row cell opens
+                      // THAT run's DMARC page), and so does DNS & Infrastructure
+                      // (pm/checks/dns.mdx §6.1 — the cell opens THAT run's DNS page); tests
+                      // without a run-scoped page yet fall through to the row.
                       const onOpen =
                         c.key === "dkim" && r.runId
                           ? () =>
@@ -288,13 +292,19 @@ function RunsTable({ runs }: { runs: AuditResult[] }) {
                                 to: "/domains/$id/runs/$runId/dkim",
                                 params: { id: r.domainId, runId: r.runId as string },
                               })
-                          : c.key === "dnsInfra" && r.runId
+                          : c.key === "dmarc" && r.runId
                             ? () =>
                                 navigate({
-                                  to: "/domains/$id/runs/$runId/dns",
+                                  to: "/domains/$id/runs/$runId/dmarc",
                                   params: { id: r.domainId, runId: r.runId as string },
                                 })
-                            : undefined
+                            : c.key === "dnsInfra" && r.runId
+                              ? () =>
+                                  navigate({
+                                    to: "/domains/$id/runs/$runId/dns",
+                                    params: { id: r.domainId, runId: r.runId as string },
+                                  })
+                              : undefined
                       return (
                         <td key={c.key} className="px-2 py-2">
                           <TestCell
@@ -306,13 +316,15 @@ function RunsTable({ runs }: { runs: AuditResult[] }) {
                       )
                     })}
                     <td className="px-2 py-2">
-                      <span
-                        className="flex items-center justify-end gap-1"
-                        onClick={(e) => e.stopPropagation()}
-                      >
+                      {/* Row controls (§4.4) — each control stops propagation so a click never
+                          also fires the whole-row navigation. */}
+                      <span className="flex items-center justify-end gap-1">
                         <button
                           type="button"
-                          onClick={() => openRun(r)}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            openRun(r)
+                          }}
                           aria-label={`Open the ${r.domain} run report`}
                           title="Open this run's report"
                           className="rounded p-1 text-[var(--edh-muted)] hover:bg-slate-100 hover:text-slate-700"
@@ -331,7 +343,10 @@ function RunsTable({ runs }: { runs: AuditResult[] }) {
                               label: "Delete run",
                               danger: true,
                               onClick: () => {
-                                if (r.runId && window.confirm("Delete this run from the history?")) {
+                                if (
+                                  r.runId &&
+                                  window.confirm("Delete this run from the history?")
+                                ) {
                                   deleteRun.mutate(r.runId)
                                 }
                               },
@@ -390,64 +405,6 @@ function fmtRunDate(iso: string): string {
   const d = new Date(iso)
   const pad = (n: number) => String(n).padStart(2, "0")
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
-/**
- * The ⋮ triple-dot pull-down on every row of both tables (pm/dashboard.mdx §4.3/§4.4). A plain
- * button + absolutely-positioned menu; the invisible fixed backdrop closes it on any outside click.
- */
-function RowMenu({
-  label,
-  items,
-}: {
-  label: string
-  items: { label: string; danger?: boolean; onClick: () => void }[]
-}) {
-  const [open, setOpen] = useState(false)
-  return (
-    <span className="relative inline-block">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-label={label}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        className="rounded p-1 text-[var(--edh-muted)] hover:bg-slate-100 hover:text-slate-700"
-      >
-        <MoreVertical className="h-4 w-4" />
-      </button>
-      {open && (
-        <>
-          <span
-            className="fixed inset-0 z-10"
-            aria-hidden="true"
-            onClick={() => setOpen(false)}
-          />
-          <div
-            role="menu"
-            className="absolute right-0 z-20 mt-1 w-56 rounded-md border border-[var(--edh-border)] bg-white py-1 shadow-lg"
-          >
-            {items.map((item) => (
-              <button
-                key={item.label}
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setOpen(false)
-                  item.onClick()
-                }}
-                className={`block w-full px-3 py-2 text-left text-sm hover:bg-slate-100 ${
-                  item.danger ? "text-red-700" : "text-slate-900"
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-    </span>
-  )
 }
 
 /**

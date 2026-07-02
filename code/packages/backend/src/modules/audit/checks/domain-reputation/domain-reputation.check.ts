@@ -3,7 +3,7 @@ import { domainToUnicode } from "node:url"
 import { withResource } from "@shared/concurrency"
 import { readAppConfig } from "@shared/config-store"
 import { resolveNs } from "../dns-util"
-import type { CheckOutcome, Checker, DomainReputationConfig, Finding } from "../types"
+import type { Checker, CheckOutcome, DomainReputationConfig, Finding } from "../types"
 
 /**
  * Domain Registration Reputation (WHOIS/RDAP) — pm/checks/domain_reputation.mdx. Reads each
@@ -215,6 +215,50 @@ export function primeBootstrapCache(services: [string[], string[]][] | null): vo
   bootstrapCache = services ? { fetchedAt: Date.now(), services } : null
 }
 
+/**
+ * The registry→registrar `related` link (spec §3 step 3, RFC 9083 §4.2): registries publish a
+ * `links[]` entry pointing at the sponsoring registrar's own RDAP record, which carries the
+ * authoritative registrar/registrant/abuse data. Only RDAP-shaped domain links are followed.
+ */
+export function relatedRdapUrl(rdap: Rdap, baseUrl: string): string | null {
+  for (const link of Array.isArray(rdap?.links) ? rdap.links : []) {
+    if (link?.rel !== "related" || typeof link.href !== "string") continue
+    const type = typeof link.type === "string" ? link.type.toLowerCase() : ""
+    const isRdap = type.includes("rdap") || (type === "" && link.href.includes("/domain/"))
+    if (!isRdap) continue
+    try {
+      const url = new URL(link.href, baseUrl)
+      if (url.protocol !== "https:") continue
+      if (url.toString() === baseUrl) continue // self link, nothing new to fetch
+      return url.toString()
+    } catch {
+      // malformed href — ignore and keep scanning
+    }
+  }
+  return null
+}
+
+/**
+ * Merge the registry and registrar RDAP documents into one record (spec §3 step 3 + edge cases):
+ * registry events FIRST so the registry `expiration` event wins a registry-vs-registrar expiry
+ * disagreement; registrar entities FIRST so the authoritative registrar/registrant/abuse vCards
+ * win; statuses are the union; secureDNS/nameservers prefer the registry view. The merged document
+ * is what gets persisted as `raw_record`, so the TTL-cached path re-derives identical findings.
+ */
+export function mergeRdapDocs(registry: Rdap, registrar: Rdap): Rdap {
+  const arr = (v: unknown): Rdap[] => (Array.isArray(v) ? v : [])
+  return {
+    ...registry,
+    events: [...arr(registry?.events), ...arr(registrar?.events)],
+    status: [...new Set([...arr(registry?.status), ...arr(registrar?.status)])],
+    entities: [...arr(registrar?.entities), ...arr(registry?.entities)],
+    secureDNS: registry?.secureDNS ?? registrar?.secureDNS,
+    nameservers:
+      arr(registry?.nameservers).length > 0 ? registry.nameservers : registrar?.nameservers,
+    redacted: registry?.redacted ?? registrar?.redacted,
+  }
+}
+
 /** Resolve the RDAP base URL for a TLD from the IANA bootstrap file (RFC 7484). */
 async function rdapBaseForTld(tld: string): Promise<string | null> {
   const services = await bootstrapServices()
@@ -361,8 +405,29 @@ export interface DeriveOptions {
   registrantPublicIntentional: boolean
   /** Curated abuse-tolerant registrar watchlist (config.yaml → domain_reputation.registrar_reputation). */
   registrarWatchlist: RegistrarWatchlistEntry[]
+  /**
+   * The previous run's registrar identity (spec §6 regression detection: "a registrar change
+   * (possible hijack)" / acceptance #14). null/absent = no baseline to diff against.
+   */
+  previousRegistrar?: { name: string | null; ianaId: number | null } | null
   /** Injectable clock for tests. */
   now?: number
+}
+
+/** Whether the registrar identity changed versus the previous run's snapshot (possible hijack). */
+function registrarChanged(
+  reg: RegData,
+  previous: { name: string | null; ianaId: number | null } | null | undefined,
+): boolean {
+  if (!previous) return false
+  // IANA ids are the stable identity — compare them when both runs captured one.
+  if (previous.ianaId !== null && reg.registrarIanaId !== undefined) {
+    return previous.ianaId !== reg.registrarIanaId
+  }
+  if (previous.name !== null && reg.registrar !== undefined) {
+    return previous.name.trim().toLowerCase() !== reg.registrar.trim().toLowerCase()
+  }
+  return false
 }
 
 /**
@@ -563,10 +628,24 @@ export function deriveRegistrationFindings(
     })
   }
 
-  // infra.recent_transfer — RDAP transfer / last-changed events vs now (< 30 days).
+  // infra.recent_transfer — a registrar change versus the previous run is the strongest hijack
+  // signal (spec §6 regression, acceptance #14), so it escalates to warning; otherwise the RDAP
+  // transfer / last-changed events vs now (< 30 days) stay info per the §3 severity mapping.
   const transferStr = reg.transfer ?? reg.updated
   const transferred = transferStr ? Date.parse(transferStr) : NaN
-  if (Number.isFinite(transferred) && now - transferred < 30 * DAY) {
+  if (registrarChanged(reg, opts.previousRegistrar)) {
+    const before = opts.previousRegistrar?.name ?? `IANA ${opts.previousRegistrar?.ianaId}`
+    const after = reg.registrar ?? `IANA ${reg.registrarIanaId ?? "?"}`
+    findings.push({
+      id: "infra.recent_transfer",
+      checkId: CHECK_ID,
+      title: "Registrar changed since the previous run",
+      severity: "warning",
+      detail: `${apex}'s registrar changed from "${before}" to "${after}" since the previous audit — an unexpected registrar change can indicate a domain hijack, and reputation may reset.`,
+      remediation: `Verify the transfer of ${apex} from "${before}" to "${after}" was authorized. If not, contact both registrars immediately (this is how hijacks look). Either way, warm up and monitor bounce rates — reputation may reset.`,
+      evidence: `registrar: ${before} → ${after}`,
+    })
+  } else if (Number.isFinite(transferred) && now - transferred < 30 * DAY) {
     findings.push({
       id: "infra.recent_transfer",
       checkId: CHECK_ID,
@@ -913,6 +992,11 @@ export const domainReputationCheck: Checker = {
     const prev = previousSnapshot(
       (ctx.previousResults as Record<string, unknown> | undefined)?.["infra.domain_reputation"],
     )
+    // The registrar-change baseline (spec §6 / acceptance #14): on the cached path the record IS
+    // the previous one, so the comparison is trivially equal and can never false-positive.
+    deriveOpts.previousRegistrar = prev
+      ? { name: prev.registrar, ianaId: prev.registrar_iana_id }
+      : null
     const ttlMs = (cfg.cache_ttl_hours || DEFAULT_CACHE_TTL_HOURS) * 60 * 60 * 1000
     const prevAge = prev ? Date.now() - Date.parse(prev.checked_at) : Number.POSITIVE_INFINITY
     const useCache =
@@ -929,12 +1013,29 @@ export const domainReputationCheck: Checker = {
       const base = await rdapBaseForTld(tld)
       let rdapTransient = false
       if (base) {
-        const res = await rdapGet(`${base}/domain/${encodeURIComponent(apex)}`, budget)
+        const registryUrl = `${base}/domain/${encodeURIComponent(apex)}`
+        const res = await rdapGet(registryUrl, budget)
         if (res.status === 200 && res.body) {
           try {
             rdap = JSON.parse(res.body)
           } catch {
             rdap = null
+          }
+          // Follow the registry→registrar `related` link when present (spec §3 step 3) for the
+          // authoritative registrar record; a failed/missing registrar fetch keeps the registry
+          // record — never degrades the run. Shares the same per-run request budget.
+          if (rdap) {
+            const relatedUrl = relatedRdapUrl(rdap, registryUrl)
+            if (relatedUrl && budget.n > 0) {
+              const rel = await rdapGet(relatedUrl, budget)
+              if (rel.status === 200 && rel.body) {
+                try {
+                  rdap = mergeRdapDocs(rdap, JSON.parse(rel.body))
+                } catch {
+                  // registrar document unparseable — the registry record stands alone
+                }
+              }
+            }
           }
         } else if (res.error || res.status === 429 || res.status >= 500 || res.status === 0) {
           rdapTransient = true

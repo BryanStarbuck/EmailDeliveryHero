@@ -57,6 +57,32 @@ export interface TakeoverFingerprint {
   enabled: boolean
 }
 
+/**
+ * One DNSSEC signing-algorithm registry row (pm/checks/dnssec.mdx §5 — the `dnssec_algorithms`
+ * reference table mapped onto `config.yaml → checks.dnssec.algorithms`): IANA algorithm number,
+ * mnemonic name, and the deprecation flag the `infra.dnssec_algorithm` severity logic reads —
+ * so the UI and checker never hard-code magic numbers.
+ */
+export interface DnssecAlgorithmEntry {
+  algo_num: number
+  name: string
+  deprecated: boolean
+  notes?: string
+}
+
+/**
+ * One seed mailbox row (pm/checks/inbox_placement.mdx §5 — the `seed_list_config` reference table
+ * mapped onto `config.yaml → seedList.seeds`): the provider it covers, the mailbox address the
+ * probe is sent to, and how the app reads the mailbox back (IMAP / Microsoft Graph / JMAP for
+ * self-hosted seeds, or "service" when the seed service owns and reads the mailbox).
+ */
+export interface SeedMailboxEntry {
+  provider: string
+  seed_address: string
+  read_method: "imap" | "graph" | "jmap" | "service"
+  active: boolean
+}
+
 export interface AppConfigFile {
   schema_version: number
   updated_at: string
@@ -68,7 +94,13 @@ export interface AppConfigFile {
   checks: {
     enabled: string[]
     spf: { maxLookups: number }
-    dkim: { defaultSelectors: string[] }
+    /**
+     * DKIM settings: the fallback selector list, plus the key-rotation warning window in days
+     * (pm/checks/dkim.mdx §2.2 `dkim.rotation` — M3AAWG ~6-month cadence, default 180; the
+     * "approaching" info fires 30 days earlier). `rotationWindowDays` is optional so older
+     * config files stay valid; the checker falls back to 180.
+     */
+    dkim: { defaultSelectors: string[]; rotationWindowDays?: number }
     dnsbl: { zones: string[] }
     /**
      * Content-scoring admin settings (pm/checks/content_scoring.mdx §4): the SpamAssassin spam
@@ -76,7 +108,20 @@ export interface AppConfigFile {
      * `ok`), and whether network content tests (URIBL/Razor/Pyzor/DCC) are enabled (default off so
      * scoring is deterministic). The binary path override is env: EDH_TOOL_SPAMASSASSIN/_SPAMC.
      */
-    content: { threshold: number; safeTarget: number; networkTests: boolean }
+    content: {
+      threshold: number
+      safeTarget: number
+      networkTests: boolean
+      /**
+       * Link / URL-reputation settings (pm/checks/link_url_reputation.mdx §5, admin-only): the
+       * public URL-shortener domain list matched by `content.url_shortener` (config, not code)
+       * and the Google Safe Browsing API key that enables `content.url_safe_browsing` in a
+       * future round ("" = not configured — the sub-check degrades to one info note). Optional
+       * so existing config literals / older files stay valid; the checker falls back to the
+       * bundled DEFAULT_SHORTENERS seed when absent.
+       */
+      url?: { shorteners: string[]; safeBrowsingKey: string }
+    }
     /**
      * List-Unsubscribe / one-click admin settings (pm/checks/list_unsubscribe.mdx §4 admin-only):
      * the Gmail/Yahoo bulk-sender daily threshold (default 5,000 — documentation for the
@@ -96,6 +141,40 @@ export interface AppConfigFile {
      * certificate-validation round; admin-only editing.
      */
     bimi: { mvaAllowList: BimiMvaEntry[] }
+    /**
+     * DANE / TLSA admin settings (pm/checks/dane_tlsa.mdx §4, admin-only): whether the FUTURE
+     * :25 STARTTLS cert-match probe is enabled at all (it opens outbound SMTP connections — off
+     * by default), the probe's per-MX timeout, and whether authoritative DNSSEC validation must
+     * see the AD bit from a validating resolver (FUTURE) rather than trusting the first-round
+     * DS/DNSKEY observation. With the probe disabled the `certMatch`/`starttlsOffered` columns
+     * stay null and no false criticals are emitted (spec AC9).
+     */
+    dane: {
+      probeEnabled: boolean
+      probeTimeoutMs: number
+      requireAdBit: boolean
+    }
+    /**
+     * MTA-STS admin settings (pm/checks/mta_sts.mdx §4 "Admin-only settings"): the HTTPS-fetch
+     * sub-checks sit behind the global `httpsProbeEnabled` feature flag (spec key
+     * `mtaSts.httpsProbe.enabled`, DEFAULT OFF until the HTTPS client ships), plus the fetch
+     * timeout (default 10 s) and max policy-body size (default 64 KB) the probe must respect
+     * (§3/§6 — one request per domain per audit, no redirects, capped body). Optional so older
+     * config files stay valid; the checker falls back to these defaults when absent.
+     */
+    mtaSts?: { httpsProbeEnabled: boolean; fetchTimeoutMs: number; maxBodyBytes: number }
+    /**
+     * DNSSEC admin settings (pm/checks/dnssec.mdx §4, admin-only): the validating resolver(s) the
+     * deep check queries (default 1.1.1.1 / 8.8.8.8), the RRSIG near-expiry lead time (default
+     * 72h), the "validate via `dig`" toggle (off = presence-only first round), and the
+     * `dnssec_algorithms` IANA reference seed (§5) the algorithm sub-check reads.
+     */
+    dnssec: {
+      resolvers: string[]
+      rrsigLeadHours: number
+      validateViaDig: boolean
+      algorithms: DnssecAlgorithmEntry[]
+    }
     thresholds: { green: number; amber: number }
     weights: { critical: number; warning: number; info: number }
   }
@@ -146,21 +225,51 @@ export interface AppConfigFile {
    * `paths: { dig: /opt/homebrew/bin/dig }` pins a tool to an absolute path ahead of the
    * PATH search and the per-platform conventional locations.
    */
-  tools: { preferCli: boolean; resolvers: string[]; timeoutMs: number; paths: Record<string, string> }
+  tools: {
+    preferCli: boolean
+    resolvers: string[]
+    timeoutMs: number
+    paths: Record<string, string>
+  }
   access: { allowedDomains: string[] }
   /**
    * Report-email ingestion (pm/emails.mdx §8, admin-only): the DMARC-aggregate/TLS-RPT report
    * sources and cadence. `enabled` is the master switch — off, the two report-fed findings
    * (dmarc.real_pass_rate / infra.tls_rpt_reports_ingested) return a single "ingestion disabled"
-   * info. `dropFolder` "" means the default `<state>/reports/inbox`. IMAP credentials come from
-   * the out-of-repo credentials file (never stored here).
+   * info. `dropFolder` "" means the default `<state>/reports/inbox`. `analyzeDir` is the
+   * directory the run-time Spam & Content report_emails test scans IN PLACE on every audit run
+   * (pm/emails.mdx §13.1 — files are never moved); "" means auto-detect the repo `emails/`
+   * corpus, else fall back to the drop folder. IMAP credentials come from the out-of-repo
+   * credentials file (never stored here).
    */
   reports: {
     enabled: boolean
     dropFolder: string
+    analyzeDir: string
     pollMinutes: number
     windowDays: number
     imap: { host: string; port: number; user: string; mailbox: string }
+  }
+  /**
+   * Seed-list inbox-placement testing (pm/checks/inbox_placement.mdx §4 admin-only settings, §5
+   * `seedList:` block, §6 gating). The whole placement family is FUTURE and stays dark until this
+   * block names a seed source: `service` "" = not configured (every `content.placement_*`
+   * sub-check reports "not configured", never a false ok/critical — acceptance criterion #1);
+   * a seed-service name (glockapps/mailtrap/everest/mailreach) or "self_hosted" (with active
+   * `seeds`) arms the family. The service API key / mailbox credentials come from the out-of-repo
+   * credentials file, never from here. `thresholds` are the overall inbox-rate bands (defaults
+   * 80/50), `settlePollMinutes` the read-back backoff before a Missing verdict (§3 edge cases),
+   * `monthlyBudget` the max probe sends per calendar month (§6 — each run spends a credit and
+   * sends real mail), and `cadence` the slow dedicated schedule decoupled from the 6h DNS cadence.
+   */
+  seedList: {
+    service: string
+    providers: string[]
+    cadence: "daily" | "weekly"
+    thresholds: { warnBelowPct: number; criticalBelowPct: number }
+    settlePollMinutes: number[]
+    monthlyBudget: number
+    seeds: SeedMailboxEntry[]
   }
   defaults: UserPreferences
 }
@@ -216,6 +325,58 @@ export function defaultAppConfig(): AppConfigFile {
           { name: "Entrust", issuerDnMatch: "Entrust", markTypes: ["vmc", "cmc"], enabled: true },
         ],
       },
+      dane: {
+        // The FUTURE :25 STARTTLS cert-match probe opens outbound SMTP — off by default (§4).
+        probeEnabled: false,
+        probeTimeoutMs: 10000,
+        // ON = only trust DNSSEC via the AD bit from a validating resolver (FUTURE); OFF =
+        // first-round DS/DNSKEY observation suffices (pm/checks/dane_tlsa.mdx §3 step 4).
+        requireAdBit: false,
+      },
+      mtaSts: {
+        // The HTTPS policy-fetch sub-checks are FUTURE-round — flag DEFAULT OFF until the HTTPS
+        // probe is turned on by the admin (pm/checks/mta_sts.mdx §4 "Admin-only settings").
+        httpsProbeEnabled: false,
+        // Defensive fetch bounds (§3/§6): 10 s total timeout, 64 KB policy-body cap, no redirects.
+        fetchTimeoutMs: 10000,
+        maxBodyBytes: 65536,
+      },
+      dnssec: {
+        // Public validating resolvers the deep check queries for the AD flag (pm/checks/dnssec.mdx §4).
+        resolvers: ["1.1.1.1", "8.8.8.8"],
+        rrsigLeadHours: 72,
+        // OFF = presence-only first round; ON = shell `dig +dnssec` for AD/RRSIG/NSEC3 (§3/§7).
+        validateViaDig: false,
+        // IANA DNSSEC algorithm registry seed — the `dnssec_algorithms` reference table (§5).
+        algorithms: [
+          { algo_num: 1, name: "RSAMD5", deprecated: true, notes: "Must not be used (RFC 6725)" },
+          { algo_num: 3, name: "DSA", deprecated: true, notes: "Deprecated" },
+          {
+            algo_num: 5,
+            name: "RSASHA1",
+            deprecated: true,
+            notes: "Being removed from validators",
+          },
+          { algo_num: 6, name: "DSA-NSEC3-SHA1", deprecated: true, notes: "Deprecated" },
+          {
+            algo_num: 7,
+            name: "RSASHA1-NSEC3-SHA1",
+            deprecated: true,
+            notes: "Being removed from validators",
+          },
+          { algo_num: 8, name: "RSASHA256", deprecated: false, notes: "RSA fallback" },
+          { algo_num: 10, name: "RSASHA512", deprecated: false },
+          {
+            algo_num: 13,
+            name: "ECDSAP256SHA256",
+            deprecated: false,
+            notes: "Recommended — compact and fast",
+          },
+          { algo_num: 14, name: "ECDSAP384SHA384", deprecated: false },
+          { algo_num: 15, name: "ED25519", deprecated: false },
+          { algo_num: 16, name: "ED448", deprecated: false },
+        ],
+      },
       thresholds: { green: 90, amber: 70 },
       weights: { critical: 40, warning: 15, info: 0 },
     },
@@ -230,7 +391,11 @@ export function defaultAppConfig(): AppConfigFile {
       timezone: systemTimezone(),
       domains: "all",
       runner: "in-process",
-      os: { kind: detectOsSchedulerKind(), installed: false, label: "com.emaildeliveryhero.scheduler" },
+      os: {
+        kind: detectOsSchedulerKind(),
+        installed: false,
+        label: "com.emaildeliveryhero.scheduler",
+      },
     },
     notifications: {
       webhook: { enabled: false, url: "" },
@@ -310,6 +475,23 @@ export function defaultAppConfig(): AppConfigFile {
       windowDays: 7,
       imap: { host: "", port: 993, user: "", mailbox: "INBOX" },
     },
+    seedList: {
+      // "" = not configured — the entire inbox-placement family reports "not configured" and no
+      // probe can ever be sent (pm/checks/inbox_placement.mdx §6, acceptance criterion #1).
+      service: "",
+      // The providers that dominate real inbox share (spec §1) — the default test matrix.
+      providers: ["gmail", "outlook", "yahoo", "apple"],
+      // Slow dedicated cadence, decoupled from the 6h DNS cadence (spec §6 — probes cost money).
+      cadence: "weekly",
+      // Overall inbox-rate bands: ≥ 80% ok, 50–79% warning, < 50% critical (spec §3, §4 defaults).
+      thresholds: { warnBelowPct: 80, criticalBelowPct: 50 },
+      // Read-back poll backoff before a seed is declared Missing (spec §3 edge cases: 2/5/10/15).
+      settlePollMinutes: [2, 5, 10, 15],
+      // Max probe sends per calendar month (spec §6 "monthly budget cap").
+      monthlyBudget: 4,
+      // The seed_list_config reference table (spec §5) — empty until seeds are configured.
+      seeds: [],
+    },
     defaults: {
       theme: "system",
       density: "comfortable",
@@ -339,7 +521,10 @@ export function readAppConfig(): AppConfigFile {
  * schema_version + updated_at, persist atomically. Sync, so serialized within the process; wrap in
  * withFileLock(appConfigFile()) from async flows that interleave their own reads.
  */
-export function updateAppConfig(mutate: (config: AppConfigFile) => AppConfigFile | void): AppConfigFile {
+export function updateAppConfig(
+  // biome-ignore lint/suspicious/noConfusingVoidType: `| void` lets callers mutate in place without an explicit return
+  mutate: (config: AppConfigFile) => AppConfigFile | void,
+): AppConfigFile {
   const current = readAppConfig()
   const next = mutate(current) ?? current
   next.schema_version = CONFIG_SCHEMA_VERSION
@@ -422,6 +607,7 @@ export function readUserConfig(email: string | null | undefined): UserConfigFile
  */
 export function updateUserConfig(
   email: string | null | undefined,
+  // biome-ignore lint/suspicious/noConfusingVoidType: `| void` lets callers mutate in place without an explicit return
   mutate: (config: UserConfigFile) => UserConfigFile | void,
 ): UserConfigFile {
   const key = sanitizeUserKey(email)
@@ -472,12 +658,18 @@ function mergeValidated(defaults: unknown, loaded: unknown, file: string, keyPat
   if (loaded === undefined || loaded === null) return defaults
   if (isPlainObject(defaults)) {
     if (!isPlainObject(loaded)) {
-      logWarn(`Ignoring malformed ${file} value at "${keyPath || "<root>"}": expected a block`, "ConfigStore")
+      logWarn(
+        `Ignoring malformed ${file} value at "${keyPath || "<root>"}": expected a block`,
+        "ConfigStore",
+      )
       return defaults
     }
     const merged: Record<string, unknown> = { ...loaded }
     for (const [key, defaultValue] of Object.entries(defaults)) {
-      merged[key] = key in loaded ? mergeValidated(defaultValue, loaded[key], file, keyPath ? `${keyPath}.${key}` : key) : defaultValue
+      merged[key] =
+        key in loaded
+          ? mergeValidated(defaultValue, loaded[key], file, keyPath ? `${keyPath}.${key}` : key)
+          : defaultValue
     }
     return merged
   }
@@ -493,7 +685,10 @@ function mergeValidated(defaults: unknown, loaded: unknown, file: string, keyPat
   if (typeof loaded !== typeof defaults) {
     // Symmetric to the case above: a list where the default is the scalar "all".
     if (Array.isArray(loaded) && typeof defaults === "string") return loaded
-    logWarn(`Ignoring malformed ${file} value at "${keyPath}": expected ${typeof defaults}`, "ConfigStore")
+    logWarn(
+      `Ignoring malformed ${file} value at "${keyPath}": expected ${typeof defaults}`,
+      "ConfigStore",
+    )
     return defaults
   }
   return loaded

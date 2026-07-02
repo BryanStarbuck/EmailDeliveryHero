@@ -1,6 +1,6 @@
 import { locateTool, runTool } from "@shared/tool-runner"
 import { resolveCname, resolveTxt } from "../dns-util"
-import type { CheckContext, CheckOutcome, Checker, Finding, Severity } from "../types"
+import type { CheckContext, Checker, CheckOutcome, Finding, Severity } from "../types"
 
 /**
  * DMARC (pm/checks/dmarc.mdx). Resolves `_dmarc.<domain>`, parses the full tag map, and runs the
@@ -97,6 +97,8 @@ export interface DmarcTestRow {
   result: "pass" | "fail" | "warn" | "info"
   detail?: string
   evidence?: string
+  /** The exact DNS record the fix expects, e.g. `<auth_name> TXT "v=DMARC1"` (§5 example). */
+  dns_value_expected?: string
   fix?: string
 }
 
@@ -276,12 +278,13 @@ export function analyzeDmarcRecord(domain: string, raw: string, foundAt: string)
       remediation: `Set sp=${policy} (or remove sp= so subdomains inherit p=${policy}).`,
       evidence: raw,
     })
-  } else if (policy && POLICY_RANK[policy] > 0) {
+  } else if (policy) {
+    // §5 example: the row exists on non-enforcing records too, at `info` ("effective sp=none").
     findings.push({
       id: "dmarc.subdomain_ok",
       checkId: "dmarc",
       title: `Subdomains covered (effective sp=${effectiveSp})`,
-      severity: "ok",
+      severity: POLICY_RANK[policy] > 0 ? "ok" : "info",
       detail: sp
         ? "An explicit sp= covers all subdomains."
         : `No sp= tag, so subdomains inherit p=${policy}.`,
@@ -415,6 +418,24 @@ export function analyzeDmarcRecord(domain: string, raw: string, foundAt: string)
     })
   }
 
+  // §8 standing recommendation: keep ≤ 2 report URIs — the spec only guarantees two.
+  for (const [tag, entries] of [
+    ["rua", ruaEntries],
+    ["ruf", rufEntries],
+  ] as const) {
+    if (entries.length > 2) {
+      findings.push({
+        id: "dmarc.rua_limit",
+        checkId: "dmarc",
+        title: `${entries.length} ${tag}= destinations — receivers only guarantee two`,
+        severity: "info",
+        detail: `DMARC only guarantees report delivery to the first 2 URIs; the extra ${tag}= destination${entries.length === 3 ? "" : "s"} may be silently ignored by receivers.`,
+        remediation: `Trim ${tag}= to at most 2 URIs (forward from one mailbox if more consumers need the reports).`,
+        evidence: map[tag],
+      })
+    }
+  }
+
   // fo / ri / rf sanity.
   if (map.fo !== undefined) {
     const tokens = map.fo.split(":").map((t) => t.trim().toLowerCase())
@@ -426,6 +447,18 @@ export function analyzeDmarcRecord(domain: string, raw: string, foundAt: string)
         severity: "info",
         detail: "fo tokens must be 0, 1, d, or s (colon-separated).",
         remediation: "Set fo=1 to get a report when either SPF or DKIM fails alignment.",
+        evidence: raw,
+      })
+    } else if (rufEntries.length > 0 && tokens.length === 1 && tokens[0] === "0") {
+      // Explicit fo=0 with ruf= set — the same both-fail-only trap as the default (§2 dmarc.fo).
+      findings.push({
+        id: "dmarc.fo",
+        checkId: "dmarc",
+        title: "ruf= set but fo=0 (both-fail reports only)",
+        severity: "info",
+        detail:
+          "With fo=0 failure reports are sent only when BOTH SPF and DKIM fail — you miss single-mechanism breakage.",
+        remediation: "Set fo=1.",
         evidence: raw,
       })
     }
@@ -570,8 +603,7 @@ export function analyzeDmarcRecord(domain: string, raw: string, foundAt: string)
     fo: map.fo ?? null,
     ri,
     // §5: policy in (quarantine, reject) AND not t=y — testing mode makes the policy advisory only.
-    is_enforcing:
-      (policy === "quarantine" || policy === "reject") && map.t?.toLowerCase() !== "y",
+    is_enforcing: (policy === "quarantine" || policy === "reject") && map.t?.toLowerCase() !== "y",
     external_reports_authorized: null,
     external_report_auth: [],
   }
@@ -596,8 +628,15 @@ const RESULT_OF: Record<Severity, DmarcTestRow["result"]> = {
   info: "info",
 }
 
-/** Findings → §5 `tests[]` rows — pass rows included so the page renders one explicit row per test. */
-export function buildTests(findings: Finding[]): DmarcTestRow[] {
+/**
+ * Findings → §5 `tests[]` rows — pass rows included so the page renders one explicit row per test.
+ * `extras` carries per-finding row fields the shared Finding shape has no slot for (e.g. the
+ * external-auth row's `dns_value_expected`, §5 example).
+ */
+export function buildTests(
+  findings: Finding[],
+  extras?: Map<Finding, Partial<DmarcTestRow>>,
+): DmarcTestRow[] {
   return findings.map((f) => ({
     id: f.id,
     title: f.title,
@@ -605,6 +644,7 @@ export function buildTests(findings: Finding[]): DmarcTestRow[] {
     ...(f.detail ? { detail: f.detail } : {}),
     ...(f.evidence ? { evidence: f.evidence } : {}),
     ...(f.remediation ? { fix: f.remediation } : {}),
+    ...(extras?.get(f) ?? {}),
   }))
 }
 
@@ -679,7 +719,11 @@ function emptyRecord(queryName: string): DmarcResults {
 // ---------------------------------------------------------------------------------------------
 
 /** Brew formula per tool — named in the info finding when a binary is missing (§3: skipped). */
-const TOOL_INSTALL: Record<string, string> = { doggo: "doggo", checkdmarc: "checkdmarc", kdig: "knot" }
+const TOOL_INSTALL: Record<string, string> = {
+  doggo: "doggo",
+  checkdmarc: "checkdmarc",
+  kdig: "knot",
+}
 
 /** Per-tool hard timeouts from the §3 execution table. */
 const DOGGO_TIMEOUT_MS = 10_000
@@ -736,7 +780,10 @@ async function invokeTool(
     return { entry, stdout: null }
   }
   if (format === "text") {
-    return { entry: { ...base, exit_code: 0, parsed: prune(null, res.stdout), error: null }, stdout: res.stdout }
+    return {
+      entry: { ...base, exit_code: 0, parsed: prune(null, res.stdout), error: null },
+      stdout: res.stdout,
+    }
   }
   try {
     const parsed = prune(JSON.parse(res.stdout), res.stdout)
@@ -830,6 +877,8 @@ export const dmarcCheck: Checker = {
   async run(ctx): Promise<CheckOutcome> {
     const name = `_dmarc.${ctx.domain}`
     const findings: Finding[] = []
+    /** Per-finding §5 row fields with no Finding slot (external-auth `dns_value_expected`). */
+    const testExtras = new Map<Finding, Partial<DmarcTestRow>>()
     let record: DmarcResults = emptyRecord(name)
     let externalReports: Analysis["externalReports"] = []
     let misplacedHit = false
@@ -871,13 +920,23 @@ export const dmarcCheck: Checker = {
       if (dmarc.length === 0) {
         const misplaced = await probeMisplacedRecord(ctx.domain)
         misplacedHit = misplaced.length > 0
+        // §4 edge cases: NXDOMAIN vs NODATA both mean "no DMARC" but are distinguished in the
+        // detail; TXT strings that don't start v=DMARC1 (wildcard junk) are ignored by receivers.
+        const negNote =
+          lookup.records.length > 0
+            ? ` (${name} answers TXT, but no string starts with v=DMARC1 — receivers ignore non-DMARC/wildcard TXT here)`
+            : lookup.negative === "nxdomain"
+              ? ` (NXDOMAIN — ${name} does not exist)`
+              : lookup.negative === "nodata"
+                ? ` (NODATA — ${name} exists but holds no TXT record)`
+                : ""
         findings.push({
           id: "dmarc.missing",
           checkId: "dmarc",
           title: "No DMARC record",
           severity: "critical",
           detail:
-            `${name} has no v=DMARC1 record (and no parent domain covers it). Anyone can spoof the exact From: domain, and Gmail/Yahoo bulk-sender rules penalize senders without DMARC.` +
+            `${name} has no v=DMARC1 record${negNote} (and no parent domain covers it). Anyone can spoof the exact From: domain, and Gmail/Yahoo bulk-sender rules penalize senders without DMARC.` +
             (misplacedHit
               ? ` A DMARC-looking record WAS found in the wrong place: ${misplaced.join("; ")} — receivers only read ${name}.`
               : ""),
@@ -918,12 +977,19 @@ export const dmarcCheck: Checker = {
             evidence: dmarc[0],
           })
         } else {
+          // §4 edge case (CNAME'd _dmarc): resolvers follow the CNAME transparently — record it
+          // in the detail for clarity so the user knows where the answer actually comes from.
+          const cname = await resolveCname(name)
+          const cnameNote =
+            cname.records.length > 0
+              ? ` ${name} is a CNAME to ${cname.records[0]} — resolvers follow it transparently.`
+              : ""
           analysis.findings.unshift({
             id: "dmarc.present",
             checkId: "dmarc",
             title: "DMARC record found",
             severity: "ok",
-            detail: `A single v=DMARC1 record is published at ${name}.`,
+            detail: `A single v=DMARC1 record is published at ${name}.${cnameNote}`,
             evidence: dmarc[0],
           })
         }
@@ -952,14 +1018,17 @@ export const dmarcCheck: Checker = {
               detail: `Lookup of ${authName} failed (${probe.error}); re-run to confirm the ${ext.kind} destination is authorized.`,
             })
           } else if (!authorized) {
-            findings.push({
+            const failure: Finding = {
               id: "dmarc.external_report_auth",
               checkId: "dmarc",
               title: `Report destination ${ext.domain} is not authorized`,
               severity: "critical",
               detail: `${ext.kind}= points at ${ext.uri}, but ${authName} has no v=DMARC1 TXT record — ${ext.domain} will silently discard your reports.`,
               remediation: `Have ${ext.domain} publish TXT ${authName} = "v=DMARC1" (report providers document this), or point ${ext.kind}= at a mailbox on ${ctx.domain}.`,
-            })
+            }
+            findings.push(failure)
+            // §5 example: the failing external-auth row carries the exact expected DNS record.
+            testExtras.set(failure, { dns_value_expected: `${authName} TXT "v=DMARC1"` })
           }
         }
         if (externalReports.length > 0) {
@@ -1056,7 +1125,13 @@ export const dmarcCheck: Checker = {
         const oursInvalid = findings.some(
           (f) =>
             f.severity === "critical" &&
-            ["dmarc.syntax", "dmarc.no_policy", "dmarc.policy", "dmarc.multiple", "dmarc.missing"].includes(f.id),
+            [
+              "dmarc.syntax",
+              "dmarc.no_policy",
+              "dmarc.policy",
+              "dmarc.multiple",
+              "dmarc.missing",
+            ].includes(f.id),
         )
         // Disagreement between the oracle and our verdict → note it on the affected test row.
         if (typeof oracleValid === "boolean" && oracleValid === oursInvalid) {
@@ -1107,12 +1182,13 @@ export const dmarcCheck: Checker = {
 
     // ---- The §5 `dmarc:` section — status, record, tool_runs, tests, problem_states ----------
     const dkim = ctx.upstream?.dkim as { working_selectors?: number } | undefined
-    const dkimUnhealthy = typeof dkim?.working_selectors === "number" && dkim.working_selectors === 0
+    const dkimUnhealthy =
+      typeof dkim?.working_selectors === "number" && dkim.working_selectors === 0
     const section: DmarcSection = {
       status: worstSeverity(findings),
       record,
       tool_runs: toolRuns,
-      tests: buildTests(findings),
+      tests: buildTests(findings, testExtras),
       problem_states: deriveProblemStates(findings, {
         misplacedHit,
         enforcing: record.is_enforcing,

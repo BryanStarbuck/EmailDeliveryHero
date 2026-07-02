@@ -6,6 +6,7 @@
   "description": "EmailDeliveryHero front-end — React 19 + Vite, Tailwind, TanStack Query/Router; auth via OpenAuthFederated (@auth/react, an externally-linked open-source library).",
   "scripts": {
     "dev": "vite",
+    "start": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run --passWithNoTests"

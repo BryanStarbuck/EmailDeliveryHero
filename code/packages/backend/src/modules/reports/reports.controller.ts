@@ -26,7 +26,9 @@ export class ReportsController {
 
   @Post("ingest")
   @ApiOperation({ summary: "Ingest now — scan the report drop folder / mailbox on demand" })
-  async ingest(@Param("id") id: string): Promise<{ summary: IngestSummary; view: DomainReportsView }> {
+  async ingest(
+    @Param("id") id: string,
+  ): Promise<{ summary: IngestSummary; view: DomainReportsView }> {
     const summary = await this.reports.ingest()
     return { summary, view: this.reports.view(id) }
   }

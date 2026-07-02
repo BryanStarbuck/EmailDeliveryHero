@@ -45,7 +45,9 @@ export class SettingsController {
 
   @Put("admin")
   @RequireRole("admin")
-  @ApiOperation({ summary: "Update admin-only global fields (checks, channels, storage, tools, access)" })
+  @ApiOperation({
+    summary: "Update admin-only global fields (checks, channels, storage, tools, access)",
+  })
   updateAdmin(
     @CurrentUser() user: AuthUser,
     @Body() dto: UpdateAdminSettingsDto,

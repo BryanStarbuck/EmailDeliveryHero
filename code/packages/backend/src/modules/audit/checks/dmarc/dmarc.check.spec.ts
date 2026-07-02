@@ -184,6 +184,44 @@ describe("analyzeDmarcRecord", () => {
     expect(byId(a, "dmarc.report_uri_size")?.severity).toBe("info")
   })
 
+  it("infos on more than 2 report URIs (§8 — the spec only guarantees two)", () => {
+    const a = analyzeDmarcRecord(
+      "example.com",
+      "v=DMARC1; p=reject; rua=mailto:a@example.com,mailto:b@example.com,mailto:c@example.com",
+      at,
+    )
+    expect(byId(a, "dmarc.rua_limit")?.severity).toBe("info")
+    // Two destinations is fine — no finding.
+    const two = analyzeDmarcRecord(
+      "example.com",
+      "v=DMARC1; p=reject; rua=mailto:a@example.com,mailto:b@example.com",
+      at,
+    )
+    expect(byId(two, "dmarc.rua_limit")).toBeUndefined()
+  })
+
+  it("infos when ruf= is set with fo=0 — explicit or defaulted (both-fail reports only)", () => {
+    const explicit = analyzeDmarcRecord(
+      "example.com",
+      "v=DMARC1; p=reject; rua=mailto:d@example.com; ruf=mailto:f@example.com; fo=0",
+      at,
+    )
+    expect(byId(explicit, "dmarc.fo")?.severity).toBe("info")
+    const defaulted = analyzeDmarcRecord(
+      "example.com",
+      "v=DMARC1; p=reject; rua=mailto:d@example.com; ruf=mailto:f@example.com",
+      at,
+    )
+    expect(byId(defaulted, "dmarc.fo")?.severity).toBe("info")
+    // fo=1 with ruf= is the advised shape — no finding.
+    const fo1 = analyzeDmarcRecord(
+      "example.com",
+      "v=DMARC1; p=reject; rua=mailto:d@example.com; ruf=mailto:f@example.com; fo=1",
+      at,
+    )
+    expect(byId(fo1, "dmarc.fo")).toBeUndefined()
+  })
+
   it("derives §9 problem states from the finding ids", () => {
     const monitor = analyzeDmarcRecord(
       "example.com",
@@ -220,9 +258,9 @@ describe("analyzeDmarcRecord", () => {
       at,
     )
     expect(deriveProblemStates(healthy.findings, { enforcing: true })).toEqual(["PS-00"])
-    expect(
-      deriveProblemStates(healthy.findings, { enforcing: true, dkimUnhealthy: true }),
-    ).toEqual(["PS-13"])
+    expect(deriveProblemStates(healthy.findings, { enforcing: true, dkimUnhealthy: true })).toEqual(
+      ["PS-13"],
+    )
   })
 
   it("maps findings to §5 tests[] rows (pass/fail/warn/info)", () => {
@@ -237,9 +275,7 @@ describe("analyzeDmarcRecord", () => {
   it("extracts TXT answers from doggo JSON tolerantly", () => {
     const doc = [
       {
-        answers: [
-          { name: "_dmarc.example.com.", type: "TXT", answer: '"v=DMARC1; p=none"' },
-        ],
+        answers: [{ name: "_dmarc.example.com.", type: "TXT", answer: '"v=DMARC1; p=none"' }],
       },
     ]
     const answers = extractDoggoAnswers(doc)

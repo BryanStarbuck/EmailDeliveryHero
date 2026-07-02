@@ -1,4 +1,7 @@
-import type { Checker, Finding } from "../types"
+import { readAppConfig } from "@shared/config-store"
+import type { Checker, CheckOutcome, Finding } from "../types"
+import { placementPayload, scorePlacementTest } from "./placement"
+import { listPlacementTests, seedListConfigured } from "./placement-store"
 
 /**
  * Inbox Placement Testing (seed-list / deliverability testing) — the empirical "did our mail actually
@@ -13,13 +16,21 @@ import type { Checker, Finding } from "../types"
  * mailboxes over a seed-service API or IMAP/Graph/JMAP. NONE are doable with pure `node:dns/promises`,
  * so nothing here can run in the first (DNS-only) round.
  *
- * Consequently this checker performs no DNS work and NEVER fabricates a placement verdict. Per spec
- * §6 ("until then every content.placement_* sub-check reports not configured") and acceptance
- * criterion #1 ("never a false ok or critical"), it emits one family-level gate finding plus one
- * `info` "not configured" finding per sub-check — using the exact sub-check ids from §2 so that, when
- * the seed integration + send-probe capability ship, each id lights up in place and the regression
- * diff (spec §6, pm/engineering.mdx §8) has a stable baseline. This mirrors the sibling FUTURE-gated
- * pattern in reputation-metrics.check.ts and link-url-reputation.check.ts.
+ * Consequently this checker performs no DNS work, never sends a probe, and NEVER fabricates a
+ * placement verdict. It has three states, gated by `config.yaml → seedList` (spec §6):
+ *
+ *   1. NOT CONFIGURED (the default): one family-level gate finding plus one `info` "not configured"
+ *      finding per sub-check — using the exact sub-check ids from §2 so that, when the seed
+ *      integration + send-probe capability ship, each id lights up in place and the regression diff
+ *      (spec §6, pm/engineering.mdx §8) has a stable baseline. Never a false ok/critical
+ *      (acceptance criterion #1). This mirrors the sibling FUTURE-gated pattern in
+ *      reputation-metrics.check.ts and link-url-reputation.check.ts.
+ *   2. CONFIGURED, NO TEST RECORDED: `info`-only "awaiting the first seed test" per sub-check —
+ *      an audit run never fires a probe incidentally (criterion #2); sending is the deliberate,
+ *      budgeted, debounced "Send seed test now" flow (placement-store.ts owns the gate).
+ *   3. CONFIGURED + RECORDED TEST(S): the pure scoring engine (placement.ts) turns the newest
+ *      recorded test into the full §2 finding set (per-provider rows, receiver-auth slices,
+ *      missing/latency/coverage, the trend diff) and the §5 `results.inbox_placement` payload.
  */
 
 const CHECK_ID = "content"
@@ -148,50 +159,117 @@ const PENDING: PendingSubcheck[] = [
   },
 ]
 
+/**
+ * The not-configured round (spec §6, acceptance criterion #1): a family-level "not configured"
+ * gate plus one `info` per sub-check — never a warning/critical, never a fabricated ok. The exact
+ * §2 sub-check ids are used so each lights up in place — and the regression diff has a stable
+ * per-sub-check baseline — once the seed integration ships.
+ */
+function notConfiguredFindings(): Finding[] {
+  const findings: Finding[] = [
+    {
+      id: "content.inbox_placement.pending",
+      checkId: CHECK_ID,
+      title: "Inbox placement testing not configured",
+      severity: "info",
+      detail:
+        "Seed-list inbox-placement testing is a future capability: it sends a tokenized probe to " +
+        "a curated seed list across Gmail, Outlook/Microsoft 365, Yahoo/AOL, and Apple iCloud, then " +
+        "reads each mailbox back to record which folder the copy landed in (Inbox / Spam / Gmail " +
+        "Promotions tab / Missing) and what the receiver's own Authentication-Results reported for " +
+        "SPF/DKIM/DMARC. None of this can run in the pure-DNS first round, so no placement verdict " +
+        "is asserted here — the sub-checks below report 'not configured', not ok and not failing.",
+      remediation:
+        'Configure a seed-list integration to enable inbox placement testing. Add a "seedList:" ' +
+        "block to ~/.email_delivery_hero/config.yaml with either a seed-service API key " +
+        "(GlockApps / Mailtrap / Everest / MailReach style) or self-hosted seed mailbox credentials " +
+        "(IMAP for Gmail/Yahoo/iCloud, Microsoft Graph for Outlook/M365, or JMAP), then use " +
+        '"Send seed test now" to send one tokenized probe. Because each run spends a credit and ' +
+        "sends real email, it runs on a slow dedicated cadence (daily/weekly), not the 6h DNS cadence.",
+    },
+  ]
+  for (const p of PENDING) {
+    findings.push({
+      id: p.id,
+      checkId: CHECK_ID,
+      title: `${p.title} — not configured`,
+      severity: "info",
+      detail: `Pending the seed-list integration (seed-service API key or self-hosted seed mailboxes). Once configured this will verify ${p.verifies}. Until then placement for this signal is unknown, not failing.`,
+      remediation: `Configure the seed-list integration (config.yaml "seedList:" block) to enable this check. Once data is flowing: ${p.fix}`,
+    })
+  }
+  return findings
+}
+
+/**
+ * Configured but no test recorded yet: still `info`-only (a verdict without data would be a false
+ * ok/critical — criterion #1's spirit holds until the first probe lands). The gate finding points
+ * at the deliberate "Send seed test now" action (spec §4/§6 — a probe is never fired incidentally
+ * by an audit run; recording happens through the seed-test flow, so criterion #2 holds by design).
+ */
+function awaitingFirstTestFindings(service: string): Finding[] {
+  const findings: Finding[] = [
+    {
+      id: "content.inbox_placement.pending",
+      checkId: CHECK_ID,
+      title: "Seed list configured — no seed test recorded yet",
+      severity: "info",
+      detail:
+        `The seed-list integration (${service}) is configured, but no seed test has been recorded ` +
+        "for this domain yet, so no placement verdict exists. Audit runs never send a probe " +
+        "incidentally — sending is a deliberate, budgeted action because it spends a seed credit " +
+        "and emits real email.",
+      remediation:
+        'Use "Send seed test now" on the domain\'s Inbox Placement panel to send one tokenized ' +
+        "probe to the seed list (confirmed action), or wait for the dedicated slow cadence " +
+        "(config.yaml → seedList.cadence) to run the first scheduled test.",
+    },
+  ]
+  for (const p of PENDING) {
+    findings.push({
+      id: p.id,
+      checkId: CHECK_ID,
+      title: `${p.title} — awaiting the first seed test`,
+      severity: "info",
+      detail: `The seed integration is configured but no test has run yet. Once the first probe lands this will verify ${p.verifies}. Until then placement for this signal is unknown, not failing.`,
+      remediation: `Send the first seed test ("Send seed test now"). Once data is flowing: ${p.fix}`,
+    })
+  }
+  return findings
+}
+
 export const inboxPlacementCheck: Checker = {
   id: "content.inbox_placement",
   label: "Inbox Placement Testing",
-  async run(_ctx): Promise<Finding[]> {
-    // The whole family is feature-gated behind a seed-list integration + a "send a probe" capability
-    // (spec §6). Until that exists there is nothing to measure with pure DNS, so we surface a
-    // family-level "not configured" gate plus one `info` per sub-check — never a warning/critical,
-    // never a fabricated ok (acceptance criterion #1).
-    const findings: Finding[] = [
-      {
-        id: "content.inbox_placement.pending",
-        checkId: CHECK_ID,
-        title: "Inbox placement testing not configured",
-        severity: "info",
-        detail:
-          "Seed-list inbox-placement testing is a future capability: it sends a tokenized probe to " +
-          "a curated seed list across Gmail, Outlook/Microsoft 365, Yahoo/AOL, and Apple iCloud, then " +
-          "reads each mailbox back to record which folder the copy landed in (Inbox / Spam / Gmail " +
-          "Promotions tab / Missing) and what the receiver's own Authentication-Results reported for " +
-          "SPF/DKIM/DMARC. None of this can run in the pure-DNS first round, so no placement verdict " +
-          "is asserted here — the sub-checks below report 'not configured', not ok and not failing.",
-        remediation:
-          'Configure a seed-list integration to enable inbox placement testing. Add a "seedList:" ' +
-          "block to ~/.email_delivery_hero/config.yaml with either a seed-service API key " +
-          "(GlockApps / Mailtrap / Everest / MailReach style) or self-hosted seed mailbox credentials " +
-          "(IMAP for Gmail/Yahoo/iCloud, Microsoft Graph for Outlook/M365, or JMAP), then use " +
-          '"Send seed test now" to send one tokenized probe. Because each run spends a credit and ' +
-          "sends real email, it runs on a slow dedicated cadence (daily/weekly), not the 6h DNS cadence.",
-      },
-    ]
-
-    // One `info` "not configured" per sub-check (spec §2/§6): the exact §2 ids, so each lights up in
-    // place — and the regression diff has a stable per-sub-check baseline — once the integration ships.
-    for (const p of PENDING) {
-      findings.push({
-        id: p.id,
-        checkId: CHECK_ID,
-        title: `${p.title} — not configured`,
-        severity: "info",
-        detail: `Pending the seed-list integration (seed-service API key or self-hosted seed mailboxes). Once configured this will verify ${p.verifies}. Until then placement for this signal is unknown, not failing.`,
-        remediation: `Configure the seed-list integration (config.yaml "seedList:" block) to enable this check. Once data is flowing: ${p.fix}`,
-      })
+  async run(ctx): Promise<CheckOutcome> {
+    // Feature gate (spec §6, acceptance criterion #1): the whole family is dark until a seed-list
+    // integration is configured — every sub-check reports "not configured", never a false verdict.
+    const cfg = readAppConfig().seedList
+    if (!seedListConfigured(cfg)) {
+      return { findings: notConfiguredFindings(), results: { configured: false } }
     }
 
-    return findings
+    // Configured: score the newest RECORDED seed test (the probe send + mailbox read-back happen
+    // in the seed-test flow, never inside an audit run — criterion #2). Scoring a stored test is
+    // pure and idempotent (spec §3 "re-reading a mailbox is idempotent on the test token"), so
+    // every audit run re-derives the findings from the same persisted envelope + per-seed rows.
+    const tests = ctx.domainId ? listPlacementTests(ctx.domainId) : []
+    if (tests.length === 0) {
+      return {
+        findings: awaitingFirstTestFindings(cfg.service),
+        results: { configured: true, seedService: cfg.service, testCount: 0 },
+      }
+    }
+
+    const [latest, ...previous] = tests
+    const findings = scorePlacementTest(latest, previous, {
+      domain: ctx.domain,
+      providers: cfg.providers,
+      thresholds: cfg.thresholds,
+    })
+    // The structured §5 payload: the test envelope + per-seed results persisted to
+    // results.inbox_placement in the audit JSON (criterion #11), plus the trend series the §4
+    // sparkline renders. The audit runner stores it under this checker's id.
+    return { findings, results: placementPayload(latest, tests) }
   },
 }

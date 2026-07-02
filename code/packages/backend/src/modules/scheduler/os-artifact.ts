@@ -268,6 +268,21 @@ export function schtasksCommands(cfg: ScheduleConfig): string[][] {
 
 /* ---------------------------------------- facade ---------------------------------------- */
 
+/**
+ * Whether the native schedule artifact ACTUALLY exists on THIS machine. The persisted
+ * `cfg.os.installed` flag only records installs done through the API — `just build` /
+ * `just install-agent` write the same launchd plist directly, and state synced from another
+ * computer can say either value. Disk is the source of truth wherever we can check it
+ * (launchd/systemd); the flag remains the fallback for schtasks.
+ */
+export function artifactInstalled(cfg: ScheduleConfig): boolean {
+  const kind = cfg.os.kind
+  if (kind === "launchd") return existsSync(launchdPlistPath(cfg.os.label))
+  if (kind === "systemd" || kind === "cron")
+    return existsSync(join(systemdUserDir(), `${SYSTEMD_UNIT}.timer`))
+  return cfg.os.installed
+}
+
 /** Render the artifact for the configured OS kind, without touching the system. */
 export function previewArtifact(cfg: ScheduleConfig): OsArtifactPreview {
   const kind = cfg.os.kind
@@ -276,7 +291,7 @@ export function previewArtifact(cfg: ScheduleConfig): OsArtifactPreview {
       kind,
       path: launchdPlistPath(cfg.os.label),
       content: renderLaunchdPlist(cfg),
-      installed: cfg.os.installed && existsSync(launchdPlistPath(cfg.os.label)),
+      installed: artifactInstalled(cfg),
     }
   }
   if (kind === "systemd" || kind === "cron") {
@@ -286,7 +301,7 @@ export function previewArtifact(cfg: ScheduleConfig): OsArtifactPreview {
       kind,
       path: join(systemdUserDir(), `${SYSTEMD_UNIT}.timer`),
       content,
-      installed: cfg.os.installed && existsSync(join(systemdUserDir(), `${SYSTEMD_UNIT}.timer`)),
+      installed: artifactInstalled(cfg),
     }
   }
   // schtasks: the "artifact" is the command set.

@@ -4,6 +4,7 @@ import {
   ArrayMaxSize,
   IsArray,
   IsBoolean,
+  IsIn,
   IsInt,
   IsIP,
   IsOptional,
@@ -33,22 +34,33 @@ export class ArcForwarderDto {
   @MaxLength(200)
   label!: string
 
-  @ApiProperty({ example: "acme-users@googlegroups.com", description: "Probe target that forwards to us" })
+  @ApiProperty({
+    example: "acme-users@googlegroups.com",
+    description: "Probe target that forwards to us",
+  })
   @IsString()
   @MaxLength(320)
   forwardAddress!: string
 
-  @ApiPropertyOptional({ example: "googlegroups.com", description: "Expected ARC signing domain (d=)" })
+  @ApiPropertyOptional({
+    example: "googlegroups.com",
+    description: "Expected ARC signing domain (d=)",
+  })
   @IsOptional()
   @IsString()
   @MaxLength(253)
   @Matches(DOMAIN_RE, { message: "signerDomain must be a valid domain" })
   signerDomain?: string
 
-  @ApiPropertyOptional({ example: "arc-20240605", description: "Expected ARC signing selector (s=)" })
+  @ApiPropertyOptional({
+    example: "arc-20240605",
+    description: "Expected ARC signing selector (s=)",
+  })
   @IsOptional()
   @IsString()
-  @Matches(SELECTOR_RE, { message: "signerSelector must contain only letters, digits, and hyphens" })
+  @Matches(SELECTOR_RE, {
+    message: "signerSelector must contain only letters, digits, and hyphens",
+  })
   signerSelector?: string
 
   @ApiPropertyOptional({
@@ -63,7 +75,10 @@ export class ArcForwarderDto {
 
 /** Per-domain ARC / forwarding configuration (pm/checks/arc.mdx §4 per-domain config inputs). */
 export class ArcConfigDto {
-  @ApiProperty({ example: true, description: "The domain sends through forwarders / mailing lists" })
+  @ApiProperty({
+    example: true,
+    description: "The domain sends through forwarders / mailing lists",
+  })
   @IsBoolean()
   usesForwarding!: boolean
 
@@ -97,7 +112,8 @@ export class BimiConfigDto {
   selectors?: string[]
 
   @ApiPropertyOptional({
-    description: "Sample message (headers suffice) — its BIMI-Selector: header names the selector to verify",
+    description:
+      "Sample message (headers suffice) — its BIMI-Selector: header names the selector to verify",
   })
   @IsOptional()
   @IsString()
@@ -162,10 +178,90 @@ export class DnsHealthConfigDto {
   @Matches(DOMAIN_RE, { each: true, message: "each expected NS must be a valid hostname" })
   expectedNs?: string[]
 
-  @ApiPropertyOptional({ example: false, description: "Skip the (future) AXFR zone-transfer probe" })
+  @ApiPropertyOptional({
+    example: false,
+    description: "Skip the (future) AXFR zone-transfer probe",
+  })
   @IsOptional()
   @IsBoolean()
   skipAxfrProbe?: boolean
+}
+
+/**
+ * Per-domain mail-routing expectations (pm/checks/mx_routing.mdx §4 per-domain config inputs —
+ * the "Mail routing" panel, mapped onto the `mx_expectations` schema of §5): the "this domain
+ * receives mail" intent toggle (drives whether an empty/null MX is critical vs expected), an
+ * optional expected-MX allow-list (drift detection), and the skip-SMTP-probe switch for hosts
+ * whose egress blocks port 25.
+ */
+export class MxRoutingConfigDto {
+  @ApiPropertyOptional({
+    example: true,
+    description:
+      "This domain receives mail — an empty/null MX is critical when true, expected when false (default true)",
+  })
+  @IsOptional()
+  @IsBoolean()
+  receivesMail?: boolean
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ["aspmx.l.google.com", "alt1.aspmx.l.google.com"],
+    description: "Expected MX host allow-list; drift against the published MX set is flagged",
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  @Matches(DOMAIN_RE, { each: true, message: "each expected MX host must be a valid hostname" })
+  expectedHosts?: string[]
+
+  @ApiPropertyOptional({
+    example: false,
+    description: "Skip the (future) TCP/25 SMTP probes for this domain (egress-blocked hosts)",
+  })
+  @IsOptional()
+  @IsBoolean()
+  skipSmtpProbe?: boolean
+}
+
+/**
+ * Per-domain DANE / TLSA config (pm/checks/dane_tlsa.mdx §4 per-domain config inputs, admin-only):
+ * the optional pinned expected next-cert SPKI digest that lets `infra.dane_rollover` proactively
+ * warn while the pre-staged rollover TLSA record is missing from DNS.
+ */
+export class DaneConfigDto {
+  @ApiPropertyOptional({
+    example: "5c1bcbc7a2e3fe9f5f41b7f6a8e1b0c9d3a2f10e8b7c6d5e4f3a2b1c0d9e8f7a",
+    description:
+      "Hex SHA-256 of the NEXT certificate's SubjectPublicKeyInfo (the planned 3 1 1 rollover digest)",
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9a-f]{64}$/i, {
+    message: "expectedNextSpki must be a 64-hex-character SHA-256 SPKI digest",
+  })
+  expectedNextSpki?: string
+}
+
+/**
+ * Per-domain MTA-STS config (pm/checks/mta_sts.mdx §4 per-domain config inputs, admin-only): the
+ * "Desired MTA-STS mode" target (`enforce` | `testing` | `off`) the `infra.mta_sts_mode` sub-check
+ * compares the served policy's `mode:` against. MTA-STS needs no per-domain secrets; the expected
+ * `mx:` set is derived automatically from live MX.
+ */
+export class MtaStsConfigDto {
+  @ApiPropertyOptional({
+    example: "enforce",
+    enum: ["enforce", "testing", "off"],
+    description:
+      "Desired MTA-STS mode — the target infra.mta_sts_mode flags a domain stuck below (off silences)",
+  })
+  @IsOptional()
+  @IsIn(["enforce", "testing", "off"], {
+    message: "desiredMode must be one of enforce, testing, off",
+  })
+  desiredMode?: "enforce" | "testing" | "off"
 }
 
 /**
@@ -187,14 +283,20 @@ export class DomainReputationConfigDto {
   @MaxLength(253, { each: true })
   brands?: string[]
 
-  @ApiPropertyOptional({ example: 30, description: "Warn when the registration expires in fewer days than this" })
+  @ApiPropertyOptional({
+    example: 30,
+    description: "Warn when the registration expires in fewer days than this",
+  })
   @IsOptional()
   @IsInt()
   @Min(1)
   @Max(365)
   expiryWarnDays?: number
 
-  @ApiPropertyOptional({ example: 30, description: "Warn when the registration is younger than this many days" })
+  @ApiPropertyOptional({
+    example: 30,
+    description: "Warn when the registration is younger than this many days",
+  })
   @IsOptional()
   @IsInt()
   @Min(1)
@@ -209,10 +311,34 @@ export class DomainReputationConfigDto {
   @IsBoolean()
   registrantPublicIntentional?: boolean
 
-  @ApiPropertyOptional({ example: false, description: "Enable the (future) active cousin-domain scan" })
+  @ApiPropertyOptional({
+    example: false,
+    description: "Enable the (future) active cousin-domain scan",
+  })
   @IsOptional()
   @IsBoolean()
   cousinScan?: boolean
+}
+
+/**
+ * Per-domain Link / URL-reputation config (pm/checks/link_url_reputation.mdx §4 per-domain config
+ * inputs): the own/related/allow-listed link domains counted as aligned by
+ * `content.url_domain_alignment` — tracking/click/CDN domains the org controls that should count
+ * as on-brand even though they differ from the sending domain.
+ */
+export class LinkUrlConfigDto {
+  @ApiPropertyOptional({
+    type: [String],
+    example: ["clicks.example.net", "cdn.examplebrand.com"],
+    description:
+      "Registrable domains treated as aligned (own/related/allow-listed) by content.url_domain_alignment",
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @IsString({ each: true })
+  @Matches(DOMAIN_RE, { each: true, message: "each allowed link domain must be a valid domain" })
+  allowedDomains?: string[]
 }
 
 export class CreateDomainDto {
@@ -249,7 +375,10 @@ export class CreateDomainDto {
   @IsBoolean()
   scheduleEnabled?: boolean
 
-  @ApiPropertyOptional({ type: ArcConfigDto, description: "ARC / forwarding config (pm/checks/arc.mdx §4)" })
+  @ApiPropertyOptional({
+    type: ArcConfigDto,
+    description: "ARC / forwarding config (pm/checks/arc.mdx §4)",
+  })
   @IsOptional()
   @ValidateNested()
   @Type(() => ArcConfigDto)
@@ -271,6 +400,16 @@ export class CreateDomainDto {
   dnsHealth?: DnsHealthConfigDto
 
   @ApiPropertyOptional({
+    type: MxRoutingConfigDto,
+    description:
+      "Mail-routing expectations (pm/checks/mx_routing.mdx §4) — receives-mail intent, expected-MX allow-list, skip-SMTP-probe",
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => MxRoutingConfigDto)
+  mx?: MxRoutingConfigDto
+
+  @ApiPropertyOptional({
     type: DomainReputationConfigDto,
     description: "Domain-registration-reputation config (pm/checks/domain_reputation.mdx §4)",
   })
@@ -278,6 +417,34 @@ export class CreateDomainDto {
   @ValidateNested()
   @Type(() => DomainReputationConfigDto)
   domainReputation?: DomainReputationConfigDto
+
+  @ApiPropertyOptional({
+    type: DaneConfigDto,
+    description: "DANE / TLSA config (pm/checks/dane_tlsa.mdx §4) — expected next-cert SPKI pin",
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => DaneConfigDto)
+  dane?: DaneConfigDto
+
+  @ApiPropertyOptional({
+    type: MtaStsConfigDto,
+    description: "MTA-STS config (pm/checks/mta_sts.mdx §4) — the desired-mode target",
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => MtaStsConfigDto)
+  mtaSts?: MtaStsConfigDto
+
+  @ApiPropertyOptional({
+    type: LinkUrlConfigDto,
+    description:
+      "Link / URL-reputation config (pm/checks/link_url_reputation.mdx §4) — aligned link domains",
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LinkUrlConfigDto)
+  linkUrl?: LinkUrlConfigDto
 }
 
 export class UpdateDomainDto {
@@ -308,7 +475,10 @@ export class UpdateDomainDto {
   @IsBoolean()
   scheduleEnabled?: boolean
 
-  @ApiPropertyOptional({ type: ArcConfigDto, description: "ARC / forwarding config (pm/checks/arc.mdx §4)" })
+  @ApiPropertyOptional({
+    type: ArcConfigDto,
+    description: "ARC / forwarding config (pm/checks/arc.mdx §4)",
+  })
   @IsOptional()
   @ValidateNested()
   @Type(() => ArcConfigDto)
@@ -330,6 +500,16 @@ export class UpdateDomainDto {
   dnsHealth?: DnsHealthConfigDto
 
   @ApiPropertyOptional({
+    type: MxRoutingConfigDto,
+    description:
+      "Mail-routing expectations (pm/checks/mx_routing.mdx §4) — receives-mail intent, expected-MX allow-list, skip-SMTP-probe",
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => MxRoutingConfigDto)
+  mx?: MxRoutingConfigDto
+
+  @ApiPropertyOptional({
     type: DomainReputationConfigDto,
     description: "Domain-registration-reputation config (pm/checks/domain_reputation.mdx §4)",
   })
@@ -337,4 +517,32 @@ export class UpdateDomainDto {
   @ValidateNested()
   @Type(() => DomainReputationConfigDto)
   domainReputation?: DomainReputationConfigDto
+
+  @ApiPropertyOptional({
+    type: DaneConfigDto,
+    description: "DANE / TLSA config (pm/checks/dane_tlsa.mdx §4) — expected next-cert SPKI pin",
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => DaneConfigDto)
+  dane?: DaneConfigDto
+
+  @ApiPropertyOptional({
+    type: MtaStsConfigDto,
+    description: "MTA-STS config (pm/checks/mta_sts.mdx §4) — the desired-mode target",
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => MtaStsConfigDto)
+  mtaSts?: MtaStsConfigDto
+
+  @ApiPropertyOptional({
+    type: LinkUrlConfigDto,
+    description:
+      "Link / URL-reputation config (pm/checks/link_url_reputation.mdx §4) — aligned link domains",
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LinkUrlConfigDto)
+  linkUrl?: LinkUrlConfigDto
 }

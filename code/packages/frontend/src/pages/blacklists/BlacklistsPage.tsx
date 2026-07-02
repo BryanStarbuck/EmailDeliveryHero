@@ -1,8 +1,8 @@
 import { Link, useNavigate } from "@tanstack/react-router"
 import { Ban, ChevronRight, ExternalLink, Mailbox, RefreshCw } from "lucide-react"
+import { useRunAllAudits, useRunAudit } from "@/api/audit"
 import { useBlacklistRegistry, useBlacklistRuns } from "@/api/blacklists"
 import { useDomains } from "@/api/domains"
-import { useRunAllAudits, useRunAudit } from "@/api/audit"
 import type { BlacklistRunResults, BlacklistZoneResult, Severity } from "@/api/types"
 import { cn } from "@/lib/utils"
 
@@ -170,7 +170,9 @@ export function BlacklistsPage() {
             <StatTile value={zonesEnabled} label="zones enabled" />
             <StatTile value={listedCount} label="listed" tone={verdictTone} />
             <StatTile
-              value={newCount > 0 ? `▲ ${newCount}` : resolvedCount > 0 ? `▼ ${resolvedCount}` : "—"}
+              value={
+                newCount > 0 ? `▲ ${newCount}` : resolvedCount > 0 ? `▼ ${resolvedCount}` : "—"
+              }
               label={newCount > 0 ? "new listings" : resolvedCount > 0 ? "resolved" : "unchanged"}
               tone={newCount > 0 ? "new" : undefined}
             />
@@ -291,10 +293,7 @@ export function BlacklistsPage() {
                   >
                     <div className="flex items-center gap-3">
                       <span
-                        className={cn(
-                          "h-2.5 w-2.5 rounded-full",
-                          DOT[run.summary.worst_severity],
-                        )}
+                        className={cn("h-2.5 w-2.5 rounded-full", DOT[run.summary.worst_severity])}
                       />
                       <span className="font-medium">{run.domain}</span>
                       <span className="text-xs text-[var(--edh-muted)]">

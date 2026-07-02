@@ -1,7 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "./axios"
 import type {
+  AuditResult,
   BlacklistHistoryEntry,
+  BlacklistLiveRecheck,
   BlacklistRegistryInfo,
   BlacklistRunResults,
   PortalUserState,
@@ -51,6 +53,70 @@ export function useBlacklistHistory(domain: string) {
           `/blacklists/results/${encodeURIComponent(domain)}/history`,
         )
       ).data,
+  })
+}
+
+/**
+ * Update one zone's operator override — enabled toggle / weight (the §4 admin "Blocklist Zones"
+ * panel). Writes <stateDir>/blacklist_zones.yaml server-side, never the checked-in registry.
+ */
+export function useUpdateBlacklistZone() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: {
+      zone: string
+      enabled?: boolean
+      weight?: number
+      kind?: "ip" | "domain"
+    }) => {
+      const { zone, ...patch } = input
+      return (
+        await api.patch<BlacklistRegistryInfo>(
+          `/blacklists/zones/${encodeURIComponent(zone)}`,
+          patch,
+        )
+      ).data
+    },
+    onSuccess: (data) => {
+      qc.setQueryData(["blacklists", "zones"], data)
+    },
+  })
+}
+
+/**
+ * Category-scoped re-run (pm/checks/blacklists.mdx §21 / AC 26): POST /audit/run/:id/blacklists
+ * executes ONLY the Blacklists category and writes a NEW run file with run.scope: blacklists —
+ * the viewed run is never mutated. Every Blacklists surface's [Run this check now] uses this and
+ * navigates to the returned run on completion.
+ */
+export function useRunBlacklistsCheck() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (domainId: string) =>
+      (await api.post<AuditResult>(`/audit/run/${encodeURIComponent(domainId)}/blacklists`)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["blacklists"] })
+      qc.invalidateQueries({ queryKey: ["audit"] })
+    },
+  })
+}
+
+/**
+ * Live recheck (pm/checks/blacklists.mdx §21.3 / AC 27): POST /blacklists/:domainId/recheck with
+ * optional { zones, targets } scoping. Ephemeral — the backend never writes a run file, and the
+ * UI renders the result as a "live recheck HH:MM" overlay beside the stored run values.
+ */
+export function useBlacklistRecheck() {
+  return useMutation({
+    mutationFn: async (input: { domain: string; zones?: string[]; targets?: string[] }) => {
+      const { domain, ...body } = input
+      return (
+        await api.post<BlacklistLiveRecheck>(
+          `/blacklists/${encodeURIComponent(domain)}/recheck`,
+          body,
+        )
+      ).data
+    },
   })
 }
 

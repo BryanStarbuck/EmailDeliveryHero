@@ -1,6 +1,12 @@
 import type { DigAnswer } from "../dns-util"
 import { parseDigAnswer } from "../dns-util"
-import { analyzeHost, type HostObservation, parseTlsa } from "./dane-tlsa.check"
+import type { DnssecResults } from "../dnssec/dnssec.check"
+import {
+  analyzeHost,
+  domainZonePrereqFindings,
+  type HostObservation,
+  parseTlsa,
+} from "./dane-tlsa.check"
 
 const SHA256 = "a".repeat(64)
 const SHA512 = "b".repeat(128)
@@ -187,5 +193,59 @@ describe("analyzeHost", () => {
     expect(row.tlsaPresent).toBe(false)
     expect(row.paramsOk).toBeNull()
     expect(row.recommended311).toBeNull()
+  })
+
+  it("warns when the admin-pinned expected next-cert digest is not staged (spec §4)", () => {
+    const pin = "d".repeat(64)
+    const { findings } = analyzeHost(
+      observe({
+        tlsa: { records: [rr(`3 1 1 ${SHA256}`), rr(`3 1 1 ${"c".repeat(64)}`)] },
+        expectedNextSpki: pin,
+      }),
+    )
+    const f = byPrefix(findings, "infra.dane_rollover.next_missing")[0]
+    expect(f.severity).toBe("warning")
+    // AC8: the remediation contains the exact record to publish, never a generic hint.
+    expect(f.remediation).toContain(`3 1 1 ${pin}`)
+    expect(f.remediation).toContain("_25._tcp.mail.example.com")
+  })
+
+  it("stays quiet when the pinned next-cert digest IS staged (case-insensitive)", () => {
+    const pin = "C".repeat(64)
+    const { findings } = analyzeHost(
+      observe({
+        tlsa: { records: [rr(`3 1 1 ${SHA256}`), rr(`3 1 1 ${"c".repeat(64)}`)] },
+        expectedNextSpki: pin,
+      }),
+    )
+    expect(byPrefix(findings, "infra.dane_rollover.next_missing")).toHaveLength(0)
+    expect(findings.every((f) => f.severity === "ok")).toBe(true)
+  })
+})
+
+describe("domainZonePrereqFindings", () => {
+  const dnssec = (signed: boolean): DnssecResults => ({ signed }) as unknown as DnssecResults
+
+  it("returns nothing without an upstream dnssec result (standalone run)", () => {
+    expect(domainZonePrereqFindings("example.com", undefined, true)).toHaveLength(0)
+  })
+
+  it("TLSA present + unsigned domain zone is critical dane_without_dnssec (spec §2 row 1)", () => {
+    const [f] = domainZonePrereqFindings("example.com", dnssec(false), true)
+    expect(f.id).toBe("infra.dane_without_dnssec.domain_zone")
+    expect(f.severity).toBe("critical")
+    expect(f.remediation).toContain("DS record")
+  })
+
+  it("no DANE + unsigned domain zone is a warning, never silent", () => {
+    const [f] = domainZonePrereqFindings("example.com", dnssec(false), false)
+    expect(f.id).toBe("infra.dane_dnssec_prereq.domain_zone")
+    expect(f.severity).toBe("warning")
+    expect(f.remediation).toContain("3 1 1")
+  })
+
+  it("signed domain zone with TLSA present is ok (AC2: never turns the cell amber/red)", () => {
+    const [f] = domainZonePrereqFindings("example.com", dnssec(true), true)
+    expect(f.severity).toBe("ok")
   })
 })

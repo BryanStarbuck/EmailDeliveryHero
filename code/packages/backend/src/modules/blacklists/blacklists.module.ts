@@ -1,8 +1,10 @@
 import { Module } from "@nestjs/common"
+import { DomainsModule } from "../domains/domains.module"
 import { BlacklistsController } from "./blacklists.controller"
 
 /** The Blacklists technology API — see pm/checks/blacklists.mdx §13 and blacklists.controller.ts. */
 @Module({
+  imports: [DomainsModule],
   controllers: [BlacklistsController],
 })
 export class BlacklistsModule {}

@@ -178,6 +178,48 @@ describe("arcCheck (pm/checks/arc.mdx)", () => {
     expect(byId(findings, "arc.selector_dns.some-list")?.severity).toBe("info")
   })
 
+  it("reads the DMARC policy the sibling dmarc checker already parsed (never re-queries _dmarc)", async () => {
+    // No _dmarc answer is mocked: if the checker fell back to DNS it would see "no record" and
+    // wrongly conclude not-enforcing. The upstream §5 dmarc section must win (pm/checks/arc.mdx §3.1).
+    dnsAnswers({
+      "arc1._domainkey.lists.acme.org": { records: [`v=DKIM1; k=rsa; p=${GOOD_P}`] },
+    })
+    const c: CheckContext = {
+      ...ctx({
+        usesForwarding: true,
+        forwarders: [
+          {
+            label: "Acme Users",
+            forwardAddress: "acme-users@lists.acme.org",
+            signerDomain: "lists.acme.org",
+            signerSelector: "arc1",
+          },
+        ],
+      }),
+      upstream: { dmarc: { record: { policy: "reject", is_enforcing: true } } },
+    }
+    const { findings, results } = await run(c)
+    expect(results.applicable).toBe(true)
+    expect(byId(findings, "arc.applicable")?.detail).toContain("p=reject")
+    expect(byId(findings, "arc.selector_dns.acme-users")?.severity).toBe("ok")
+    const queried = mockResolveTxt.mock.calls.map((call) => call[0])
+    expect(queried).not.toContain("_dmarc.example.com")
+  })
+
+  it("treats a sibling not-enforcing verdict as not applicable without any DNS lookup", async () => {
+    dnsAnswers({})
+    const c: CheckContext = {
+      ...ctx({ usesForwarding: true, forwarders: [] }),
+      upstream: { dmarc: { record: { policy: "none", is_enforcing: false } } },
+    }
+    const { findings, results } = await run(c)
+    expect(findings).toHaveLength(1)
+    expect(findings[0].id).toBe("arc.applicable")
+    expect(findings[0].severity).toBe("info")
+    expect(results.applicable).toBe(false)
+    expect(mockResolveTxt).not.toHaveBeenCalled()
+  })
+
   it("every non-ok finding carries a concrete remediation (acceptance §8.1)", async () => {
     dnsAnswers({ "_dmarc.example.com": { records: ["v=DMARC1; p=reject"] } })
     const { findings } = await run(

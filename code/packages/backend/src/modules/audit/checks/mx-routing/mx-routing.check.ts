@@ -1,3 +1,4 @@
+import { domainToASCII } from "node:url"
 import { resolve4, resolve6, resolveCname, resolveMx } from "../dns-util"
 import type { Checker, CheckOutcome, Finding, MxRoutingConfig, Severity } from "../types"
 
@@ -82,6 +83,21 @@ function normHost(exchange: string): string {
   return exchange.trim().toLowerCase().replace(/\.$/, "")
 }
 
+/**
+ * IDN → A-label normalization (spec §3 edge cases: "IDN/punycode domains are normalized to A-label
+ * before query"). A Unicode name (e.g. "bücher.example") becomes its punycode form
+ * ("xn--bcher-kva.example") so node:dns queries the wire-format name. Already-ASCII names pass
+ * through unchanged; an unconvertible name falls back to the input so the lookup itself reports
+ * the failure rather than this helper throwing.
+ */
+function toAsciiName(name: string): string {
+  const normalized = normHost(name)
+  // Fast path: pure-ASCII names need no conversion (domainToASCII would only lowercase them).
+  if (/^\p{ASCII}*$/u.test(normalized)) return normalized
+  const ascii = domainToASCII(normalized)
+  return ascii !== "" ? ascii : normalized
+}
+
 interface HostInfo {
   host: string
   priority: number
@@ -152,7 +168,8 @@ const SEVERITY_ORDER: Record<Severity, number> = { ok: 0, info: 1, warning: 2, c
 
 function worstSeverity(findings: Finding[]): Severity {
   let worst: Severity = "ok"
-  for (const f of findings) if (SEVERITY_ORDER[f.severity] > SEVERITY_ORDER[worst]) worst = f.severity
+  for (const f of findings)
+    if (SEVERITY_ORDER[f.severity] > SEVERITY_ORDER[worst]) worst = f.severity
   return worst
 }
 
@@ -211,13 +228,19 @@ export const mxRoutingCheck: Checker = {
   label: "MX & Mail Routing",
   async run(ctx): Promise<CheckOutcome> {
     const domain = normHost(ctx.domain)
+    // IDN/punycode domains are normalized to A-label before query (spec §3 edge cases).
+    const queryDomain = toAsciiName(ctx.domain)
     const findings: Finding[] = []
     // Declared intent (pm/checks/mx_routing.mdx §4): schema default receivesMail=TRUE.
     const mxConfig: MxRoutingConfig = ctx.mx ?? {}
     const receivesMail = mxConfig.receivesMail ?? true
     const skipSmtpProbe = mxConfig.skipSmtpProbe ?? false
+    // Optional expected-MX allow-list (spec §4: "flags drift if published MX differs").
+    const expectedHosts = [
+      ...new Set((mxConfig.expectedHosts ?? []).map(toAsciiName).filter(Boolean)),
+    ]
 
-    const mx = await resolveMx(ctx.domain)
+    const mx = await resolveMx(queryDomain)
     if (mx.error) {
       // Transient resolver failure: no snapshot — the UI must not render false topology.
       return {
@@ -258,8 +281,10 @@ export const mxRoutingCheck: Checker = {
               remediation: `Publish an RFC 7505 null MX so senders fail fast with a permanent error: "${domain}. IN MX 0 \\".\\"".`,
             },
       )
+      // Expected-MX drift (spec §4): the allow-list names hosts, but nothing is published.
+      pushExpectedDrift(findings, domain, expectedHosts, [])
       // infra.mx_matches_a: implicit-A fallback (RFC 5321) when no MX exists.
-      const a = await resolve4(ctx.domain)
+      const a = await resolve4(queryDomain)
       if (a.records.length > 0) {
         findings.push({
           id: "infra.mx_matches_a",
@@ -327,6 +352,8 @@ export const mxRoutingCheck: Checker = {
           evidence: nullRecords.map((r) => `${r.priority} "."`).join(" | "),
         })
       }
+      // Expected-MX drift (spec §4): a null MX publishes none of the allow-listed hosts.
+      pushExpectedDrift(findings, domain, expectedHosts, [])
       // Null MX short-circuits target resolution/reachability (no target to probe).
       pushFutureFindings(findings, domain, skipSmtpProbe)
       return {
@@ -371,7 +398,9 @@ export const mxRoutingCheck: Checker = {
     // --- Resolve each distinct host once (dedupe within the run) --------------------------------
     const seen = new Map<string, HostInfo>()
     for (const rec of realRecords) {
-      const host = normHost(rec.exchange)
+      // Targets are lowercased, FQDN-normalized, and IDN→A-label converted before query and
+      // set comparison (spec §3 edge cases).
+      const host = toAsciiName(rec.exchange)
       if (seen.has(host)) continue
       const info: HostInfo = {
         host,
@@ -381,13 +410,13 @@ export const mxRoutingCheck: Checker = {
         nonPublic: [],
       }
 
-      const cname = await resolveCname(rec.exchange)
+      const cname = await resolveCname(host)
       if (cname.records.length > 0) {
         info.isCname = true
         info.cnameTarget = cname.records.join(", ")
       }
 
-      const [v4, v6] = await Promise.all([resolve4(rec.exchange), resolve6(rec.exchange)])
+      const [v4, v6] = await Promise.all([resolve4(host), resolve6(host)])
       info.ips = [...v4.records, ...v6.records]
       if (info.ips.length === 0 && !v4.empty && !v6.empty && (v4.error || v6.error)) {
         info.transient = v4.error ?? v6.error
@@ -512,10 +541,13 @@ export const mxRoutingCheck: Checker = {
       })
     }
 
+    // --- infra.mx_expected_drift: published set vs the operator's allow-list (spec §4) ----------
+    pushExpectedDrift(findings, domain, expectedHosts, [...seen.keys()])
+
     // --- infra.mx_dup_targets ------------------------------------------------------------------
     const targetCounts = new Map<string, number>()
     for (const r of realRecords) {
-      const h = normHost(r.exchange)
+      const h = toAsciiName(r.exchange)
       targetCounts.set(h, (targetCounts.get(h) ?? 0) + 1)
     }
     const dups = [...targetCounts.entries()].filter(([, n]) => n > 1).map(([h]) => h)
@@ -635,7 +667,7 @@ export const mxRoutingCheck: Checker = {
     }
 
     // --- FUTURE (probe / external feed) sub-checks: info only -----------------------------------
-    pushFutureFindings(findings, domain)
+    pushFutureFindings(findings, domain, skipSmtpProbe)
 
     return {
       findings,
@@ -643,37 +675,103 @@ export const mxRoutingCheck: Checker = {
         hosts,
         { mx_found: true, null_mx: nullRecords.length > 0, implicit_a_fallback: false },
         { host_count: distinctHosts.size, network_count: publicPrefixes.size },
+        {
+          mx_count: mx.records.length,
+          distinct_priorities: distinctPriorities.size,
+          receives_mail: receivesMail,
+        },
+        findings,
       ),
     }
   },
 }
 
 /**
+ * infra.mx_expected_drift (pm/checks/mx_routing.mdx §4 per-domain config inputs): compare the
+ * published MX host set against the operator's optional expected-MX allow-list and flag drift.
+ * Both sides are lowercased / FQDN-normalized / A-label converted before the set compare. With no
+ * allow-list configured the sub-check is silent; a matching set emits an `ok` row so the operator
+ * sees the expectation is being enforced.
+ */
+function pushExpectedDrift(
+  findings: Finding[],
+  domain: string,
+  expected: string[],
+  published: string[],
+): void {
+  if (expected.length === 0) return
+  const publishedSet = new Set(published)
+  const expectedSet = new Set(expected)
+  const missing = expected.filter((h) => !publishedSet.has(h))
+  const unexpected = published.filter((h) => !expectedSet.has(h))
+  if (missing.length === 0 && unexpected.length === 0) {
+    findings.push({
+      id: "infra.mx_expected_drift",
+      checkId: CHECK_ID,
+      title: "Published MX matches the expected allow-list",
+      severity: "ok",
+      detail: `All ${expected.length} expected MX host(s) are published and no unexpected MX host is present.`,
+      evidence: expected.join(", "),
+    })
+    return
+  }
+  const parts: string[] = []
+  if (missing.length > 0) parts.push(`expected but not published: ${missing.join(", ")}`)
+  if (unexpected.length > 0) parts.push(`published but not expected: ${unexpected.join(", ")}`)
+  const fixes: string[] = []
+  if (missing.length > 0) {
+    fixes.push(
+      `publish the missing line(s): ${missing.map((h) => `"${domain}. IN MX 10 ${h}."`).join(" ")}`,
+    )
+  }
+  if (unexpected.length > 0) {
+    fixes.push(
+      `remove the unexpected MX line(s) for ${unexpected.join(", ")} — or add them to the expected-MX allow-list in the domain's Mail-routing settings if the change was intentional`,
+    )
+  }
+  findings.push({
+    id: "infra.mx_expected_drift",
+    checkId: CHECK_ID,
+    title: "Published MX differs from the expected allow-list",
+    severity: "warning",
+    detail: `The MX RRset published for ${domain} has drifted from the operator-declared allow-list — ${parts.join("; ")}. Unplanned MX changes can silently reroute (or drop) inbound mail and may indicate a DNS compromise.`,
+    remediation: `Reconcile the MX RRset with the allow-list: ${fixes.join("; ")}.`,
+    evidence: `expected: [${expected.join(", ")}] | published: [${published.join(", ") || "(none)"}]`,
+  })
+}
+
+/**
  * Emit the one-info-each "not yet evaluated" findings for the FUTURE, network-probe / external-feed
  * sub-checks (spec §7). These never escalate to warning/critical.
  */
-function pushFutureFindings(findings: Finding[], _domain: string): void {
+function pushFutureFindings(findings: Finding[], _domain: string, skipSmtpProbe = false): void {
+  // skipSmtpProbe (pm/checks/mx_routing.mdx §4): the domain opted out of TCP/25 probing, so the
+  // SMTP-probe-gated sub-checks are omitted entirely rather than reported as "not yet evaluated".
+  if (!skipSmtpProbe) {
+    findings.push(
+      future(
+        "infra.mx_reachable",
+        "SMTP reachability not yet evaluated",
+        "TCP/25 connect + 220-banner probing is deferred to the network-probe round (outbound port 25 is blocked on many hosts). Each MX will be tested for a 220 SMTP greeting there.",
+      ),
+      future(
+        "infra.mx_banner",
+        "SMTP banner not yet evaluated",
+        "The 220 greeting hostname will be validated as a proper FQDN (not localhost.localdomain or a bare IP) once SMTP probing is enabled.",
+      ),
+      future(
+        "infra.mx_greylash",
+        "Greylisting behavior not yet evaluated",
+        "First-contact 4xx tempfail (greylisting) detection requires an SMTP probe and is advisory-only; it will estimate expected first-delivery delay in the probe round.",
+      ),
+      future(
+        "infra.backup_mx_hygiene",
+        "Backup-MX hygiene not yet evaluated",
+        "Open-relay / recipient-validation testing of higher-preference (backup) MX hosts requires an SMTP relay probe, pending the network-probe round.",
+      ),
+    )
+  }
   findings.push(
-    future(
-      "infra.mx_reachable",
-      "SMTP reachability not yet evaluated",
-      "TCP/25 connect + 220-banner probing is deferred to the network-probe round (outbound port 25 is blocked on many hosts). Each MX will be tested for a 220 SMTP greeting there.",
-    ),
-    future(
-      "infra.mx_banner",
-      "SMTP banner not yet evaluated",
-      "The 220 greeting hostname will be validated as a proper FQDN (not localhost.localdomain or a bare IP) once SMTP probing is enabled.",
-    ),
-    future(
-      "infra.mx_greylash",
-      "Greylisting behavior not yet evaluated",
-      "First-contact 4xx tempfail (greylisting) detection requires an SMTP probe and is advisory-only; it will estimate expected first-delivery delay in the probe round.",
-    ),
-    future(
-      "infra.backup_mx_hygiene",
-      "Backup-MX hygiene not yet evaluated",
-      "Open-relay / recipient-validation testing of higher-preference (backup) MX hosts requires an SMTP relay probe, pending the network-probe round.",
-    ),
     future(
       "infra.mx_ttl",
       "MX RRset TTL not evaluated in first round",

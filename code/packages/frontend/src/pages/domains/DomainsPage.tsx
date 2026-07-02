@@ -100,7 +100,8 @@ export function DomainsPage() {
     const byId = new Map((results ?? []).map((r) => [r.domainId, r]))
     return list.map((d) => ({
       domain: d,
-      cells: rollupCategories(byId.get(d.id)?.findings),
+      // Structured results give DKIM/DMARC their spec'd cell labels (selectors · bits / p=<policy>).
+      cells: rollupCategories(byId.get(d.id)?.findings, byId.get(d.id)?.results),
       running: activeScans.some((s) => s.domainId === d.id),
     }))
   }, [list, results, activeScans])
@@ -263,23 +264,15 @@ export function DomainsPage() {
           </thead>
           <tbody>
             {table.getRowModel().rows.map((row) => (
-              // The whole row (outside the toggle/action cells, which stop propagation)
-              // click-navigates to the run detail (pm/domains.mdx §3.1).
+              // The whole row click-navigates to the run detail (pm/domains.mdx §3.1); the
+              // toggle/action controls stop propagation so they never also navigate.
               <tr
                 key={row.id}
                 onClick={() => openDetail(row.original.domain)}
                 className="cursor-pointer border-t border-[var(--edh-border)] hover:bg-slate-50"
               >
                 {row.getVisibleCells().map((cell) => (
-                  <td
-                    key={cell.id}
-                    className={TD_CLASS[cell.column.id] ?? "px-2 py-2"}
-                    onClick={
-                      cell.column.id === "scheduleEnabled" || cell.column.id === "actions"
-                        ? (e) => e.stopPropagation()
-                        : undefined
-                    }
-                  >
+                  <td key={cell.id} className={TD_CLASS[cell.column.id] ?? "px-2 py-2"}>
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </td>
                 ))}
@@ -471,6 +464,38 @@ function validateIps(raw: string): string | null {
   return bad ? `“${bad}” is not a valid IPv4 or IPv6 address` : null
 }
 
+/**
+ * Expiry/age warning-threshold validation (pm/checks/domain_reputation.mdx §4) mirroring the
+ * server DTO: blank = use the 30-day default; otherwise an integer between 1 and 365.
+ */
+function validateThresholdDays(raw: string, label: string): string | null {
+  const value = raw.trim()
+  if (value === "") return null
+  const n = Number(value)
+  if (!Number.isInteger(n) || n < 1 || n > 365)
+    return `${label} must be a whole number of days (1–365)`
+  return null
+}
+
+/**
+ * Aligned link-domain allow-list validation (pm/checks/link_url_reputation.mdx §4) mirroring the
+ * server LinkUrlConfigDto: every comma-separated entry must be a bare, valid domain.
+ */
+function validateAlignedLinkDomains(raw: string): string | null {
+  const bad = splitList(raw).find((d) => !DOMAIN_RE.test(d.toLowerCase()))
+  return bad ? `“${bad}” is not a valid domain (enter bare domains, e.g. clicks.example.net)` : null
+}
+
+/**
+ * Expected-MX allow-list validation (pm/checks/mx_routing.mdx §4) mirroring the server
+ * MxRoutingConfigDto: every comma-separated entry must be a valid hostname (a trailing dot is
+ * tolerated and stripped before submit).
+ */
+function validateExpectedMxHosts(raw: string): string | null {
+  const bad = splitList(raw).find((h) => !DOMAIN_RE.test(h.toLowerCase().replace(/\.$/, "")))
+  return bad ? `“${bad}” is not a valid MX hostname (e.g. aspmx.l.google.com)` : null
+}
+
 function FieldError({ message }: { message: string | null }) {
   if (!message) return null
   return <span className="mt-1 block text-xs text-red-600">{message}</span>
@@ -514,6 +539,36 @@ function DomainDialog({
     (domain?.dnsHealth?.expectedNs ?? []).join(", "),
   )
   const [dnsSkipAxfr, setDnsSkipAxfr] = useState(domain?.dnsHealth?.skipAxfrProbe ?? false)
+  // Mail routing (pm/checks/mx_routing.mdx §4 per-domain config inputs): the "this domain receives
+  // mail" intent toggle (drives whether an empty/null MX is critical vs expected), the optional
+  // expected-MX allow-list (infra.mx_expected_drift), and the skip-SMTP-probe switch for hosts
+  // whose egress blocks port 25.
+  const [mxReceivesMail, setMxReceivesMail] = useState(domain?.mx?.receivesMail ?? true)
+  const [mxExpectedHosts, setMxExpectedHosts] = useState(
+    (domain?.mx?.expectedHosts ?? []).join(", "),
+  )
+  const [mxSkipSmtpProbe, setMxSkipSmtpProbe] = useState(domain?.mx?.skipSmtpProbe ?? false)
+  // Domain registration (pm/checks/domain_reputation.mdx §4 per-domain config inputs, admin-only):
+  // brand strings for infra.name_similarity, the expiry/age warning thresholds (default 30 days
+  // each), the "registrant is intentionally public" silencer for infra.registrant_privacy, and
+  // the (future, default-off) active cousin-domain scan toggle.
+  const [repBrands, setRepBrands] = useState((domain?.domainReputation?.brands ?? []).join(", "))
+  const [repExpiryDays, setRepExpiryDays] = useState(
+    domain?.domainReputation?.expiryWarnDays?.toString() ?? "",
+  )
+  const [repAgeDays, setRepAgeDays] = useState(
+    domain?.domainReputation?.ageWarnDays?.toString() ?? "",
+  )
+  const [repPublicIntentional, setRepPublicIntentional] = useState(
+    domain?.domainReputation?.registrantPublicIntentional ?? false,
+  )
+  const [repCousinScan, setRepCousinScan] = useState(domain?.domainReputation?.cousinScan ?? false)
+  // Link / URL reputation (pm/checks/link_url_reputation.mdx §4 per-domain config inputs): the
+  // own/related/allow-listed link domains counted as aligned by content.url_domain_alignment —
+  // tracking/click/CDN domains the org controls that differ from the sending domain.
+  const [urlAllowedDomains, setUrlAllowedDomains] = useState(
+    (domain?.linkUrl?.allowedDomains ?? []).join(", "),
+  )
   // The optional fields live behind an "Advanced (optional)" disclosure (pm/domains.mdx §4.1).
   // Collapsed by default when adding (only the domain is required); expanded when editing, since
   // those fields are the point of the edit.
@@ -524,7 +579,19 @@ function DomainDialog({
   const nameError = editing ? null : validateDomainName(name, existingNames)
   const selectorError = validateSelectors(selectors)
   const ipError = validateIps(ips)
-  const valid = !nameError && !selectorError && !ipError && (editing || name.trim().length > 0)
+  const expiryDaysError = validateThresholdDays(repExpiryDays, "Expiry warning threshold")
+  const ageDaysError = validateThresholdDays(repAgeDays, "Age warning threshold")
+  const urlAllowedError = validateAlignedLinkDomains(urlAllowedDomains)
+  const mxHostsError = validateExpectedMxHosts(mxExpectedHosts)
+  const valid =
+    !nameError &&
+    !selectorError &&
+    !ipError &&
+    !expiryDaysError &&
+    !ageDaysError &&
+    !urlAllowedError &&
+    !mxHostsError &&
+    (editing || name.trim().length > 0)
 
   // Close on Escape (the modal backdrop is non-interactive for a11y; use Escape or the X button).
   useEffect(() => {
@@ -545,6 +612,34 @@ function DomainDialog({
       expectedNs: splitList(dnsExpectedNs),
       skipAxfrProbe: dnsSkipAxfr,
     }
+    // Registration-reputation config (pm/checks/domain_reputation.mdx §4); the server collapses an
+    // all-default block back to "absent" so domains.yaml stays clean.
+    const domainReputation = {
+      brands: splitList(repBrands),
+      ...(repExpiryDays.trim() !== "" ? { expiryWarnDays: Number(repExpiryDays) } : {}),
+      ...(repAgeDays.trim() !== "" ? { ageWarnDays: Number(repAgeDays) } : {}),
+      registrantPublicIntentional: repPublicIntentional,
+      cousinScan: repCousinScan,
+    }
+    const domainReputationConfigured =
+      domainReputation.brands.length > 0 ||
+      domainReputation.expiryWarnDays !== undefined ||
+      domainReputation.ageWarnDays !== undefined ||
+      repPublicIntentional ||
+      repCousinScan
+    // Link / URL-reputation config (pm/checks/link_url_reputation.mdx §4); the server collapses an
+    // empty allow-list back to "absent" so domains.yaml stays clean.
+    const linkUrl = {
+      allowedDomains: splitList(urlAllowedDomains).map((d) => d.toLowerCase()),
+    }
+    // Mail-routing expectations (pm/checks/mx_routing.mdx §4); the server collapses an
+    // all-default block (receives mail, no allow-list, probe on) back to "absent".
+    const mx = {
+      receivesMail: mxReceivesMail,
+      expectedHosts: splitList(mxExpectedHosts).map((h) => h.toLowerCase().replace(/\.$/, "")),
+      skipSmtpProbe: mxSkipSmtpProbe,
+    }
+    const mxConfigured = !mxReceivesMail || mx.expectedHosts.length > 0 || mxSkipSmtpProbe
     if (editing && domain) {
       update.mutate(
         {
@@ -557,6 +652,9 @@ function DomainDialog({
             arc,
             bimi,
             dnsHealth,
+            mx,
+            domainReputation,
+            linkUrl,
           },
         },
         {
@@ -579,6 +677,22 @@ function DomainDialog({
       ...(arc.usesForwarding || arc.forwarders.length > 0 ? { arc } : {}),
       // Only send a bimi block when the operator actually configured something (pm/checks/bimi.mdx §4).
       ...(bimi.selectors.length > 0 || bimi.sampleMessage !== "" ? { bimi } : {}),
+      // Only send a dnsHealth block when the operator actually configured something
+      // (pm/checks/dns_health.mdx §4).
+      ...(dnsHealth.extraLabels.length > 0 ||
+      dnsHealth.expectedNs.length > 0 ||
+      dnsHealth.skipAxfrProbe
+        ? { dnsHealth }
+        : {}),
+      // Only send a domainReputation block when the operator actually configured something
+      // (pm/checks/domain_reputation.mdx §4).
+      ...(domainReputationConfigured ? { domainReputation } : {}),
+      // Only send a linkUrl block when the operator actually configured aligned link domains
+      // (pm/checks/link_url_reputation.mdx §4).
+      ...(linkUrl.allowedDomains.length > 0 ? { linkUrl } : {}),
+      // Only send an mx block when the operator changed something off the defaults
+      // (pm/checks/mx_routing.mdx §4).
+      ...(mxConfigured ? { mx } : {}),
     }
     create.mutate(input, {
       onSuccess: () => {
@@ -808,6 +922,186 @@ function DomainDialog({
                     }
                     className="w-full rounded-md border border-[var(--edh-border)] px-3 py-2 font-mono text-xs"
                   />
+                </label>
+              </fieldset>
+              {/* DNS health (pm/checks/dns_health.mdx §4): extra dangling-scan labels, an optional
+                  expected-NS allow-list (drift alerts), and the skip-AXFR-probe toggle. */}
+              <fieldset className="rounded-md border border-[var(--edh-border)] p-3">
+                <legend className="px-1 text-sm font-medium">DNS health</legend>
+                <label className="block text-sm">
+                  <span className="mb-1 block font-medium">
+                    Extra labels to scan for dangling records (comma-separated)
+                  </span>
+                  <input
+                    value={dnsExtraLabels}
+                    onChange={(e) => setDnsExtraLabels(e.target.value)}
+                    placeholder="staging, old-blog"
+                    className="w-full rounded-md border border-[var(--edh-border)] px-3 py-2"
+                  />
+                </label>
+                <label className="mt-3 block text-sm">
+                  <span className="mb-1 block font-medium">
+                    Expected nameservers (comma-separated, alerts on drift)
+                  </span>
+                  <input
+                    value={dnsExpectedNs}
+                    onChange={(e) => setDnsExpectedNs(e.target.value)}
+                    placeholder="ns1.example-dns.com, ns2.example-dns.com"
+                    className="w-full rounded-md border border-[var(--edh-border)] px-3 py-2"
+                  />
+                </label>
+                <label className="mt-3 flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={dnsSkipAxfr}
+                    onChange={(e) => setDnsSkipAxfr(e.target.checked)}
+                    className="h-4 w-4 rounded border-[var(--edh-border)]"
+                  />
+                  <span className="font-medium">Skip the AXFR zone-transfer probe</span>
+                </label>
+              </fieldset>
+              {/* Mail routing (pm/checks/mx_routing.mdx §4 per-domain config inputs): the
+                  receives-mail intent toggle (empty/null MX critical vs expected), the expected-MX
+                  allow-list (drift detection), and the skip-SMTP-probe switch for hosts whose
+                  egress blocks port 25. */}
+              <fieldset className="rounded-md border border-[var(--edh-border)] p-3">
+                <legend className="px-1 text-sm font-medium">Mail routing</legend>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={mxReceivesMail}
+                    onChange={(e) => setMxReceivesMail(e.target.checked)}
+                    className="h-4 w-4 rounded border-[var(--edh-border)]"
+                  />
+                  <span className="font-medium">
+                    This domain receives mail (a missing or null MX is then critical)
+                  </span>
+                </label>
+                {!mxReceivesMail && (
+                  <p className="mt-1 pl-6 text-xs text-[var(--edh-muted)]">
+                    Send-only domain: an absent MX is accepted and an RFC 7505 null MX (
+                    <code className="font-mono">MX 0 "."</code>) is reported as correct.
+                  </p>
+                )}
+                <label className="mt-3 block text-sm">
+                  <span className="mb-1 block font-medium">
+                    Expected MX hosts (comma-separated, alerts on drift)
+                  </span>
+                  <input
+                    value={mxExpectedHosts}
+                    onChange={(e) => setMxExpectedHosts(e.target.value)}
+                    aria-invalid={Boolean(mxHostsError)}
+                    placeholder="aspmx.l.google.com, alt1.aspmx.l.google.com"
+                    className={`w-full rounded-md border px-3 py-2 ${
+                      mxHostsError ? "border-red-400" : "border-[var(--edh-border)]"
+                    }`}
+                  />
+                  <FieldError message={mxHostsError} />
+                </label>
+                <label className="mt-3 flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={mxSkipSmtpProbe}
+                    onChange={(e) => setMxSkipSmtpProbe(e.target.checked)}
+                    className="h-4 w-4 rounded border-[var(--edh-border)]"
+                  />
+                  <span className="font-medium">
+                    Skip the SMTP reachability probe (port-25 egress blocked here)
+                  </span>
+                </label>
+              </fieldset>
+              {/* Domain registration (pm/checks/domain_reputation.mdx §4 per-domain config inputs):
+                  brand strings for infra.name_similarity, expiry/age warning thresholds, the
+                  registrant-intentionally-public silencer, and the future cousin-scan toggle. */}
+              <fieldset className="rounded-md border border-[var(--edh-border)] p-3">
+                <legend className="px-1 text-sm font-medium">Domain registration</legend>
+                <label className="block text-sm">
+                  <span className="mb-1 block font-medium">
+                    Brand string(s) for lookalike detection (comma-separated)
+                  </span>
+                  <input
+                    value={repBrands}
+                    onChange={(e) => setRepBrands(e.target.value)}
+                    placeholder="example.com, examplebrand"
+                    className="w-full rounded-md border border-[var(--edh-border)] px-3 py-2"
+                  />
+                </label>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <label className="block text-sm">
+                    <span className="mb-1 block font-medium">Expiry warning (days)</span>
+                    <input
+                      value={repExpiryDays}
+                      onChange={(e) => setRepExpiryDays(e.target.value)}
+                      inputMode="numeric"
+                      aria-invalid={Boolean(expiryDaysError)}
+                      placeholder="30"
+                      className={`w-full rounded-md border px-3 py-2 ${
+                        expiryDaysError ? "border-red-400" : "border-[var(--edh-border)]"
+                      }`}
+                    />
+                    <FieldError message={expiryDaysError} />
+                  </label>
+                  <label className="block text-sm">
+                    <span className="mb-1 block font-medium">Age warning (days)</span>
+                    <input
+                      value={repAgeDays}
+                      onChange={(e) => setRepAgeDays(e.target.value)}
+                      inputMode="numeric"
+                      aria-invalid={Boolean(ageDaysError)}
+                      placeholder="30"
+                      className={`w-full rounded-md border px-3 py-2 ${
+                        ageDaysError ? "border-red-400" : "border-[var(--edh-border)]"
+                      }`}
+                    />
+                    <FieldError message={ageDaysError} />
+                  </label>
+                </div>
+                <label className="mt-3 flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={repPublicIntentional}
+                    onChange={(e) => setRepPublicIntentional(e.target.checked)}
+                    className="h-4 w-4 rounded border-[var(--edh-border)]"
+                  />
+                  <span className="font-medium">
+                    Registrant contact is intentionally public (silences the privacy note)
+                  </span>
+                </label>
+                <label className="mt-2 flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={repCousinScan}
+                    onChange={(e) => setRepCousinScan(e.target.checked)}
+                    className="h-4 w-4 rounded border-[var(--edh-border)]"
+                  />
+                  <span className="font-medium">
+                    Enable active cousin-domain scan (future — RDAP cost)
+                  </span>
+                </label>
+              </fieldset>
+              {/* Link / URL reputation (pm/checks/link_url_reputation.mdx §4 per-domain config
+                  inputs): the own/related/allow-listed link domains counted as aligned by
+                  content.url_domain_alignment. */}
+              <fieldset className="rounded-md border border-[var(--edh-border)] p-3">
+                <legend className="px-1 text-sm font-medium">Link / URL reputation</legend>
+                <label className="block text-sm">
+                  <span className="mb-1 block font-medium">
+                    Allowed link domains counted as on-brand (comma-separated)
+                  </span>
+                  <input
+                    value={urlAllowedDomains}
+                    onChange={(e) => setUrlAllowedDomains(e.target.value)}
+                    aria-invalid={Boolean(urlAllowedError)}
+                    placeholder="clicks.example.net, cdn.examplebrand.com"
+                    className={`w-full rounded-md border px-3 py-2 ${
+                      urlAllowedError ? "border-red-400" : "border-[var(--edh-border)]"
+                    }`}
+                  />
+                  <FieldError message={urlAllowedError} />
+                  <span className="mt-1 block text-xs text-[var(--edh-muted)]">
+                    Tracking/click/CDN domains your org controls; links to them are not flagged
+                    off-brand by the body-link alignment check.
+                  </span>
                 </label>
               </fieldset>
             </div>

@@ -230,4 +230,37 @@ describe("bimiCheck", () => {
     const { findings } = await run({ upstream: dmarcUpstream("reject") })
     expect(byId(findings, "content.bimi_dns_health")?.severity).toBe("warning")
   })
+
+  it("flags a dangling CNAME even when the dead target makes the TXT lookup come back empty (§2/§3)", async () => {
+    // The classic silent-disappearance case: `_bimi` is a CNAME to an unclaimed host, so the TXT
+    // lookup finds nothing — bimi_present warns AND bimi_dns_health names the dangling CNAME.
+    mockTxt({})
+    dns.resolveCname.mockImplementation(async (name: string) =>
+      name === "default._bimi.example.com" ? found(["unclaimed.example.net"]) : found([]),
+    )
+    dns.resolve4.mockResolvedValue(found([]))
+    dns.resolve6.mockResolvedValue(found([]))
+    const { findings } = await run({ upstream: dmarcUpstream("reject") })
+    expect(byId(findings, "content.bimi_present")?.severity).toBe("warning")
+    const health = byId(findings, "content.bimi_dns_health")
+    expect(health?.severity).toBe("warning")
+    expect(health?.remediation).toContain("unclaimed.example.net")
+  })
+
+  it("a CNAME target that serves TXT (no A/AAAA) is alive, not dangling", async () => {
+    // A BIMI CNAME target hosts the TXT record — it need not have any A/AAAA of its own.
+    mockTxt({
+      "default._bimi.example.com": [GOOD],
+      "bimi.provider.example.net": [GOOD],
+    })
+    dns.resolveCname.mockImplementation(async (name: string) =>
+      name === "default._bimi.example.com" ? found(["bimi.provider.example.net"]) : found([]),
+    )
+    dns.resolve4.mockImplementation(async (host: string) =>
+      host === "example.com" ? found(["203.0.113.10"]) : found([]),
+    )
+    dns.resolve6.mockResolvedValue(found([]))
+    const { findings } = await run({ upstream: dmarcUpstream("reject") })
+    expect(byId(findings, "content.bimi_dns_health")?.severity).toBe("ok")
+  })
 })

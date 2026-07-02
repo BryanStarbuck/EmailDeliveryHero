@@ -1,5 +1,15 @@
 import { Link, useNavigate, useParams } from "@tanstack/react-router"
-import { ArrowLeft, ChevronDown, ChevronRight, Download, Info, Mailbox, ShieldAlert, ShieldCheck, Wrench } from "lucide-react"
+import {
+  ArrowLeft,
+  ChevronDown,
+  ChevronRight,
+  Download,
+  Info,
+  Mailbox,
+  ShieldAlert,
+  ShieldCheck,
+  Wrench,
+} from "lucide-react"
 import { type ReactNode, useState } from "react"
 import { toast } from "sonner"
 import { useDomainReports, useIngestReports } from "@/api/reports"
@@ -29,7 +39,10 @@ export function DomainReportsPage() {
           summary.skipped > 0 ? `${summary.skipped} non-report file(s) skipped` : null,
         ].filter(Boolean)
         if (summary.errors.length > 0) toast.error(summary.errors.join("; "))
-        else toast.success(`Ingest complete — ${parts.join(", ")} (${summary.scanned} file(s) scanned)`)
+        else
+          toast.success(
+            `Ingest complete — ${parts.join(", ")} (${summary.scanned} file(s) scanned)`,
+          )
       },
       onError: () => toast.error("Could not run the report ingest — see the backend log."),
     })
@@ -71,7 +84,9 @@ export function DomainReportsPage() {
         {view && (
           <>
             Window: last {view.windowDays} days
-            {view.lastIngestAt && <> · last ingest {new Date(view.lastIngestAt).toLocaleString()}</>}
+            {view.lastIngestAt && (
+              <> · last ingest {new Date(view.lastIngestAt).toLocaleString()}</>
+            )}
           </>
         )}
       </p>
@@ -108,7 +123,11 @@ function EmptyState({ domain, enabled }: { domain: string; enabled: boolean }) {
       <p className="mt-1 text-sm text-slate-600">
         Publish <code className="font-mono">rua=</code> on your DMARC and TLS-RPT records so
         receivers send reports, then point the report mailbox or drop folder here in{" "}
-        <Link to="/settings/$section" params={{ section: "admin" }} className="text-[var(--edh-primary)] underline">
+        <Link
+          to="/settings/$section"
+          params={{ section: "admin" }}
+          className="text-[var(--edh-primary)] underline"
+        >
           Settings → Admin
         </Link>
         . Reports typically take 24–72h to start arriving after publishing{" "}
@@ -204,7 +223,11 @@ function TlsRptGroup({ agg, findings }: { agg: TlsRptReportAggregate; findings: 
 
 function severityIcon(f: Finding) {
   if (f.severity === "critical" || f.severity === "warning") {
-    return <ShieldAlert className={`h-4 w-4 ${f.severity === "critical" ? "text-red-600" : "text-amber-600"}`} />
+    return (
+      <ShieldAlert
+        className={`h-4 w-4 ${f.severity === "critical" ? "text-red-600" : "text-amber-600"}`}
+      />
+    )
   }
   if (f.severity === "ok") return <ShieldCheck className="h-4 w-4 text-emerald-600" />
   return <Info className="h-4 w-4 text-slate-500" />
@@ -215,7 +238,13 @@ function severityIcon(f: Finding) {
  * parsed detail), the remediation with copy-to-clipboard, and an expander that reveals the
  * details table (per-source-IP / per-reporter-day).
  */
-function ReportFindingRow({ finding: f, detailTable }: { finding: Finding; detailTable: ReactNode }) {
+function ReportFindingRow({
+  finding: f,
+  detailTable,
+}: {
+  finding: Finding
+  detailTable: ReactNode
+}) {
   const [open, setOpen] = useState(false)
   const showFix = f.severity !== "ok" && Boolean(f.remediation)
   return (
@@ -288,7 +317,9 @@ function DmarcSourceTable({ agg }: { agg: DmarcReportAggregate }) {
               <td className="px-2 py-1">
                 {r.dkimEvaluated}/{r.dkimAligned ? "aligned" : "not aligned"}
               </td>
-              <td className={`px-2 py-1 font-medium ${r.dmarcPass ? "text-emerald-700" : "text-red-700"}`}>
+              <td
+                className={`px-2 py-1 font-medium ${r.dmarcPass ? "text-emerald-700" : "text-red-700"}`}
+              >
                 {r.dmarcPass ? "pass" : "fail"}
               </td>
               <td className="px-2 py-1">{r.headerFrom || "—"}</td>
@@ -318,12 +349,19 @@ function TlsRptDayTable({ agg }: { agg: TlsRptReportAggregate }) {
         </thead>
         <tbody>
           {agg.rows.map((r) => (
-            <tr key={`${r.reporterOrg}-${r.reportDate}-${r.policyType}`} className="border-t border-[var(--edh-border)]">
+            <tr
+              key={`${r.reporterOrg}-${r.reportDate}-${r.policyType}`}
+              className="border-t border-[var(--edh-border)]"
+            >
               <td className="px-2 py-1">{r.reporterOrg}</td>
               <td className="px-2 py-1 tabular-nums">{r.reportDate}</td>
               <td className="px-2 py-1">{r.policyType}</td>
-              <td className="px-2 py-1 text-right tabular-nums text-emerald-700">{r.successCount}</td>
-              <td className={`px-2 py-1 text-right tabular-nums ${r.failureCount > 0 ? "font-medium text-red-700" : ""}`}>
+              <td className="px-2 py-1 text-right tabular-nums text-emerald-700">
+                {r.successCount}
+              </td>
+              <td
+                className={`px-2 py-1 text-right tabular-nums ${r.failureCount > 0 ? "font-medium text-red-700" : ""}`}
+              >
                 {r.failureCount}
               </td>
               <td className="px-2 py-1">

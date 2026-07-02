@@ -87,7 +87,9 @@ function collectLeafParts(part: MimePart): MimePart[] {
   const leaves: MimePart[] = []
   // Split on the boundary lines; the first chunk is the preamble, the last (after --boundary--)
   // the epilogue — both ignored.
-  const chunks = part.body.split(new RegExp(`(?:^|\r?\n)${escapeRe(marker)}(?:--)?[ \t]*(?:\r?\n|$)`))
+  const chunks = part.body.split(
+    new RegExp(`(?:^|\r?\n)${escapeRe(marker)}(?:--)?[ \t]*(?:\r?\n|$)`),
+  )
   for (const chunk of chunks.slice(1)) {
     if (!chunk.trim()) continue
     leaves.push(...collectLeafParts(splitPart(chunk)))

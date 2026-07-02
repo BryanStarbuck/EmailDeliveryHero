@@ -16,6 +16,33 @@ export type NotificationMode = "immediate" | "daily"
 export type Theme = "system" | "light" | "dark"
 export type Density = "comfortable" | "compact"
 
+/**
+ * One recognized Mark Verifying Authority (pm/checks/bimi.mdx §5 — the `bimi_mva` reference table
+ * mapped onto `config.yaml → checks.bimi.mvaAllowList`; admin-only editing, §4).
+ */
+export interface BimiMvaEntry {
+  name: string
+  issuerDnMatch: string
+  /** Mark types the MVA may issue: "vmc" (registered trademark) and/or "cmc". */
+  markTypes: string[]
+  enabled: boolean
+}
+
+/**
+ * One subdomain-takeover fingerprint (pm/checks/dns_health.mdx §4/§5 — the `takeover_fingerprints`
+ * reference table mapped onto `config.yaml → dns_health.fingerprints`; admin-only editing). The
+ * dangling-CNAME sub-check flags a CNAME whose final target matches `cname_suffix` and no longer
+ * resolves as a critical takeover risk.
+ */
+export interface TakeoverFingerprint {
+  provider: string
+  /** Suffix matched against the final CNAME target, e.g. ".herokudns.com". */
+  cname_suffix: string
+  /** HTTP body marker for the future "unclaimed endpoint" confirmation probe. */
+  unclaimed_signature?: string
+  enabled: boolean
+}
+
 export interface ChecksConfig {
   enabled: string[]
   spf: { maxLookups: number }
@@ -23,6 +50,8 @@ export interface ChecksConfig {
   dnsbl: { zones: string[] }
   /** Content-scoring admin settings (pm/checks/content_scoring.mdx §4). */
   content: { threshold: number; safeTarget: number; networkTests: boolean }
+  /** BIMI admin settings (pm/checks/bimi.mdx §4/§5): the VMC/CMC issuer allow-list. */
+  bimi: { mvaAllowList: BimiMvaEntry[] }
   thresholds: { green: number; amber: number }
   weights: { critical: number; warning: number; info: number }
 }
@@ -59,8 +88,16 @@ export interface SettingsView {
     schedule: ScheduleConfig
     notifications: NotificationChannels
     storage: { retentionDays: number }
-    tools: { preferCli: boolean; resolvers: string[]; timeoutMs: number }
+    tools: {
+      preferCli: boolean
+      resolvers: string[]
+      timeoutMs: number
+      /** Explicit per-tool binary-path overrides, e.g. spamassassin/spamc (content_scoring §4). */
+      paths: Record<string, string>
+    }
     access: { allowedDomains: string[] }
+    /** DNS-health takeover-fingerprint list (pm/checks/dns_health.mdx §4/§5; admin-only editing). */
+    dns_health: { fingerprints: TakeoverFingerprint[] }
   }
   me: {
     sub: string
@@ -85,6 +122,7 @@ export interface UpdateAdminSettingsInput {
     dkim?: { defaultSelectors?: string[] }
     dnsbl?: { zones?: string[] }
     content?: { threshold?: number; safeTarget?: number; networkTests?: boolean }
+    bimi?: { mvaAllowList?: BimiMvaEntry[] }
     thresholds?: { green?: number; amber?: number }
     weights?: { critical?: number; warning?: number; info?: number }
   }
@@ -94,8 +132,16 @@ export interface UpdateAdminSettingsInput {
     smtp?: { host?: string; port?: number; from?: string }
   }
   storage?: { retentionDays?: number }
-  tools?: { preferCli?: boolean; resolvers?: string[]; timeoutMs?: number }
+  tools?: {
+    preferCli?: boolean
+    resolvers?: string[]
+    timeoutMs?: number
+    /** Per-tool binary-path overrides (empty string clears an override). */
+    paths?: Record<string, string>
+  }
   access?: { allowedDomains?: string[] }
+  /** Replaces the whole takeover-fingerprint list (pm/checks/dns_health.mdx §4; admin-only). */
+  dns_health?: { fingerprints?: TakeoverFingerprint[] }
 }
 
 export interface TestNotificationResult {

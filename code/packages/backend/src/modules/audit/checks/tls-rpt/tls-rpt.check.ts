@@ -264,7 +264,7 @@ export const tlsRptCheck: Checker = {
       .map(parseTag)
     const first = tags[0]
 
-    if (!first || first.key.toLowerCase() !== "v") {
+    if (first?.key.toLowerCase() !== "v") {
       findings.push({
         id: "infra.tls_rpt_syntax",
         checkId: CHECK_ID,

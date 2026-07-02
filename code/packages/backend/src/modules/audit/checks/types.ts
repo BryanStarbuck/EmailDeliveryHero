@@ -144,12 +144,39 @@ export interface BimiDomainConfig {
 }
 
 /**
+ * Per-domain DANE / TLSA configuration (pm/checks/dane_tlsa.mdx §4 per-domain config inputs,
+ * admin-only). DANE needs no input beyond the auto-discovered MX list — the single optional knob
+ * is a pinned "expected next-cert SPKI digest" so the app can proactively warn when the rollover
+ * record for a planned renewal is not yet staged in DNS.
+ */
+export interface DaneDomainConfig {
+  /**
+   * Hex SHA-256 of the NEXT certificate's SubjectPublicKeyInfo (the `3 1 1` association data the
+   * admin plans to roll to). When set, `infra.dane_rollover` warns until a TLSA record with this
+   * exact digest is published alongside the current one.
+   */
+  expectedNextSpki?: string
+}
+
+/**
  * Per-domain MTA-STS configuration (pm/checks/mta_sts.mdx §4 per-domain config inputs, admin-only):
  * the "Desired MTA-STS mode" target the `infra.mta_sts_mode` sub-check compares the served policy
  * against. Absent ⇒ the default target is `enforce` (spec §5); `off` silences the comparison.
  */
 export interface MtaStsDomainConfig {
   desiredMode: "enforce" | "testing" | "off"
+}
+
+/**
+ * Per-domain Link / URL-reputation configuration (pm/checks/link_url_reputation.mdx §4 per-domain
+ * config inputs): the domain's own/related/allow-listed link domains for
+ * `content.url_domain_alignment` — tracking/click/CDN domains the org controls that should count
+ * as "on-brand" even though they differ from the sending domain. Absent = only the sending
+ * domain's registrable domain (and its subdomains) count as aligned.
+ */
+export interface LinkUrlDomainConfig {
+  /** Registrable domains treated as aligned (own/related/allow-listed), e.g. ["clicks.example.net"]. */
+  allowedDomains: string[]
 }
 
 /** Everything a checker needs to inspect one domain. */
@@ -181,6 +208,18 @@ export interface CheckContext {
    * the skip-SMTP-probe toggle. Absent = receives mail, no allow-list, probes allowed.
    */
   mx?: MxRoutingConfig
+  /**
+   * Per-domain DANE config (pm/checks/dane_tlsa.mdx §4) — the optional pinned expected next-cert
+   * SPKI digest that lets `infra.dane_rollover` proactively warn when the pre-staged rollover
+   * TLSA record is missing.
+   */
+  dane?: DaneDomainConfig
+  /**
+   * Per-domain MTA-STS config (pm/checks/mta_sts.mdx §4, admin-only) — the "Desired MTA-STS mode"
+   * target the `infra.mta_sts_mode` sub-check compares the served policy's `mode:` against.
+   * Absent ⇒ the default target is `enforce` (spec §5); `off` silences the comparison.
+   */
+  mtaSts?: MtaStsDomainConfig
   /** Per-domain BIMI config — powers content.bimi_selector (extra selectors + BIMI-Selector header compare). */
   bimi?: BimiDomainConfig
   /**
@@ -193,6 +232,11 @@ export interface CheckContext {
    * strings, expiry/age thresholds, and the registrant-public / cousin-scan toggles.
    */
   domainReputation?: DomainReputationConfig
+  /**
+   * Per-domain Link / URL-reputation config (pm/checks/link_url_reputation.mdx §4) — the
+   * own/related/allow-listed link domains that count as aligned for content.url_domain_alignment.
+   */
+  linkUrl?: LinkUrlDomainConfig
   /**
    * Which trigger started this run — pure data (pm/run_checks.mdx §9): the run graph never
    * branches on it. The registration checker alone reads it, to bypass its long-TTL RDAP cache on
@@ -258,6 +302,19 @@ export interface AuditResult {
   ranAt: string
   /** Which trigger started this run (pm/run_checks.mdx §9). Absent on pre-history data. */
   trigger?: AuditTrigger
+  /**
+   * Category scope of the run (pm/checks/blacklists.mdx §21 / AC 26; pm/checks/dkim.mdx §7.7):
+   * absent = a full run of all six categories; "blacklists" / "dkim" = a category-scoped re-run
+   * that executed only that category and whose run file carries `run.scope: <category>`. Scoped
+   * runs appear in prev/next stepping and the history strip chip-tagged with this value.
+   */
+  scope?: "blacklists" | "dkim"
+  /**
+   * Category prefixes a scoped re-run executed (pm/checks/spf.mdx §6.5 — e.g. ["spf"] on a
+   * `POST /audit/run/:domainId?checks=spf` run whose sibling categories were carried forward
+   * verbatim). Absent on a full run of all six categories.
+   */
+  checks?: string[]
   /** 0–100, derived from finding severities. */
   score: number
   status: Severity
@@ -282,10 +339,7 @@ const SEVERITY_RANK: Record<Severity, number> = { ok: 0, info: 1, warning: 2, cr
  * in place and returns how many were flagged. With no previous run there is no baseline to
  * regress from, so nothing is flagged.
  */
-export function flagNewProblems(
-  previous: Finding[] | undefined,
-  current: Finding[],
-): number {
+export function flagNewProblems(previous: Finding[] | undefined, current: Finding[]): number {
   if (!previous) return 0
   const previousRank = new Map<string, number>()
   for (const f of previous) {
@@ -333,7 +387,9 @@ export function summarize(
 
   // Weighted deduction per finding (critical > warning > info — pm/engineering.mdx §6.2); floor at 0.
   const penalty =
-    counts.critical * weights.critical + counts.warning * weights.warning + counts.info * weights.info
+    counts.critical * weights.critical +
+    counts.warning * weights.warning +
+    counts.info * weights.info
   const score = Math.max(0, 100 - penalty)
 
   const status: Severity =

@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — Spam & Content Check
-description: Engineering spec for the Spam & Content category — the roll-up over the six test families we run against a domain's messages and reputation (BIMI, message content spam scoring, List-Unsubscribe & one-click, link/URL reputation, sender reputation metrics, inbox placement), the verified Brew/npm testing toolbox with the exact command line each tool runs, the per-run test-results YAML stored under ~/.email_delivery_hero/runs/ (structured observation, tool_runs, tests), the "view one category run" Spam & Content page with the inbox-placement hero and prev/next run navigation, the fix-order ladder, and the catalog of content problem states with drill-down pages.
+description: Engineering spec for the Spam & Content category — the roll-up over the seven test families we run against a domain's messages and reputation (BIMI, message content spam scoring, List-Unsubscribe & one-click, link/URL reputation, sender reputation metrics, inbox placement, report-email analysis over the DMARC/TLS-RPT corpus), the verified Brew/npm testing toolbox with the exact command line each tool runs, the per-run test-results YAML stored under ~/.email_delivery_hero/runs/ (structured observation, tool_runs, tests), the "view one category run" Spam & Content page with the inbox-placement hero and prev/next run navigation, the click-through explainer map (every clickable concept answers what-is-it / is-it-healthy / what-it-means / how-to-fix / run-it-now), the per-family check detail pages at /spam-content/check/:checkKey with raw + parsed breakdowns and the single-check re-run endpoint, run-over-run history trends, the external reference library, the fix-order ladder, and the catalog of content problem states with drill-down pages.
 ---
 
 # EmailDeliveryHero — Spam & Content Check
@@ -18,7 +18,7 @@ check in the app still shows green.
 This check is the **Spam & Content** dashboard category; all sub-check ids use the **`content.`**
 checkId prefix. It is the **category-level spec**: it defines the roll-up, the per-run results
 section (`spam_content` in the run YAML), the full-page Spam & Content run view, the tool
-execution contract, and the problem-state catalog. The six per-topic specs below own the
+execution contract, and the problem-state catalog. The seven per-topic specs below own the
 per-sub-check detail; this file never contradicts them.
 
 **Read alongside**
@@ -31,18 +31,31 @@ per-sub-check detail; this file never contradicts them.
 - [../dashboard.mdx](../dashboard.mdx) / [../ui.mdx](../ui.mdx) — Run → Test → Sub-test vocabulary,
   the 6-column dashboard, and the cell roll-up.
 - [../scheduled_checks.mdx](../scheduled_checks.mdx) — recurring-check cadence and regression diffing.
+- [../emails.mdx](../emails.mdx) — the report-email ingestion machinery (MIME decode, DMARC-XML /
+  TLS-RPT parsing, per-domain routing, the report store) that family 2 reuses at run time (§13
+  there).
 
-**The six topic specs this category rolls up** (one `Checker` each, in run order — cheap DNS
-first, sample-message parsing second, network probes and paid feeds last):
+**The seven topic specs this category rolls up** (one `Checker` each, in run order — cheap DNS
+and local-file work first, sample-message parsing second, network probes and paid feeds last):
 
 | # | Family | Spec | Section key under `spam_content` |
 | --- | --- | --- | --- |
 | 1 | BIMI (brand logo + VMC) | [./bimi.mdx](./bimi.mdx) | `bimi` |
-| 2 | Message content spam scoring | [./content_scoring.mdx](./content_scoring.mdx) | `content_score` |
-| 3 | List-Unsubscribe & one-click | [./list_unsubscribe.mdx](./list_unsubscribe.mdx) | `list_unsubscribe` |
-| 4 | Link / URL reputation | [./link_url_reputation.mdx](./link_url_reputation.mdx) | `link_reputation` |
-| 5 | Sender reputation metrics | [./reputation_metrics.mdx](./reputation_metrics.mdx) | `sender_reputation` |
-| 6 | Inbox placement testing | [./inbox_placement.mdx](./inbox_placement.mdx) | `inbox_placement` |
+| 2 | Report-email analysis (DMARC rua / TLS-RPT corpus) | [../emails.mdx §13](../emails.mdx) | `report_emails` |
+| 3 | Message content spam scoring | [./content_scoring.mdx](./content_scoring.mdx) | `content_score` |
+| 4 | List-Unsubscribe & one-click | [./list_unsubscribe.mdx](./list_unsubscribe.mdx) | `list_unsubscribe` |
+| 5 | Link / URL reputation | [./link_url_reputation.mdx](./link_url_reputation.mdx) | `link_reputation` |
+| 6 | Sender reputation metrics | [./reputation_metrics.mdx](./reputation_metrics.mdx) | `sender_reputation` |
+| 7 | Inbox placement testing | [./inbox_placement.mdx](./inbox_placement.mdx) | `inbox_placement` |
+
+> **Family 2 in one line.** During every run, `content.report_emails` scans the admin-configured
+> report-email directory **in place** (the DMARC aggregate / TLS-RPT `.eml` corpus — e.g. the repo's
+> `emails/` directory in development), attributes every report to its domain by the **payload's own
+> policy domain** (never the filename, subject, or mailbox), stores reports for *other* monitored
+> domains under those domains, and analyzes this run's domain over the rolling window: real-world
+> DMARC pass rate, spoofing, single-mechanism alignment fragility, active enforcement, TLS failures,
+> and corpus freshness. Full behavior, finding table, and the act3ai.com worked example:
+> [../emails.mdx §13](../emails.mdx).
 
 ---
 
@@ -79,6 +92,7 @@ matching is by **id prefix**):
 | Family | Section key | Finding-id prefixes (`content.` elided) | Worst |
 | --- | --- | --- | --- |
 | BIMI | `bimi` | `bimi_present`, `bimi_syntax`, `bimi_dmarc_prereq`, `bimi_selector`, `bimi_l_present`, `bimi_svg_url`, `bimi_svg_profile`, `bimi_svg_square`, `bimi_vmc`, `bimi_vmc_url`, `bimi_vmc_valid`, `bimi_vmc_logo_match`, `bimi_single`, `bimi_dns_health` | critical (record present but malformed / DMARC not enforcing) |
+| Report-email analysis | `report_emails` | `report_corpus`, `report_domain_attribution`, `report_pass_rate`, `report_spoofing`, `report_fragility`, `report_enforcement`, `report_tls`, `report_freshness` | critical (spoofing volume failing both alignments; own mail quarantined/rejected by receivers) |
 | Content scoring | `content_score` | `spamassassin_score`, `subject`, `image_text_ratio`, `multipart`, `mime_valid`, `spammy_phrases`, `header_sanity`, `attachment_risk`, `html_hygiene`, `encoding`, `charset`, `bayes`, `short_body` | critical (score ≥ 5.0, hidden text, risky attachment) |
 | List-Unsubscribe | `list_unsubscribe` | `list_unsubscribe`, `list_unsub_oneclick`, `list_unsub_https`, `list_unsub_mailto`, `list_unsub_syntax`, `list_unsub_https_get_safe`, `list_unsub_reachable`, `list_unsub_tls`, `list_unsub_honored`, `list_unsub_url_reputation`, `list_unsub_per_recipient`, `precedence`, `from_alignment`, `no_priority_abuse`, `list_id`, `list_headers_consistent` | critical (bulk sender missing one-click; From aligns with nothing) |
 | Link / URL reputation | `link_reputation` | `url_extract`, `url_dbl`, `url_surbl`, `url_ivmuri`, `url_uribl`, `url_shortener`, `url_redirect_chain`, `url_https`, `url_domain_alignment`, `url_ip_literal`, `url_punycode`, `url_safe_browsing`, `url_dnsbl_cross`, `url_reachable`, `url_count`, `url_aggregate` | critical (DBL/SURBL phish or malware listing, raw-IP link, brand homograph) |
@@ -87,6 +101,8 @@ matching is by **id prefix**):
 
 **First round vs gated.** Only the pure-DNS and own-data sub-checks run unconditionally: the BIMI
 DNS rows (`bimi_present/syntax/dmarc_prereq/selector/l_present/svg_url/vmc/vmc_url/single/dns_health`),
+the **report-email analysis** rows (`report_*` — pure local-file work over the corpus directory and
+report store; an empty corpus emits a single info, never a fabricated failure),
 the reputation advisories (`fbl_enrollment`, `reputation_data_available`, `postmaster_verified`),
 and `blocklist_history` (trends this app's own stored [Blacklists](./blacklists.mdx) runs).
 Everything else is gated: content scoring, list management, and link reputation need an uploaded
@@ -99,11 +115,15 @@ a fabricated failure — `info` alone never turns the category cell amber.
 high-trust URI zone, raw-IP or brand-homograph link, complaint rate ≥ 0.3%, GPT reputation
 BAD/LOW, bulk stream missing one-click unsubscribe, `From:` aligned with neither SPF nor DKIM,
 SpamAssassin ≥ 5.0, hidden text or a risky attachment, majority Spam/Missing at a provider,
-receiver-observed `dmarc=fail`, BIMI published while DMARC is not enforcing. Reputation-eroding →
+receiver-observed `dmarc=fail`, BIMI published while DMARC is not enforcing, report-observed
+**spoofing** (a source failing both SPF and DKIM alignment with real volume) or **own mail
+quarantined/rejected** by receivers. Reputation-eroding →
 **warning**: score 2.0–5.0, shortener/`http:` links, missing `mailto:` fallback, complaint
 0.1–0.3%, GPT MEDIUM, warmup/volume anomalies, Gmail Promotions-tab placement, 50–79% inbox,
-SVG-only BIMI (no VMC). Visibility and adoption gaps → **info**: no sample, no integration, no
-seeds, no BIMI for a domain not opting in, declined BIMI record.
+SVG-only BIMI (no VMC), report-observed alignment fragility (a stream passing DMARC on one
+mechanism only), a real-world DMARC pass rate below ~100%, orphan reports for an unmonitored
+domain, a stale report corpus. Visibility and adoption gaps → **info**: no sample, no integration,
+no seeds, no BIMI for a domain not opting in, declined BIMI record, an empty report corpus.
 
 ---
 
@@ -119,7 +139,18 @@ it renders **one run's** Spam & Content section, with navigation between the dom
 | This category, one specific run | `/domains/:domainId/runs/:runId/spam-content` |
 | This category, the newest run (alias) | `/domains/:domainId/spam-content` |
 | Whole run report (all six tests) | `/domains/:domainId/runs/:runId` (newest alias `/domains/:domainId`) |
-| Problem-state drill-down | `/domains/:domainId/spam-content/:problemId` |
+| **Check detail (family explainer), one specific run** | `/domains/:domainId/runs/:runId/spam-content/check/:checkKey` (§8) |
+| **Check detail, the newest run (alias)** | `/domains/:domainId/spam-content/check/:checkKey` |
+| Problem-state drill-down, one specific run | `/domains/:domainId/runs/:runId/spam-content/:problemId` |
+| Problem-state drill-down, the newest run (alias) | `/domains/:domainId/spam-content/:problemId` |
+
+`:checkKey` slugs are fixed (§8): `bimi`, `report-emails`, `content-score`, `list-unsubscribe`,
+`link-reputation`, `sender-reputation`, `inbox-placement`. The static `check` segment outranks the dynamic
+`:problemId` segment (the router's static-over-dynamic rule), so
+`…/spam-content/check/bimi` never matches the problem-state route. The legacy
+`/domains/:domainId/content` content-scoring page remains as a redirect alias of
+`…/spam-content/check/content-score` (interior owned by
+[./content_scoring.mdx](./content_scoring.mdx)).
 
 **How the page is reached.**
 - **Domain-health table (Table 1):** clicking the **Spam & Content cell** of a domain row opens
@@ -137,8 +168,9 @@ it renders **one run's** Spam & Content section, with navigation between the dom
   light gray never-run).
 
 **Contents, top to bottom** (exact layout below). The page must answer: *is my mail landing in
-inboxes right now? What did we observe (the score, the headers, the links, the rates)? Which of
-the six families pass/fail, sub-test by sub-test? How do I fix each failure, in what order?*
+inboxes right now? What did we observe (the score, the headers, the links, the rates, what the
+receivers' own DMARC/TLS reports say)? Which of
+the seven families pass/fail, sub-test by sub-test? How do I fix each failure, in what order?*
 
 1. **Header** — back link to the run report, domain name, "Spam & Content" title, the category
    StatusCell, the **run timestamp** (`run of <startedAt>`), **‹ prev / next ›** run navigation
@@ -153,9 +185,9 @@ the six families pass/fail, sub-test by sub-test? How do I fix each failure, in 
    "No placement test yet — connect seeds to measure where mail actually lands" — and the strip
    collapses. Beneath the hero: one plain-language verdict line and the **primary next step** from
    the §5 fix-order ladder (one accent CTA maximum).
-3. **Family status strip** — six compact chips (BIMI · Content · List-Unsub · Links · Reputation ·
-   Placement), each colored by that family's worst severity with a ✓/✗/⚠/ⓘ glyph. Clicking a chip
-   scrolls to that family's group in the results table.
+3. **Family status strip** — seven compact chips (BIMI · Reports · Content · List-Unsub · Links ·
+   Reputation · Placement), each colored by that family's worst severity with a ✓/✗/⚠/ⓘ glyph.
+   Clicking a chip scrolls to that family's group in the results table.
 4. **Sample & sources panel** (two-up left) — what this run measured against: the sample message
    (filename, date captured, subject, "change sample" link), the connected reputation sources
    (GPT ✓/–, FBL ✓/–, ESP ✓/–, each with last-sync freshness), and the seed-list summary (seeds
@@ -165,7 +197,8 @@ the six families pass/fail, sub-test by sub-test? How do I fix each failure, in 
    the recurring-blocklist flag. Values gray out with a "connect …" hint when the source is absent.
 6. **Sub-test results table** — one row per finding, **grouped by family** in the §1 table order,
    fail-first within each group; each family group header repeats the family chip and its
-   pass/fail count. Row anatomy: status icon (✗ red / ⚠ amber / ✓ green / ⓘ slate), finding id in
+   pass/fail count **and carries a "Full ⟨family⟩ report ›" chevron** into that family's §8 check
+   detail page (run-scoped — the same `:runId` the table is showing). Row anatomy: status icon (✗ red / ⚠ amber / ✓ green / ⓘ slate), finding id in
    small-caps mono, plain-language title, the **observed value** (score, header, link domain +
    return code, rate — monospace), chevron accordion. Expanded = *observed* (exact evidence: the
    raw header, the fired rules with points, the DNS answer from the URI zone) / *expected* / *why
@@ -194,7 +227,7 @@ lucide vocabulary as the SPF/DMARC/DNS pages — the four category pages must fe
 │  "Outlook is junking 1 in 5 — complaint rate is climbing toward 0.3%."      │
 │  Next step: enroll in Microsoft SNDS + JMRP and suppress complainers  [→]   │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  [⚠ BIMI] [✓ Content] [✗ List-Unsub] [⚠ Links] [⚠ Reputation] [⚠ Placement] │  family strip
+│ [⚠ BIMI] [⚠ Reports] [✓ Content] [✗ List-Unsub] [⚠ Links] [⚠ Reput.] [⚠ Plc.] │  family strip
 ├────────────────────────────────────┬────────────────────────────────────────┤
 │  SAMPLE & SOURCES                  │  REPUTATION                            │  two-up band
 │  sample  campaign_2026-06-28.eml   │  complaints ▓▓▓▓▓▓░░ 0.21%  (0.3% max) │
@@ -214,6 +247,11 @@ lucide vocabulary as the SPF/DMARC/DNS pages — the four category pages must fe
 │  ⚠ content.url_https        1 link is http:// (not https)            [v]    │
 │  ── Sender reputation ──────────────────────────────────────────────────── │
 │  ⚠ content.complaint_rate   0.21% and rising (warn ≥ 0.1%)           [v]    │
+│  ── Report-email analysis ─────────────────────────────── 1 of 8 warn ──── │
+│  ⚠ content.report_fragility  SendGrid stream is DKIM-only (aspf=s)    [v]    │
+│      observed: 34 msgs envelope em2598.act3ai.com pass via DKIM only        │
+│      fix: set aspf=r, or brand the Return-Path (bounces.act3ai.com) [copy]  │
+│  ✓ content.report_spoofing   0 rows fail both SPF+DKIM alignment      [v]    │
 │  …                                                                          │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  PROBLEM STATES                                                             │  cards
@@ -359,7 +397,7 @@ e.g. ~/.email_delivery_hero/runs/whitehatengineering.com/2026_07_01_09_14AM.yaml
 zero-padded, `AM`/`PM` suffix. The file opens with the `run:` block (`run_id`, `domain`,
 `started_at`/`finished_at` in ISO-UTC, `score`, `status`) and then holds **one top-level key per
 category**: `spf`, `dkim`, `dmarc`, `blacklists`, `dns_infra`, **`spam_content`**. This section
-owns the `spam_content` key. Its shape — the category `status`, the six structured family
+owns the `spam_content` key. Its shape — the category `status`, the seven structured family
 snapshots, the `tool_runs[]` execution log, the per-sub-test `tests[]` rows, and the derived
 `problem_states`:
 
@@ -380,15 +418,31 @@ blacklists: { ... }   # owned by ./blacklists.mdx
 dns_infra: { ... }    # owned by ./dns.mdx
 
 spam_content:
-  status: warning                       # worst severity across all six families
+  status: warning                       # worst severity across all seven families
   families:                             # roll-up per family (drives the family chip strip)
     bimi:              { status: warning,  tests: 8 }
+    report_emails:     { status: warning,  tests: 8 }
     content_score:     { status: ok,       tests: 9 }
     list_unsubscribe:  { status: critical, tests: 8 }
     link_reputation:   { status: warning,  tests: 12 }
     sender_reputation: { status: warning,  tests: 5 }
     inbox_placement:   { status: warning,  tests: 7 }
   # ---- structured observation (one snapshot per test family) ----
+  report_emails:                        # owned by ../emails.mdx §13.3 (full example there)
+    dir: /Users/bryan/.email_delivery_hero/reports/inbox
+    scanned_files: 10
+    parsed_reports: 10
+    duplicates: 10                      # unchanged corpus re-scan — idempotent
+    skipped: 0
+    decode_errors: []
+    attribution: { this_domain: 8, other_domains: { act3ai.com: 2 }, orphans: [] }
+    window: { begin: 2026-06-24, end: 2026-06-30 }
+    dmarc: { reports: 5, reporters: [google.com], messages: 812, dual_aligned: 790,
+             pass_rate_pct: 97.3, dkim_only: 22, spf_only: 0, both_fail: 0,
+             quarantined: 0, rejected: 0,
+             policy: "p=reject; adkim=s; aspf=s; pct=100" }
+    tlsrpt: { reports: 2, reporters: [Microsoft Corporation], sessions_ok: 5,
+              sessions_failed: 0, policy_types: [sts] }
   bimi:
     selector: default
     record_found: true
@@ -516,21 +570,32 @@ spam_content:
       title: Content score 1.4 / 5.0 — safe
       result: pass
       evidence: "SpamAssassin 4.0.2 (local): 1.4 (HTML_MESSAGE 0.0, MIME_HTML_MOSTLY 0.7, SUBJECT_EXCESS_EXCLAIM 0.7)"
+    - id: content.report_fragility
+      title: A stream passes DMARC via DKIM only
+      result: warn
+      evidence: "22 msgs envelope em2598.whitehatengineering.com — SPF alignment fails under aspf=s; DKIM rescues the stream"
+      fix: Set aspf=r on _dmarc.whitehatengineering.com, or brand the Return-Path (bounces.whitehatengineering.com CNAME at the ESP) so SPF aligns too.
+    - id: content.report_spoofing
+      title: No unauthorized senders in receiver reports
+      result: pass
+      evidence: "0 of 812 msgs fail both SPF and DKIM alignment (5 reports, google.com)"
   # ---- matched problem states (see §6; derived at render time, stored for the differ) ----
-  problem_states: [PS-03, PS-05, PS-07, PS-08]
+  problem_states: [PS-03, PS-05, PS-07, PS-08, PS-11]
 ```
 
-Field-name mapping: the six snapshot keys are 1:1 with the family specs' Information-Schema
+Field-name mapping: the seven snapshot keys are 1:1 with the family specs' Information-Schema
 tables (`content_sample_messages`, `content_url_checks`, `reputation_metrics`,
-`placement_results`, …); `tests[]` rows are the `findings` (`result: pass|fail|warn|info` ⇔
+`placement_results`, the [../emails.mdx](../emails.mdx) §9 report store for `report_emails`, …);
+`tests[]` rows are the `findings` (`result: pass|fail|warn|info` ⇔
 severity `ok|critical|warning|info`; `family` is derived from the finding id per the §1 prefix
 table); `families` is derived at render time. `tool_runs[]` is this category's execution log —
 append-only within the run, one entry per external invocation, exactly the §3 contract
 (`tool, command, started_at, duration_ms, exit_code, output_format, parsed, error`). The
 regression differ ([../scheduled_checks.mdx](../scheduled_checks.mdx)) compares consecutive run
 files per domain: a placement rate dropping, a new zone hit in `link_reputation`, a complaint-rate
-band change, or a VMC sliding toward expiry each surface as a **new problem** even when the
-overall severity is unchanged.
+band change, a VMC sliding toward expiry, a report-observed pass-rate drop, a new unaligned
+source, or TLS failure sessions appearing in `report_emails` each surface as a **new problem**
+even when the overall severity is unchanged.
 
 ---
 
@@ -544,15 +609,17 @@ VMC while their complaint rate is spiking is malpractice. First matching rung wi
 | Rung | Condition (first match wins) | Primary recommendation |
 | --- | --- | --- |
 | 0 | A provider shows majority **Missing** (`seed_missing`) or a linked domain you own is on a high-trust URI zone (`url_dbl`/`url_surbl` critical) | You are blocked, not filtered: pause sending to that provider, request delisting via the zone's portal, and clean the compromised site/shortener before anything else. |
-| 1 | Complaint rate ≥ 0.3% or GPT reputation `BAD`/`LOW` (`complaint_rate`, `gpt_spam_rate`, `gpt_domain_reputation`) | Stop the bleeding: pause the offending segment today, suppress every complainer from FBL/GPT data, and cut volume to the most-engaged recipients until the rate is < 0.1%. |
-| 2 | Bulk-compliance gate failing (`list_unsubscribe`, `list_unsub_oneclick`, `list_unsub_https`, `from_alignment` critical) | Ship the Gmail/Yahoo requirements: RFC 8058 one-click header + https unsubscribe endpoint, and a `From:` that aligns with your DKIM `d=` — these are hard gates, not scores. |
-| 3 | Content scoring critical (`spamassassin_score` ≥ 5, `html_hygiene` hidden text, `mime_valid` broken, `attachment_risk`) | Fix the message: address the highest-scoring fired rules first and re-score until the total is < 2.0. |
-| 4 | Link hygiene (`url_shortener`, `url_https`, `url_ip_literal`, `url_punycode`, `url_redirect_chain`, abused-legit zone hits) | Clean the links: full destination URLs on your own https domains, no shorteners, no raw IPs; re-check the final domains against the URI zones. |
-| 5 | Placement warnings (50–79% inbox, `seed_tab_placement` Promotions, `placement_longtail`) | Tune per provider: SNDS/JMRP for Outlook, engagement pruning for Yahoo, plainer markup for Gmail Primary — the per-provider rows name the lever. |
-| 6 | Warmup/volume anomalies (`warmup`, `volume_consistency`) | Smooth the sending pattern: ramp new IPs/domains over 4–8 weeks and spread campaigns instead of burst-and-silence. |
-| 7 | BIMI absent/incomplete while DMARC is enforcing (`bimi_*` warnings) | Collect the reward: publish the BIMI record, serve an SVG Tiny-PS logo, and add a VMC/CMC so Gmail/Apple actually render it. |
-| 8 | Visibility gaps only (`reputation_data_available`, `postmaster_verified`, `seed_coverage`, no-sample infos) | You're flying blind: upload a representative `.eml`, verify the domain in Google Postmaster Tools, enroll FBLs, and add seeds — every future run gets sharper. |
-| 9 | All healthy | Keep it: re-run on schedule, watch the placement trend and complaint band — content reputation regresses quietly (a template edit, a new vendor link, one bad list import). |
+| 1 | Receivers are actively dropping or spoofers are actively using your domain (`report_enforcement` critical, `report_spoofing` critical) | Act on what the receivers themselves reported: authorize the failing own-stream (SPF `include:` / DKIM selector) before the next send, or confirm the spoofing source is being rejected and report high-volume abuse. |
+| 2 | Complaint rate ≥ 0.3% or GPT reputation `BAD`/`LOW` (`complaint_rate`, `gpt_spam_rate`, `gpt_domain_reputation`) | Stop the bleeding: pause the offending segment today, suppress every complainer from FBL/GPT data, and cut volume to the most-engaged recipients until the rate is < 0.1%. |
+| 3 | Bulk-compliance gate failing (`list_unsubscribe`, `list_unsub_oneclick`, `list_unsub_https`, `from_alignment` critical) | Ship the Gmail/Yahoo requirements: RFC 8058 one-click header + https unsubscribe endpoint, and a `From:` that aligns with your DKIM `d=` — these are hard gates, not scores. |
+| 4 | Content scoring critical (`spamassassin_score` ≥ 5, `html_hygiene` hidden text, `mime_valid` broken, `attachment_risk`) | Fix the message: address the highest-scoring fired rules first and re-score until the total is < 2.0. |
+| 5 | Link hygiene (`url_shortener`, `url_https`, `url_ip_literal`, `url_punycode`, `url_redirect_chain`, abused-legit zone hits) | Clean the links: full destination URLs on your own https domains, no shorteners, no raw IPs; re-check the final domains against the URI zones. |
+| 6 | Report-observed fragility or TLS failures (`report_fragility`, `report_pass_rate` < ~100%, `report_tls` warning) | De-risk the streams the reports flagged: set `aspf=r` or brand the Return-Path so the ESP stream dual-aligns; fix the MX cert / TLSA / MTA-STS layer TLS-RPT named — before a key rotation or cert expiry turns the warning into bounces. |
+| 7 | Placement warnings (50–79% inbox, `seed_tab_placement` Promotions, `placement_longtail`) | Tune per provider: SNDS/JMRP for Outlook, engagement pruning for Yahoo, plainer markup for Gmail Primary — the per-provider rows name the lever. |
+| 8 | Warmup/volume anomalies (`warmup`, `volume_consistency`) | Smooth the sending pattern: ramp new IPs/domains over 4–8 weeks and spread campaigns instead of burst-and-silence. |
+| 9 | BIMI absent/incomplete while DMARC is enforcing (`bimi_*` warnings) | Collect the reward: publish the BIMI record, serve an SVG Tiny-PS logo, and add a VMC/CMC so Gmail/Apple actually render it. |
+| 10 | Visibility gaps only (`reputation_data_available`, `postmaster_verified`, `seed_coverage`, no-sample / empty-corpus / stale-corpus infos, `report_domain_attribution` orphans) | You're flying blind: upload a representative `.eml`, verify the domain in Google Postmaster Tools, enroll FBLs, add seeds, and point the report mailbox / analysis directory here (add orphan-report domains as monitored domains) — every future run gets sharper. |
+| 11 | All healthy | Keep it: re-run on schedule, watch the placement trend and complaint band — content reputation regresses quietly (a template edit, a new vendor link, one bad list import). |
 
 Standing advisories surfaced as `info` when applicable: keep the sample message current (a
 6-month-old sample audits a campaign you no longer send); never A/B test your way past a filter by
@@ -581,6 +648,7 @@ when any listed prefix matches a finding at warning/critical severity (PS-09 mat
 | PS-08 | BIMI published but not rendering | `bimi_dmarc_prereq`, `bimi_syntax`, `bimi_vmc`, `bimi_vmc_url`, `bimi_vmc_valid`, `bimi_vmc_logo_match`, `bimi_svg_*`, `bimi_l_present`, `bimi_single`, `bimi_selector`, `bimi_dns_health` | warning (critical: record present, DMARC not enforcing) |
 | PS-09 | Flying blind — no sample / sources / seeds | `reputation_data_available`, `postmaster_verified`, `fbl_enrollment`, `seed_coverage`, the per-family "no sample message" infos | info |
 | PS-10 | Delivered, but to the wrong place (Gmail tabs) | `seed_tab_placement`, `seed_delivery_latency` | warning |
+| PS-11 | Receivers' reports flag your mail stream | `report_spoofing`, `report_enforcement`, `report_fragility`, `report_pass_rate`, `report_tls`, `report_domain_attribution`, `report_freshness`, `report_corpus` | critical (spoofing / enforcement) · warning (fragility, pass-rate, TLS, orphans, staleness) |
 
 Drill-down pages follow the app-wide pattern (§2): **Concept**, **Your data** (the matched
 findings + the relevant snapshot rendered live from the viewed run), **Diagnose it yourself**
@@ -593,7 +661,7 @@ The goal state: a scored sample under 2.0 with clean structure, both unsubscribe
 and DKIM-covered, every link full-URL https on domains you control and clean on the URI zones,
 complaint rate under 0.1% with sources connected, ≥ 90% inbox placement, BIMI rendering (or
 consciously declined).
-- **Data fields:** `families.*.status = ok`, all six §4 snapshots clean, a current `sample_id`.
+- **Data fields:** `families.*.status = ok`, all seven §4 snapshots clean, a current `sample_id`.
 - **Diagnose/debug:** nothing to fix — `spamassassin --test-mode --local <sample>` and a
   mail-tester.com pass (9–10/10) should agree with us.
 - **Tools:** the §3 bench, run on schedule rather than ad hoc.
@@ -806,18 +874,50 @@ consciously declined).
 - **UI:** Promotions renders amber-lite with an explicit "this is not spam-foldering" note;
   fix = content-weight levers, offered as optional tuning, never as a compliance item.
 
+### PS-11 — Receivers' reports flag your mail stream
+
+- **Concept:** DMARC aggregate and TLS-RPT reports are the receivers **telling you what they
+  saw** — the only evidence that arrives without probing anything. Four escalating stories hide
+  in them: a stream that passes DMARC on **one mechanism only** (e.g. an ESP subdomain envelope
+  failing SPF alignment under `aspf=s`, rescued by DKIM — one key rotation from rejection under
+  `p=reject`); a **spoofer** using your domain (rows failing both alignments); your **own mail
+  being quarantined/rejected** right now; and **inbound TLS quietly failing** for senders that
+  enforce MTA-STS/DANE. The run-time test ([../emails.mdx §13](../emails.mdx)) walks the report
+  corpus on every run, attributes each report to its domain by the payload's policy domain, and
+  scores this catalog.
+- **Data fields:** the whole `report_emails` §4 snapshot (`attribution`, `dmarc.pass_rate_pct`,
+  `dkim_only`/`spf_only`/`both_fail`, `quarantined`/`rejected`, `tlsrpt.sessions_failed`,
+  `window`), plus the per-source-IP table from the Reports view.
+- **Diagnose/debug:** open the expandable per-source table (source IP · count · disposition ·
+  SPF/DKIM eval + alignment · envelope); confirm a fragile stream's envelope
+  (`em2598.<domain>` ⇒ the ESP's default Return-Path); check the published record:
+  `dig +short TXT _dmarc.<domain>` (read `aspf=`/`adkim=`/`p=`); after the fix, watch the next
+  window's reports confirm dual alignment.
+- **Tools:** the [../emails.mdx](../emails.mdx) ingestion + Reports view ("Ingest now"), dig for
+  the record edits; the ESP's authenticated-domain / custom Return-Path settings page is where
+  the branded-bounce fix actually ships.
+- **More health metrics:** pass-rate trend across windows; new-source appearances
+  (`dmarc.report_new_source`); TLS failure-rate trend — all fed by the same store.
+- **UI:** the family group reads observed-first (the counts and IPs from the reports, with the
+  "from reports" chip); fragility rows carry the two-option fix (`aspf=r` **or** branded
+  Return-Path) as a copyable record edit; orphan-report rows link to "Add domain"; the healthy
+  state prints the §12 emails.mdx numbers ("96.8% dual-aligned · 0 spoofed · 0 rejected ·
+  TLS 7/0") so green is quantified, never blank.
+
 ---
 
 ## 7. Acceptance criteria
 
-1. All six family checkers run in every run and emit pass **and** fail findings with the
+1. All seven family checkers run in every run and emit pass **and** fail findings with the
    `content.` prefix; input-gated families with no sample/integration/seeds emit a single **info**
-   finding each (never a fabricated pass, warning, or critical).
+   finding each (never a fabricated pass, warning, or critical); the report-email family with an
+   empty corpus emits a single **info** the same way.
 2. The run file at `~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml` contains
-   a top-level `spam_content` key with `status`, the six family snapshot keys
-   (`bimi`, `content_score`, `list_unsubscribe`, `link_reputation`, `sender_reputation`,
-   `inbox_placement`), `tool_runs[]`, `tests[]`, and `problem_states` exactly per §4; the file's
-   `run:` block and sibling category keys are owned by [../storage.mdx](../storage.mdx).
+   a top-level `spam_content` key with `status`, the seven family snapshot keys
+   (`bimi`, `report_emails`, `content_score`, `list_unsubscribe`, `link_reputation`,
+   `sender_reputation`, `inbox_placement`), `tool_runs[]`, `tests[]`, and `problem_states` exactly
+   per §4; the file's `run:` block and sibling category keys are owned by
+   [../storage.mdx](../storage.mdx).
 3. Every external tool invocation appends one `tool_runs[]` entry with
    `tool, command (exact argv string with every input arg), started_at, duration_ms, exit_code,
    output_format (json|text), parsed, error` — including failed and timed-out invocations
@@ -844,26 +944,39 @@ consciously declined).
 10. The category page renders at `/domains/:domainId/runs/:runId/spam-content` (newest alias
     `/domains/:domainId/spam-content`): header with run timestamp + working ‹ prev / next ›
     run navigation + Re-run, the inbox-placement hero with per-provider strip (and the `—`
-    never-tested state), the six-chip family strip with anchor links, the Sample & sources and
+    never-tested state), the seven-chip family strip with anchor links, the Sample & sources and
     Reputation panels, the family-grouped fail-first sub-test table with observed values,
     accordion evidence, and copyable fixes, and the matched problem-state cards.
 11. Problem-state drill-downs (`/domains/:domainId/spam-content/:problemId`) render concept, live
     data from the viewed run, copyable diagnose-commands, tools, and the numbered path forward
-    for PS-01…PS-10.
+    for PS-01…PS-11.
 12. The primary recommendation is computed by the §5 ladder (first matching rung), so a provider
     block outranks a complaint spike, which outranks compliance headers, and BIMI advice never
     appears while mail is being junked.
 13. A later scheduled run that sees a placement drop, a new URI-zone hit, a complaint band change,
     a lost one-click header, or a VMC nearing expiry flags each as a **new problem** via the
     run-file regression diff.
+14. **Report-email analysis (family 2):** every run scans the analysis directory **in place**
+    (files never moved/renamed), attributes each report by its **payload** policy domain (exact
+    monitored-domain match, else closest monitored parent — never filename/subject/mailbox),
+    stores other monitored domains' reports under those domains, names orphan report domains,
+    and — run against the [../emails.mdx §12](../emails.mdx) act3ai.com corpus — reproduces
+    §13.4 there exactly: `report_pass_rate` warning at 96.8%, `report_fragility` warning
+    (the SendGrid DKIM-only stream with the `aspf=r`/branded-Return-Path fix), `report_spoofing`
+    ok, `report_enforcement` info, `report_tls` info — and emits **nothing but corpus/attribution
+    rows for any other domain**.
 
 <!--
   Maintenance notes:
   * This is the CATEGORY-level spec for the six-category dashboard's "Spam & Content" column
-    (checkId prefix `content`). The six family specs (bimi, content_scoring, list_unsubscribe,
-    link_url_reputation, reputation_metrics, inbox_placement) own per-sub-check detail; keep §1's
-    finding-id prefix table in sync with those specs AND with the checkers under
-    code/packages/backend/src/modules/audit/checks/.
+    (checkId prefix `content`). The seven family specs (bimi, ../emails.mdx §13 for report_emails,
+    content_scoring, list_unsubscribe, link_url_reputation, reputation_metrics, inbox_placement)
+    own per-sub-check detail; keep §1's finding-id prefix table in sync with those specs AND with
+    the checkers under code/packages/backend/src/modules/audit/checks/.
+  * Family 2 (report_emails, checker content.report_emails, findings content.report_*) is the
+    RUN-TIME surface of ../emails.mdx: in-place corpus scan (never move files), attribution by
+    payload policy domain, aggregate findings only — per-source detail stays dmarc.*/infra.*.
+    Keep §1 row, §4 snapshot, §5 rungs 1/6/10, and PS-11 in lockstep with ../emails.mdx §13.
   * Run-file storage (one YAML per run at ~/.email_delivery_hero/runs/<domain>/
     <YYYY_MM_DD_hh_mm{AM|PM}>.yaml, run: block + one key per category) is OWNED by ../storage.mdx —
     this file only defines the `spam_content` key's interior. Change the tool_runs[] entry shape

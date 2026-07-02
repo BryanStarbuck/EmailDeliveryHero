@@ -8,13 +8,14 @@ import { stateSubdir } from "@shared/state-dir"
 import {
   aggregateDmarc,
   aggregateTlsRpt,
+  type DmarcAggregate,
   deriveDmarcReportFindings,
   deriveTlsRptFindings,
-  type DmarcAggregate,
   type TlsRptAggregate,
 } from "./derive-findings"
 import { parseDmarcAggregateXml } from "./dmarc-xml"
 import { classifyPayload, extractReportPayloads } from "./mime"
+import type { IngestSummary, ParsedTlsRptReport } from "./report.types"
 import {
   listDmarcReports,
   listTlsRptReports,
@@ -23,7 +24,6 @@ import {
   saveTlsRptReport,
   writeIngestState,
 } from "./report-store"
-import type { IngestSummary, ParsedTlsRptReport } from "./report.types"
 import { parseTlsRptJson } from "./tlsrpt-json"
 
 /** File extensions the drop folder accepts (pm/emails.mdx §4.1). */
@@ -70,7 +70,9 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
     if (!config.enabled) return
     const everyMs = Math.max(1, config.pollMinutes) * 60 * 1000
     this.pollTimer = setInterval(() => {
-      this.ingest().catch((err) => logError("Scheduled report ingest failed", err, "ReportsService"))
+      this.ingest().catch((err) =>
+        logError("Scheduled report ingest failed", err, "ReportsService"),
+      )
     }, everyMs)
     this.pollTimer.unref?.()
   }
@@ -88,7 +90,13 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
    */
   async ingest(): Promise<IngestSummary> {
     const config = readAppConfig().reports
-    const summary: IngestSummary = { scanned: 0, ingested: 0, duplicates: 0, skipped: 0, errors: [] }
+    const summary: IngestSummary = {
+      scanned: 0,
+      ingested: 0,
+      duplicates: 0,
+      skipped: 0,
+      errors: [],
+    }
     if (!config.enabled) {
       summary.errors.push("Report ingestion is disabled in Settings → Admin.")
       return summary
@@ -269,8 +277,14 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
       ingestionEnabled: config.enabled,
       windowDays: config.windowDays,
       lastIngestAt: readIngestState(domainId).lastIngestAt,
-      dmarc: { ...aggregateDmarc(dmarcReports, config.windowDays), totalReportsStored: dmarcReports.length },
-      tlsrpt: { ...aggregateTlsRpt(tlsReports, config.windowDays), totalReportsStored: tlsReports.length },
+      dmarc: {
+        ...aggregateDmarc(dmarcReports, config.windowDays),
+        totalReportsStored: dmarcReports.length,
+      },
+      tlsrpt: {
+        ...aggregateTlsRpt(tlsReports, config.windowDays),
+        totalReportsStored: tlsReports.length,
+      },
       findings: [
         ...deriveDmarcReportFindings(domainId, domain.name),
         ...deriveTlsRptFindings(domainId, domain.name),

@@ -34,7 +34,7 @@ export const DKIM_PROBLEM_STATES: DkimProblemState[] = [
     title: "Selector not published (no key in DNS)",
     hook: 'Every message signed with this selector fails at every receiver — permerror "no key for signature".',
     severity: "critical",
-    findingPrefixes: ["dkim.present"],
+    findingPrefixes: ["dkim.present", "dkim.cname_delegation"],
     concept: [
       "Mail signed with this selector carries a DKIM-Signature that every receiver tries — and fails — to verify, because the public key was never published at <selector>._domainkey.<domain>. That is worse than not signing at all.",
       "The classic causes: the ESP was set up to sign but the DNS record was never added at the registrar, a selector typo, or signing was rotated to a selector whose record was later deleted.",
@@ -321,7 +321,7 @@ export const DKIM_PROBLEM_STATES: DkimProblemState[] = [
     title: "No selectors known — mail likely unsigned",
     hook: "Nothing configured and discovery found nothing: probably no DKIM at all.",
     severity: "warning",
-    findingPrefixes: ["dkim.unsigned", "dkim.lookup_failed"],
+    findingPrefixes: ["dkim.unsigned"],
     concept: [
       "Selectors cannot be enumerated from DNS, and discovery probed dozens of common names without a hit. Either the domain does not sign at all — which Gmail/Yahoo (2024) and Microsoft's outlook.com enforcement (May 2025) penalize for bulk senders — or it signs with a custom selector no wordlist can know (Amazon SES's random tokens, custom names).",
       "The definitive source is a real message: the s= and d= tags of its DKIM-Signature header.",

@@ -63,6 +63,14 @@ export interface DnsHealthResults {
   ns: DnsNameserverRow[]
   ns_count: number
   network_count: number
+  /**
+   * `dns_health_results.ns_asn_diverse` (acceptance #2): FALSE when the resolvable NS all share
+   * one /24+/48 prefix group (single-network proxy for single-ASN); NULL when prefix-diverse —
+   * true ASN diversity waits for the future ASN feed — or when nothing resolved.
+   */
+  ns_asn_diverse: boolean | null
+  /** `dns_health_results.lame_ns`: the lame/no-answer NS observed this run (first-round inference). */
+  lame_ns: { host: string; reason: string }[]
   parent_child_match: boolean | null
   soa: {
     mname: string
@@ -73,15 +81,29 @@ export interface DnsHealthResults {
     expire: number
     min_ttl: number
   } | null
+  /** `dns_health_results.soa_serial` — extracted for the cross-run monotonic compare. */
+  soa_serial: number | null
   ttls: Record<string, number> | null
   wildcard: { detected: boolean; probe: string; types: string[] }
+  /** Spec-named mirror of `wildcard.types` (`dns_health_results.wildcard_types`, acceptance #9). */
+  wildcard_types: string[]
   cname_at_apex: boolean
+  /** Spec-named mirror of `cname_at_apex` (`dns_health_results.apex_is_cname`, acceptance #3). */
+  apex_is_cname: boolean
   /** Dangling CNAME / SPF-include / MX / sub-delegated-NS targets found this run. */
   dangling: DanglingEntry[]
   /** Apex TXT RRset size (infra.txt_bloat). */
   txt_record_count: number
   /** How many v=spf1 TXT records the apex publishes (>1 = permerror, infra.multi_txt_spf). */
   spf_record_count: number
+  /** `dns_health_results.glue_ok` — NULL until the parent-glue probe (future). */
+  glue_ok: boolean | null
+  /** `dns_health_results.axfr_open` — NULL until the AXFR probe (future). */
+  axfr_open: boolean | null
+  /** `dns_health_results.worst_severity` — the worst severity this check produced this run. */
+  worst_severity: "ok" | "info" | "warning" | "critical"
+  /** `dns_health_results.checked_at` — ISO timestamp of this run's DNS-health pass. */
+  checked_at: string
 }
 
 function emptySnapshot(): DnsHealthResults {
@@ -89,14 +111,23 @@ function emptySnapshot(): DnsHealthResults {
     ns: [],
     ns_count: 0,
     network_count: 0,
+    ns_asn_diverse: null,
+    lame_ns: [],
     parent_child_match: null,
     soa: null,
+    soa_serial: null,
     ttls: null,
     wildcard: { detected: false, probe: "", types: [] },
+    wildcard_types: [],
     cname_at_apex: false,
+    apex_is_cname: false,
     dangling: [],
     txt_record_count: 0,
     spf_record_count: 0,
+    glue_ok: null,
+    axfr_open: null,
+    worst_severity: "ok",
+    checked_at: new Date().toISOString(),
   }
 }
 
@@ -268,8 +299,13 @@ async function checkNs(
   }
 
   const hosts = unique(ns.records.map(fqdnLower))
-  const nsInfos: { host: string; ips: string[]; groups: string[]; isCname: boolean; dead: boolean }[] =
-    []
+  const nsInfos: {
+    host: string
+    ips: string[]
+    groups: string[]
+    isCname: boolean
+    dead: boolean
+  }[] = []
   for (const host of hosts) {
     const cname = await resolveCname(host)
     const isCname = !cname.error && cname.records.length > 0
@@ -302,6 +338,12 @@ async function checkNs(
   }))
   snap.ns_count = hosts.length
   snap.network_count = new Set(nsInfos.flatMap((n) => n.groups)).size
+  // ns_asn_diverse (acceptance #2): a single prefix group is definitively NOT diverse (false);
+  // prefix-diverse stays NULL until the real-ASN feed can confirm; nothing resolved stays NULL.
+  snap.ns_asn_diverse = resolvedCount === 0 ? null : snap.network_count <= 1 ? false : null
+  snap.lame_ns = nsInfos
+    .filter((n) => n.dead)
+    .map((n) => ({ host: n.host, reason: "resolves to no A/AAAA address (inferred lame)" }))
 
   const evidence = nsInfos.map((n) => `${n.host}=${n.ips.join("/") || "?"}`).join(", ")
 
@@ -423,6 +465,7 @@ async function checkSoa(
     expire: r.expire,
     min_ttl: r.minttl,
   }
+  snap.soa_serial = r.serial
 
   const soaEvidence = `mname=${r.nsname} rname=${r.hostmaster} serial=${r.serial} refresh=${r.refresh} retry=${r.retry} expire=${r.expire} minimum=${r.minttl}`
 
@@ -498,7 +541,7 @@ async function checkSoa(
 
   // RNAME (hostmaster mailbox) hygiene — info-level only.
   const rname = r.hostmaster
-  if (!rname || !rname.includes(".")) {
+  if (!rname?.includes(".")) {
     findings.push({
       id: "infra.soa_rname",
       checkId: CHECK_ID,
@@ -670,6 +713,7 @@ async function checkApexCname(
   }
   if (c.records.length > 0) {
     snap.cname_at_apex = true
+    snap.apex_is_cname = true
     findings.push({
       id: "infra.cname_at_apex",
       checkId: CHECK_ID,
@@ -717,7 +761,10 @@ async function danglingLabels(
     .map(fqdnLower)
     .filter(Boolean)
     .map((l) => (l === domain || l.endsWith(`.${domain}`) ? l : `${l}.${domain}`))
-  const labels = [...base, ...dkim].map((l) => `${l}.${domain}`).concat(extras)
+  // The apex itself is scanned too (spec §3.4 "for the apex and a curated set of mail-relevant
+  // labels"): an apex CNAME is already critical via infra.cname_at_apex, but a DEAD apex-CNAME
+  // target additionally surfaces here as a takeover-risk dangling finding.
+  const labels = [domain, ...[...base, ...dkim].map((l) => `${l}.${domain}`), ...extras]
   const mx = await resolveMx(domain)
   if (!mx.error) {
     for (const rec of mx.records) {
@@ -741,7 +788,21 @@ async function checkDanglingCname(
   for (const label of labels) {
     const c = await resolveCname(label)
     if (c.error || c.records.length === 0) continue // no CNAME here (or transient) — nothing to flag.
-    const { final, chain } = await followCname(label)
+    const { final, chain, status: chainStatus } = await followCname(label)
+    if (chainStatus === "loop") {
+      // The 8-hop loop guard tripped (spec §3 edge cases): a CNAME loop never resolves, so every
+      // lookup through this name SERVFAILs — flag it rather than silently classifying the target.
+      findings.push({
+        id: `infra.dangling_cname.${label}`,
+        checkId: CHECK_ID,
+        title: `CNAME loop on ${label}`,
+        severity: "warning",
+        detail: `${label} is part of a CNAME loop (${[...chain, final].join(" → ")} → …). Resolvers abort looped chains, so this name never resolves and any mail/auth record behind it is unreachable.`,
+        remediation: `Break the loop: repoint the CNAME on ${label} (or on ${final}) at a real A/AAAA host, or delete the record.`,
+        evidence: [...chain, final].join(" → "),
+      })
+      continue
+    }
     const fp = matchFingerprint(final, fingerprints)
     const status = await classifyTarget(final)
     if (status === "transient") continue
@@ -795,12 +856,21 @@ async function checkDanglingInclude(
     if (spf) {
       for (const tok of spf.split(/\s+/)) {
         const m = /^[+~\-?]?(include:|redirect=)(.+)$/i.exec(tok)
-        if (!m) continue
-        const mech = m[1].replace(/[:=]/, "")
-        const target = fqdnLower(m[2])
+        // SPF `a:`/`mx:` mechanisms with an explicit domain are dead-target candidates too
+        // (spec §3.5: "extract include:/redirect: domains and a/mx mechanism hosts").
+        const am = m ? null : /^[+~\-?]?(a|mx):([^/]+)(?:\/.*)?$/i.exec(tok)
+        if (!m && !am) continue
+        const mech = m ? m[1].replace(/[:=]/, "") : (am as RegExpExecArray)[1].toLowerCase()
+        const target = fqdnLower(m ? m[2] : (am as RegExpExecArray)[2])
+        if (!target || target === domain) continue
         const status = await classifyTarget(target)
         if (status === "dead") {
-          snap.dangling.push({ name: domain, type: "SPF", target, kind: "include" })
+          snap.dangling.push({
+            name: domain,
+            type: "SPF",
+            target,
+            kind: mech === "mx" ? "mx" : "include",
+          })
           findings.push({
             id: `infra.dangling_include.${target}`,
             checkId: CHECK_ID,
@@ -823,6 +893,7 @@ async function checkDanglingInclude(
       const [a, aaaa] = await Promise.all([resolve4(host), resolve6(host)])
       if (a.error || aaaa.error) continue
       if (a.records.length === 0 && aaaa.records.length === 0) {
+        snap.dangling.push({ name: domain, type: "MX", target: host, kind: "mx" })
         findings.push({
           id: `infra.dangling_include.mx.${host}`,
           checkId: CHECK_ID,
@@ -921,6 +992,7 @@ function detectTxtDuplicates(records: string[]): string[] {
 /** infra.multi_txt_spf + infra.txt_bloat. */
 async function checkTxt(
   domain: string,
+  selectors: string[],
   findings: Finding[],
   snap: DnsHealthResults,
 ): Promise<void> {
@@ -987,6 +1059,34 @@ async function checkTxt(
       detail: `${records.length} TXT records, ${totalOctets} octets at the apex.`,
     })
   }
+
+  // Mail names too (spec §2 infra.txt_bloat: "Count TXT RRs + total octets at apex and MAIL
+  // NAMES"): a bloated _dmarc / DKIM-selector TXT set risks the same UDP-fragmentation /
+  // TCP-only failure mode on exactly the lookups receivers make while authenticating.
+  const mailNames = unique(
+    ["_dmarc", "_mta-sts", ...selectors.map((s) => `${s}._domainkey`)].map((l) => `${l}.${domain}`),
+  )
+  for (const name of mailNames) {
+    const t = await resolveTxt(name)
+    if (t.error || t.records.length === 0) continue // absent/transient — owned by that record's check.
+    const octets = t.records.reduce((n, r) => n + r.length, 0)
+    const nameDups = detectTxtDuplicates(t.records)
+    const issues: string[] = []
+    if (octets > 1200)
+      issues.push(`TXT set totals ${octets} octets (risks UDP fragmentation / TCP-only responses)`)
+    if (nameDups.length > 0) issues.push(`duplicate records: ${nameDups.join(", ")}`)
+    if (issues.length > 0) {
+      findings.push({
+        id: `infra.txt_bloat.${name}`,
+        checkId: CHECK_ID,
+        title: `TXT record bloat at ${name}`,
+        severity: "warning",
+        detail: `The TXT set at ${name} may be problematic: ${issues.join("; ")}. Receivers resolve this name while authenticating mail, so an oversized/duplicated answer can intermittently fail as temperror.`,
+        remediation: `Remove stale or duplicate TXT records at ${name} so its TXT set fits a single UDP response (keep exactly one record per purpose).`,
+        evidence: `${t.records.length} TXT records, ${octets} octets`,
+      })
+    }
+  }
 }
 
 /** infra.wildcard. A random nonce label that resolves implies a wildcard/catch-all. */
@@ -1009,6 +1109,7 @@ async function checkWildcard(
   if (mx.records.length > 0) types.push("MX")
   if (txt.records.length > 0) types.push("TXT")
   snap.wildcard = { detected: types.length > 0, probe: label, types }
+  snap.wildcard_types = types
   if (types.length > 0) {
     findings.push({
       id: "infra.wildcard",
@@ -1076,11 +1177,19 @@ export const dnsHealthCheck: Checker = {
     await checkDanglingCname(domain, selectors, cfg.extraLabels, loadFingerprints(), findings, snap)
     await checkDanglingInclude(domain, findings, snap)
     await checkDanglingNs(domain, selectors, cfg.extraLabels, findings, snap)
-    await checkTxt(domain, findings, snap)
+    await checkTxt(domain, selectors, findings, snap)
     await checkWildcard(domain, findings, snap)
     // Last: the serial compare diffs the completed snapshot against the previous run's.
     checkSoaSerial(domain, findings, snap, prev)
     emitFutureInfos(findings, cfg.skipAxfrProbe)
+
+    // dns_health_results.worst_severity / checked_at (spec §5) — the summary row's verdict.
+    const rank = { ok: 0, info: 1, warning: 2, critical: 3 } as const
+    snap.worst_severity = findings.reduce<DnsHealthResults["worst_severity"]>(
+      (worst, f) => (rank[f.severity] > rank[worst] ? f.severity : worst),
+      "ok",
+    )
+    snap.checked_at = new Date().toISOString()
 
     return { findings, results: snap }
   },

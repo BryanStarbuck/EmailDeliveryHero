@@ -1,28 +1,121 @@
-import { withResource } from "@shared/concurrency"
+import { mapLimit, withResource } from "@shared/concurrency"
+import { readAppConfig } from "@shared/config-store"
+import type { BlocklistZone } from "../blacklist/blacklist-types"
+import { buildQueryName, classifyAnswer, classifyZoneHealth } from "../blacklist/engine"
+import { loadZones } from "../blacklist/zones"
+import { getActiveSample, readSampleRaw } from "../content-scoring/sample-store"
 import { resolve4, resolveTxt } from "../dns-util"
-import type { Checker, Finding } from "../types"
+import type { Checker, CheckOutcome, Finding, Severity } from "../types"
+import {
+  DEFAULT_SHORTENERS,
+  extractLinks,
+  extractSampleParts,
+  type LinkUrl,
+  registrableDomain,
+} from "./url-extract"
 
 /**
- * Link / URL Reputation (content.url_*). Extracts every link from a sample message, reduces each
- * host to its Public-Suffix registrable domain, and queries URI/RHSBL blocklists (Spamhaus DBL,
- * SURBL multi, URIBL multi) on the *link* domain — the RHSBL half of RFC 5782 (queried directly,
- * with no reversal). It also flags link-hygiene problems (URL shorteners, raw-IP hosts,
- * punycode/homograph hosts, http-not-https links, off-brand links) that filters penalize even when
- * SPF/DKIM/DMARC pass.
+ * Link / URL Reputation (pm/checks/link_url_reputation.mdx — the `content.url_*` sub-family of
+ * Spam & Content). Extracts every link from the domain's sample message (the shared
+ * content_sample_messages store owned by content_scoring), reduces each host to its Public-Suffix
+ * registrable domain, and queries the URI/RHSBL blocklists — `dnsbl_zones WHERE kind='domain'`
+ * from the blacklists registry (Spamhaus DBL, SURBL multi, URIBL multi, …), the RHSBL half of
+ * RFC 5782: the domain is queried directly, with no reversal. It also flags link-hygiene problems
+ * (URL shorteners, raw-IP hosts, punycode/homograph hosts, http-not-https links, off-brand links)
+ * that filters penalize even when SPF/DKIM/DMARC are perfect.
  *
- * A message body is required to run. `CheckContext` does not yet plumb a sample through (that store
- * — content_sample_messages — is owned by content_scoring), so this checker reads an OPTIONAL sample
- * off the context (forward-compatible with the runner wiring). With no sample it emits exactly one
- * `info` "add a sample" finding — never a false pass or false listing (spec §3, AC#2).
+ * With no sample it emits exactly one `info` "add a sample" finding — never a false pass or false
+ * listing — and records no per-URL rows (spec §3, AC#2). FUTURE sub-checks (redirect-chain /
+ * reachability probes, Google Safe Browsing, paid ivmURI) each degrade to one `info` (AC#8).
  *
- * FUTURE (never emit warning/critical here): redirect-chain / reachability (outbound HTTP probe),
- * Google Safe Browsing (API key), and Invaluement ivmURI (paid feed) each degrade to one `info`.
+ * The structured payload lands at `results["content.url"]` — the audit-JSON `content.url` key of
+ * spec §5: one `links[]` element per extracted URL (= one `message_urls` row) plus the one
+ * `summary` roll-up (= the `url_check_results` row), round-tripping 1:1 (AC#9).
  */
 
 const CHECK_ID = "content"
 
+/** §3/§6 etiquette: URI-zone queries capped at ~8 in flight (also gated process-globally). */
+const QUERY_CONCURRENCY = 8
+
 // ---------------------------------------------------------------------------------------------
-// Sample plumbing (optional; widened off ctx until the runner wires content_sample_messages in).
+// Structured results payload (spec §5 "File-store mapping" — the `content.url` key).
+// ---------------------------------------------------------------------------------------------
+
+/** One decoded URI-zone answer for a link domain (`message_urls.listings[]` element). */
+export interface UrlZoneListing {
+  zone: string
+  listed: boolean
+  /** The 127.0.0.x / 127.0.1.x return code. */
+  code: string
+  /** Decoded sub-list / bitmask label, e.g. "phishing domain" or "black". */
+  bit: string
+}
+
+/** One extracted URL (= one `message_urls` row, camelCase per the spec §5 JSON example). */
+export interface UrlLinkResult {
+  url: string
+  /** PSL-registrable domain of the URL host (the raw IP for IP-literal hosts). */
+  linkDomain: string
+  /** Registrable domain after redirect/shortener expansion — null until the probe round. */
+  finalDomain: string | null
+  isShortener: boolean
+  isHttps: boolean
+  isIpLiteral: boolean
+  isPunycode: boolean
+  /** Brand a punycode host impersonates (critical homograph), or null. */
+  homographOf: string | null
+  /** Redirect hops followed — null while the probe is disabled (first round). */
+  redirectHops: number | null
+  listings: UrlZoneListing[]
+  /** Link domain matches sender/org/allow-list; null = not evaluated (e.g. IP literal). */
+  aligned: boolean | null
+}
+
+/** The per-run roll-up (= the `url_check_results` row of spec §5). */
+export interface UrlCheckSummary {
+  totalLinks: number
+  uniqueDomains: number
+  listedDomains: number
+  shortenerCount: number
+  httpCount: number
+  ipLiteralCount: number
+  punycodeCount: number
+  offbrandCount: number
+  /** Zone(s) unavailable / paid feed unconfigured / redirect probe disabled. */
+  inconclusive: boolean
+  weightedWorst: Severity
+}
+
+/** §6 scheduler diff over the pinned sample's link-domain set (inconclusive transitions ignored). */
+export interface UrlRunDiff {
+  /** clean → listed this run: "zone|domain" pairs. */
+  newListings: string[]
+  /** listed → clean this run (domain still linked, zone conclusive both runs). */
+  resolved: string[]
+  /** The compared runs used different samples (diff is advisory across a sample change). */
+  sampleChanged: boolean
+}
+
+/** `results["content.url"]` — the audit-JSON `content.url` payload (spec §5, AC#9). */
+export interface LinkUrlResults {
+  schema_version: 1
+  /** The pinned content_sample_messages id this audit ran against (reproducibility, §3). */
+  sampleId: string | null
+  summary: UrlCheckSummary
+  links: UrlLinkResult[]
+  /** URI zones queried conclusively this run. */
+  zonesQueried: string[]
+  /** Zones whose RFC 5782 test point failed / answers were refused — inconclusive, never listed. */
+  zonesInconclusive: string[]
+  /** Zones skipped for missing registration/paid credentials (AC#6). */
+  zonesSkipped: Array<{ zone: string; reason: string }>
+  diff: UrlRunDiff
+  checkedAt: string
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sample plumbing: the shared content-scoring sample store, with a context override for tests.
 // ---------------------------------------------------------------------------------------------
 
 interface SampleObject {
@@ -33,339 +126,290 @@ interface SampleObject {
 }
 type SampleInput = string | SampleObject
 
-interface SampleBody {
-  body: string
-  htmlish: boolean
-  id?: number | string
+interface SampleSource {
+  raw: string
+  id: string | null
 }
 
-function readSample(ctx: unknown): SampleBody | null {
+/** An inline sample handed straight through the context (unit tests / snippet flows). */
+function readContextSample(ctx: unknown): SampleSource | null {
   const c = ctx as { sample?: SampleInput; sampleMessage?: SampleInput }
-  const raw = c.sample ?? c.sampleMessage
+  const input = c.sample ?? c.sampleMessage
+  if (!input) return null
+  if (typeof input === "string") {
+    const raw = input.trim()
+    return raw ? { raw, id: null } : null
+  }
+  const parts = [input.html, input.text, input.raw].filter(
+    (p): p is string => typeof p === "string",
+  )
+  const raw = parts.join("\n").trim()
   if (!raw) return null
-  if (typeof raw === "string") {
-    const body = raw.trim()
-    return body ? { body, htmlish: /<[a-z!]/i.test(body) } : null
-  }
-  const parts = [raw.html, raw.text, raw.raw].filter((p): p is string => typeof p === "string")
-  const body = parts.join("\n").trim()
-  if (!body) return null
-  return { body, htmlish: Boolean(raw.html) || /<[a-z!]/i.test(body), id: raw.id }
+  return { raw, id: input.id !== undefined ? String(input.id) : null }
 }
 
 // ---------------------------------------------------------------------------------------------
-// URL extraction + normalization.
+// URI zones: dnsbl_zones WHERE kind='domain' (spec §5 "Zone reuse" — no second zone table).
 // ---------------------------------------------------------------------------------------------
 
-// Common second-level public suffixes so foo.bar.co.uk reduces to bar.co.uk, not co.uk. This is a
-// compact first-round stand-in for the full Public Suffix List (bundle+refresh the real PSL later —
-// see spec maintenance notes); it covers the overwhelming majority of real-world links.
-const MULTI_PART_SUFFIXES = new Set([
-  "co.uk",
-  "org.uk",
-  "gov.uk",
-  "ac.uk",
-  "me.uk",
-  "ltd.uk",
-  "plc.uk",
-  "net.uk",
-  "sch.uk",
-  "com.au",
-  "net.au",
-  "org.au",
-  "edu.au",
-  "gov.au",
-  "id.au",
-  "co.jp",
-  "or.jp",
-  "ne.jp",
-  "ac.jp",
-  "go.jp",
-  "com.br",
-  "net.br",
-  "org.br",
-  "gov.br",
-  "co.nz",
-  "net.nz",
-  "org.nz",
-  "govt.nz",
-  "co.za",
-  "org.za",
-  "co.in",
-  "net.in",
-  "org.in",
-  "gen.in",
-  "firm.in",
-  "co.kr",
-  "or.kr",
-  "com.sg",
-  "com.hk",
-  "com.tw",
-  "com.mx",
-  "com.cn",
-  "net.cn",
-  "org.cn",
-  "gov.cn",
-])
-
-// Well-known public URL shorteners that hide (and cannot vouch for) their destination.
-const SHORTENERS = new Set([
-  "bit.ly",
-  "t.co",
-  "tinyurl.com",
-  "ow.ly",
-  "buff.ly",
-  "goo.gl",
-  "is.gd",
-  "rebrand.ly",
-  "lnkd.in",
-  "t.ly",
-  "cutt.ly",
-  "rb.gy",
-  "shorturl.at",
-  "bl.ink",
-  "tiny.cc",
-  "soo.gd",
-  "s.id",
-  "trib.al",
-  "dlvr.it",
-  "shar.es",
-  "mcaf.ee",
-  "adf.ly",
-  "clck.ru",
-])
-
-interface LinkUrl {
-  url: string
-  linkDomain: string
-  isHttps: boolean
-  isIpLiteral: boolean
-  isPunycode: boolean
-  isShortener: boolean
+/**
+ * The distinct sub-check id per named URI zone (spec §2): a finding names the exact offending
+ * body domain AND zone. Every other `kind='domain'` zone rolls under `content.url_dnsbl_cross`.
+ */
+const ZONE_SUBCHECK: Record<string, string> = {
+  "dbl.spamhaus.org": "content.url_dbl",
+  "multi.surbl.org": "content.url_surbl",
+  "multi.uribl.com": "content.url_uribl",
+  "uri.invaluement.com": "content.url_ivmuri",
 }
 
-const ATTR_URL_RE = /(?:href|src|background)\s*=\s*["']?\s*([^"'\s>]+)/gi
-const CSS_URL_RE = /url\(\s*['"]?\s*([^'")\s]+)/gi
-const TEXT_URL_RE = /\bhttps?:\/\/[^\s"'<>()[\]{}]+/gi
-
-function isIpv4(host: string): boolean {
-  const parts = host.split(".")
-  return parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255)
+function subCheckFor(zone: string): string {
+  return ZONE_SUBCHECK[zone] ?? "content.url_dnsbl_cross"
 }
 
-/** PSL-registrable domain of a host: last two labels, or three when the last two are a public suffix. */
-function registrableDomain(host: string): string {
-  const h = host.replace(/\.+$/, "").toLowerCase()
-  const labels = h.split(".").filter(Boolean)
-  if (labels.length <= 2) return h
-  const lastTwo = labels.slice(-2).join(".")
-  if (MULTI_PART_SUFFIXES.has(lastTwo)) return labels.slice(-3).join(".")
-  return lastTwo
+function uriZones(): BlocklistZone[] {
+  return loadZones().filter((z) => z.kind === "domain" && !z.positive)
 }
 
-function collectRawUrls(sample: SampleBody): string[] {
-  const found = new Set<string>()
-  const add = (re: RegExp, body: string) => {
-    re.lastIndex = 0
-    let m: RegExpExecArray | null
-    // biome-ignore lint/suspicious/noAssignInExpressions: standard regex-exec loop
-    while ((m = re.exec(body)) !== null) found.add(m[1])
+/**
+ * RFC 5782 test-point probe, once per zone per audit (§3, AC#6): `2.0.0.127.<zone>` must answer
+ * and `1.0.0.127.<zone>` must be NXDOMAIN. Failure ⇒ the zone is inconclusive (info), never
+ * false-listed. Runs through the process-global `dnsbl` semaphore — the same mirrors and rate
+ * limits as the blacklists checker (pm/run_checks.mdx §3.1).
+ */
+async function probeZone(zone: BlocklistZone): Promise<{ usable: boolean; reason: string }> {
+  const started = Date.now()
+  const positive = await withResource("dnsbl", () => resolve4(`2.0.0.127.${zone.zone}`))
+  const negative = await withResource("dnsbl", () => resolve4(`1.0.0.127.${zone.zone}`))
+  const health = classifyZoneHealth({
+    zone: zone.zone,
+    positiveAnswers: positive.records,
+    negativeAnswers: negative.records,
+    probeMs: Date.now() - started,
+  })
+  switch (health.status) {
+    case "dead":
+      return {
+        usable: false,
+        reason: "test point 2.0.0.127 not listed (zone dead or resolver blocked)",
+      }
+    case "wildcarding":
+      return {
+        usable: false,
+        reason: "test point 1.0.0.127 wrongly listed (zone wildcards / resolver intercepting)",
+      }
+    case "blocked":
+      return {
+        usable: false,
+        reason: `test point returned an in-band refusal (${health.positive_probe})`,
+      }
+    default:
+      return { usable: true, reason: "" }
   }
-  if (sample.htmlish) {
-    add(ATTR_URL_RE, sample.body)
-    add(CSS_URL_RE, sample.body)
-  }
-  add(TEXT_URL_RE, sample.body)
-  return [...found]
 }
 
-/** Parse one raw URL string into a normalized LinkUrl, or null when it is not a reputation-bearing http(s) URL. */
-function parseLink(raw: string): LinkUrl | null {
-  const trimmed = raw.trim()
-  // Skip non-reputation schemes and fragments/anchors.
-  if (/^(mailto:|tel:|data:|cid:|javascript:|#)/i.test(trimmed)) return null
-  let parsed: URL
-  try {
-    parsed = new URL(trimmed)
-  } catch {
-    return null
+interface ZoneQueryRow {
+  zone: BlocklistZone
+  domain: string
+  listed: boolean
+  inconclusive: boolean
+  code: string | null
+  bit: string | null
+  severity: Severity | null
+  reasonTxt: string | null
+  queryName: string
+}
+
+/** One `<linkdomain>.<zone>` RHSBL lookup, decoded via the zone's return-code map / bitmask. */
+async function queryZonePair(zone: BlocklistZone, domain: string): Promise<ZoneQueryRow> {
+  const queryName = buildQueryName(domain, zone) ?? `${domain}.${zone.zone}`
+  const base: ZoneQueryRow = {
+    zone,
+    domain,
+    listed: false,
+    inconclusive: false,
+    code: null,
+    bit: null,
+    severity: null,
+    reasonTxt: null,
+    queryName,
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null
-  // new URL() lowercases and IDNA-encodes the host; IPv6 hosts come back bracketed.
-  const bracketed = parsed.hostname.startsWith("[") && parsed.hostname.endsWith("]")
-  const host = bracketed ? parsed.hostname.slice(1, -1) : parsed.hostname
-  const isIpLiteral = bracketed || isIpv4(host)
-  const linkDomain = isIpLiteral ? host : registrableDomain(host)
+  const answer = await withResource("dnsbl", () => resolve4(queryName))
+  if (answer.error) return { ...base, inconclusive: true } // SERVFAIL/timeout — never a listing
+  if (answer.records.length === 0) return base // NXDOMAIN / no data = not listed (AC#3)
+  const decoded = classifyAnswer(zone, answer.records)
+  if (decoded.refusal_code) return { ...base, inconclusive: true, code: decoded.refusal_code }
+  if (!decoded.listed) return base
+  const txt = await withResource("dnsbl", () => resolveTxt(queryName))
   return {
-    url: trimmed,
-    linkDomain,
-    isHttps: parsed.protocol === "https:",
-    isIpLiteral,
-    isPunycode: !isIpLiteral && /(^|\.)xn--/.test(host),
-    isShortener: !isIpLiteral && SHORTENERS.has(linkDomain),
+    ...base,
+    listed: true,
+    code: decoded.return_code,
+    bit: decoded.sub_list,
+    severity: decoded.severity ?? zone.severity,
+    reasonTxt: txt.records.length > 0 ? txt.records.join(" | ") : null,
   }
 }
 
 // ---------------------------------------------------------------------------------------------
-// URI/RHSBL zones and return-code decoding.
+// Findings.
 // ---------------------------------------------------------------------------------------------
 
-interface Listing {
-  zone: string
-  code: string
-  bit: string
-  severity: "warning" | "critical"
-}
-
-interface UriZone {
-  id: string // finding-id sub-check, e.g. "content.url_dbl"
-  zone: string
-  name: string
-  delistUrl: string
-  decode(codes: string[]): Listing | null // null = not listed; returns null for blocked/error codes
-}
-
-function lastOctet(code: string): number {
-  const parts = code.split(".")
-  return parts.length === 4 ? Number(parts[3]) : Number.NaN
-}
-
-// Spamhaus DBL: 127.0.1.2-.6 = spam/phish/malware/botnet/abused-spam (critical); 127.0.1.102-.106 =
-// abused-legit (warning); 127.255.255.x = error/blocked resolver (not a listing).
-const DBL_BITS: Record<number, string> = {
-  2: "spam",
-  3: "abused-legit-spam",
-  4: "phish",
-  5: "malware",
-  6: "botnet",
-}
-
-const dblZone: UriZone = {
-  id: "content.url_dbl",
-  zone: "dbl.spamhaus.org",
-  name: "Spamhaus DBL",
-  delistUrl: "https://www.spamhaus.org/dbl/removal/",
-  decode(codes) {
-    for (const code of codes) {
-      const octets = code.split(".").map(Number)
-      if (octets.length !== 4 || octets[0] !== 127) continue
-      if (octets[1] === 255) return null // 127.255.255.x = query error / blocked resolver
-      const n = octets[3]
-      if (n >= 2 && n <= 6) {
-        return { zone: this.zone, code, bit: DBL_BITS[n] ?? "listed", severity: "critical" }
-      }
-      if (n >= 102 && n <= 106) {
-        return { zone: this.zone, code, bit: "abused-legit", severity: "warning" }
-      }
-    }
-    return null
-  },
-}
-
-// SURBL multi bitmask (last octet): 0x08 phishing, 0x10 malware (critical); 0x40 abuse, 0x80 cracked (warning).
-const surblZone: UriZone = {
-  id: "content.url_surbl",
-  zone: "multi.surbl.org",
-  name: "SURBL multi",
-  delistUrl: "https://www.surbl.org/surbl-analysis",
-  decode(codes) {
-    for (const code of codes) {
-      const n = lastOctet(code)
-      if (!Number.isFinite(n)) continue
-      if (n & 0x08) return { zone: this.zone, code, bit: "phishing", severity: "critical" }
-      if (n & 0x10) return { zone: this.zone, code, bit: "malware", severity: "critical" }
-      if (n & 0x40) return { zone: this.zone, code, bit: "abuse", severity: "warning" }
-      if (n & 0x80) return { zone: this.zone, code, bit: "cracked", severity: "warning" }
-    }
-    return null
-  },
-}
-
-// URIBL multi bitmask (last octet): 2 black (critical), 4 grey (warning), 8 red (warning);
-// 127.0.0.1 = blocked/blacklisted resolver (not a listing).
-const uriblZone: UriZone = {
-  id: "content.url_uribl",
-  zone: "multi.uribl.com",
-  name: "URIBL multi",
-  delistUrl: "https://admin.uribl.com/",
-  decode(codes) {
-    for (const code of codes) {
-      const n = lastOctet(code)
-      if (!Number.isFinite(n) || n === 1) continue
-      if (n & 2) return { zone: this.zone, code, bit: "black", severity: "critical" }
-      if (n & 4) return { zone: this.zone, code, bit: "grey", severity: "warning" }
-      if (n & 8) return { zone: this.zone, code, bit: "red", severity: "warning" }
-    }
-    return null
-  },
-}
-
-const URI_ZONES: UriZone[] = [dblZone, surblZone, uriblZone]
-
-// ---------------------------------------------------------------------------------------------
-// The engine.
-// ---------------------------------------------------------------------------------------------
+const SEVERITY_RANK: Record<Severity, number> = { ok: 0, info: 1, warning: 2, critical: 3 }
 
 function noSampleFinding(): Finding {
   return {
     id: "content.url_extract",
     checkId: CHECK_ID,
-    title: "No sample message to check link reputation",
+    title: "No sample message — add one to check link reputation",
     severity: "info",
     detail:
-      "Link/URL reputation needs a message body to inspect. No sample message is attached to this domain, so no links were extracted and no URI blocklists were queried (no false pass).",
+      "Link/URL reputation needs a message body to inspect. No sample message is stored for this domain, so no links were extracted and no URI blocklists were queried (no false pass).",
     remediation:
-      "Add a sample: paste or upload a raw .eml, paste an HTML/text snippet, or send a real campaign to this domain's ingest/seed address, then re-run the audit.",
+      "Add a sample: paste or upload a raw .eml (Sample Message panel), paste an HTML/text snippet, or send a real campaign to this domain's ingest/seed address, then re-run the audit.",
   }
 }
-
-type Severity = Finding["severity"]
-
-const SEVERITY_RANK: Record<Severity, number> = { ok: 0, info: 1, warning: 2, critical: 3 }
 
 /**
- * RFC 5782 test point (once per zone per audit): 2.0.0.127.<zone> must answer 127.0.0.2 and
- * 1.0.0.127.<zone> must be NXDOMAIN. On failure the zone is inconclusive (info), never false-listed.
+ * The link-domains counted as aligned: the sending domain's registrable domain plus the
+ * operator-configured own/related/allow-listed domains (spec §4 per-domain config inputs).
  */
-async function zoneUsable(zone: string): Promise<{ usable: boolean; reason?: string }> {
-  // RHSBL zones share the process-global `dnsbl` semaphore with the blacklists checker — same
-  // mirrors, same rate limits (pm/run_checks.mdx §3.1).
-  const positive = await withResource("dnsbl", () => resolve4(`2.0.0.127.${zone}`))
-  if (positive.error) return { usable: false, reason: `test point unreachable (${positive.error})` }
-  if (positive.records.length === 0) {
-    return { usable: false, reason: "test point 2.0.0.127 not listed (mirror/resolver blocked)" }
-  }
-  const negative = await withResource("dnsbl", () => resolve4(`1.0.0.127.${zone}`))
-  if (negative.records.length > 0) {
-    return { usable: false, reason: "test point 1.0.0.127 wrongly listed (resolver intercepting)" }
-  }
-  return { usable: true }
+function alignmentFor(
+  link: LinkUrl,
+  orgDomain: string,
+  allowed: ReadonlySet<string>,
+): boolean | null {
+  if (link.isIpLiteral) return null // evaluated by content.url_ip_literal instead
+  const d = link.linkDomain
+  if (d === orgDomain || d.endsWith(`.${orgDomain}`) || orgDomain.endsWith(`.${d}`)) return true
+  return allowed.has(d)
 }
 
-async function analyzeSample(sample: SampleBody, ctx: { domain: string }): Promise<Finding[]> {
+/** Aggregate weighting (§3 "Severity mapping"): a low-weight zone listing never counts critical. */
+function weightedSeverity(severity: Severity, weight: number): Severity {
+  if (severity === "critical" && weight < 0.5) return "warning"
+  return severity
+}
+
+interface PreviousListingIndex {
+  pairs: Set<string>
+  inconclusiveZones: Set<string>
+  sampleId: string | null
+}
+
+function indexPrevious(previous: LinkUrlResults | undefined): PreviousListingIndex | null {
+  if (!previous || !Array.isArray(previous.links)) return null
+  const pairs = new Set<string>()
+  for (const link of previous.links) {
+    for (const listing of link.listings ?? []) {
+      if (listing.listed) pairs.add(`${listing.zone}|${link.linkDomain}`)
+    }
+  }
+  return {
+    pairs,
+    inconclusiveZones: new Set(previous.zonesInconclusive ?? []),
+    sampleId: previous.sampleId ?? null,
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The checker.
+// ---------------------------------------------------------------------------------------------
+
+export const linkUrlReputationCheck: Checker = {
+  id: "content.url",
+  label: "Link / URL Reputation",
+  async run(ctx): Promise<Finding[] | CheckOutcome> {
+    try {
+      // --- Sample source (§3): context override (tests/snippets) else the shared sample store. --
+      let sample = readContextSample(ctx)
+      if (!sample && ctx.domainId) {
+        const record = getActiveSample(ctx.domainId)
+        if (record) {
+          const raw = readSampleRaw(record)
+          if (raw !== null) sample = { raw, id: record.id }
+          else {
+            return [
+              {
+                id: "content.url_extract",
+                checkId: CHECK_ID,
+                title: "Stored sample message could not be read",
+                severity: "info",
+                detail: `The active sample (uploaded ${record.uploadedAt}) is missing from the file store, so link/URL reputation was skipped — no false pass, no false listing.`,
+                remediation: "Upload the sample .eml again to re-enable link-reputation checking.",
+                evidence: record.rawPath ?? "(no stored path)",
+              },
+            ]
+          }
+        }
+      }
+      // AC#2: no sample ⇒ exactly one info finding, no message_urls rows, no results payload.
+      if (!sample) return [noSampleFinding()]
+      return await analyzeSample(sample, ctx)
+    } catch (err) {
+      // Never throw out of run(): degrade to a retryable info finding (pm/errors.mdx).
+      const msg = err instanceof Error ? err.message : String(err)
+      return [
+        {
+          id: "content.url_extract",
+          checkId: CHECK_ID,
+          title: "Link/URL reputation check could not complete",
+          severity: "info",
+          detail: `The link/URL reputation check hit an unexpected error (${msg}).`,
+          remediation: "Retry the audit; if it persists, verify the sample message and resolver.",
+        },
+      ]
+    }
+  },
+}
+
+async function analyzeSample(
+  sample: { raw: string; id: string | null },
+  ctx: {
+    domain: string
+    linkUrl?: { allowedDomains: string[] }
+    previousResults?: Record<string, unknown>
+  },
+): Promise<CheckOutcome> {
   const findings: Finding[] = []
   const orgDomain = registrableDomain(ctx.domain)
+  const allowedDomains = new Set(
+    (ctx.linkUrl?.allowedDomains ?? [])
+      .map((d) => registrableDomain(d.trim().toLowerCase()))
+      .filter(Boolean),
+  )
 
-  // --- content.url_extract -------------------------------------------------------------------
-  const parsed = collectRawUrls(sample)
-    .map(parseLink)
-    .filter((l): l is LinkUrl => l !== null)
-  // Dedupe by url.
-  const links = [...new Map(parsed.map((l) => [l.url, l])).values()]
+  // Shortener list is config, not code (spec §5): config.yaml → checks.content.url.shorteners.
+  const urlConfig = readAppConfig().checks.content?.url
+  const shorteners = new Set(
+    (urlConfig?.shorteners?.length ? urlConfig.shorteners : DEFAULT_SHORTENERS).map((s) =>
+      s.trim().toLowerCase(),
+    ),
+  )
+  const safeBrowsingConfigured = Boolean(urlConfig?.safeBrowsingKey)
+
+  // --- content.url_extract (§3 extraction & normalization, AC#1) ------------------------------
+  const parts = extractSampleParts(sample.raw)
+  const htmlish = parts.html !== null
+  const links = extractLinks(parts, shorteners)
   const linkDomains = [...new Set(links.filter((l) => !l.isIpLiteral).map((l) => l.linkDomain))]
 
   if (links.length === 0) {
     findings.push({
       id: "content.url_extract",
       checkId: CHECK_ID,
-      title: sample.htmlish ? "HTML message has no parseable links" : "No links in sample",
-      severity: sample.htmlish ? "warning" : "info",
-      detail: sample.htmlish
-        ? "The sample is HTML but no parseable links were found. If links are present but malformed, receivers cannot resolve them either."
+      title: htmlish ? "HTML message has no parseable links" : "No links in sample",
+      severity: htmlish ? "warning" : "info",
+      detail: htmlish
+        ? "The sample is HTML but no parseable links were found. If links are present but malformed, receivers (and recipients) cannot resolve them either."
         : "No http(s) links were found in the sample; nothing to check against URI blocklists.",
-      remediation: sample.htmlish
-        ? "Fix malformed href/encoded URLs so links parse (and so receivers can follow them)."
-        : undefined,
+      ...(htmlish
+        ? {
+            remediation:
+              "Fix malformed href/encoded URLs so links parse (and so receivers can follow them).",
+          }
+        : {}),
+      evidence: sample.id ? `sample ${sample.id}` : undefined,
     })
   } else {
     findings.push({
@@ -373,12 +417,12 @@ async function analyzeSample(sample: SampleBody, ctx: { domain: string }): Promi
       checkId: CHECK_ID,
       title: `${linkDomains.length} unique link domain(s) found`,
       severity: "info",
-      detail: `Extracted ${links.length} link(s) reducing to ${linkDomains.length} unique registrable domain(s).`,
+      detail: `Extracted ${links.length} link(s) from the HTML/text parts, reducing to ${linkDomains.length} unique PSL-registrable domain(s), de-duplicated before any DNS query.${sample.id ? ` Sample: ${sample.id}.` : ""}`,
       evidence: linkDomains.join(", ") || links.map((l) => l.url).join(", "),
     })
   }
 
-  // --- Hygiene flags (content.url_https / _ip_literal / _punycode / _shortener) ---------------
+  // --- Per-URL hygiene flags (AC#4): https / ip_literal / punycode+homograph / shortener -------
   const httpLinks = links.filter((l) => !l.isHttps)
   if (httpLinks.length > 0) {
     findings.push({
@@ -426,7 +470,21 @@ async function analyzeSample(sample: SampleBody, ctx: { domain: string }): Promi
   }
 
   const punyLinks = links.filter((l) => l.isPunycode)
-  if (punyLinks.length > 0) {
+  const homographLinks = links.filter((l) => l.homographOf !== null)
+  if (homographLinks.length > 0) {
+    // Brand homograph = unambiguous phishing shape ⇒ critical (§3 severity mapping, AC#5).
+    const brands = [...new Set(homographLinks.map((l) => l.homographOf))].join(", ")
+    findings.push({
+      id: "content.url_punycode",
+      checkId: CHECK_ID,
+      title: `Homograph link host(s) impersonating ${brands}`,
+      severity: "critical",
+      detail: `One or more punycode (xn--) link hosts are confusable lookalikes of a protected brand (${brands}) — the classic IDN-homograph phishing shape (e.g. Cyrillic "аpple.com").`,
+      remediation:
+        "Use the real ASCII domain. A lookalike of a protected brand will be treated as phishing by every major filter — remove the link entirely if it is not yours.",
+      evidence: homographLinks.map((l) => l.url).join(", "),
+    })
+  } else if (punyLinks.length > 0) {
     findings.push({
       id: "content.url_punycode",
       checkId: CHECK_ID,
@@ -437,6 +495,14 @@ async function analyzeSample(sample: SampleBody, ctx: { domain: string }): Promi
       remediation:
         "Use the real ASCII domain. If the IDN is intentional and legitimate, confirm it is not a lookalike of a protected brand.",
       evidence: punyLinks.map((l) => l.url).join(", "),
+    })
+  } else if (links.length > 0) {
+    findings.push({
+      id: "content.url_punycode",
+      checkId: CHECK_ID,
+      title: "No punycode/homograph link hosts",
+      severity: "ok",
+      detail: "No link host uses punycode (xn--) labels or impersonates a known brand.",
     })
   }
 
@@ -450,25 +516,36 @@ async function analyzeSample(sample: SampleBody, ctx: { domain: string }): Promi
       severity: "warning",
       detail: `Message routes recipients through public shortener(s) (${domains.join(", ")}) that hide — and cannot vouch for — the true destination; filters penalize this on principle.`,
       remediation:
-        "Replace shortener links with the full destination URL, or use a branded/custom-domain shortener you authenticate; the true final domain will then be re-checked (content.url_redirect_chain, future-round).",
+        "Replace shortener links with the full destination URL, or use a branded/custom-domain shortener you authenticate; once the redirect probe is enabled the final domain is re-checked (content.url_redirect_chain).",
       evidence: shortenerLinks.map((l) => l.url).join(", "),
+    })
+  } else if (links.length > 0) {
+    findings.push({
+      id: "content.url_shortener",
+      checkId: CHECK_ID,
+      title: "No public URL shorteners",
+      severity: "ok",
+      detail: "No link routes through a public URL shortener.",
     })
   }
 
-  // --- content.url_domain_alignment (advisory) ------------------------------------------------
+  // --- content.url_domain_alignment (advisory; sender/org domain + configured allow-list) ------
+  const alignedByDomain = new Map<string, boolean>()
+  for (const link of links) {
+    const aligned = alignmentFor(link, orgDomain, allowedDomains)
+    if (aligned !== null) alignedByDomain.set(link.linkDomain, aligned)
+  }
+  const offBrand = linkDomains.filter((d) => alignedByDomain.get(d) === false)
   if (linkDomains.length > 0) {
-    const offBrand = linkDomains.filter(
-      (d) => d !== orgDomain && !d.endsWith(`.${orgDomain}`) && !orgDomain.endsWith(`.${d}`),
-    )
     if (offBrand.length > linkDomains.length / 2) {
       findings.push({
         id: "content.url_domain_alignment",
         checkId: CHECK_ID,
         title: `${offBrand.length}/${linkDomains.length} link domains are off-brand`,
         severity: "warning",
-        detail: `Most links point at domains unrelated to ${orgDomain}, which looks forwarded/spoofed to filters.`,
+        detail: `Most links point at domains unrelated to ${orgDomain}${allowedDomains.size > 0 ? " (and its configured allow-list)" : ""}, which looks forwarded/spoofed to filters.`,
         remediation:
-          "Link primarily to your own authenticated domains; register tracking/click domains under your org and align them (see content_scoring).",
+          "Advisory: link primarily to your own authenticated domains; register tracking/click domains under your org and add them to this domain's allowed link domains (see content_scoring).",
         evidence: offBrand.join(", "),
       })
     } else {
@@ -477,78 +554,122 @@ async function analyzeSample(sample: SampleBody, ctx: { domain: string }): Promi
         checkId: CHECK_ID,
         title: "Links are mostly on-brand",
         severity: "info",
-        detail: `${linkDomains.length - offBrand.length}/${linkDomains.length} link domains align with ${orgDomain}.`,
+        detail: `${linkDomains.length - offBrand.length}/${linkDomains.length} link domains align with ${orgDomain}${allowedDomains.size > 0 ? " or its configured allow-list" : ""}.`,
+        ...(offBrand.length > 0 ? { evidence: `off-brand: ${offBrand.join(", ")}` } : {}),
       })
     }
   }
 
-  // --- content.url_count ----------------------------------------------------------------------
-  if (links.length > 25 || linkDomains.length > 15) {
+  // --- content.url_count (advisory info unless the spam-shaped thresholds cross) ---------------
+  if (links.length > 0) {
+    const spamShaped = links.length > 25 || offBrand.length > 15
     findings.push({
       id: "content.url_count",
       checkId: CHECK_ID,
-      title: "Link volume looks spam-shaped",
-      severity: "warning",
-      detail: `Message has ${links.length} links across ${linkDomains.length} distinct domains; high link counts and many off-domain hosts correlate with spam.`,
-      remediation:
-        "Reduce the link count, consolidate to your own domain, and balance text vs. links.",
+      title: spamShaped ? "Link volume looks spam-shaped" : "Link volume looks reasonable",
+      severity: spamShaped ? "warning" : "info",
+      detail: `Message has ${links.length} link(s) across ${linkDomains.length} distinct domain(s) (${offBrand.length} off-brand).${spamShaped ? " High link counts and many off-domain hosts correlate with spam." : ""}`,
+      ...(spamShaped
+        ? {
+            remediation:
+              "Reduce the link count, consolidate to your own domain, and balance text vs. links.",
+          }
+        : {}),
     })
   }
 
-  // --- RHSBL / URI zones (content.url_dbl / _surbl / _uribl; content.url_dnsbl_cross covered here) ---
-  const usable = new Map<string, { usable: boolean; reason?: string }>()
-  for (const z of URI_ZONES) usable.set(z.zone, await zoneUsable(z.zone))
-  for (const z of URI_ZONES) {
-    const u = usable.get(z.zone)
-    if (u && !u.usable) {
-      findings.push({
-        id: `${z.id}.inconclusive`,
-        checkId: CHECK_ID,
-        title: `${z.name} unavailable this run`,
-        severity: "info",
-        detail: `${z.name} (${z.zone}) failed its RFC 5782 test point (${u.reason}); its results are inconclusive, not treated as clean or listed.`,
-        remediation: `Query ${z.name} from a dedicated non-public resolver (public resolvers like 8.8.8.8/1.1.1.1 and high-volume clients are blocked) or register/license access, then re-run.`,
-      })
-    }
+  // --- URI zones: dnsbl_zones kind='domain' (content.url_dbl/_surbl/_uribl/_dnsbl_cross) -------
+  const zones = uriZones()
+  // AC#6: registration-gated / paid zones without credentials are skipped with an info note.
+  const gatedZones = zones.filter((z) => z.requires_registration || z.is_paid)
+  const activeZones = zones.filter((z) => z.enabled && !z.requires_registration && !z.is_paid)
+
+  const zonesSkipped: Array<{ zone: string; reason: string }> = []
+  for (const z of gatedZones) {
+    const reason = z.is_paid
+      ? "paid subscription/licensed resolver required"
+      : "registration/API key required"
+    zonesSkipped.push({ zone: z.zone, reason })
+    findings.push({
+      id: `${subCheckFor(z.zone)}.skipped.${z.zone}`,
+      checkId: CHECK_ID,
+      title: `${z.name} skipped (${reason})`,
+      severity: "info",
+      detail: `${z.name} (${z.zone}) is a ${z.is_paid ? "paid" : "registration-gated"} URI zone and no credentials are configured, so link domains were not checked against it — inconclusive, not clean.`,
+      remediation: `Configure access for ${z.name} in the Blocklist Zones settings panel (lookups at ${z.lookup_url}), then re-run. Listings there are removed via ${z.delist_url}.`,
+    })
   }
 
-  let anyListed = false
+  // RFC 5782 preflight, once per zone per audit (§3, AC#6).
+  const health = await mapLimit(activeZones, QUERY_CONCURRENCY, async (z) => ({
+    zone: z,
+    ...(await probeZone(z)),
+  }))
+  const usableZones = health.filter((h) => h.usable).map((h) => h.zone)
+  const zonesInconclusive: string[] = []
+  for (const h of health) {
+    if (h.usable) continue
+    zonesInconclusive.push(h.zone.zone)
+    findings.push({
+      id: `${subCheckFor(h.zone.zone)}.inconclusive.${h.zone.zone}`,
+      checkId: CHECK_ID,
+      title: `${h.zone.name} unavailable this run`,
+      severity: "info",
+      detail: `${h.zone.name} (${h.zone.zone}) failed its RFC 5782 test point (${h.reason}); its results are inconclusive — not treated as clean or listed.`,
+      remediation: `Query ${h.zone.name} from a dedicated non-public resolver (public resolvers like 8.8.8.8/1.1.1.1 and high-volume clients are blocked — set EDH_DNS_RESOLVER), or register/license access, then re-run.`,
+    })
+  }
+
+  // The sweep: every usable zone × unique link domain (deduped BEFORE querying, §3/§6), plus
+  // final domains once the redirect probe lands (null in first round — nothing extra to query).
+  const pairs = usableZones.flatMap((zone) => linkDomains.map((domain) => ({ zone, domain })))
+  const rows = await mapLimit(pairs, QUERY_CONCURRENCY, (p) => queryZonePair(p.zone, p.domain))
+
+  const listingsByDomain = new Map<string, UrlZoneListing[]>()
+  const listedDomains = new Set<string>()
   let transient = false
-  for (const domain of linkDomains) {
-    for (const z of URI_ZONES) {
-      if (!usable.get(z.zone)?.usable) continue
-      const query = `${domain}.${z.zone}`
-      // Through the process-global dnsbl semaphore (pm/run_checks.mdx §3.1).
-      const a = await withResource("dnsbl", () => resolve4(query))
-      if (a.error) {
-        transient = true
-        continue
-      }
-      if (a.records.length === 0) continue // NXDOMAIN / no data = not listed
-      const listing = z.decode(a.records)
-      if (!listing) continue // blocked/error return code, not a real listing
-      anyListed = true
-      const txt = await resolveTxt(query)
-      findings.push({
-        id: `${z.id}:${domain}`,
-        checkId: CHECK_ID,
-        title: `Linked domain ${domain} is listed on ${z.name} (${listing.bit})`,
-        severity: listing.severity,
-        detail: `The link domain ${domain} is on ${z.name} (${z.zone} returned ${listing.code} = ${listing.bit}). Filters (SpamAssassin URIBL_*, Rspamd SURBL_*/DBL, commercial gateways) weight body-URL reputation heavily, so this can spam-file the whole message even with perfect SPF/DKIM/DMARC.`,
-        remediation: `Stop linking ${domain}. If it is yours, secure the compromised site/shortener first, then request removal at ${z.delistUrl} (return code ${listing.code} = ${listing.bit}).`,
-        evidence: txt.records.length > 0 ? `${query} TXT: ${txt.records.join(" | ")}` : query,
-      })
+  for (const row of rows) {
+    if (row.inconclusive) {
+      transient = true
+      if (!zonesInconclusive.includes(row.zone.zone)) zonesInconclusive.push(row.zone.zone)
+      continue
     }
+    if (!row.listed) continue
+    listedDomains.add(row.domain)
+    const list = listingsByDomain.get(row.domain) ?? []
+    list.push({
+      zone: row.zone.zone,
+      listed: true,
+      code: row.code ?? "",
+      bit: row.bit ?? row.zone.name,
+    })
+    listingsByDomain.set(row.domain, list)
+    const severity = row.severity ?? "warning"
+    const subCheck = subCheckFor(row.zone.zone)
+    findings.push({
+      // Distinct id per (sub-check, zone, domain): one finding per bad domain per zone (deduped
+      // across repeated links), and stable across runs so the §6 diff flags clean→listed as new.
+      id:
+        subCheck === "content.url_dnsbl_cross"
+          ? `${subCheck}:${row.zone.zone}:${row.domain}`
+          : `${subCheck}:${row.domain}`,
+      checkId: CHECK_ID,
+      title: `Linked domain ${row.domain} is listed on ${row.zone.name}${row.bit ? ` (${row.bit})` : ""}`,
+      severity,
+      detail: `The link domain ${row.domain} is on ${row.zone.name} (${row.queryName} answered ${row.code}${row.bit ? ` = ${row.bit}` : ""}).${row.reasonTxt ? ` Reason: ${row.reasonTxt}.` : ""} Content filters (SpamAssassin URIBL_*, Rspamd SURBL_*/DBL, commercial gateways) weight body-URL reputation heavily, so this can spam-file the whole message even with perfect SPF/DKIM/DMARC.`,
+      remediation: `Stop linking ${row.domain}. If it is yours, secure the compromised site/shortener first, then request removal at ${row.reasonTxt?.match(/https?:\/\/\S+/)?.[0] ?? row.zone.delist_url} (return code ${row.code}${row.bit ? ` = ${row.bit}` : ""}).`,
+      evidence: `${row.queryName} → ${row.code}${row.reasonTxt ? `; TXT: ${row.reasonTxt}` : ""}`,
+    })
   }
 
-  if (linkDomains.length > 0 && URI_ZONES.some((z) => usable.get(z.zone)?.usable)) {
-    if (!anyListed) {
+  if (linkDomains.length > 0 && usableZones.length > 0) {
+    if (listedDomains.size === 0) {
       findings.push({
         id: "content.url_reputation.clean",
         checkId: CHECK_ID,
         title: "All link domains clean on checked URI blocklists",
         severity: "ok",
-        detail: `Checked ${linkDomains.length} link domain(s) against Spamhaus DBL, SURBL, and URIBL — none listed.`,
+        detail: `Checked ${linkDomains.length} link domain(s) against ${usableZones.length} URI zone(s) (${usableZones.map((z) => z.name).join(", ")}) — none listed.`,
         evidence: linkDomains.join(", "),
       })
     }
@@ -559,30 +680,78 @@ async function analyzeSample(sample: SampleBody, ctx: { domain: string }): Promi
         title: "Some URI-zone lookups failed transiently",
         severity: "info",
         detail:
-          "One or more URI-blocklist lookups returned SERVFAIL/timeout; those domains were not conclusively cleared.",
-        remediation: "Retry the audit later; if it persists, use a dedicated non-public resolver.",
+          "One or more URI-blocklist lookups returned SERVFAIL/timeout or an in-band refusal; those domains were not conclusively cleared (inconclusive, never false-listed).",
+        remediation:
+          "Retry the audit later; if it persists, use a dedicated non-public resolver (EDH_DNS_RESOLVER).",
+      })
+    }
+  }
+
+  // --- §6 diff vs the previous run over the link-domain set (AC#10) ----------------------------
+  const previous = indexPrevious(ctx.previousResults?.["content.url"] as LinkUrlResults | undefined)
+  const currentPairs = new Set<string>()
+  for (const [domain, listings] of listingsByDomain) {
+    for (const l of listings) currentPairs.add(`${l.zone}|${domain}`)
+  }
+  const diff: UrlRunDiff = { newListings: [], resolved: [], sampleChanged: false }
+  if (previous) {
+    diff.sampleChanged = previous.sampleId !== sample.id
+    const conclusiveZones = new Set(usableZones.map((z) => z.zone))
+    for (const pair of currentPairs) {
+      const [zone] = pair.split("|")
+      // clean→listed is new only when the zone was conclusive last run (inconclusive↔listed
+      // transitions are ignored to avoid resolver-blockage false alarms, §6).
+      if (!previous.pairs.has(pair) && !previous.inconclusiveZones.has(zone)) {
+        diff.newListings.push(pair)
+      }
+    }
+    for (const pair of previous.pairs) {
+      const [zone, domain] = pair.split("|")
+      if (!linkDomains.includes(domain)) continue // domain no longer linked — not "resolved"
+      if (!conclusiveZones.has(zone) || zonesInconclusive.includes(zone)) continue
+      if (!currentPairs.has(pair)) diff.resolved.push(pair)
+    }
+    if (diff.resolved.length > 0) {
+      findings.push({
+        id: "content.url_reputation.resolved",
+        checkId: CHECK_ID,
+        title: `${diff.resolved.length} URI listing(s) resolved since the previous run`,
+        severity: "info",
+        detail: `Previously-listed link domain(s) now answer clean: ${diff.resolved
+          .map((p) => {
+            const [zone, domain] = p.split("|")
+            return `${domain} on ${zone}`
+          })
+          .join(
+            "; ",
+          )}.${diff.sampleChanged ? " Note: the sample message changed between runs, so the comparison is over the current link-domain set." : ""}`,
       })
     }
   }
 
   // --- FUTURE sub-checks: one info each, never warning/critical (spec §7, AC#8) ----------------
-  findings.push({
-    id: "content.url_ivmuri",
-    checkId: CHECK_ID,
-    title: "Invaluement ivmURI check pending (paid feed)",
-    severity: "info",
-    detail:
-      "ivmURI (uri.invaluement.com) requires a paid subscription and a licensed resolver, so link domains were not checked against it this round.",
-    remediation:
-      "Once licensed, listed domains are removed via https://www.invaluement.com/lookup/ — configure the ivmURI resolver/key to enable this check.",
-  })
+  const hasIvmUriZone = zones.some(
+    (z) => z.zone in ZONE_SUBCHECK && subCheckFor(z.zone) === "content.url_ivmuri",
+  )
+  if (!hasIvmUriZone) {
+    findings.push({
+      id: "content.url_ivmuri",
+      checkId: CHECK_ID,
+      title: "Invaluement ivmURI check pending (paid feed)",
+      severity: "info",
+      detail:
+        "ivmURI requires a paid Invaluement subscription and a licensed resolver, so link domains were not checked against it this round — inconclusive, not clean.",
+      remediation:
+        "Once licensed, configure the ivmURI resolver/key in the Blocklist Zones settings panel; listed domains are checked/removed via https://www.invaluement.com/lookup/.",
+    })
+  }
   findings.push({
     id: "content.url_redirect_chain",
     checkId: CHECK_ID,
     title: "Redirect-chain expansion disabled (first round)",
     severity: "info",
     detail:
-      "Following shortener/redirect hops to reveal the true final domain needs an outbound HTTP probe (bounded hops + timeout, no cookies/JS), which is off in the first round; final_domain is null and shortener destinations were not expanded.",
+      "Following shortener/redirect hops to reveal the true final domain needs an outbound HTTP probe (hop cap 5, 5s timeout, no cookies/JS), which is off in the first round; final_domain is null and shortener destinations were not expanded or re-checked against the URI zones.",
     remediation:
       "Enable the bounded redirect probe to expand shorteners and re-check the final landing domain against the URI zones.",
   })
@@ -599,20 +768,33 @@ async function analyzeSample(sample: SampleBody, ctx: { domain: string }): Promi
   findings.push({
     id: "content.url_safe_browsing",
     checkId: CHECK_ID,
-    title: "Google Safe Browsing check pending (API key required)",
+    title: safeBrowsingConfigured
+      ? "Google Safe Browsing screening pending (probe round)"
+      : "Google Safe Browsing check pending (API key required)",
     severity: "info",
-    detail:
-      "Checking link/final domains against Google Safe Browsing (malware/phishing/unwanted) needs a Safe Browsing API key, which is not configured.",
-    remediation:
-      "Add a Google Safe Browsing API key (secrets.safe_browsing_key) to enable phishing/malware screening of body links.",
+    detail: safeBrowsingConfigured
+      ? "A Safe Browsing API key is configured, but the hashed Lookup/Update v4 screening of link/final domains ships with the probe round."
+      : "Checking link/final domains against Google Safe Browsing (malware/phishing/unwanted software) needs a Safe Browsing API key, which is not configured.",
+    remediation: safeBrowsingConfigured
+      ? "No action needed — screening activates automatically when the probe round ships."
+      : "Add a Google Safe Browsing API key (config.yaml → checks.content.url.safeBrowsingKey) to enable phishing/malware screening of body links.",
   })
 
-  // --- content.url_aggregate: worst weighted severity roll-up ---------------------------------
-  let worst: Severity = "ok"
-  for (const f of findings) {
-    if (SEVERITY_RANK[f.severity] > SEVERITY_RANK[worst]) worst = f.severity
+  // --- content.url_aggregate: worst WEIGHTED severity roll-up (§3, AC#5) -----------------------
+  const considered: Severity[] = []
+  for (const row of rows) {
+    if (row.listed && row.severity) considered.push(weightedSeverity(row.severity, row.zone.weight))
   }
-  // Advisory info alone must not turn the Spam & Content cell amber (spec §3 severity mapping).
+  for (const f of findings) {
+    // Hygiene/extract findings carry full weight; listing rows were weighted above (skip their ids).
+    if (f.id.includes(":")) continue
+    if (f.severity === "warning" || f.severity === "critical") considered.push(f.severity)
+  }
+  const worst = considered.reduce<Severity>(
+    (acc, s) => (SEVERITY_RANK[s] > SEVERITY_RANK[acc] ? s : acc),
+    "ok",
+  )
+  // Advisory info alone never turns the Spam & Content cell amber (§3 severity mapping).
   const aggregateSeverity: Severity = worst === "critical" || worst === "warning" ? worst : "ok"
   findings.push({
     id: "content.url_aggregate",
@@ -625,37 +807,51 @@ async function analyzeSample(sample: SampleBody, ctx: { domain: string }): Promi
     detail:
       aggregateSeverity === "ok"
         ? "No URI listing, raw-IP, homograph, shortener, http, or alignment problem fired for this sample."
-        : "One or more link/URL problems fired; fix the highest-weight listing/link first (each finding above carries its delisting URL or exact hygiene edit).",
-    remediation:
-      aggregateSeverity === "ok"
-        ? undefined
-        : "Work the prioritized list above: resolve any critical URI listing / raw-IP / homograph link first, then shortener/http/alignment warnings.",
+        : "One or more link/URL problems fired; fix the highest-weight listing/link first — each finding above carries its delisting URL or exact link-hygiene edit.",
+    ...(aggregateSeverity === "ok"
+      ? {}
+      : {
+          remediation:
+            "Work the prioritized list above: resolve any critical URI listing / raw-IP / homograph link first, then shortener/http/alignment warnings.",
+        }),
   })
 
-  return findings
-}
+  // --- Structured payload: the audit-JSON `content.url` key (spec §5, AC#9) --------------------
+  const linkResults: UrlLinkResult[] = links.map((l) => ({
+    url: l.url,
+    linkDomain: l.linkDomain,
+    finalDomain: null, // redirect/shortener expansion is a future-round probe (§3, AC#8)
+    isShortener: l.isShortener,
+    isHttps: l.isHttps,
+    isIpLiteral: l.isIpLiteral,
+    isPunycode: l.isPunycode,
+    homographOf: l.homographOf,
+    redirectHops: null,
+    listings: listingsByDomain.get(l.linkDomain) ?? [],
+    aligned: alignmentFor(l, orgDomain, allowedDomains),
+  }))
+  const results: LinkUrlResults = {
+    schema_version: 1,
+    sampleId: sample.id,
+    summary: {
+      totalLinks: links.length,
+      uniqueDomains: linkDomains.length,
+      listedDomains: listedDomains.size,
+      shortenerCount: shortenerLinks.length,
+      httpCount: httpLinks.length,
+      ipLiteralCount: ipLinks.length,
+      punycodeCount: punyLinks.length,
+      offbrandCount: offBrand.length,
+      inconclusive: zonesInconclusive.length > 0 || zonesSkipped.length > 0 || transient,
+      weightedWorst: aggregateSeverity,
+    },
+    links: linkResults,
+    zonesQueried: usableZones.map((z) => z.zone),
+    zonesInconclusive,
+    zonesSkipped,
+    diff,
+    checkedAt: new Date().toISOString(),
+  }
 
-export const linkUrlReputationCheck: Checker = {
-  id: "content.link_url",
-  label: "Link / URL Reputation",
-  async run(ctx): Promise<Finding[]> {
-    try {
-      const sample = readSample(ctx)
-      if (!sample) return [noSampleFinding()]
-      return await analyzeSample(sample, ctx)
-    } catch (err) {
-      // Never throw out of run(): degrade to a retryable info finding.
-      const msg = err instanceof Error ? err.message : String(err)
-      return [
-        {
-          id: "content.url_extract",
-          checkId: CHECK_ID,
-          title: "Link/URL reputation check could not complete",
-          severity: "info",
-          detail: `The link/URL reputation check hit an unexpected error (${msg}).`,
-          remediation: "Retry the audit; if it persists, verify the sample message and resolver.",
-        },
-      ]
-    }
-  },
+  return { findings, results }
 }

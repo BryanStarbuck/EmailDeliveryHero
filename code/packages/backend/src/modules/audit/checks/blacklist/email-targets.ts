@@ -117,6 +117,8 @@ interface ParsedReport {
   domain: string | null
   endEpoch: number | null
   rows: Array<{ ip: string; count: number; aligned: boolean }>
+  /** DKIM d= / SPF envelope domains that PASSED in <auth_results> (§19.1 RHSBL candidates). */
+  authDomains: Array<{ domain: string; kind: "dkim_d" | "return_path" }>
 }
 
 /** Regex-level rua parse — enough for source_ip + policy_evaluated without an XML dependency. */
@@ -125,6 +127,8 @@ export function parseRuaXml(xml: string): ParsedReport {
   const range = /<date_range>([\s\S]*?)<\/date_range>/i.exec(xml)?.[1] ?? ""
   const end = Number(tag(range, "end"))
   const rows: ParsedReport["rows"] = []
+  const authDomains: ParsedReport["authDomains"] = []
+  const seenAuth = new Set<string>()
   for (const record of xml.match(/<record>[\s\S]*?<\/record>/gi) ?? []) {
     const ip = tag(record, "source_ip")
     if (!ip) continue
@@ -133,11 +137,28 @@ export function parseRuaXml(xml: string): ParsedReport {
       tag(evaluated, "dkim")?.toLowerCase() === "pass" ||
       tag(evaluated, "spf")?.toLowerCase() === "pass"
     rows.push({ ip: ip.trim(), count: Number(tag(record, "count")) || 1, aligned })
+    // §19.1: DKIM d= / SPF envelope domains seen authenticating for us in <auth_results> —
+    // RHSBL domain-sweep candidates when they are ours (the caller filters to subdomains).
+    const auth = /<auth_results>([\s\S]*?)<\/auth_results>/i.exec(record)?.[1] ?? ""
+    for (const [element, kind] of [
+      ["dkim", "dkim_d"],
+      ["spf", "return_path"],
+    ] as const) {
+      for (const block of auth.match(new RegExp(`<${element}>[\\s\\S]*?</${element}>`, "gi")) ??
+        []) {
+        if (tag(block, "result")?.toLowerCase() !== "pass") continue
+        const d = tag(block, "domain")?.toLowerCase().trim()
+        if (!d || seenAuth.has(`${kind}|${d}`)) continue
+        seenAuth.add(`${kind}|${d}`)
+        authDomains.push({ domain: d, kind })
+      }
+    }
   }
   return {
     domain: tag(policy, "domain")?.toLowerCase() ?? null,
     endEpoch: Number.isFinite(end) && end > 0 ? end : null,
     rows,
+    authDomains,
   }
 }
 
@@ -179,7 +200,12 @@ export function collectEmailReportIps(domain: string): { ips: EmailReportIp[]; t
           if (seen < existing.first_seen) existing.first_seen = seen
           if (seen > existing.last_seen) existing.last_seen = seen
         } else {
-          byIp.set(row.ip, { ip: row.ip, first_seen: seen, last_seen: seen, message_count: row.count })
+          byIp.set(row.ip, {
+            ip: row.ip,
+            first_seen: seen,
+            last_seen: seen,
+            message_count: row.count,
+          })
         }
       }
     }
@@ -187,4 +213,50 @@ export function collectEmailReportIps(domain: string): { ips: EmailReportIp[]; t
 
   const all = [...byIp.values()].sort((a, b) => b.message_count - a.message_count)
   return { ips: all.slice(0, EMAIL_IP_CAP), truncated: Math.max(0, all.length - EMAIL_IP_CAP) }
+}
+
+export interface EmailReportDomain {
+  domain: string
+  source: "dkim_d" | "return_path"
+}
+
+/**
+ * §19.1 RHSBL domain targets: DKIM d= / SPF envelope domains that PASSED in rua <auth_results>
+ * for `domain` (last 30 days) and are OURS — subdomains of the primary. Third-party ESP domains
+ * and the primary itself (already the primary target) are excluded.
+ */
+export function collectEmailReportDomains(domain: string): EmailReportDomain[] {
+  const dir = emailsDir()
+  if (!dir) return []
+  const cutoff = Date.now() / 1000 - WINDOW_DAYS * 24 * 3600
+  const wanted = domain.toLowerCase()
+  const suffix = `.${wanted}`
+  const out = new Map<string, EmailReportDomain>()
+
+  let files: string[]
+  try {
+    files = readdirSync(dir).filter((f) => f.toLowerCase().endsWith(".eml"))
+  } catch {
+    return []
+  }
+
+  for (const file of files) {
+    let eml: string
+    try {
+      eml = readFileSync(join(dir, file), "utf8")
+    } catch {
+      continue
+    }
+    for (const xml of extractReportXml(eml)) {
+      const report = parseRuaXml(xml)
+      if (report.domain !== wanted) continue
+      if (report.endEpoch !== null && report.endEpoch < cutoff) continue
+      for (const { domain: d, kind } of report.authDomains) {
+        if (d === wanted || !d.endsWith(suffix)) continue
+        // A domain seen as both dkim_d and return_path keeps the first-seen source tag.
+        if (!out.has(d)) out.set(d, { domain: d, source: kind })
+      }
+    }
+  }
+  return [...out.values()]
 }

@@ -9,16 +9,22 @@ import { readYaml, writeYaml } from "@shared/yaml-store"
 import type {
   ArcConfig,
   BimiDomainConfig,
+  DaneDomainConfig,
   DnsHealthConfig,
   DomainReputationConfig,
+  LinkUrlDomainConfig,
+  MxRoutingConfig,
 } from "../audit/checks/types"
 import type { MonitoredDomain } from "./domain.types"
 import type {
   ArcConfigDto,
   BimiConfigDto,
   CreateDomainDto,
+  DaneConfigDto,
   DnsHealthConfigDto,
   DomainReputationConfigDto,
+  LinkUrlConfigDto,
+  MxRoutingConfigDto,
   UpdateDomainDto,
 } from "./dto/domain.dto"
 
@@ -95,9 +101,12 @@ export class DomainsService {
       ...(dto.arc ? { arc: normalizeArc(dto.arc) } : {}),
       ...(dto.bimi ? { bimi: normalizeBimi(dto.bimi) } : {}),
       ...(dto.dnsHealth ? { dnsHealth: normalizeDnsHealth(dto.dnsHealth) } : {}),
+      ...(dto.mx ? { mx: normalizeMx(dto.mx) } : {}),
       ...(dto.domainReputation
         ? { domainReputation: normalizeDomainReputation(dto.domainReputation) }
         : {}),
+      ...(dto.dane ? { dane: normalizeDane(dto.dane) } : {}),
+      ...(dto.linkUrl ? { linkUrl: normalizeLinkUrl(dto.linkUrl) } : {}),
       addedBy,
       createdAt: now,
       updatedAt: now,
@@ -124,10 +133,13 @@ export class DomainsService {
       bimi: dto.bimi !== undefined ? normalizeBimi(dto.bimi) : current.bimi,
       dnsHealth:
         dto.dnsHealth !== undefined ? normalizeDnsHealth(dto.dnsHealth) : current.dnsHealth,
+      mx: dto.mx !== undefined ? normalizeMx(dto.mx) : current.mx,
       domainReputation:
         dto.domainReputation !== undefined
           ? normalizeDomainReputation(dto.domainReputation)
           : current.domainReputation,
+      dane: dto.dane !== undefined ? normalizeDane(dto.dane) : current.dane,
+      linkUrl: dto.linkUrl !== undefined ? normalizeLinkUrl(dto.linkUrl) : current.linkUrl,
       updatedAt: new Date().toISOString(),
     }
     domains[idx] = updated
@@ -221,6 +233,41 @@ function normalizeDnsHealth(cfg: DnsHealthConfigDto): DnsHealthConfig | undefine
   const skipAxfrProbe = cfg.skipAxfrProbe ?? false
   if (extraLabels.length === 0 && expectedNs.length === 0 && !skipAxfrProbe) return undefined
   return { extraLabels, expectedNs, skipAxfrProbe }
+}
+
+/**
+ * Normalize the operator-entered mail-routing expectations (pm/checks/mx_routing.mdx §4 — the
+ * `mx_expectations` shape of §5): trim / lower-case / de-dup the expected-MX host list (stripping
+ * trailing dots), default receivesMail to TRUE (the schema default) and skipSmtpProbe to FALSE,
+ * and collapse an entirely-default config to undefined so domains.yaml stays clean.
+ */
+function normalizeMx(cfg: MxRoutingConfigDto): MxRoutingConfig | undefined {
+  const receivesMail = cfg.receivesMail ?? true
+  const expectedHosts = normalizeList(cfg.expectedHosts).map((h) => h.replace(/\.$/, ""))
+  const skipSmtpProbe = cfg.skipSmtpProbe ?? false
+  if (receivesMail && expectedHosts.length === 0 && !skipSmtpProbe) return undefined
+  return { receivesMail, expectedHosts, skipSmtpProbe }
+}
+
+/**
+ * Normalize the operator-entered DANE config (pm/checks/dane_tlsa.mdx §4): lower-case the pinned
+ * next-cert SPKI digest and collapse an empty config to undefined so domains.yaml stays clean.
+ */
+function normalizeDane(cfg: DaneConfigDto): DaneDomainConfig | undefined {
+  const expectedNextSpki = (cfg.expectedNextSpki ?? "").trim().toLowerCase()
+  if (expectedNextSpki === "") return undefined
+  return { expectedNextSpki }
+}
+
+/**
+ * Normalize the operator-entered Link / URL-reputation config (pm/checks/link_url_reputation.mdx
+ * §4): trim / lower-case / de-dup the aligned link-domain allow-list and collapse an empty config
+ * to undefined so domains.yaml stays clean.
+ */
+function normalizeLinkUrl(cfg: LinkUrlConfigDto): LinkUrlDomainConfig | undefined {
+  const allowedDomains = normalizeList(cfg.allowedDomains).map((d) => d.replace(/\.$/, ""))
+  if (allowedDomains.length === 0) return undefined
+  return { allowedDomains }
 }
 
 /**

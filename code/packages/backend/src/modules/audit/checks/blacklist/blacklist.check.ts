@@ -1,5 +1,6 @@
 import { Resolver } from "node:dns/promises"
 import { mapLimit, withResource } from "@shared/concurrency"
+import { logWarn } from "@shared/logging"
 import { resolveMx, resolveTxt, resolve4 as utilResolve4 } from "../dns-util"
 import type { Checker, CheckOutcome, Finding, Severity } from "../types"
 import type {
@@ -14,7 +15,7 @@ import type {
   ZoneHealth,
   ZoneResult,
 } from "./blacklist-types"
-import { collectEmailReportIps } from "./email-targets"
+import { collectEmailReportDomains, collectEmailReportIps } from "./email-targets"
 import {
   buildQueryName,
   classifyAnswer,
@@ -50,8 +51,13 @@ const QUERY_CONCURRENCY = 8
 const QUERY_TIMEOUT_MS = 5000
 
 /** Dedicated resolver so operators can point DNSBL traffic at a real recursive resolver
- *  (EDH_DNS_RESOLVER=ip[,ip]) — public resolvers get refused by Spamhaus/URIBL (§3, PS-9). */
-function makeResolver(): { resolver: Resolver; mode: "system" | "custom"; server: string | null } {
+ *  (EDH_DNS_RESOLVER=ip[,ip]) — public resolvers get refused by Spamhaus/URIBL (§3, PS-9).
+ *  Exported for the §21.3 live-recheck path (recheck.ts), which pins the same resolver. */
+export function makeResolver(): {
+  resolver: Resolver
+  mode: "system" | "custom"
+  server: string | null
+} {
   const resolver = new Resolver({ timeout: QUERY_TIMEOUT_MS, tries: 1 })
   const custom = process.env.EDH_DNS_RESOLVER?.trim()
   if (custom) {
@@ -202,8 +208,16 @@ async function discoverIpTargets(
   }
   // §19: IPs observed actually sending as this domain in DMARC rua reports (last 30 days),
   // capped at the top 20 by message volume. Dedupe keeps the stronger config-derived source tag.
-  for (const rep of collectEmailReportIps(domain).ips) {
+  const emailIps = collectEmailReportIps(domain)
+  for (const rep of emailIps.ips) {
     if (!sources.has(rep.ip)) sources.set(rep.ip, "email_report")
+  }
+  if (emailIps.truncated > 0) {
+    // §19.1: the target cap is bounded but truncation is never silent.
+    logWarn(
+      `Blacklist sweep for ${domain}: ${emailIps.truncated} email-derived IP(s) beyond the top-20-by-volume cap were skipped`,
+      "BlacklistCheck",
+    )
   }
 
   return mapLimit([...sources.entries()], QUERY_CONCURRENCY, async ([ip, source]) => {
@@ -241,7 +255,8 @@ function queryNameFor(r: ZoneResult): string {
   return `${r.target.toLowerCase()}.${r.zone}`
 }
 
-async function queryPair(
+/** One (zone × target) DNSBL query — exported for the §21.3 live-recheck path (recheck.ts). */
+export async function queryPair(
   resolver: Resolver,
   zone: BlocklistZone,
   target: string,
@@ -448,7 +463,12 @@ export const blacklistCheck: Checker = {
       () => discoverIpTargets(resolver, ctx.domain, ctx.sendingIps),
       (targets) => targets,
     )
+    // §3/§19.1 domain targets: the primary sending domain plus our own subdomains observed
+    // authenticating (DKIM d= / SPF Return-Path) in ingested rua reports.
     const domainTargets: DomainTarget[] = [{ domain: ctx.domain, source: "primary", created: null }]
+    for (const extra of collectEmailReportDomains(ctx.domain)) {
+      domainTargets.push({ domain: extra.domain, source: extra.source, created: null })
+    }
 
     // §11.2 preflight — dead/wildcarding zones are excluded from the sweep (PS-10).
     const zoneHealth = await loggedPhase(
@@ -529,7 +549,13 @@ export const blacklistCheck: Checker = {
       results.some((r) => r.refusal_code !== null) || zoneHealth.some((h) => h.status === "blocked")
     const deadZones = zoneHealth.filter((h) => h.status === "dead" || h.status === "wildcarding")
 
-    const problemStates = detectProblemStates({ results, zoneHealth, positive, zones: sweepZones })
+    const problemStates = detectProblemStates({
+      results,
+      zoneHealth,
+      positive,
+      zones: sweepZones,
+      ipTargets,
+    })
     const previous = readLatestBlacklistRun(ctx.domain)
     const diff = diffRuns(previous, results)
 

@@ -36,12 +36,18 @@ function ingestStatePath(domainId: string): string {
 
 /** Dedupe key → file name for a DMARC aggregate report: (reporterOrg, reportId) (§4.5). */
 function dmarcPath(domainId: string, report: ParsedDmarcReport): string {
-  return join(dmarcDir(domainId), `${safeStem(report.reporterOrg)}-${safeStem(report.reportId)}.json`)
+  return join(
+    dmarcDir(domainId),
+    `${safeStem(report.reporterOrg)}-${safeStem(report.reportId)}.json`,
+  )
 }
 
 /** Dedupe key → file name for a TLS-RPT report: (reporterOrg, reportDate) (§4.5). */
 function tlsRptPath(domainId: string, report: ParsedTlsRptReport): string {
-  return join(tlsRptDir(domainId), `${safeStem(report.reporterOrg)}-${safeStem(report.reportDate)}.json`)
+  return join(
+    tlsRptDir(domainId),
+    `${safeStem(report.reporterOrg)}-${safeStem(report.reportDate)}.json`,
+  )
 }
 
 /** Store one DMARC report. Returns false (and writes nothing) when its key is already stored. */

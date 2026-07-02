@@ -218,6 +218,71 @@ export function parseBimiSelectorHeader(sampleMessage: string | undefined): stri
   return selector ? selector.toLowerCase() : null
 }
 
+/**
+ * Whether a `_bimi` CNAME target is alive at all. A BIMI CNAME target hosts the TXT record — it
+ * need not have any A/AAAA — so TXT presence counts as alive before falling back to A/AAAA.
+ */
+async function cnameTargetAlive(target: string): Promise<"ok" | "empty" | "error"> {
+  const txt = await resolveTxt(target)
+  if (txt.records.length > 0) return "ok"
+  const host = await hostResolves(target)
+  if (host === "ok") return "ok"
+  if (txt.error || host === "error") return "error"
+  return "empty"
+}
+
+/**
+ * `content.bimi_dns_health` (pm/checks/bimi.mdx §2): the `_bimi` name must resolve cleanly — no
+ * dangling CNAME to a dead/unclaimed host. Runs whether or not a TXT record was served: the
+ * classic silent-disappearance case is a `_bimi` CNAME whose target lapsed, which makes the TXT
+ * lookup come back EMPTY, so this is checked in the no-record path too.
+ */
+async function dnsHealthFinding(name: string): Promise<Finding> {
+  const cname = await resolveCname(name)
+  if (cname.records.length === 0) {
+    return {
+      id: "content.bimi_dns_health",
+      checkId: CHECK_ID,
+      title: "BIMI _bimi name resolves cleanly",
+      severity: "ok",
+      detail: `${name} resolves directly with no dangling CNAME.`,
+    }
+  }
+  const target = cname.records[0]
+  const targetState = await cnameTargetAlive(target)
+  if (targetState === "empty") {
+    return {
+      id: "content.bimi_dns_health",
+      checkId: CHECK_ID,
+      title: "Dangling CNAME on _bimi",
+      severity: "warning",
+      detail: `${name} is a CNAME to "${target}", which does not resolve — the BIMI record depends on an unclaimed/dead host and silently disappears.`,
+      remediation: `Point ${name} directly at the TXT record or a claimed host; remove the dangling CNAME to "${target}".`,
+      evidence: `${name} CNAME ${target}`,
+    }
+  }
+  if (targetState === "error") {
+    return {
+      id: "content.bimi_dns_health",
+      checkId: CHECK_ID,
+      title: "Could not verify the _bimi CNAME target",
+      severity: "info",
+      detail: `${name} is a CNAME to "${target}", but a transient DNS error prevented verifying the target. Retry the audit later.`,
+      remediation:
+        "Retry the audit; if it persists, verify the CNAME target's authoritative nameservers respond.",
+      evidence: `${name} CNAME ${target}`,
+    }
+  }
+  return {
+    id: "content.bimi_dns_health",
+    checkId: CHECK_ID,
+    title: "BIMI _bimi name resolves cleanly",
+    severity: "ok",
+    detail: `${name} is a CNAME to "${target}", which resolves.`,
+    evidence: `${name} CNAME ${target}`,
+  }
+}
+
 /** An empty per-selector result row (future-round columns null — pm/checks/bimi.mdx §5). */
 function emptyRow(
   selector: string,
@@ -363,6 +428,10 @@ export const bimiCheck: Checker = {
         detail: `${name} has no v=BIMI1 TXT record, so supporting receivers (Gmail, Apple Mail, Yahoo, Fastmail) show a generic avatar instead of your brand logo.`,
         remediation: publishRemediation,
       })
+      // DNS health still runs with no record (§2 bimi_dns_health): the classic cause of a BIMI
+      // record silently disappearing is a `_bimi` CNAME whose target lapsed — surface the dangling
+      // CNAME as the reason the TXT lookup came back empty.
+      findings.push(await dnsHealthFinding(name))
       // The header/configured selectors are still audited (§8.7) even with no default record.
       await probeExtras()
       return outcome()
@@ -561,40 +630,8 @@ export const bimiCheck: Checker = {
     // Non-default selectors (§2/§8.7): configured selectors + the BIMI-Selector header compare.
     await probeExtras()
 
-    // DNS health: a dangling CNAME on the _bimi name means the record silently disappears. (§8 — bimi_dns_health)
-    const cname = await resolveCname(name)
-    if (cname.records.length > 0) {
-      const target = cname.records[0]
-      const targetState = await hostResolves(target)
-      if (targetState === "empty") {
-        findings.push({
-          id: "content.bimi_dns_health",
-          checkId: CHECK_ID,
-          title: "Dangling CNAME on _bimi",
-          severity: "warning",
-          detail: `${name} is a CNAME to "${target}", which does not resolve — the BIMI record depends on an unclaimed/dead host.`,
-          remediation: `Point ${name} directly at the TXT record or a claimed host; remove the dangling CNAME to "${target}".`,
-          evidence: `${name} CNAME ${target}`,
-        })
-      } else {
-        findings.push({
-          id: "content.bimi_dns_health",
-          checkId: CHECK_ID,
-          title: "BIMI _bimi name resolves cleanly",
-          severity: "ok",
-          detail: `${name} is a CNAME to "${target}", which resolves.`,
-          evidence: `${name} CNAME ${target}`,
-        })
-      }
-    } else {
-      findings.push({
-        id: "content.bimi_dns_health",
-        checkId: CHECK_ID,
-        title: "BIMI _bimi name resolves cleanly",
-        severity: "ok",
-        detail: `${name} resolves directly to a TXT record with no dangling CNAME.`,
-      })
-    }
+    // DNS health: a dangling CNAME on the _bimi name means the record silently disappears. (§2 — bimi_dns_health)
+    findings.push(await dnsHealthFinding(name))
 
     // Future round: SVG body (Tiny-PS profile / square viewBox) and VMC certificate (chain against
     // the checks.bimi.mvaAllowList, expiry, logo-hash match) all require an HTTPS fetch. Never

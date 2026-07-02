@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — ARC (Authenticated Received Chain)
-description: The ARC check spec — how EmailDeliveryHero advises on and (in a future round) verifies Authenticated Received Chain header sets (RFC 8617) so that forwarders and mailing lists can preserve prior SPF/DKIM/DMARC results across a hop that would otherwise break DMARC; covers the seven-plus arc.* sub-checks, why this is largely advisory and message-sample-dependent, the swaks-through-a-forwarder capture method, the arc_check_results table, and the first-round-vs-future split.
+description: The ARC check spec — how EmailDeliveryHero advises on and (in a future round) verifies Authenticated Received Chain header sets (RFC 8617) so that forwarders and mailing lists can preserve prior SPF/DKIM/DMARC results across a hop that would otherwise break DMARC; covers the seven-plus arc.* sub-checks, why this is largely advisory and message-sample-dependent, the swaks-through-a-forwarder capture method, the arc_check_results table, the first-round-vs-future split, the ARC sub-test explainer page (/domains/:domainId/runs/:runId/dmarc/check/arc — the five-block what/state/meaning/fix/re-run contract with signer-key raw-record cards, the scoped parsed-field table, the unit-scoped run-history strip, the RFC/provider references footer, and every loading/not-applicable/not-measured/error state), the clickable sub-concept navigation map, and the ARC-nn problem-state drill-down pages under /domains/:domainId/runs/:runId/dmarc/:problemId.
 ---
 
 # EmailDeliveryHero — ARC (Authenticated Received Chain)
@@ -183,6 +183,15 @@ and `arc.selector_dns` today and the capture probe later.
 enforcing DMARC or no forwarding declared" note. *Loading:* skeleton rows. *Sampled:* the parsed
 chain table. **Admin-only:** enabling the live swaks probe (which sends real mail) is gated behind
 `role:admin`; non-admins see advisory + DNS results only.
+
+**Where every ARC row leads.** The rows above are no longer terminal: the ARC sub-group heading and
+every `arc.*` finding row (on the run report's DMARC section and on the DMARC category page's
+sub-tests band) deep-link into the **ARC explainer page** at
+`/domains/:domainId/runs/:runId/dmarc/check/arc` (§9), and each finding also maps to one **ARC-nn
+problem drill-down** at `/domains/:domainId/runs/:runId/dmarc/:problemId` (§10). The DMARC category
+page currently filters its test-results table to `checkId === "dmarc"` (DmarcPage.tsx); the `arc`
+band row specified in [dmarc.mdx §6.3](./dmarc.mdx) is the surface that reads `checkId === "arc"`
+findings and carries the user here.
 
 ---
 

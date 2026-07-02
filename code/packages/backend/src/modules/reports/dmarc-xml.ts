@@ -119,8 +119,7 @@ export function parseDmarcAggregateXml(xml: string): ParsedDmarcReport | null {
       dmarcPass: spfAligned || dkimAligned,
       headerFrom: text(identifiers, "header_from").toLowerCase(),
       envelopeSpfDomain: (
-        authSpf.map((n) => text(n, "domain")).find(Boolean) ??
-        text(identifiers, "envelope_from")
+        authSpf.map((n) => text(n, "domain")).find(Boolean) ?? text(identifiers, "envelope_from")
       ).toLowerCase(),
       dkimSigningDomains: authDkim.map((n) => text(n, "domain").toLowerCase()).filter(Boolean),
     }

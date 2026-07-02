@@ -1,6 +1,6 @@
 ---
 title: STARTTLS Transport Encryption & MX TLS Certificate Health
-description: The DNS & Infrastructure check that connects to every MX host, negotiates STARTTLS (RFC 3207), and audits the presented TLS certificate — validity window, hostname match, chain trust, protocol version, cipher strength, expiry runway, downgrade resistance, SNI handling, and OCSP stapling — so opportunistic transport encryption is actually offered and actually trustworthy.
+description: The DNS & Infrastructure check that connects to every MX host, negotiates STARTTLS (RFC 3207), and audits the presented TLS certificate — validity window, hostname match, chain trust, protocol version, cipher strength, expiry runway, downgrade resistance, SNI handling, and OCSP stapling — so opportunistic transport encryption is actually offered and actually trustworthy. Also owns the interior copy of the run-scoped check-detail explainer page at /domains/:domainId/runs/:runId/dns/check/tls-transport (newest alias /domains/:domainId/dns/check/tls-transport): the concept anchors, the raw + parsed per-MX breakdown, state-conditional meaning and fix recipes, the family-scoped "Run this check now" spot-check, history/trends, and references.
 ---
 
 # STARTTLS Transport Encryption & MX TLS Certificate Health
@@ -21,6 +21,10 @@ their own specs. A domain can pass every sub-check here and still be trivially d
 active attacker unless MTA-STS `enforce` or DANE/TLSA is also published.
 
 **Read alongside:**
+- [./dns.mdx](./dns.mdx) — the DNS & Infrastructure **category** spec. Its §14 owns the explainer-page
+  **shell** (routes, the five locked blocks, raw+parsed frame, history strip, references frame,
+  states); §15 owns the scoped-re-run endpoints; §16 the render-time trend derivations; §17 the
+  grown run-report section. **This spec owns only the tls-transport interior copy** (§9-§12 below).
 - [../overview.mdx](../overview.mdx) — product charter, personas, port list.
 - [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
 - [../spam_checks.mdx](../spam_checks.mdx) — master catalog; this spec expands its `infra.starttls` row.
@@ -191,6 +195,14 @@ an optional EHLO name override. **Empty / never-run:** the cell renders light gr
 audited"; the TLS group shows "Run an audit to probe MX TLS." **Loading:** a skeleton per MX host
 while handshakes run. **Probe-unavailable** (port 25 blocked): an inline `info` banner "TLS probe
 could not connect from this host — outbound :25 may be blocked" with a link to the settings toggle.
+
+**Beyond the grouped rows: the explainer page.** Everywhere this family surfaces as a row — the
+DNS category page's "Transport Security (TLS)" group header, the run report's ten-family status
+list, the family strip — the row is clickable and its `details ›` navigates to the run-scoped
+**check-detail explainer page** specced in §9 below (route shell owned by
+[./dns.mdx](./dns.mdx) §14). Underlined concept terms (STARTTLS, MX certificate, SAN, TLS
+version) deep-link to that page's `#concept-<term>` anchors per the [./dns.mdx](./dns.mdx) §14.6
+map.
 
 ---
 

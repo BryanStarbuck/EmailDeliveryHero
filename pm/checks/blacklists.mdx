@@ -1,6 +1,6 @@
 ---
 title: Blacklists (DNSBL / RHSBL / IP & Domain Reputation Blocklists)
-description: How EmailDeliveryHero queries DNS-based blocklists for a domain's sending IPs and domain names, interprets 127.0.0.x return codes and TXT reasons, weights per-zone impact, and hands the user the exact per-zone delisting URL and reason code for every listing. Includes the complete tiered catalog of every blocklist we know (where it lives, how to look it up, how to delist), the dead-zone do-not-check registry, provider reputation portals, the verified Brew/npm testing toolbox and the exact per-tool command lines a run executes (§10, captured into blacklists.tool_runs[]), the test plan (§11), the per-run YAML — the top-level `blacklists` key inside ~/.email_delivery_hero/runs/{domain}/{timestamp}.yaml with status, observation, tool_runs and tests (§12, storage contract in ../storage.mdx), the run-scoped "view one category run" page at /domains/:domainId/runs/:runId/blacklists with prev/next run navigation and the zones × targets listings matrix (§13), the UX layout (§14), the fix-recommendation playbook (§15), the catalog of problem states with a diagnosis deep-dive for each (§16), the left-bar Blacklists Dashboard (§17), the checked-in blacklists.yaml source-of-truth registry (§18), and the email-derived IP/domain target pipeline (§19).
+description: How EmailDeliveryHero queries DNS-based blocklists for a domain's sending IPs and domain names, interprets 127.0.0.x return codes and TXT reasons, weights per-zone impact, and hands the user the exact per-zone delisting URL and reason code for every listing. Includes the complete tiered catalog of every blocklist we know (where it lives, how to look it up, how to delist), the dead-zone do-not-check registry, provider reputation portals, the verified Brew/npm testing toolbox and the exact per-tool command lines a run executes (§10, captured into blacklists.tool_runs[]), the test plan (§11), the per-run YAML — the top-level `blacklists` key inside ~/.email_delivery_hero/runs/{domain}/{timestamp}.yaml with status, observation, tool_runs and tests (§12, storage contract in ../storage.mdx), the run-scoped "view one category run" page at /domains/:domainId/runs/:runId/blacklists with prev/next run navigation and the zones × targets listings matrix (§13), the UX layout (§14), the fix-recommendation playbook (§15), the catalog of problem states with a diagnosis deep-dive for each (§16), the left-bar Blacklists Dashboard (§17), the checked-in blacklists.yaml source-of-truth registry (§18), the email-derived IP/domain target pipeline (§19), the click-through explainer layer — the five-point template, the clickable-concept map, and the run-scoped zone / target / problem-state explainer pages with raw + parsed evidence, per-concept history, and external references (§20), the scoped "Run this check now" re-run system — category-, zone-, and target-scoped (§21), and the grown Blacklists section of the run report (§22).
 ---
 
 # Blacklists (DNSBL / RHSBL / IP & Domain Reputation Blocklists)
@@ -215,6 +215,15 @@ CREATE INDEX idx_dnsbl_results_run           ON dnsbl_check_results (audit_run_i
 18. IPs mined from ingested report emails (§19) that authenticated as the domain are swept against every enabled IP zone exactly like configured sending IPs, appear in the run file's `blacklists.targets.ips[]` with `source: email_report`, and a listed email-derived IP produces the same per-zone delisting remediation as any other listed IP.
 19. The **"view one category run" page** exists at `/domains/:domainId/runs/:runId/blacklists` with the newest-run alias `/domains/:domainId/blacklists` and renders only that run's file: run header with domain, run `startedAt` timestamp, back link to the run report, working **‹ prev / next ›** run navigation (disabled at the ends) and a **[Re-run]** that creates a new run without mutating the viewed one; it is reached by (a) clicking the Blacklists cell on a Domain-health row → newest run's page, (b) clicking the Blacklists cell on a Runs row → that run's page, and (c) the Blacklists section chevron on a run report — while clicking anywhere else in a dashboard row still opens the whole run report.
 20. The page shows the **listings matrix** (zones × sending IPs + domain; cells listed / clean / timeout-inconclusive, HIGH tier always visible, cell click jumps to the sub-test row) above the **sub-test results table** (one row per zone check: pass/fail/warn/info icon, observed return code + TXT reason, accordion with evidence, the verbatim `tool_runs[].command`, delisting steps, [Delist ↗], and a link into the delisting flow [../use_cases/domain_on_blacklist.mdx](../use_cases/domain_on_blacklist.mdx)), with the §13.2 empty / never-run / loading / historical-run states.
+22. Every clickable concept on the summary card (§13.1), the run-scoped full page (§13.2/§14), the Blacklists Dashboard (§17), and the run report's Blacklists section (§22) has a specced destination per the clickable-concept map (§20.1) — no dead ends: zone names open the zone explainer (§20.3), target headers/cells open the target explainer (§20.4), "Explain & fix this →" opens the run-scoped problem-state page (§20.5), return-code chips deep-link the zone page's decoder row, and every explainer page renders the locked five-point template of §20.2 (what it is / current status / what it means / what to do / run it now).
+23. The zone explainer page exists at `/domains/:domainId/runs/:runId/blacklists/zone/:zoneId` with the newest-run alias `/domains/:domainId/blacklists/zone/:zoneId`; it renders entirely from the registry entry (`GET /api/blacklists/zones`) plus that one run's `blacklists` section, shows the raw answer + parsed field-by-field breakdown (§20.6), the full return-code decoder table with this run's observed code highlighted, the per-zone history strip across the last 30 runs, the references block (§20.7), and the zone-scoped [Run this check now] (§21.2) — and it renders correctly for a zone with no results this run (skipped/disabled) by explaining *why* (dead / not registered / paid / disabled).
+24. The target explainer page exists at `/domains/:domainId/runs/:runId/blacklists/target/:target` with the newest-run alias `/domains/:domainId/blacklists/target/:target`; it shows the target identity panel (PTR, FCrDNS, ASN/org, domain age — raw + parsed), the provenance block (how this target entered the sweep, incl. §19 report evidence for `email_report` targets), the one-column listings matrix for this run, per-target history, references, and the target-scoped [Run this check now].
+25. The problem-state deep-dive page gains its run-scoped canonical route `/domains/:domainId/runs/:runId/blacklists/state/:psId` and newest-run alias `/domains/:domainId/blacklists/state/:psId`; the existing `/blacklists/:domain/state/:psId` shorthand 301-redirects into the alias, and the page is grown to the full §20.2 template (status verdict against the viewed run, raw+parsed evidence, history of when this state was active, references, scoped re-run).
+26. The category-scoped re-run endpoint `POST /api/audit/run/:domainId/blacklists` exists: it executes only the Blacklists category, writes a **new** run file with `run.scope: blacklists`, never mutates any existing run, and every Blacklists surface's [Run this check now] navigates to the new run on completion; prev/next stepping and the history strip include scoped runs, chip-tagged `blacklists-only`.
+27. The live-recheck endpoint `POST /api/blacklists/:domainId/recheck` (body `{ zones?: string[], targets?: string[] }`) exists, obeys every §10.4 etiquette rule (pinned resolver, 5 s timeout, concurrency 8, refusal codes → inconclusive), returns ephemeral results **without writing a run file**, and the UI renders them as a "live recheck HH:MM" overlay chip (▲ now listed / ▼ now clean / unchanged) beside the stored run values with a [Run full check] escalation — the viewed run's stored data is never overwritten.
+28. The [Run this check now] affordance follows the §21.4 state machine everywhere it appears (idle → running with per-zone progress → done with diff flash → error toast with retry), is disabled with a reason while a run for the same domain is already in flight, and each explainer page's variant is scoped exactly to its concept (category / one zone / one target / one state's evidence set).
+29. The run report's Blacklists section (§22) renders the grown collapsed header (StatusCell + listed/clean/unknown counts + diff chip + worst-listing one-liner) and grown expanded body (top sub-check rows fail-first capped at 5 with "+N more →", the HIGH-tier mini matrix strip, [Run this check now], and the run-scoped footer link), and the category chip's chevron `›` on a historical run routes to `/domains/:id/runs/:runId/blacklists` — never silently to the newest run.
+30. Every explainer page (§20.3–§20.5) implements the explicit loading / empty / error states of §20.8: skeletons sized to the final layout, "unknown zone/target/state" pages that name the bad param and link back, never-run pages with the [Run blacklist check] CTA, and API-error states with retry — no blank screens and no partial renders that silently mix runs.
 21. Every external tool invocation of a run (§10.4) is captured as one `blacklists.tool_runs[]` entry `{tool, command, started_at, duration_ms, exit_code, output_format, parsed, error}` whose `command` replays verbatim in a terminal with every input argument (reversed IP, zone host, domain, resolver, timeout flags); JSON output is preferred (`doggo --json`, `dnsx -json`, npm `dnsbl`); every DNS call pins the configured non-public resolver (npm `dnsbl`'s OpenDNS default `servers` are never used), respects the 5 s timeout and the 8-query concurrency cap, and parses refusal codes as inconclusive.
 
 ---
@@ -1079,6 +1088,336 @@ Target discovery (§3, test 1 of §11) gains the fourth source: `sending_ips` �
 
 **Fixes.** For a listed aligned IP the remediation is the standard per-zone delisting playbook (§15) *plus* the stream-level advice: if the IP belongs to an ESP/shared pool, open a ticket with the ESP citing the zone + return code (pre-drafted, [Copy]); if it's yours, run the §16 state's cause-first flow. IP delisting portals are the same per-zone `delist_url`s — there is no separate "IP removal" universe; the registry (§18) already carries every one.
 
+---
+
+## 20. The click-through explainer layer — every concept answers five questions
+
+The surfaces above (§13 card, §13.2 full page, §14 layout, §17 dashboard, §22 run-report section)
+are triage surfaces: they *name* concepts — a zone (`zen.spamhaus.org`), a target
+(`203.0.113.24`), a return code (`127.0.0.4`), a problem state (PS-2) — and expect the user to
+already know what those are. This section adds the layer underneath: **every clickable concept
+navigates to an explainer page that teaches it**, so the product grows from "here is your result"
+to "here is your result, here is what that thing is, whether yours is healthy, what it means for
+your deliverability, exactly what to do, and a button to re-check it right now." No concept the UI
+renders may be a dead end.
+
+### 20.1 The clickable-concept map — no dead ends
+
+Every cell of this table is binding: if a surface renders the concept, the concept is a link (or
+carries an inline chevron) to the destination shown. Chevron `›` = internal navigation; the
+destinations are the three explainer page shapes of §20.3–§20.5.
+
+| Concept as rendered | Where it appears | Click destination |
+|---|---|---|
+| **Zone name** (`zen.spamhaus.org`, matrix row label, sub-test row's zone, Needs-attention "List" column, Blocklist Zones panel row) | §13.2 matrix + sub-test table, §17 tables, §4 admin panel, §22 mini-matrix | **Zone explainer** `/domains/:domainId/runs/:runId/blacklists/zone/:zoneId` (§20.3) |
+| **Target** (IP or domain — matrix column header, sub-test row's `Target` cell, Needs-attention `Target` column, email-derived strip rows) | §13.2, §17, §19.3, §22 | **Target explainer** `/domains/:domainId/runs/:runId/blacklists/target/:target` (§20.4) |
+| **Return-code chip** (`127.0.0.4`, `.10`, DBL `.102`, SURBL bitmask) | sub-test rows, debug drawer, matrix cell suffix | Zone explainer, **deep-linked** to its decoder row (`#code-127-0-0-4` anchor; the row flashes) |
+| **Sub-list label** ("XBL", "PBL", "abused-legit") | sub-test titles, card worst-line, diff chips | Same as return-code chip — the decoder row explains the sub-list |
+| **"Explain & fix this →"** | debug drawer (§14.5), Needs-attention rows | **Problem-state page** `/domains/:domainId/runs/:runId/blacklists/state/:psId` (§20.5) |
+| **Problem-state id** (`PS-2` chip in `blacklists.problem_states`) | verdict band, run report section | Problem-state page (§20.5) |
+| **Tier chip** (HIGH / MEDIUM / LOW), **access chips** (`paid`, `registration`) | matrix groups, admin panel, zone explainer | Inline popover (not a page): two sentences from §9's tier definition + "see the catalog" link to the zone explainer's identity block. Popovers are the one sanctioned non-page destination — for concepts with no per-run state |
+| **`via DMARC reports` chip** | matrix columns, target rows (§19) | Target explainer, scrolled to the **provenance** block (§20.4.2) |
+| **Resolver / refusal notice** ("resolver blocked", `127.255.255.254`) | inconclusive banners, zone-health rows | Problem-state page for **PS-9** |
+| **Dead/wildcarding zone notice** | registry-health panel, suppressed rows | Problem-state page for **PS-10**, plus the zone explainer's "why we did not query this" block |
+| **Provider portal row** (Google Postmaster, SNDS…) | §13.2 checklist, PS-8 page | External `↗` (they have no DNS state to explain) — but the row's ⓘ opens the §9.7 description popover |
+| **History-strip point** | §13.2, §20.3/§20.4 history strips | That run's same-shaped page (swap `:runId`) |
+
+Anything *not* in this table that a future surface renders (a new chip, a new count) must be added
+here before it ships — the map is the contract that keeps "no dead ends" true.
+
+### 20.2 The locked five-point template
+
+Every explainer page (§20.3 zone, §20.4 target, §20.5 problem state) renders the same five blocks
+in the same order. The template is locked so a user who has read one explainer can read them all:
+
+1. **What this is** — the concept in plain language, 2–4 sentences, written for someone who has
+   never heard of a DNSBL. Sourced from static registry/spec data (`blacklists.yaml`
+   `description`, §16 concept paragraphs) — never computed.
+2. **Is it healthy right now?** — the live verdict *for the run being viewed*: a StatusCell +
+   one sentence naming this domain/run's state, plus the evidence rows (raw + parsed, §20.6).
+   Always answers for the `:runId` in the URL; a historical run shows that run's truth with the
+   slate "historical run" banner from §13.2.
+3. **What it means for your deliverability** — impact in plain language: who honors this
+   zone/signal, what happens to mail when it is unhealthy, and the weighted severity rationale
+   ("HIGH tier: a listing here measurably hurts at Gmail/Microsoft" vs "collateral: near-zero
+   real-world impact"). Sourced from `tier`/`weight` + §9 research text.
+4. **What you can do about it** — the §15-ordered, copy-pasteable playbook scoped to this
+   concept: cause fix first, then the `[Delist ↗]` link, the diagnose-it-yourself command block
+   (the same strings as `tool_runs[].command`, each with `[copy]`), and the "Start the delisting
+   flow ›" link where a listing exists. When healthy, this block becomes the §15.3 prevention
+   list.
+5. **Run it now** — the scoped **[Run this check now]** affordance (§21): re-queries exactly this
+   concept's evidence set and refreshes block 2 with a diff chip. The button states are §21.4;
+   the scope per page shape is §21.2–§21.3.
+
+Below the five blocks, every explainer page carries two locked footers: the **history strip**
+(this concept across the last 30 runs, points navigate per §20.1's last row) and the
+**References** block (§20.7). Loading/empty/error behavior is §20.8.
+
+### 20.3 The zone explainer page — `/domains/:domainId/runs/:runId/blacklists/zone/:zoneId`
+
+**Route.** Run-scoped canonical `/domains/:domainId/runs/:runId/blacklists/zone/:zoneId`, newest-run
+alias `/domains/:domainId/blacklists/zone/:zoneId`. `:zoneId` is the zone host verbatim
+(`zen.spamhaus.org`) — it is already unique, stable, and human-meaningful; no synthetic id.
+Reached from every zone-name click in §20.1.
+
+**Data.** Two sources only: the registry entry from `GET /api/blacklists/zones` (already served by
+`code/packages/backend/src/modules/blacklists/blacklists.controller.ts` — no new endpoint) and the
+viewed run's `blacklists` section (§12). The page renders correctly even when the zone has **no
+results this run** (skipped/disabled/dead): blocks 1/3/4 come from the registry alone and block 2
+explains *why* there is nothing — "not queried this run: requires registration (Barracuda) — fix
+in Settings", "dead zone (§9.5) — never queried", "disabled by operator", or "refused (PS-9 →)".
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Blacklists run 2026-07-01 09:14 AM        Spamhaus ZEN        [Run this zone ⟳]│
+│ zen.spamhaus.org · IP list · tier HIGH · weight 1.0 · [free, DQS for volume]    │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ 1 WHAT THIS IS                                                                  │
+│ The combined Spamhaus IP zone (SBL+CSS+XBL+PBL). The single most consequential  │
+│ blocklist: nearly every large receiver consults it at connection time…          │
+│ Operator: spamhaus.org ↗ · Query: reversed-IP A/TXT · RFC 5782 probe: yes       │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ 2 IS IT HEALTHY RIGHT NOW?                          run 2026-07-01 09:14 AM     │
+│ ● LISTED — 1 of 3 targets on this zone                                          │
+│   ✕ 203.0.113.24 → 127.0.0.4 (XBL) · TXT: check.spamhaus.org/query/… [raw ▸]   │
+│   ✓ 198.51.100.7 → NXDOMAIN                                                     │
+│   — whitehatengineering.com (domain — not applicable to an IP zone)             │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ RETURN-CODE DECODER                              observed code highlighted      │
+│  code        sub-list  meaning                     severity   state             │
+│  127.0.0.2   SBL       manual spam listing         critical   PS-1              │
+│ ▸127.0.0.4   XBL       compromised host  ← this run critical  PS-2              │
+│  127.0.0.10  PBL       ISP dynamic policy          warning    PS-3              │
+│  127.255.255.254  —    public resolver refused     inconclusive PS-9            │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ 3 WHAT IT MEANS · 4 WHAT YOU CAN DO  (severity rationale · §15 playbook,        │
+│   [Delist ↗], diagnose commands with [copy], "Start the delisting flow ›")      │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ HISTORY  ▁▁▁▁▁▄▄█  this zone, last 30 runs (listed-target count per run)        │
+│ REFERENCES  RFC 5782 ↗ · check.spamhaus.org ↗ · multirbl zone page ↗ · …        │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Page-specific rules:
+
+- **Header identity line** = registry fields: zone host (monospace), `type`, tier chip, weight,
+  access chips (`free` / `registration` / `paid` — the chip explains the §3 gating inline).
+- **Block 2** lists **every target of this run × this zone** with its verdict (listed / clean /
+  inconclusive / not-applicable), each row expandable to the §20.6 raw+parsed evidence for that
+  pair. Target names link to their target explainers (§20.4).
+- **Return-code decoder** — the registry's full `return_codes` + `refusal_codes` map rendered as a
+  table; the row matching this run's observed code(s) is highlighted and anchor-linkable
+  (`#code-…`, the §20.1 deep-link destination). Refusal codes render in the inconclusive style
+  with "never a listing" phrasing.
+- **History strip** = listed-target count for this zone per run over the last 30 run files
+  (already computable from `GET /api/blacklists/results/:domain/history`).
+- **[Run this zone ⟳]** is the zone-scoped live recheck (§21.2): every current target × this one
+  zone.
+
+### 20.4 The target explainer page — `/domains/:domainId/runs/:runId/blacklists/target/:target`
+
+**Route.** Run-scoped canonical `/domains/:domainId/runs/:runId/blacklists/target/:target`,
+newest-run alias `/domains/:domainId/blacklists/target/:target`. `:target` is the IP or domain,
+URL-encoded (IPv6 colons encode as `%3A`). Reached from every target click in §20.1.
+
+**20.4.1 Identity panel** (block 1+2 fused — for a target, "what is this" *is* live data): the
+target rendered large + monospace, then the identity facts as raw + parsed rows (§20.6): **PTR**
+(`dig -x` answer verbatim → parsed hostname + generic-pattern verdict), **FCrDNS** (forward answer
+→ ok/broken chip, broken links PS-7), **ASN / netblock org** (whois raw → parsed `OriginAS`,
+`OrgName`, `OrgAbuseEmail` with `[copy]` — the §15.2 escalation address), and for domain targets
+**domain age** (whois `Creation Date` raw → parsed age, <30 days links PS-11). All fields come
+from the run file's `targets` block (§12) — the page computes nothing live except via §21.
+
+**20.4.2 Provenance block** — how this target entered the sweep: the `source` chip
+(`sending_ips` — "you configured this IP" / `mx_resolved` / `spf_authorized` — with the SPF
+mechanism that authorized it / `email_report` — §19). For `email_report` targets the block shows
+the report evidence: reporter, window, `message_count`, `first_seen`/`last_seen` ("seen in 4
+DMARC reports, 1,240 messages, last 2026-06-28") and links the Reports page row.
+
+**20.4.3 This run's listings — the one-column matrix.** The §13.2 matrix reduced to this target's
+single column: one row per enabled zone (tier-grouped, HIGH first), cell = ✓ / ✕ + code / ? .
+Zone names link to zone explainers; listed rows expand to raw+parsed evidence + the §15 fix steps.
+Block 3 (what it means) summarizes above the matrix: "this IP is listed on 1 HIGH-tier zone —
+mail from it will be rejected by most receivers until delisted."
+
+**20.4.4 History + run-now.** History strip = this target's listed-zone count across the last 30
+runs. **[Run this target ⟳]** = target-scoped live recheck (§21.3): this one target × every
+enabled zone. References per §20.7 (whois/RDAP docs, FCrDNS spec via
+[./reverse_dns.mdx](./reverse_dns.mdx), the ASN's abuse-desk page when known).
+
+### 20.5 The grown problem-state page — run-scoped `/domains/:domainId/runs/:runId/blacklists/state/:psId`
+
+The §16 deep-dive pages already exist in the product at `/blacklists/:domain/state/:psId`
+(`BlacklistStatePage.tsx`). This section grows them onto the locked template and route shape:
+
+- **Routes.** Canonical `/domains/:domainId/runs/:runId/blacklists/state/:psId`, newest-run alias
+  `/domains/:domainId/blacklists/state/:psId`. The existing `/blacklists/:domain/state/:psId`
+  shorthand **301-redirects** into the alias (resolve domain → domainId), exactly as
+  `/blacklists/:domain` already redirects (§17.1) — no page renders at the old shape.
+- **Template mapping.** Block 1 = the §16 **Concept** paragraph. Block 2 = the verdict *against
+  the viewed run*: "PS-2 is **active** in this run" with the evidence set — every `results[]` /
+  `zone_health[]` / `targets` row that triggered the state, each raw + parsed (§20.6) — or
+  "PS-2 was **not detected** in this run" (reachable from a history link; the page still teaches
+  the concept). Block 3 = the state's severity rationale. Block 4 = the §16 **Progress forward**
+  checklist, each step with its diagnose command (`[copy]`) and link. Block 5 = the state-scoped
+  re-run (§21.3): re-checks exactly this state's evidence pairs.
+- **History** = the runs (last 30) in which `blacklists.problem_states` contained this `psId`,
+  rendered as a presence strip ("active in 6 of the last 30 runs; first 2026-06-12, last this
+  run"); points navigate to that run's state page.
+
+### 20.6 Raw + parsed — the evidence display rule
+
+Every piece of evidence on every explainer page renders **both** forms, always in this order:
+
+1. **Raw** — the verbatim artifact in a monospace block with `[copy]`: the DNS query name and
+   answer as `dig` printed it, the full TXT string, the whois text region, the
+   `tool_runs[].command` that produced it. Raw comes first because it is the ground truth the
+   user can replay in a terminal.
+2. **Parsed** — a field-by-field table: `Field · Value · Meaning · Status`. Example for a listing:
+   `Query — 24.113.0.203.zen.spamhaus.org — reversed-octet lookup name — ·` /
+   `Answer — 127.0.0.4 — XBL: compromised host — ● critical` /
+   `TXT — https://check.spamhaus.org/… — operator's evidence + delist link — ·`. Every `Status`
+   cell uses the locked four colors; rows with no health dimension show `·`.
+
+The §14.5 debug drawer already follows this shape; §20 extends the same rule to whois, PTR,
+FCrDNS, and report-evidence panels. No explainer page may show an interpretation without the raw
+artifact adjacent, and vice versa.
+
+### 20.7 The References block
+
+The last block of every explainer page, a compact link list — title, one-clause relevance, `↗`:
+
+- **Standards:** RFC 5782 (DNSBL query mechanics — zone + target pages), RFC 6471 (list-operation
+  ethics; the never-pay citation — PS-6/PS-13 and any `paid_delist_offered` zone), RFC 5321
+  (how receivers apply listings at SMTP time).
+- **Per-zone:** the registry entry's operator `url`, `lookup_url`, `delist_url`, plus the
+  multirbl.valli.org zone detail page and dnsbl.com (liveness) — all straight from
+  `blacklists.yaml`; the References block is registry-driven, never hand-listed.
+- **Per-target:** whois/RDAP for the netblock, the provider abuse-desk page when the registry of
+  §9.7 knows it, [./reverse_dns.mdx](./reverse_dns.mdx) for FCrDNS.
+- **Per-state:** the links already named in that state's §16 entry (Search Console for PS-4,
+  sender.office.com for PS-8, dnswl.org for PS-12…).
+
+### 20.8 Loading / empty / error states — all explainer pages
+
+- **Loading:** skeletons sized to the final layout (header line, five block frames, decoder/matrix
+  row stubs) — no layout shift when data lands, per §13.2's rule.
+- **Unknown param:** an unknown `:zoneId` / `:target` / `:psId` renders a titled "not found" page
+  that **names the bad param** ("no zone `zen.spamhus.org` in the registry — did you mean
+  `zen.spamhaus.org`?" with a nearest-match suggestion where cheap) and links back to the run's
+  Blacklists page. Never a blank screen, never a silent redirect.
+- **Unknown `:runId`:** same "run not found → newest run" affordance as §13.2.
+- **Never-run:** the alias routes with zero run files render blocks 1/3/4 from static data
+  (the page still *teaches*), block 2 shows the gray never-run panel with one
+  **[Run blacklist check]** CTA, and history/References render normally.
+- **API error:** an inline error band in block 2 ("could not load run data — [Retry]") while
+  blocks 1/3/4 (static) still render. A page must never partially mix two runs: if the run fetch
+  fails mid-navigation, the whole run-scoped region shows the error state, not stale data.
+
+---
+
+## 21. Scoped "Run this check now" — category, zone, target, and state re-runs
+
+The §13.2 header's **[Re-run ⟳]** runs the *whole* audit (`POST /api/audit/run/:domainId` — exists
+today in `audit.controller.ts`). That is too heavy an answer to "did my delisting go through on
+this one zone?". This section specs the scoped re-run system every §20 page and §22 section uses.
+
+### 21.1 Two backend operations, precisely split
+
+| Operation | Endpoint | Writes a run file? | Use |
+|---|---|---|---|
+| **Category-scoped run** | `POST /api/audit/run/:domainId/blacklists` (**new**, small: the audit service already dispatches per-category checkers from the registry — this endpoint invokes only the `dnsbl` checker and the §12 writer) | **Yes** — a new run file with `run.scope: blacklists`; the other five category keys are absent. Never mutates any existing run | The category page's and run-report section's [Run this check now]; "re-check after delisting" |
+| **Live recheck** | `POST /api/blacklists/:domainId/recheck` (**new**) body `{ zones?: string[], targets?: string[] }` — omitted = all enabled/current | **No** — returns ephemeral results only | Zone-/target-/state-scoped [Run this check now]: instant answers without polluting run history |
+
+Scoped runs (`run.scope: blacklists`) participate in prev/next stepping, the history strips, and
+the diff engine like any run, and render a neutral **`blacklists-only`** chip beside the run
+timestamp wherever the run is named (run header, dashboard Runs table, history tooltips) so a
+partial run is never mistaken for a full audit. The recheck endpoint obeys every §10.4 etiquette
+rule (pinned resolver, 5 s timeout, concurrency 8, refusal codes → inconclusive, dead-zone
+hard-block) — it is the same engine entry point (`engine.ts`), minus the run-file writer.
+
+### 21.2 Zone-scoped ([Run this zone ⟳], §20.3)
+
+Calls the recheck endpoint with `zones: [":zoneId"]`, all current targets. The zone page's block 2
+rows update in place with a **"live recheck 09:41"** overlay chip per row: `▲ now listed`,
+`▼ now clean`, or `unchanged` — rendered *beside* the stored run values, never replacing them (the
+viewed run's stored data is immutable; the overlay is ephemeral UI state, gone on reload). When a
+live result differs from the stored run, the chip offers **[Run full check]** — the §21.1
+category-scoped run — so the improvement gets a real run file and the history strip records it.
+Registration-gated/paid/dead zones disable the button with the reason inline ("requires Barracuda
+resolver registration — Settings ›").
+
+### 21.3 Target- and state-scoped
+
+**Target ([Run this target ⟳], §20.4):** recheck with `targets: [":target"]`, all enabled zones —
+the one-column matrix gains the same overlay chips and [Run full check] escalation. The identity
+panel (PTR/FCrDNS/whois) also refreshes: those probes are cheap and part of the target's evidence.
+**State ([Re-check this evidence ⟳], §20.5):** recheck with the exact `zones` + `targets` pairs of
+the state's evidence set (e.g. PS-2 → the XBL/DroneBL zones × the listed IP). A state whose
+evidence is not DNS-queryable (PS-8 provider-side, PS-11 age) replaces the button with its manual
+step ("check the portal ↗" / "age gate: 22 of 30 days — nothing to re-run"), stated, not hidden.
+
+### 21.4 The affordance state machine (every [Run this check now], everywhere)
+
+`idle → running → done | error`, locked semantics:
+
+- **idle:** enabled with a scope caption under the label ("47 zones × 3 targets" / "this zone ×
+  3 targets" / "this target × 47 zones"). **Disabled with a visible reason** whenever a run for
+  the same domain is already in flight ("audit running — started 09:40") — one domain, one run at
+  a time, per the §progress_ui dock.
+- **running:** button shows an inline spinner + per-zone progress ("12/47 zones…", fed by the
+  same progress events as the dock); the page's stored data stays fully visible — a re-run never
+  blanks the evidence the user is reading.
+- **done:** results land (new run navigation for §21.1; overlay chips for rechecks) with a brief
+  **diff flash** on changed rows (`▲ new listing` amber-red / `▼ cleared` green) and a one-line
+  toast ("re-checked 47 zones — 1 change"). No change: "re-checked — no change" and nothing
+  flashes.
+- **error:** toast with the cause ("resolver refused (PS-9 →)" / "timeout") and a **[Retry]**;
+  the button returns to idle. Errors never write partial overlays — a failed recheck leaves every
+  row exactly as it was.
+
+---
+
+## 22. The grown Blacklists section of the run report
+
+The run report (`/domains/:domainId/runs/:runId`, `RunDetailPage.tsx`) renders six collapsible
+`CategorySection`s. Today the Blacklists section is a finding list with a chevron; it grows to a
+true summary of §13.2 so the report answers "which category is my problem, how bad, and is it new"
+without a click — and every element follows the §20.1 concept map.
+
+**22.1 Collapsed header (one line, always visible):**
+
+```
+⛔ Blacklists   ● 2 listed · 92 clean · 2 unknown   ▲ 1 new   Spamhaus XBL — 203.0.113.24  ›
+```
+
+StatusCell (category color) + the §12 `summary` counts + the diff chip (`▲ N new` / `▼ N
+resolved` / nothing) + the single worst-listing one-liner (zone + target, same sentence as the
+§13.1 card line 2). Sections with open problems start expanded; all-healthy sections collapse to
+this quiet line (the existing `CategorySection` rule). The header's chevron `›` routes to the
+**run-scoped** category page for *the viewed run* — `/domains/:id/runs/:runId/blacklists` — never
+silently to the newest run.
+
+**22.2 Expanded body (top → bottom):**
+
+1. **Top sub-check rows** — the §13.2 sub-test rows, fail-first, capped at **5**, each with status
+   icon, zone (→ zone explainer), target (→ target explainer), observed code chip (→ decoder
+   deep-link), and "Explain & fix this →" (→ state page). A sixth-plus problem renders as
+   **"+N more →"** into the full category page. All-clean runs show the single green line +
+   the top prevention item instead.
+2. **HIGH-tier mini matrix strip** — one compact row per HIGH-tier zone × targets (the §13.2
+   matrix's top group only), cells ✓/✕/?, zone and target labels clickable per §20.1. This is the
+   2-second damage-localizer, embedded.
+3. **Footer row** — **[Run this check now]** (the §21.1 category-scoped run, §21.4 states) and
+   the run-scoped "Full Blacklists report ›" link (same destination as the header chevron).
+
+**22.3 States.** Loading: header line skeleton only (sections never block the report). The
+category never run within a full run (older files predating the category): gray header, "not
+checked in this run — [Run this check now]". Historical run: body renders that run's data with no
+banner of its own (the page-level banner from §13.2's pattern covers it); the chevron still
+targets the viewed `:runId`.
+
 <!--
 MAINTENANCE NOTES
 - Keep zone hosts, return-code maps, and delisting URLs current: DNSBL operators change codes and portals (Spamhaus moved to check.spamhaus.org / DQS; SORBS is DEAD as of 2024-06, NiX Spam as of 2025-01 — the do-not-check registry is §9.5; verify each zone is still live via its RFC 5782 test point before shipping). Track https://www.dnsbl.com for zone deaths.
@@ -1089,4 +1428,5 @@ MAINTENANCE NOTES
 - Domain/URI zones overlap ./link_url_reputation.mdx — keep the split clear: this spec = sending domain + sending IPs; that spec = domains found inside message bodies.
 - Revisit per-zone weights as real-world placement data accrues; weights are config, not code.
 - §9 (research narrative) and the checked-in registry code/packages/backend/src/modules/blacklists/registry/blacklists.yaml (§18) are twins — never update one without the other. The §17 dashboard and §19 email-derived pipeline read only run outputs + the registry; they hold no catalog data of their own.
+- §20's clickable-concept map (§20.1) is a binding contract: any new chip/label a Blacklists surface renders must get a row there (and a destination) before it ships. The explainer routes (/…/blacklists/zone/:zoneId, /…/blacklists/target/:target, /…/blacklists/state/:psId with newest-run aliases) and the five-point template (§20.2) are LOCKED; zone explainers are registry-driven (GET /api/blacklists/zones — exists in code/packages/backend/src/modules/blacklists/blacklists.controller.ts) so a registry edit updates every explainer for free. The two §21.1 endpoints (POST /api/audit/run/:domainId/blacklists — scoped run file with run.scope: blacklists; POST /api/blacklists/:domainId/recheck — ephemeral, never writes) are NEW backend surface; the full-audit POST /api/audit/run/:domainId already exists. Keep §20–§22 in lockstep with §13/§14 (same counts, same worst-line sentence, same chevron semantics) and with acceptance criteria 22–30.
 -->

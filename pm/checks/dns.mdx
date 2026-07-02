@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — DNS & Infrastructure Check
-description: Engineering spec for the DNS & Infrastructure category — the ten test families we run against a domain's DNS and mail infrastructure (MX routing, reverse DNS/FCrDNS, STARTTLS, MTA-STS, TLS-RPT, DANE, DNSSEC, zone & nameserver health, domain registration, SMTP hardening), the verified Brew/npm testing toolbox with the exact command line each tool is executed with, the `dns_infra` section of the per-run YAML file (~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml) including the `tool_runs` audit trail, the dashboard summary surface and the run-scoped "view one category run" DNS page (/domains/:domainId/runs/:runId/dns with prev/next run navigation — UX layout), the fix recommendations and fix-order ladder, and the catalog of infrastructure problem states with a deep-dive (data fields, diagnosis, tools, drill-down UI) for each.
+description: Engineering spec for the DNS & Infrastructure category — the ten test families we run against a domain's DNS and mail infrastructure (MX routing, reverse DNS/FCrDNS, STARTTLS, MTA-STS, TLS-RPT, DANE, DNSSEC, zone & nameserver health, domain registration, SMTP hardening), the verified Brew/npm testing toolbox with the exact command line each tool is executed with, the `dns_infra` section of the per-run YAML file (~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml) including the `tool_runs` audit trail, the dashboard summary surface and the run-scoped "view one category run" DNS page (/domains/:domainId/runs/:runId/dns with prev/next run navigation — UX layout), the fix recommendations and fix-order ladder, and the catalog of infrastructure problem states with a deep-dive (data fields, diagnosis, tools, drill-down UI) for each — plus the check-detail explainer layer: one explainer page per test family at /domains/:domainId/runs/:runId/dns/check/:checkKey (what it is, current state, what it means, how to fix it, run-this-check-now), the raw + parsed record breakdown, the single-check spot-check endpoint, per-family history trends across runs, and the grown DNS section of the full run report.
 ---
 
 # EmailDeliveryHero — DNS & Infrastructure Check
@@ -536,7 +536,10 @@ Contents, in order (exact layout in §7):
    (`signed, algorithm 13, DS ✓` / `unsigned` / `BROKEN — resolvers SERVFAIL`).
 6. **Grouped sub-test results table** — one row per sub-test (finding), **grouped by family** in
    the §2 order, fail-first within each family group; each family group header repeats the family
-   chip and its pass/fail count. Rows expand (accordion) to full detail, evidence (exact DNS name
+   chip and its pass/fail count, a **since-last-run trend glyph** (▲ regressed / ▼ improved / =
+   unchanged, §16), and — right-aligned — a **`details ›`** link opening that family's run-scoped
+   **check-detail explainer page** (§14) plus a compact **⟳ spot-check** button (§15). Rows expand
+   (accordion) to full detail, evidence (exact DNS name
    + raw answer, monospace), and the **Fix** block with a copy button carrying the exact
    record/step. Expanded rows that were fed by an external tool link to the matching
    `tool_runs[]` entry ("ran: `dig +time=5 … -x 2001:db8::25` · 187 ms") so the evidence is
@@ -544,6 +547,14 @@ Contents, in order (exact layout in §7):
 7. **Problem states** — cards for each matched §9 problem state with a one-paragraph hook and a
    **"Learn more ›"** chevron opening the drill-down page (`/domains/:domainId/dns/:problemId`,
    rendered from the run being viewed).
+8. **Everything clickable has a destination.** Every family chip, family group header, and every
+   underlined concept term on this page (record types like MX/PTR/NS/SOA/DS/DNSKEY/TLSA, terms
+   like FCrDNS, STARTTLS, `mode: enforce`) routes somewhere that explains it: family surfaces →
+   the run-scoped **check-detail explainer page**
+   `/domains/:domainId/runs/:runId/dns/check/:checkKey` (§14, anchored to the term's
+   `#concept-<term>` section); cross-family narratives → the §9 problem drill-downs. No dead-end
+   chips: a chip's primary click still anchor-scrolls to its table group (item 3), and the group
+   header's `details ›` is the navigation affordance.
 
 **Empty / never-run / loading states.** Domain has **no runs at all** → the alias route shows
 the gray never-run header cell + "No audit yet — run one" CTA (no run context strip — there is
@@ -1123,6 +1134,368 @@ single-module change.
     appears while FCrDNS is failing.
 15. A second scheduled run that sees a lost PTR, NS drift, a dropped MX, a registrar status
     change, or `network_count` falling flags each as a **new problem** via the regression diff.
+16. The check-detail explainer page exists at
+    `/domains/:domainId/runs/:runId/dns/check/:checkKey` with the newest-run alias
+    `/domains/:domainId/dns/check/:checkKey`, for exactly the ten §14.1 check keys; an unknown
+    key renders the "no such check" state listing the ten valid keys; the static `check` segment
+    never collides with the `/dns/:problemId` drill-down route.
+17. Every explainer renders the locked five-block order — **what this is / is it healthy right
+    now / what it means / what you can do / run this check now** — with the family-specific
+    interior copy owned by the family's own spec, and a `#concept-<term>` anchor for every
+    concept term the category's surfaces underline (§14.6).
+18. The explainer's state block renders the **raw + parsed breakdown** per §14.3: the raw answer
+    verbatim in monospace with a copy button (traceable to `tool_runs[]` where a tool produced
+    it), and a field-by-field table with observed value, expected/sane range, and a per-field
+    verdict chip — never fabricating a field absent from the run file ("not captured this run").
+19. Explainer states per §14.5: never-audited domains still get the full education blocks plus a
+    run CTA; `.pending` families explain why the probe hasn't run and how to enable it; unknown
+    `:runId` and loading behave exactly as the category page (§6.2).
+20. The scoped re-run endpoints exist — `POST /api/audit/run/:domainId/check/dns` (all ten
+    families) and `POST /api/audit/run/:domainId/check/dns/:checkKey` (one family) — each
+    writing a **new** run file tagged `run.scope` (`dns` / `dns.<family_key>`), never mutating an
+    existing run, and still honoring semaphores, caches, and `.pending` gating; the UI affordance
+    follows the §15.2 state machine (idle → running → done with diff flash → error with retry)
+    and is disabled with a reason while a run for the same domain is in flight.
+21. Scoped runs appear in run history and prev/next stepping chip-tagged with their scope; the
+    Domain-health (newest) roll-up merges per category, so a scoped DNS run advances only the
+    DNS & Infrastructure cell and never blanks or ages the other five categories.
+22. Family group headers on the category page show the §16.1 since-last-run trend glyph
+    (▲/▼/=/·) with the exact delta in the tooltip; every explainer footer shows the ≤30-run
+    per-family history strip (click a cell → that run's explainer) with §16.3 change markers for
+    snapshot-value changes even when severity is unchanged.
+23. The run report's DNS & Infrastructure section renders the §17 grown surfaces: the collapsed
+    header with `K of M fail`, trend glyph, and worst-problem one-liner; the expanded body's
+    ten-family clickable status list (row label + one-line meaning + `details ›` per §14.1),
+    fail-first finding rows capped at 5 with "+N more →", the category-scoped spot-check, and
+    the run-scoped "Open the full DNS & Infrastructure report →" footer link.
+24. Every clickable DNS concept, chip, family row, and finding row on the run report, the
+    category page, the explainers, and the drill-downs navigates to a specced destination
+    (§6.2 item 8, §14.6) — no dead ends.
+
+---
+
+## 14. Check-detail explainer pages — `/domains/:domainId/runs/:runId/dns/check/:checkKey`
+
+The layer between the category page and the ten family specs: **one explainer page per test
+family**, run-scoped, reachable from every place a family surfaces (the family strip, the group
+headers' `details ›`, the run report's family rows, and every underlined concept term). Each
+page answers, in this locked order: **(1) what this thing is, (2) whether it is healthy on this
+domain in this run, (3) what that means for deliverability, (4) exactly what to do about it,
+(5) run this check now.** The problem-state drill-downs (§9) stay: they tell cross-family
+*stories* (e.g. PS-08 spans three families); the explainers are the per-family *reference*
+pages. They link to each other, never duplicate each other.
+
+**Ownership split.** This spec owns the **shell**: routes, block order, chrome, the raw+parsed
+breakdown frame, the history strip, the references frame, and the empty/error states. Each
+family spec ([./mx_routing.mdx](./mx_routing.mdx) … [./smtp_security.mdx](./smtp_security.mdx))
+owns its **interior copy**: the concept text, the parsed-field table rows, the per-finding fix
+recipes, and its references list. A family spec may add family-specific panels inside block 2
+(e.g. reverse_dns's per-IP FCrDNS loop diagram) but never reorders or removes the five blocks.
+
+### 14.1 Routes and check keys
+
+| Page | Route |
+| --- | --- |
+| Check detail (family explainer), one specific run | `/domains/:domainId/runs/:runId/dns/check/:checkKey` |
+| Check detail, the newest run (alias) | `/domains/:domainId/dns/check/:checkKey` |
+
+The alias rewrites itself to the canonical run URL exactly like the category page (§6.2). The
+static `check` segment outranks the dynamic `:problemId` segment (the router's
+static-over-dynamic rule), so `…/dns/check/dnssec` never matches the
+`/domains/:domainId/dns/:problemId` drill-down route.
+
+**`:checkKey` slugs are fixed** — the kebab-case of the §5 family keys, deliberately equal to
+the backend check directory names (`code/packages/backend/src/modules/audit/checks/<checkKey>/`).
+The same table fixes the **row label** and **one-line meaning** used everywhere a family renders
+as a clickable row (the category page's family group headers, §6.2 item 6, and the run report's
+ten-family list, §17):
+
+| # | Family key (§5) | `:checkKey` | Row label | One-line meaning on the row |
+| --- | --- | --- | --- | --- |
+| 1 | `mx_routing` | `mx-routing` | MX routing | Can the world route mail to this domain — and bounces and reports back to you? |
+| 2 | `reverse_dns` | `reverse-dns` | Reverse DNS (PTR / FCrDNS) | Does every sending/MX IP reverse-resolve to a real hostname that points back to it? |
+| 3 | `tls_transport` | `tls-transport` | STARTTLS & MX certificates | Is mail to this domain encrypted in transit with a valid, matching certificate? |
+| 4 | `mta_sts` | `mta-sts` | MTA-STS | Is there a downgrade-resistant TLS policy that senders must honor? |
+| 5 | `tls_rpt` | `tls-rpt` | TLS-RPT | Will anyone tell you when senders can't negotiate TLS with your MX? |
+| 6 | `dane_tlsa` | `dane-tlsa` | DANE / TLSA | Is the MX certificate pinned in DNS for DANE-validating senders? |
+| 7 | `dnssec` | `dnssec` | DNSSEC | Are this zone's DNS answers cryptographically signed — and validly so? |
+| 8 | `dns_health` | `dns-health` | Zone & nameserver health | Will every receiver's resolver get a fast, consistent, honest answer? |
+| 9 | `domain_reputation` | `domain-reputation` | Domain registration | Does the registration look stable, locked, and mature — not throwaway? |
+| 10 | `smtp_security` | `smtp-security` | SMTP hardening | Is the mail server itself abusable — open relay, enumeration, plaintext auth? |
+
+The mapping `:checkKey` ↔ family key ↔ checker id `infra.<family_key>` is 1:1:1 and lives in one
+frontend module (alongside `lib/dns-families.ts`) — never re-derived ad hoc.
+
+### 14.2 Page anatomy — the five locked blocks
+
+Header chrome and the run context strip are identical to the category page (§6.2 items 1-2);
+the back link returns to the category page of the same run. Then, top to bottom:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Back to DNS & Infrastructure    Reverse DNS (PTR / FCrDNS)   [⟳ Run now]  │  header
+│ example.com · [ red: 1 of 3 fail ]                                          │
+│  ‹ prev run    Run 2026-07-01 09:14  [ newest ]                  next run › │  run strip
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 1 WHAT THIS IS                                                              │  concept
+│   FCrDNS is the oldest infrastructure trust test … (#concept-fcrdns,        │  (static)
+│   #concept-ptr, #concept-generic-ptr anchors live here)                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 2 IS IT HEALTHY RIGHT NOW?                    [ ✗ critical — 1 of 3 fail ]  │  state
+│   ✗ infra.reverse_dns  IPv6 MX 2001:db8::25 has no PTR record        [v]    │  (this run)
+│   RAW  dig -x 2001:db8::25 → NXDOMAIN            (tool run · 187 ms) [copy] │
+│   PARSED  field        observed          expected              verdict      │
+│           ptr          —                 mail.example.com       ✗           │
+│           fcrdns       not confirmed     closes both ways       ✗           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 3 WHAT IT MEANS   Gmail rejects this outright (550-5.7.25) — this is a      │  impact
+│   hard gate, not a score.                                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 4 WHAT YOU CAN DO   1. Open the PTR ticket with the IP owner … [copy]       │  fix steps
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 5 RUN THIS CHECK NOW   [⟳ Run reverse-dns only]  re-runs 1 of 10 families;  │  spot-check
+│   DNS queries only, ~2 s · last ran 2026-07-01 09:14                        │  (§15)
+├─────────────────────────────────────────────────────────────────────────────┤
+│ HISTORY   ▢▢▢▢▢▢▢▢■  30 runs · click a cell to open that run    (§16.2)     │  footer
+│ REFERENCES  RFC 1912 §2.1 · Gmail sender guidelines · …          (§14.4)    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **What this is** — 2-4 paragraphs of concept explainer, plain language first, standards
+   second (family spec owns the copy). Every term the category's surfaces underline gets an
+   anchored sub-heading here (`#concept-<term>`, §14.6). Static content: renders instantly,
+   independent of run data.
+2. **Is it healthy right now?** — the family StatusCell + one verdict sentence, then **every
+   sub-test row of this family from this run** (same row anatomy as the §7 table; fail rows
+   pre-expanded), then the **raw + parsed breakdown** (§14.3). Evidence links to the matching
+   `tool_runs[]` entry exactly as on the category page.
+3. **What it means** — deliverability impact in plain language, copy conditional on the observed
+   state (family spec owns): the *rejected now* / *reputation eroding* / *hardening available*
+   framing of §7, plus who enforces it (Gmail/Yahoo/Microsoft) and since when.
+4. **What you can do about it** — the fix block: numbered steps from the family spec, each with
+   a copy button carrying the publishable record, provider-ticket wording, or MTA config — never
+   prose. When a higher rung of the §8 ladder is failing, this block leads with a cross-link:
+   "Fix your PTR first (rung 2) — DANE advice is premature until FCrDNS closes."
+5. **Run this check now** — the §15 spot-check affordance, labeled with its exact scope, cost,
+   and expected duration, plus the timestamp of the last run that included this family.
+
+Footer: the per-family **history strip** (§16.2) and the **References** block (§14.4).
+
+### 14.3 The raw + parsed breakdown
+
+Block 2 always renders the observation both ways:
+
+- **Raw** — the answer exactly as observed, monospace, with a copy button: dig/doggo answer
+  lines, the fetched `mta-sts.txt` policy body, the RDAP JSON excerpt, the SMTP transcript, the
+  TLSA RRset. Sourced from the run's snapshot and/or the linked `tool_runs[].parsed`/`command` —
+  never re-queried at render time (the page describes **this run**, not "now"; "now" is what
+  block 5 is for).
+- **Parsed** — a field-by-field table: **Field | Observed | Expected / sane range | Verdict**
+  (per-field chip ✓/✗/⚠/ⓘ). The family spec owns the rows; representative shapes: mx-routing →
+  one row per MX host (priority, target, IPs, CNAME?, public?); reverse-dns → one row per IP
+  (PTR, forward-confirmed, generic?); mta-sts → one row per policy tag (`v`, `id`, `mode`,
+  `max_age`, each `mx:` pattern vs the real MX set); tls-rpt → the `v`/`rua` tags and mailbox
+  deliverability; dane-tlsa → usage/selector/matching-type/digest per MX vs the "3 1 1" profile;
+  dnssec → signed / DS digest types / algorithms / DS↔DNSKEY match vs RFC 8624/9904; dns-health
+  → NS rows plus the seven SOA values with their §2 sane ranges; domain-reputation →
+  created/expiry/EPP statuses/locks vs the §2 bar; tls-transport & smtp-security → per-MX probe
+  fields once the probe lands, the `.pending` explainer until then.
+
+A field the run file did not capture renders as **"not captured this run"** — the breakdown
+never invents data, mirroring the §3.1 no-fabrication rule.
+
+### 14.4 References
+
+A fixed footer block: a table of **Standard / doc | Why it matters here | Link**. The family
+spec owns its rows (its RFCs, the §3 online validators, provider setup docs); three
+category-common rows appear on all ten pages: the Gmail sender guidelines, the Yahoo sender
+requirements, and the Microsoft/Outlook sender requirements (the §1 enforcement floor).
+External links are plain anchors opening a new tab — the app never proxies them.
+
+### 14.5 Loading / empty / error states
+
+- **Loading** — blocks 1 and 3's concept-side copy and the references render immediately;
+  block 2, block 4's conditional lead-in, and the history strip skeleton-load.
+- **Unknown `:checkKey`** — "No such check" with the ten valid keys rendered as links
+  (newest-run alias form). Never a blank page.
+- **Unknown `:runId`** — identical to §6.2: "This run no longer exists" + link to the newest
+  run's explainer for the same checkKey.
+- **Never-audited domain** (alias route, no runs) — blocks 1/3/4 render in full (the page is
+  still a useful reference), block 2 shows the gray never-run cell + "Run an audit" CTA, block
+  5 stays active: the spot-check works before any full run and creates the domain's first
+  (scoped) run.
+- **`.pending` family** (probe off — tls-transport, smtp-security, DANE cert-match) — block 2
+  states plainly that the probe has not run and why (opt-in, `smtp25` semaphore), what the DNS
+  side already shows, and the enable path; block 5's button reads "Run probe now" when the probe
+  is enableable and is disabled with the reason when not.
+- **Run in progress** — same skeleton-as-checkers-finish behavior as §6.2.
+
+### 14.6 The clickable-concept map
+
+Every underlined concept term, wherever it appears (run report, category page, panels, problem
+drill-downs, other explainers), routes to a `#concept-<term>` anchor inside block 1 of its
+owning explainer — run-scoped, preserving the `:runId` being viewed. A term is underlined at
+its first occurrence per page region only. The map is fixed here so the ten family specs can
+write their anchor sections against it:
+
+| Concept terms | Destination |
+| --- | --- |
+| MX record, null MX, implicit MX, MX priority, backup MX | `…/dns/check/mx-routing#concept-…` |
+| PTR, reverse DNS, FCrDNS, generic PTR, HELO match | `…/dns/check/reverse-dns#concept-…` |
+| STARTTLS, MX certificate, SAN, TLS version | `…/dns/check/tls-transport#concept-…` |
+| MTA-STS, `mode: enforce`, policy id, `max_age`, policy file | `…/dns/check/mta-sts#concept-…` |
+| TLS-RPT, `rua` (TLS), reporting mailbox | `…/dns/check/tls-rpt#concept-…` |
+| DANE, TLSA, "3 1 1", TLSA rollover | `…/dns/check/dane-tlsa#concept-…` |
+| DNSSEC, DS, DNSKEY, RRSIG, algorithm 13, signed-but-broken | `…/dns/check/dnssec#concept-…` |
+| NS, delegation, lame delegation, glue, SOA, TTL, wildcard, dangling CNAME | `…/dns/check/dns-health#concept-…` |
+| RDAP, EPP status, `clientHold`, transfer lock, NRD, parked domain | `…/dns/check/domain-reputation#concept-…` |
+| open relay, VRFY/EXPN, submission port, backscatter | `…/dns/check/smtp-security#concept-…` |
+
+Cross-family narrative terms (e.g. "SubdoMailing", "encryption in transit") keep routing to
+their §9 problem drill-downs — stories go to drill-downs, mechanisms to explainers.
+
+---
+
+## 15. "Run this check now" — the scoped spot-check
+
+Re-running the whole audit to see whether one PTR ticket landed is slow and noisy. The
+spot-check re-runs **just this category or just one family** for the domain and shows the delta.
+
+### 15.1 Endpoints
+
+| Scope | Endpoint | Executes | `run.scope` |
+| --- | --- | --- | --- |
+| Whole category | `POST /api/audit/run/:domainId/check/dns` | all ten `infra.*` checkers | `dns` |
+| One family | `POST /api/audit/run/:domainId/check/dns/:checkKey` | that family's checker only | `dns.<family_key>` (e.g. `dns.reverse_dns`) |
+
+Response: the new scoped `AuditResult` (same shape as `POST /api/audit/run/:domainId`). Errors:
+404 for an unknown domain or checkKey; 409 when a run for the same domain is already in flight.
+
+**Semantics.** A scoped run writes a **new** run file (naming per
+[../storage.mdx](../storage.mdx)) whose `run:` block carries the `scope` tag and whose body
+contains only the `dns_infra` section — for a family scope, only that family's `tests[]`,
+snapshot, and `tool_runs[]`. It **never mutates an existing run**. All §4/§11 discipline applies
+unchanged: semaphores, the RDAP daily cache, bounded retries, and `.pending` gating — a
+spot-check of `tls-transport` with the probe disabled still yields `.pending`, and block 5 says
+so before the user clicks.
+
+**Backend today vs the small change.** `audit.controller.ts` currently exposes only the
+full-run `POST /api/audit/run/:domainId` (and run-all); `AuditService.runForDomain` iterates the
+complete `CHECKERS` registry (`checks/index.ts`). The spot-check needs one small addition, not a
+new module: an optional checker filter on `runForDomain` (by checker id / the `infra.` prefix),
+the `run.scope` tag persisted into the run file, and the two thin controller routes above. The
+sibling categories' scoped endpoints (`…/check/dmarc`, the Blacklists-scoped re-run) share the
+same mechanism — build it once.
+
+### 15.2 Where it appears, and the state machine
+
+Placements: **block 5 of every explainer** (primary button, scope named explicitly: "Runs
+reverse-dns only — 1 of 10 families, DNS queries only, ~2 s"); the compact **⟳** on each family
+group header of the category page (§6.2 item 6); the category-scoped variant in the run
+report's DNS section footer (§17). The page header's existing **Re-run** button keeps meaning
+"full audit, all six categories" — the two are labeled so they can't be confused.
+
+State machine (shared across all placements):
+
+1. **idle** — button enabled; disabled with an inline reason while any run for the same domain
+   is in flight (`useScanProgress`), or when the scope is un-runnable (a `.pending` probe that
+   isn't enableable).
+2. **running** — button disabled + spinner, inline "running reverse-dns…"; the page keeps
+   showing the run being viewed (no premature blanking). DNS-only families complete in seconds;
+   probe families may take up to their §3.1 timeouts.
+3. **done** — navigate to the **new scoped run's** same page (explainer or category page, with
+   the new `:runId`), with a **diff flash**: any sub-test whose severity changed vs the
+   previously viewed run highlights for ~2 s with a "was ⚠ · now ✓" chip. Fixed-it-verified is
+   the entire point of the affordance.
+4. **error** — toast with the failure and a retry action; the viewed run is untouched.
+
+### 15.3 Scoped runs in history and the dashboard
+
+Scoped runs are real runs: they appear in `GET /api/audit/runs`, in the run context strip's
+prev/next stepping, and in the §16 history strips — chip-tagged with their scope (`dns only`,
+`reverse-dns only`) in the run strip and the dashboard Runs table. The whole-run report of a
+scoped run renders its DNS section normally and the out-of-scope categories as gray "not run in
+this scoped check — see the previous full run" (linked). The Domain-health (newest) roll-up
+**merges per category**: each category cell reflects the newest run whose scope included that
+category, so a scoped DNS run advances only the DNS cell and never blanks or ages the other
+five. Regression diffing (§11, §16.1) per family always compares against the most recent
+earlier run **whose scope included that family**.
+
+---
+
+## 16. History & trends across runs
+
+Everything here is **derived at render time** from the runs already fetched via
+`GET /api/audit/runs?domainId=` — no new endpoint, no persisted aggregates. Pruned runs simply
+drop off ([../storage.mdx](../storage.mdx) retention).
+
+### 16.1 The since-last-run trend glyph
+
+Referenced by §6.2 item 6 (family group headers) and §17 (the run report section header). Per
+family, compare the viewed run against the domain's most recent earlier run whose scope
+included that family: **▲ regressed** (worst severity worsened, or the fail count rose at equal
+severity), **▼ improved**, **= unchanged**, **· no earlier data**. The tooltip states the exact
+delta ("1 new critical: `infra.fcrdns.2001:db8::25` — PTR was present in the 2026-06-30 run").
+The category-level glyph on the run report is the worst family movement (any ▲ → ▲).
+
+### 16.2 The per-family history strip
+
+The explainer footer's strip: up to **30 cells, oldest → newest**, one per run that included
+the family in scope; cell color = the family's worst severity in that run; the viewed run gets
+a ring; scoped runs get a dotted underline. Hover: run timestamp + `K of M fail` + scope chip.
+Click: the same explainer for that run (swap `:runId`). One run only → the strip hides behind
+"history builds as more runs complete". Loading → one skeleton row.
+
+### 16.3 Trended snapshot fields — change markers
+
+Severity alone hides slow drift, so the strip also carries **change markers** (a small dot under
+a cell) whenever a trended snapshot value changed in that run even if severity did not — the
+§11 snapshot-diff rule made visible. Trended per family:
+
+| Family | Fields trended across runs |
+| --- | --- |
+| mx-routing | MX target set, `host_count`, `network_count` |
+| reverse-dns | per-IP PTR value, `forward_confirmed` (a lost PTR is the headline regression) |
+| dns-health | `ns_count`, `network_count`, `parent_child_match`, SOA serial, observed TTLs |
+| dnssec | `signed`, `algorithms[]`, `ds_digest_types[]`, `ds_matches_dnskey` |
+| domain-reputation | days-to-expiry countdown, EPP status set, lock flags |
+| mta-sts | policy `id` + `mode` (an unchanged `id` across a changed policy body = the stale-id trap, detectable only across runs) |
+| tls-rpt | `rua` destination set |
+| dane-tlsa | the TLSA record set per MX |
+| tls-transport / smtp-security | cert days-to-expiry / probe verdicts — once their probes persist payloads (§12) |
+
+Fields with a numeric shape (days-to-expiry, `network_count`, TTLs) additionally render as
+small sparkline rows under the strip when ≥ 2 data points exist.
+
+---
+
+## 17. The grown DNS & Infrastructure section of the run report
+
+The run report (`/domains/:domainId/runs/:runId`, newest alias `/domains/:domainId` —
+`RunDetailPage`) currently shows the category as a StatusCell chip with a run-scoped `›`
+chevron and a collapsible flat findings list. It grows into the category's summary-in-place:
+
+**Collapsed header (grown).** Chevron + "DNS & Infrastructure" + StatusCell + the `K of M fail`
+count + the §16.1 category trend glyph + the worst open problem's one-liner ("IPv6 MX has no
+PTR — Gmail rejects") — enough to triage without expanding. The chip's `›` keeps routing to
+**this run's** category page (already run-scoped in `RunDetailPage.tsx` for `dnsInfra`).
+
+**Expanded body (grown), top to bottom:**
+
+1. **The ten-family status list** — one compact row per family, in §2 order: glyph chip, the
+   §14.1 **row label + one-line meaning**, the `K of M` count, the family ⟳ spot-check, and
+   `details ›` → that family's run-scoped explainer (§14). This list is the primary
+   click-through layer — every row navigates; nothing is display-only.
+2. **The mail-path one-liner** — the MX → IP → PTR digest with ✗ markers, rendered when the
+   `mx_routing`/`reverse_dns` snapshots exist (the §6.2 Mail path panel compressed to one line
+   per MX).
+3. **Finding rows** — fail-first, **capped at 5**, then "+N more →" linking to the run-scoped
+   category page. Row anatomy unchanged from today's `FindingRow`.
+4. **Footer** — `[⟳ Re-run DNS checks only]` (the §15 category-scoped spot-check) and
+   "Open the full DNS & Infrastructure report →" (the run-scoped category page).
+
+The everything-clickable rule (§6.2 item 8) applies here too: family rows → explainers, concept
+terms → `#concept-<term>` anchors, problem one-liners → the matching §9 drill-down.
 
 <!--
   Maintenance notes:
@@ -1152,13 +1525,26 @@ single-module change.
     output_format, parsed, error} — append-only within a run, excluded from the regression diff.
   * Routes: the category page is run-scoped — /domains/:domainId/runs/:runId/dns with newest
     alias /domains/:domainId/dns (run report: /domains/:domainId/runs/:runId, newest alias
-    /domains/:domainId); drill-downs at /domains/:domainId/dns/:problemId. Dashboard cell-click:
-    Domain-health cell → newest run's DNS page; Runs-row cell → that run's DNS page; anywhere
-    else in a row → the whole run report. Mirrors the DMARC pattern (DnsPage.tsx,
-    DnsProblemPage.tsx, lib/dns-problems.ts). The four snapshot payload shapes in §5 are the
-    frontend's contract — change them in lockstep with api/types.ts. The run context strip
-    (timestamp, newest badge, ‹ prev / › next across the same domain's runs) is shared chrome
-    across all six category pages — keep the six specs in lockstep.
+    /domains/:domainId); drill-downs at /domains/:domainId/dns/:problemId; check-detail
+    explainers at /domains/:domainId/runs/:runId/dns/check/:checkKey with newest alias
+    /domains/:domainId/dns/check/:checkKey (the static `check` segment must outrank :problemId).
+    Dashboard cell-click: Domain-health cell → newest run's DNS page; Runs-row cell → that run's
+    DNS page; anywhere else in a row → the whole run report. Mirrors the DMARC pattern
+    (DnsPage.tsx, DnsProblemPage.tsx, lib/dns-problems.ts). The four snapshot payload shapes in
+    §5 are the frontend's contract — change them in lockstep with api/types.ts. The run context
+    strip (timestamp, newest badge, ‹ prev / › next across the same domain's runs) is shared
+    chrome across all six category pages — keep the six specs in lockstep.
+  * Explainer layer (§14-§17): the ten :checkKey slugs are the kebab-case family keys and equal
+    the backend check directory names — never invent new slugs; §14.1's row-label/one-line-
+    meaning table is the single source for every family-row surface. This spec owns the shell
+    (five locked blocks, raw+parsed frame, history strip, references frame, states); the ten
+    family specs own interior copy and their #concept-<term> anchor sections against the §14.6
+    map — keep both sides in sync. Scoped re-runs: POST /api/audit/run/:domainId/check/dns and
+    …/check/dns/:checkKey write NEW run files with run.scope (dns / dns.<family_key>) — same
+    mechanism as the other categories' scoped endpoints (one checker-filter param on
+    AuditService.runForDomain); the Domain-health roll-up merges per category so scoped runs
+    never blank other categories. §16 trends are render-time derivations from
+    GET /api/audit/runs — never persist aggregates.
   * PS-11 (dangling/takeover) is first-round PARTIAL (apex-CNAME + SPF-include liveness via the
     dns_health checker's dangling_* findings); the full subdomain sweep and PS-12 (split answers)
     stay FUTURE until those probes land; the §8 ladder gains rungs for them then.

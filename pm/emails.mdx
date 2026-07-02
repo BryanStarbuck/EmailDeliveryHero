@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — Report-Email Ingestion (DMARC aggregate & TLS-RPT)
-description: The authoritative spec for the inbound report emails that mailbox providers send to a monitored domain — DMARC aggregate (rua) XML reports and SMTP TLS Reporting (TLS-RPT) JSON reports. Defines how to recognize, decode, and parse a .eml file, the exact deliverability problems the reports reveal (unauthorized senders, SPF/DKIM-alignment gaps, spoofing, silent TLS/MTA-STS breakage), how each report row becomes a severity-tagged Finding with a concrete fix, the receive → classify → decode → parse → normalize → findings → store pipeline, which proactive DNS health checks hunt these same problems in future, the Reports UI surface, and the on-disk schema. Grounded in the 10 real reports for act3ai.com under emails/.
+description: The authoritative spec for the inbound report emails that mailbox providers send to a monitored domain — DMARC aggregate (rua) XML reports and SMTP TLS Reporting (TLS-RPT) JSON reports. Defines how to recognize, decode, and parse a .eml file, the exact deliverability problems the reports reveal (unauthorized senders, SPF/DKIM-alignment gaps, spoofing, silent TLS/MTA-STS breakage), how each report row becomes a severity-tagged Finding with a concrete fix, the receive → classify → decode → parse → normalize → findings → store pipeline, the run-time Spam & Content report_emails test that scans the email corpus during every audit run and attributes each report to the right domain, which proactive DNS health checks hunt these same problems in future, the Reports UI surface, the on-disk schema, and (§16) the DMARC-category sub-test explainer page for the ingested-reports unit — /domains/:domainId/runs/:runId/dmarc/check/reports — with the five-block what/state/meaning/fix/re-run contract, the finding → drill-down map, the run-history strip, and the references footer. Grounded in the 10 real reports for act3ai.com under emails/.
 ---
 
 # EmailDeliveryHero — Report-Email Ingestion (DMARC aggregate & TLS-RPT)
@@ -31,14 +31,22 @@ and TLS-RPT records), **this spec covers the reports that come back**.
   file store, and the scheduler this ingestion runs beside.
 - [checks/dmarc.mdx](./checks/dmarc.mdx) — audits the `_dmarc` record (including the `rua=` that
   **requests** these aggregate reports); `dmarc.real_pass_rate` is the finding this ingestion feeds.
+  Its §6.3 `checkKey` registry lists this spec's content as the **`reports` sub-test unit** of the
+  DMARC category (band row title "Ingested aggregate reports"); dmarc.mdx owns the band row (chip,
+  title, one-liner, route), **this spec owns the explainer page content** — see §16 below.
 - [checks/tls_rpt.mdx](./checks/tls_rpt.mdx) — audits the `_smtp._tls` record (the `rua=` that
   **requests** TLS-RPT reports); `infra.tls_rpt_reports_ingested` is the finding this ingestion feeds.
 - [checks/spf.mdx](./checks/spf.mdx) / [checks/dkim.mdx](./checks/dkim.mdx) — the two authentication
   mechanisms whose per-source pass/fail these reports measure in the field.
 - [checks/mta_sts.mdx](./checks/mta_sts.mdx) / [checks/dane_tlsa.mdx](./checks/dane_tlsa.mdx) — the TLS
   policy layers whose enforcement failures land in TLS-RPT reports.
+- [checks/spam_content.mdx](./checks/spam_content.mdx) — the Spam & Content category whose seventh
+  family, **Report-email analysis** (`report_emails`), is the **run-time test** specified in §13:
+  every audit run scans the email corpus, attributes each report to its domain, and analyzes the
+  problems as `content.report_*` findings.
 - [dashboard.mdx](./dashboard.mdx) — where report-derived findings roll up (DMARC column, DNS &
-  Infrastructure column). No seventh category is added.
+  Infrastructure column, and — via the §13 run-time test — the Spam & Content column). No seventh
+  category is added.
 - [scheduled_checks.mdx](./scheduled_checks.mdx) — the recurring cadence and run-diff that report
   ingestion piggybacks on.
 - [settings.mdx](./settings.mdx) — the admin-only report-mailbox/collector configuration.
@@ -226,6 +234,10 @@ To honor the **six locked dashboard categories** (no seventh is added — see
 [dashboard.mdx](./dashboard.mdx)), report-derived findings use existing `checkId` prefixes: DMARC-
 aggregate findings under **`dmarc.*`**, TLS-RPT findings under **`infra.*`**. Each is a standard
 `Finding { checkId, severity, title, detail, remediation }` ([engineering.mdx](./engineering.mdx)).
+In addition, the **run-time corpus test** (§13) emits aggregate **`content.report_*`** findings into
+the existing **Spam & Content** category — the corpus-analysis surface (did we scan, did every
+report land on the right domain, what does the mail stream show) — while the per-source detail
+stays in the two tables below. One parse, three surfaces; severities always agree.
 
 | checkId | Source | Severity rule | Title / detail | Remediation |
 | --- | --- | --- | --- | --- |
@@ -292,6 +304,12 @@ Reports ▸ act3ai.com                                   window: last 7 days ▾
   and `failure-details`.
 - **Ingest now** button triggers an on-demand mailbox/drop-folder scan (§4) so the user can pull fresh
   reports without waiting for the poll.
+- **Every DMARC-aggregate row is clickable** (grow-every-click, §16): the row title and its chevron
+  deep-link to the domain's **ingested-reports explainer** —
+  `/domains/:domainId/dmarc/check/reports#finding-<finding-id>` (newest alias; §16.1) — anchored at
+  the matching finding row, so "see the problem" here is one click from the full what/state/meaning/
+  fix page. TLS-RPT rows link to their DNS & Infrastructure surface
+  ([checks/tls_rpt.mdx](./checks/tls_rpt.mdx)), not to the DMARC explainer.
 
 ### 7.2 Inside the health-check run detail
 
@@ -300,7 +318,10 @@ the six categories. Report-derived findings render **in-line** there: `dmarc.rep
 **DMARC** group, `infra.tls_rpt_reports_ingested` under **DNS & Infrastructure**, each with the same
 observed-detail + remediation + copy control, and a small **"from reports"** chip so the user knows the
 evidence came from an ingested report rather than a live DNS lookup. Expanding still reveals the
-per-source-IP table.
+per-source-IP table. Per [checks/dmarc.mdx](./checks/dmarc.mdx) §6.6, each `dmarc.report_*` /
+`dmarc.real_pass_rate` finding row in the run report also carries a **chevron deep-linking to the
+run-scoped explainer** — `/domains/:domainId/runs/:runId/dmarc/check/reports#finding-<finding-id>`
+(§16.5) — the same finding-id → anchor map the category page and Reports view use.
 
 ### 7.3 States
 
@@ -320,6 +341,10 @@ Under **Settings → Admin** (gated by `role:admin`, per [settings.mdx](./settin
   mailbox") and/or a drop-folder path. Credentials are read from the out-of-repo credentials file, not
   stored in the state dir ([storage.mdx](./storage.mdx) / [authentication.mdx](./authentication.mdx)).
 - **Poll cadence** — default hourly; and the rolling aggregation window (default 7 days).
+- **Analysis directory** (`reports.analyzeDir`) — the directory the **run-time** `report_emails`
+  test (§13) scans in place on every audit run. Empty (default) = the drop folder above. In
+  development it points at the repo's `emails/` corpus. Files here are **never moved** — this is a
+  corpus to analyze, not an inbox to drain.
 - **Per-domain rua mailbox mapping** — which mailbox/address receives reports for which monitored
   domain (a domain may point `rua` at a shared box; the parser routes by the report's
   `<policy_published><domain>` / TLS-RPT policy domain, not the mailbox).
@@ -379,6 +404,7 @@ move is a single-module change.
 | DMARC aggregate (RUA) XML: decode zip/gzip, parse, per-source rows, alignment/pass-rate findings | ✅ | — |
 | TLS-RPT JSON: decode gzip, parse, success/failure + failure-details findings | ✅ | — |
 | IMAP mailbox poll + drop-folder ingest, dedupe, idempotent | ✅ | OAuth mailbox auto-discovery |
+| Run-time Spam & Content `report_emails` test (§13): in-place corpus scan, per-domain attribution, `content.report_*` findings | ✅ | — |
 | Reports UI (per-source table, copy-fix), roll-up into DMARC / DNS&Infra cells | ✅ | — |
 | DMARC **failure/forensic (RUF)** ARF parsing (redacted samples) | — | ⛔ needs `ruf`/`fo=1` + ARF parser + PII handling |
 | Google Postmaster Tools reputation / provider FBL complaint streams | — | ⛔ separate feed → [reputation_metrics.mdx](./checks/reputation_metrics.mdx) |
@@ -419,7 +445,118 @@ to produce:
 
 ---
 
-## 13. Proactive health checks that hunt these problems (future)
+## 13. Run-time corpus analysis — the Spam & Content `report_emails` test
+
+The §4 pipeline is **asynchronous** (a poller on its own cadence). This section adds the
+**synchronous, in-run test** the user sees the moment they run checks: every audit run also walks
+the report-email corpus, attributes each email to its domain, and analyzes the problems. It is
+**family #7 of the Spam & Content category** — section key `report_emails`, checker id
+`content.report_emails` — specified at the category level in
+[checks/spam_content.mdx](./checks/spam_content.mdx) §1/§4; this section owns the behavior.
+
+### 13.1 What the test does, step by step
+
+1. **Scan the corpus, in place.** The checker reads every `.eml`/`.xml`/`.json`/`.gz`/`.zip` file in
+   the **analysis directory** — admin-configurable (`reports.analyzeDir`, §8); empty = the §4.1 drop
+   folder (`<state>/reports/inbox`). Pointing it at the repo's `emails/` corpus is exactly how the
+   §12 worked example runs in development. Unlike the poller's drop-folder ingest, the run-time scan
+   is **read-only — it never moves or renames files** (a corpus must survive unlimited re-runs), and
+   §4.5's dedupe keys make every re-scan idempotent: already-stored reports count as duplicates,
+   never as new data.
+2. **Decode exactly like §2.** Same MIME walk, same base64 + magic-byte decompression (`PK` → ZIP,
+   `\x1f\x8b` → gzip), same §4.2 classification by media type and payload root — never by filename
+   or subject. A file with no report payload is skipped and counted; a file that fails to decode is
+   counted as an error and surfaces in the `content.report_corpus` finding (warning), never thrown.
+3. **Attribute each report to its domain — the routing rule.** The report names its own subject:
+   `<policy_published><domain>` (DMARC) / `policies[].policy.policy-domain` (TLS-RPT). Matching
+   against the monitored-domain list is **exact name first, else the closest monitored parent** (a
+   report for `em2598.act3ai.com` rolls up to `act3ai.com`). Three outcomes:
+   - **This run's domain** → stored (§9 store, deduped) and analyzed in step 4.
+   - **Another monitored domain** → stored under **that** domain — the report surfaces in *that*
+     domain's runs and Reports view, never mixed into this one. Right results, right domain.
+   - **No monitored domain** → an **orphan**: counted and named in
+     `content.report_domain_attribution` (the mailbox is receiving reports for a domain nobody
+     monitors — usually a domain that should be added).
+4. **Analyze the run's domain over the rolling window.** Aggregate the stored reports (window per
+   §4.6, anchored on the newest report so a historical corpus still analyzes) and score them
+   against the §3 problem catalog. Emit the `content.report_*` findings below plus the
+   `spam_content.report_emails` snapshot in the run YAML.
+
+**Ordering.** In the run graph the `content.report_emails` scan runs **before**
+`dmarc.reports` and the TLS-RPT derivation, so the per-category findings (§5) read a store the
+same run just refreshed — scan once, analyze everywhere.
+
+### 13.2 Findings emitted (`checkId: content.report_emails`, all with `source:"report"`)
+
+| Finding id | Severity rule | What it says / the fix |
+| --- | --- | --- |
+| `content.report_corpus` | **info** — N files scanned, K reports parsed (D duplicates), S skipped; **warning** if any file failed to decode/parse (named, with the error). | The scan summary — the "did the test actually look at my emails" row. Empty directory ⇒ info "no report emails found at `<dir>`" with the §8 pointer; never a fabricated failure. |
+| `content.report_domain_attribution` | **info** — every report attributed (counts per domain); **warning** if orphan reports exist. | "K reports for this domain, J routed to other monitored domains (named), O orphans for `<domain>` — add it as a monitored domain or fix the rua= address." |
+| `content.report_pass_rate` | mirrors `dmarc.real_pass_rate` (§5): **warning** when dual-aligned < ~100% with real unaligned volume; **info** at ~100% or no reports. | "96.8% of 1,195 msgs dual-aligned; 38 msgs from 12 sources pass on one mechanism only." Fix: authorize/align the failing streams. |
+| `content.report_spoofing` | **critical** if any source fails **both** SPF and DKIM alignment with real volume (unknown sender); **warning** if a both-fail source traces to the domain; **ok** when zero rows both-fail. | The spoofing verdict over the corpus — aggregate row; the per-IP enumeration lives in `dmarc.report_unaligned_source.*` (§5). |
+| `content.report_fragility` | **warning** when any own stream passes DMARC via one mechanism only (the §12 SendGrid case); **ok** when all passing streams are dual-aligned. | "SendGrid stream (envelope `em2598.<domain>`, 34 msgs) is DKIM-only under `aspf=s`." Fix: `aspf=r` or brand the Return-Path (`bounces.<domain>` CNAME at the ESP). |
+| `content.report_enforcement` | **critical** when receivers report `disposition=quarantine`/`reject` on real volume; **info** when all `none`. | Own mail is being dropped right now — authorize the failing source before the next send. |
+| `content.report_tls` | **warning** on any TLS-RPT failure sessions (with the §3.2 layer-specific fix); **info** at zero failures (healthy baseline) or no TLS-RPT reports. | "microsoft.com: 7 ok / 0 failed sessions, policy sts/enforce" — the corpus-side echo of `infra.tls_rpt_reports_ingested`. |
+| `content.report_freshness` | **info** when the newest report is within the window; **warning** when the corpus's newest report is older than 2× the window (reports stopped arriving — rua broken or mailbox unwatched). | "Newest report is 21 days old — check the rua= address and the drop folder/mailbox wiring." |
+
+Aggregate rows only: the Spam & Content family never repeats the per-source-IP enumeration — that
+detail stays under `dmarc.report_*`/`infra.*` (§5) and in the expandable per-source table (§7),
+which the family's rows link to. This keeps the score honest (one problem, one severity per
+surface) and the category page readable.
+
+### 13.3 Run-YAML snapshot (`spam_content.report_emails`)
+
+Per [checks/spam_content.mdx](./checks/spam_content.mdx) §4, the checker's structured payload lands
+in the run file:
+
+```yaml
+spam_content:
+  report_emails:
+    dir: /Users/bryan/BGit/Bryan_git/EmailDeliveryHero/emails    # the analysis directory scanned
+    scanned_files: 10
+    parsed_reports: 10
+    duplicates: 0            # re-runs over an unchanged corpus: 10 duplicates, 0 new
+    skipped: 0
+    decode_errors: []
+    attribution:
+      this_domain: 10        # act3ai.com
+      other_domains: {}      # e.g. { whitehatengineering.com: 2 }
+      orphans: []            # unmonitored report domains seen, with counts
+    window: { begin: 2026-06-24, end: 2026-06-30 }
+    dmarc:
+      reports: 7
+      reporters: [google.com, Outlook.com]
+      messages: 1195
+      dual_aligned: 1157
+      pass_rate_pct: 96.8
+      dkim_only: 38
+      spf_only: 0
+      both_fail: 0
+      quarantined: 0
+      rejected: 0
+      policy: "p=reject; sp=reject; adkim=s; aspf=s; pct=100"
+    tlsrpt:
+      reports: 3
+      reporters: [Microsoft Corporation]
+      sessions_ok: 7
+      sessions_failed: 0
+      policy_types: [sts]
+```
+
+### 13.4 What the §12 corpus must produce
+
+Running checks for `act3ai.com` with the analysis directory pointed at `emails/` must yield:
+`content.report_corpus` info (10/10 parsed), `content.report_domain_attribution` info (all 10 →
+act3ai.com), `content.report_pass_rate` **warning** (96.8%), `content.report_spoofing` **ok**
+(zero both-fail rows), `content.report_fragility` **warning** (the SendGrid DKIM-only stream,
+fix `aspf=r` / branded Return-Path), `content.report_enforcement` info (all `disposition=none`),
+`content.report_tls` info (7 ok / 0 failed). A run for any **other** domain against the same
+directory attributes all 10 reports elsewhere and emits only the corpus/attribution rows plus
+"no reports for this domain" infos — **never act3ai.com's problems on the wrong domain.**
+
+---
+
+## 14. Proactive health checks that hunt these problems (future)
 
 The reports are **retrospective** — they tell you what receivers already saw. The audit engine should
 also **proactively hunt** the same problems so it flags them before (or without) a report. For every
@@ -451,7 +588,7 @@ in the field what the health checks predict from DNS, and each backstops the oth
 
 ---
 
-## 14. Acceptance criteria
+## 15. Acceptance criteria
 
 1. A `.eml` in `emails/` (or a report mailbox) is parsed by walking its MIME tree; the report part is
    found by **media type / payload sniffing**, base64-decoded, and decompressed by **magic bytes**
@@ -481,6 +618,287 @@ in the field what the health checks predict from DNS, and each backstops the oth
 12. Running against the `act3ai.com` corpus reproduces §12: 96.8% aligned pass, the SendGrid
     strict-SPF-alignment fragility warning, zero spoofing, and a healthy TLS baseline.
 13. RUF/ARF parsing, provider FBL/Postmaster streams, and trend charts are clearly gated as **future**.
+14. **The run-time test (§13):** every audit run executes `content.report_emails` — it scans the
+    analysis directory **in place** (no file ever moved/renamed), re-scans are idempotent via the
+    §4.5 dedupe, and the scan runs before `dmarc.reports` in the run graph so the §5 findings read
+    fresh data.
+15. **Per-domain attribution (§13.1.3):** every report routes by its **payload** domain
+    (`policy_published`/`policy-domain`) — exact monitored-domain match, else closest monitored
+    parent; a report for another monitored domain is stored under that domain and never surfaces in
+    this run's results; unmatched report domains are named as orphans in
+    `content.report_domain_attribution`.
+16. **The Spam & Content family (§13.2):** the eight `content.report_*` findings emit with
+    `checkId: content.report_emails` and `source:"report"`, aggregate-only (no per-source-IP
+    duplication of the §5 rows), and the §12 corpus reproduces §13.4 exactly — including the
+    SendGrid fragility warning for act3ai.com and *nothing* for any other domain.
+17. The `spam_content.report_emails` run-YAML snapshot matches §13.3 (dir, scan counts,
+    attribution, window, dmarc/tlsrpt aggregates).
+18. **The explainer page (§16):** `/domains/:domainId/runs/:runId/dmarc/check/reports` (newest
+    alias `/domains/:domainId/dmarc/check/reports`) renders the five blocks in locked order —
+    what this is / your current state / what it means / what you can do / check for new reports —
+    with the header chip equal to the **worst severity among the viewed run's `checkId:
+    "dmarc.reports"` findings** (critical red ✗ > warning amber ⚠ > info slate ⓘ > ok green ✓;
+    none present ⇒ gray "not measured").
+19. Block 2 renders **every** `dmarc.reports` finding of the viewed run as an anchored row
+    (`#finding-<finding-id>`) showing exactly the checker's fields (title, severity, detail,
+    evidence, remediation), the raw `_dmarc` TXT with the `rua=` tag highlighted, the
+    **aggregate breakdown table** (report count, reporters, window, messages, dual-aligned,
+    pass-rate %, DKIM-only/SPF-only/both-fail, quarantined/rejected, published policy), and the
+    expandable **per-source-IP table** (§7.1 columns, count-desc).
+20. Block 4 offers per-finding, **copy-pasteable** fixes where the copy button carries a
+    publishable value only (the corrected `v=DMARC1…aspf=r` TXT, the `include:` mechanism, the
+    `selector._domainkey.<domain>` name, the branded Return-Path CNAME, or the `rua=` record in
+    the empty state) — never prose; a healthy run collapses block 4 to the "keep it this way"
+    line.
+21. Block 5 reads **"Check for new reports"** (not "Run this check now") and calls the existing
+    `POST /api/domains/:id/reports/ingest`; on success it refreshes via the newest alias and
+    reports "N new reports ingested" (0 ⇒ "no new reports"); a secondary "Re-run all checks"
+    action calls `POST /api/audit/run/:domainId` — matching the §6.5 scope exception in
+    [checks/dmarc.mdx](./checks/dmarc.mdx).
+22. Every finding id this check emits resolves through the §16.5 map: category-page rows,
+    run-report rows (§7.2), and Reports-view rows (§7.1) all deep-link to the explainer's
+    anchored finding row; **no new `:problemId` drill-down ids are minted** for report findings
+    (the `PS-nn` namespace of checks/dmarc.mdx §9 is untouched and the `check` segment stays
+    disjoint from `/dmarc/:problemId`).
+23. Each clickable sub-concept on the explainer navigates per §16.5's concept map (tags →
+    sibling dmarc explainers, SPF/DKIM columns → their category pages, source IPs → the
+    blacklist affordance, TLS-RPT cross-link → the Reports view), and the references footer
+    links RFC 7489 §7.2 / RFC 9990, the reporter postmaster pages, and a DMARC-XML reader tool.
+24. The explainer implements all §16.6 states — loading skeletons, ingestion-disabled,
+    no-reports-yet (with the copyable `rua=` record), not-measured on an old run, stale-corpus
+    freshness banner, and fetch-error with Retry — and the viewed run stays a **snapshot**: an
+    older `:runId` never silently shows newer report data without the "live data" chip of §16.3.
+
+---
+
+## 16. The DMARC sub-test explainer page — `checkKey: reports`
+
+The DMARC (+ARC) category's grow-every-click pass ([checks/dmarc.mdx](./checks/dmarc.mdx) §6.3)
+registers this spec's content as the **`reports` unit** — band row "Ingested aggregate reports",
+one-liner *"What receivers actually saw: real pass rates and spoof sources."* dmarc.mdx owns the
+band row and the shared page chrome; **this section owns everything rendered inside the explainer
+page** for the unit, filling the §6.4 five-block contract on the locked route pattern. The
+`dmarc-reports` checker (`code/…/audit/checks/dmarc-reports/dmarc-reports.check.ts`, checker id
+`dmarc.reports`) is the data source: it reads the §9 store and emits the §5 findings — every one
+carries `checkId: "dmarc.reports"` and `source: "report"`, which is exactly how the page selects
+its rows from the run.
+
+### 16.1 Route, chrome, and the status chip
+
+```
+/domains/:domainId/runs/:runId/dmarc/check/reports     (canonical, run-scoped)
+/domains/:domainId/dmarc/check/reports                 (newest-run alias)
+```
+
+Shared chrome per dmarc.mdx §6.4: the category header row, the **run context strip** (back link →
+the run's DMARC page `/domains/:domainId/runs/:runId/dmarc`, ‹ prev / next › run paging that swaps
+`:runId`, the "newest run" chip on the alias), and the unit-scoped run-history strip + references
+footer below the blocks. The static `check` segment keeps this disjoint from the
+`/dmarc/:problemId` (`PS-nn`) drill-downs; the router registers `check/reports` (with the other
+`check/:checkKey` routes) **ahead of** the `:problemId` param route.
+
+**Status chip derivation (locked).** The chip = the worst severity among the viewed run's findings
+with `checkId: "dmarc.reports"`, using the checker's actual severity values:
+
+| Worst severity present | Chip |
+| --- | --- |
+| `critical` (`dmarc.report_unaligned_source.<ip>` unknown sender, `dmarc.report_enforcement.<ip>`) | ✗ red — "Failing" |
+| `warning` (pass-rate < ~100%, fragility, own both-fail stream) | ⚠ amber — "Needs attention" |
+| `info` only (healthy baselines, no-reports-yet, ingestion disabled, new-source watch) | ⓘ slate — "Informational" |
+| `ok` present and nothing worse (`…unaligned_source` / `…fragility` clear rows) | ✓ green — "Healthy" |
+| no `dmarc.reports` findings in the run at all (run predates the checker) | gray — "Not measured" |
+
+This is the same chip the category page's band row and the run report's mini-list show for the
+unit — one derivation, three surfaces.
+
+### 16.2 The five blocks
+
+Wireframe (the §12 corpus, worst = warning):
+
+```
+← DMARC · run 2026-06-30 14:02        act3ai.com          ‹ prev run   next run ›
+┌────────────────────────────────────────────────────────────────────────────────┐
+│ Ingested aggregate reports (rua)                          ⚠ Needs attention     │
+│                                                                                  │
+│ 1 · WHAT THIS IS                                                                 │
+│   Receivers that get mail claiming to be act3ai.com send daily XML "aggregate    │
+│   reports" back to the rua= mailbox your DMARC record names …                    │
+│                                                                                  │
+│ 2 · YOUR CURRENT STATE                          window 06-24 → 06-30 · 7 reports │
+│   raw record  _dmarc.act3ai.com TXT                                              │
+│   "v=DMARC1; p=reject; sp=reject; adkim=s; aspf=s; [rua=mailto:dmarc@act3ai.com]"│
+│   ┌ aggregate breakdown ──────────────────────────────────────────────────────┐ │
+│   │ reporters google.com, Outlook.com │ messages 1,195 │ dual-aligned 1,157   │ │
+│   │ pass rate 96.8% │ DKIM-only 34 │ SPF-only 0 │ both-fail 0 │ rejected 0    │ │
+│   └───────────────────────────────────────────────────────────────────────────┘ │
+│   ⚠ #finding-dmarc.real_pass_rate            DMARC-aligned pass rate 96.8%      │
+│   ✓ #finding-dmarc.report_unaligned_source   No unauthorized senders            │
+│   ⚠ #finding-…fragility.em2598.act3ai.com    Stream is DKIM-only     [details ▾] │
+│   ⓘ #finding-dmarc.report_enforcement        No mail quarantined or rejected    │
+│   ▸ Per-source table (12 sources)  Source IP│Count│Disp│SPF│DKIM│From│Envelope  │
+│                                                                                  │
+│ 3 · WHAT IT MEANS   …one paragraph per firing state, §3.1 copy…                  │
+│ 4 · WHAT YOU CAN DO ABOUT IT                                                     │
+│   1. Set relaxed SPF alignment:  v=DMARC1; p=reject; …; aspf=r      [ Copy ]     │
+│   2. …or brand the Return-Path:  bounces.act3ai.com CNAME → sendgrid [ Copy ]    │
+│ 5 · [ ⟳ Check for new reports ]      Re-run all checks ↗                         │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ history  ▪▪▪▪▪▪▣▣⚠⚠   last 10 runs        references  RFC 7489 §7.2 · RFC 9990 …│
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **What this is.** 2–4 plain-language paragraphs, fixed copy (this block never depends on run
+   data — the concept never disappears): what a DMARC aggregate (rua) report is (§1 row 1), that
+   the `rua=` tag on `_dmarc.<domain>` *requests* them, that they are the receivers' own record of
+   *who sent mail as your domain, from which IPs, and whether SPF/DKIM passed **and aligned***,
+   and one concrete example ("Google's daily zip for act3ai.com covering 06-24"). One-line gloss
+   for "alignment" on first use; a "how the sausage is made" link to §2's decode pipeline for the
+   curious. Cross-link: the tag that requests these reports is audited by the
+   [`reporting` unit](./checks/dmarc.mdx#63-the-sub-tests-band-and-the-checkkey-registry).
+2. **Your current state.** Everything here comes from **the viewed run** (snapshot rule, §16.3):
+   - The large status chip (§16.1) with the aggregation window and report count as the sub-line.
+   - The **raw record**: the run's `_dmarc.<domain>` TXT answer (monospace), with the unit's
+     input tag — `rua=` — visually highlighted (the other tags render muted; clicking any tag
+     navigates per the §16.5 concept map).
+   - The **scoped aggregate breakdown table** — this unit's "parsed field-by-field" view. Because
+     the unit parses reports rather than record tags, the parsed fields are the `DmarcAggregate`
+     fields the checker computes (derive-findings.ts): `reportCount`, `reporters`,
+     `window.begin/end`, `totalMessages`, `alignedPassMessages` (dual-aligned),
+     `dmarcPassMessages`, `passRatePct`, DKIM-only / SPF-only / both-fail volumes, quarantined /
+     rejected volumes, and `policyPublished` (`p`, `sp`, `adkim`, `aspf`, `pct` — each value
+     rendered with its meaning, defaults grayed when absent). Every row: value + one-line meaning.
+   - **One anchored row per finding** the checker emitted for this run — id anchor
+     `#finding-<finding-id>` (e.g. `#finding-dmarc.report_alignment_fragility.em2598.act3ai.com`)
+     — rendering exactly the checker's fields: severity chip, `title`, `detail` (the observed
+     block), `evidence` in monospace when present, and `remediation` (block 4 repeats it as
+     steps). Per-IP findings (`…unaligned_source.<ip>`, `…enforcement.<ip>`) group under one
+     family heading with a count.
+   - The expandable **per-source-IP table** (§7.1 columns: Source IP | Count | Disposition |
+     SPF eval/align | DKIM eval/align | DMARC | Header-From | Envelope | Reporters, count-desc)
+     — the `rows[]` of the aggregate; collapsed by default, remembered per session.
+3. **What it means.** Deliverability impact keyed to the current worst state, reusing §3.1's "why
+   it hurts" copy verbatim per firing finding: the passing paragraph ("these reports confirm every
+   real stream authenticates — receivers see no spoofing surface") plus one paragraph per firing
+   state (pass-rate gap = enforcement risk; unaligned source = spoofing or a forgotten sender;
+   fragility = one DKIM hiccup from rejection under `p=reject`; enforcement = your own mail is
+   being dropped **right now**; new source = watch item). The §3.3 limits line closes the block
+   ("these reports carry no blacklist or content-score signal — see those checks").
+4. **What you can do about it.** Numbered, copy-pasteable steps per firing finding, copy buttons
+   carrying **only publishable values** (never prose):
+   - *Fragility (DKIM-only)* → step 1: the corrected TXT `v=DMARC1; p=reject; sp=reject;
+     adkim=s; aspf=r; rua=mailto:…` `[Copy]`; step 2 (alternative): the branded Return-Path CNAME
+     (`bounces.<domain> → <esp-return-path-host>`) `[Copy]`; step 3: where to paste (DNS
+     provider's TXT editor), the propagation wait, and the copyable verify command
+     (`dig +short TXT _dmarc.<domain>`).
+   - *Unaligned/unknown source* → if yours: the SPF `include:<esp-spf-host>` mechanism `[Copy]`
+     and the DKIM CNAME/selector name `selector._domainkey.<domain>` `[Copy]`; if not yours: the
+     monitor-and-report guidance (already rejected under `p=reject`).
+   - *Enforcement* → authorize-the-source steps (same snippets), flagged "before your next send".
+   - *No reports yet* (empty state) → the full `rua=` record to publish `[Copy]` plus the
+     Settings → Admin mailbox pointer (§7.3 copy).
+   - Healthy run → the block collapses to "Nothing to do — keep it this way", plus the standing
+     recommendation (keep the rua mailbox monitored; §13.2's freshness rule guards it).
+5. **Check for new reports.** This unit's block 5 is the **scope exception** locked in
+   [checks/dmarc.mdx §6.5](./checks/dmarc.mdx): freshness here belongs to the ingestion pipeline,
+   not a DNS run, so the primary button reads **"Check for new reports"** and calls the existing
+   `POST /api/domains/:id/reports/ingest` (reports.controller.ts). While in flight it spins and
+   disables; on success a toast reports "N new report(s) ingested" and, when N > 0, the page
+   navigates to its **newest alias** so fresh findings resolve; N = 0 ⇒ "No new reports — newest
+   is <date>". A secondary text action **"Re-run all checks"** calls the v1 full-run endpoint
+   `POST /api/audit/run/:domainId` for users who want the run YAML to reflect the fresh reports
+   immediately. Keyboard: `r` triggers the primary button (same input-field guard as the pager).
+
+### 16.3 What the run records — the snapshot rule (small checker addition)
+
+Today the checker persists only its `findings[]` into the run. For the explainer, that is almost
+enough — block 2's finding rows read the run's findings verbatim — but the aggregate breakdown
+table and per-source table would have to read the **live store**, which breaks the "an older run
+stays a snapshot" rule. Two-part contract:
+
+- **Proposed addition (small, preferred).** The `dmarc.reports` checker also writes a
+  `dmarc.reports` snapshot into the run file mirroring the `DmarcAggregate` it already computes:
+  `{ report_count, reporters[], window: {begin, end}, window_days, total_messages,
+  aligned_pass_messages, dmarc_pass_messages, pass_rate_pct, dkim_only, spf_only, both_fail,
+  quarantined, rejected, policy_published: {p, sp, adkim, aspf, pct, np}, rows[] }` (`rows[]` =
+  the §7.1 per-source columns). No new computation — it serializes what derive-findings.ts already
+  holds in memory. This makes every block-2 element run-scoped and lets §16.4's history strip plot
+  real pass-rate history.
+- **v1 fallback (until the snapshot lands).** Block 2 renders the finding rows from the run and
+  the breakdown/per-source tables from the live `GET /api/domains/:id/reports` view. When the
+  viewed run is **not** the domain's newest, those two tables carry a small **"live data — not
+  from this run"** chip so the snapshot rule is never silently violated.
+
+### 16.4 Run-history strip — did my fix work?
+
+Below block 5, the unit-scoped strip per dmarc.mdx §6.7: the domain's last 10 runs, one chip per
+run — colored by that run's worst `dmarc.reports` severity (the §16.1 derivation applied
+per run), gray for runs with no `dmarc.reports` findings. Each chip tooltips the run timestamp +
+pass-rate (when the §16.3 snapshot exists) and **clicking a chip swaps `:runId`** to that run's
+explainer. Derived client-side from the existing `GET /api/audit/runs` list; the optional compact
+endpoint `GET /api/audit/history/:domainId?category=dmarc&unit=reports` (dmarc.mdx §6.7) serves it
+in one call when it lands. Once snapshots exist, the strip upgrades to a **pass-rate sparkline**
+(96.8 → 100 after the `aspf=r` fix is the "did my fix work?" picture) — future, gated on §16.3.
+
+### 16.5 Finding → drill-down map, and where every click goes
+
+**Findings → drill-down.** Report findings mint **no new `:problemId` ids** — the `PS-nn`
+namespace of [checks/dmarc.mdx §9](./checks/dmarc.mdx) stays DNS-record-owned, and the route
+disjointness rule (literal `check` segment vs `:problemId`) is preserved. For this unit, **the
+anchored explainer row is the drill-down**: every surface that renders a `dmarc.reports` finding
+(category-page test table and band, run-report section, Reports view §7.1, dashboard regression
+rows) deep-links to the same target. The map is mechanical — strip nothing, anchor on the full id:
+
+| Finding id (as emitted) | Drill-down target |
+| --- | --- |
+| `dmarc.real_pass_rate` | `…/dmarc/check/reports#finding-dmarc.real_pass_rate` |
+| `dmarc.report_unaligned_source` (ok row) / `.<ip>` (per-source) | `…/dmarc/check/reports#finding-dmarc.report_unaligned_source[.<ip>]` |
+| `dmarc.report_alignment_fragility` (ok row) / `.<envelope>` | `…/dmarc/check/reports#finding-dmarc.report_alignment_fragility[.<envelope>]` |
+| `dmarc.report_enforcement` (info row) / `.<ip>` | `…/dmarc/check/reports#finding-dmarc.report_enforcement[.<ip>]` |
+| `dmarc.report_new_source` | `…/dmarc/check/reports#finding-dmarc.report_new_source` |
+
+(`…` = run-scoped prefix when the linking surface is run-scoped, else the newest alias. The
+anchored row scrolls into view and flashes once.)
+
+**Clickable sub-concepts on this page** (every concept is one click from its own explainer):
+
+| Clickable element | Navigates to |
+| --- | --- |
+| `rua=` / `ruf=` in the raw record | sibling explainer `…/dmarc/check/reporting` |
+| `p=` / `sp=` values (breakdown table & copy) | `…/dmarc/check/policy` (and `…/check/subdomain-policy` for `sp`/`np`) |
+| `adkim=` / `aspf=` values (the fragility fix's subject) | `…/dmarc/check/alignment` |
+| `pct=` | `…/dmarc/check/pct` |
+| SPF eval/align column header & envelope-domain cells | the domain's SPF page `/domains/:domainId/spf` |
+| DKIM eval/align column header & `d=` domain cells | the domain's DKIM page `/domains/:domainId/dkim` |
+| A source-IP cell | row-level "Check blacklists" affordance → the Blacklists page for the domain (the §14.5 sweep; per-IP lookup is that spec's growth) |
+| "Forwarded mail" mention in block 3 | sibling explainer `…/dmarc/check/arc` ([checks/arc.mdx](./checks/arc.mdx)) |
+| "TLS-RPT reports" cross-mention | the Reports view `/domains/:domainId/reports` (TLS-RPT group) — that unit reports to DNS & Infrastructure, never here |
+| A reporter org name (google.com, Outlook.com) | its postmaster documentation (references footer link, new tab) |
+
+**References footer** (external, new-tab, the only external navigation): RFC 7489 §7.2 (aggregate
+reporting) and DMARCbis RFC 9990; RFC 7489 §6.6.2 (alignment); Google Postmaster Tools & Gmail
+bulk-sender requirements; Microsoft/Outlook sender support; a DMARC XML reader (dmarcian XML-to-
+human or learndmarc.com); one "edit a TXT record" doc per common provider (Cloudflare, Route 53,
+Namecheap, Squarespace) — same provider list as the sibling units.
+
+### 16.6 States
+
+- **Loading** → five skeleton blocks + skeleton history strip (shared chrome behavior).
+- **Ingestion disabled** (admin switch off, §8) → chip ⓘ slate; block 2 shows the single
+  "Report ingestion disabled" finding the checker actually emits; block 4 = "Enable report
+  ingestion under Settings → Admin"; block 5's button disabled with that tooltip.
+- **No reports yet** → chip ⓘ slate; block 2 shows the checker's "No DMARC aggregate reports
+  ingested yet" finding; block 4 = the copyable `rua=` record + the 24–72h expectation (§7.3);
+  block 5 stays active ("Check for new reports" is exactly the right action).
+- **Not measured** (the viewed run predates the checker — no `dmarc.reports` findings) → gray
+  chip, blocks 1/3 render normally, block 2 = one line "This run did not include the ingested-
+  reports check", block 4 defers to block 5's re-run.
+- **Stale corpus** (newest report older than 2× the window — §13.2 freshness rule) → an amber
+  banner above block 2: "Newest report is N days old — reports may have stopped arriving; check
+  the rua= address and mailbox wiring", linking to `…/dmarc/check/reporting` and Settings.
+- **Run-fetch error** → error strip with Retry above block 1 (shared chrome). **Ingest-call
+  error** (block 5) → toast with the API error; the page stays on the current run.
+- **Unknown `checkKey`** is owned by the shared chrome (dmarc.mdx §6.4's "No such sub-test"
+  panel) — nothing extra here.
 
 <!--
   Maintenance notes:
@@ -489,13 +907,34 @@ in the field what the health checks predict from DNS, and each backstops the oth
     infra.tls_rpt_reports_ingested / tls_rpt_reports (checks/tls_rpt.mdx). Keep those cross-links live.
   * The classifier MUST key off attachment media type + decompressed payload root, NOT subject/filename
     — three microsoft.com files in emails/ are TLS-RPT despite DMARC-looking subjects. Do not regress.
-  * Report findings roll into the EXISTING six categories (DMARC, DNS & Infrastructure). Never add a
-    seventh dashboard category (dashboard.mdx locks the six).
+  * Report findings roll into the EXISTING six categories (DMARC, DNS & Infrastructure, and — via
+    the §13 run-time test — Spam & Content). Never add a seventh dashboard category (dashboard.mdx
+    locks the six).
+  * §13 is the run-time Spam & Content family (report_emails, checker content.report_emails,
+    findings content.report_*): scans reports.analyzeDir IN PLACE (never move files), attributes
+    by payload domain, aggregate findings only (per-source detail stays dmarc.*/infra.*). Keep in
+    lockstep with checks/spam_content.mdx §1 row 7 / §4 snapshot.
   * Media types: DMARC agg = application/zip | application/gzip; TLS-RPT = application/tlsrpt+gzip.
   * State root is ~/.email_delivery_hero/ (storage.mdx authority; EDH_STATE_DIR override) — the
     same store module engineering.mdx/dmarc.mdx/tls_rpt.mdx refer to.
   * When RUF/ARF or FBL/Postmaster ingestion ships, move the relevant row from §11 future → first
     round and add a sub-check id under the correct existing category.
+  * §16 owns the CONTENT of the DMARC category's `reports` sub-test explainer at the LOCKED route
+    /domains/:domainId/runs/:runId/dmarc/check/reports (newest alias /domains/:domainId/dmarc/
+    check/reports). checks/dmarc.mdx §6.3–§6.5 owns the band row, page chrome, and route pattern —
+    keep the ownership boundary; never fork the route or the five-block order here.
+  * The explainer's block 5 is the §6.5 SCOPE EXCEPTION: "Check for new reports" → the EXISTING
+    POST /api/domains/:id/reports/ingest (reports.controller.ts), never the DNS-run endpoint as
+    primary. Do not regress the label to "Run this check now".
+  * Report findings mint NO new :problemId ids — drill-down = the anchored explainer row
+    (#finding-<full-finding-id>, §16.5). checks/dmarc.mdx §9's PS-nn namespace stays DNS-owned.
+  * §16.1's chip derives from the run's checkId "dmarc.reports" findings with the checker's real
+    severity values (ok/info/warning/critical) — keep in lockstep with derive-findings.ts (§5) and
+    dmarc-reports.check.ts.
+  * §16.3's run-YAML `dmarc.reports` aggregate snapshot is a PROPOSED small checker addition
+    (serialize the DmarcAggregate already computed). Until it lands, older-run explainers must
+    show the "live data — not from this run" chip on the two tables; when it lands, drop the
+    fallback and upgrade §16.4's strip to the pass-rate sparkline.
 -->
 </content>
 </invoke>

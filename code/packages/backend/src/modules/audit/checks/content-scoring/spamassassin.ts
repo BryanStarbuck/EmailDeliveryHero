@@ -55,7 +55,9 @@ export function parseSaOutput(stdout: string): SaReport | null {
     threshold = Number.parseFloat(slash[2])
   } else {
     // spamassassin -t: X-Spam-Status: Yes, score=6.2 required=5.0 tests=...
-    const status = stdout.match(/X-Spam-Status:.*?score=(-?\d+(?:\.\d+)?)\s+required=(\d+(?:\.\d+)?)/s)
+    const status = stdout.match(
+      /X-Spam-Status:.*?score=(-?\d+(?:\.\d+)?)\s+required=(\d+(?:\.\d+)?)/s,
+    )
     if (status) {
       totalScore = Number.parseFloat(status[1])
       threshold = Number.parseFloat(status[2])
@@ -94,7 +96,9 @@ async function readSaVersion(binPath: string): Promise<string | null> {
   return line || null
 }
 
-export type SaAvailability = { installed: true; spamc: string | null; spamassassin: string | null } | { installed: false }
+export type SaAvailability =
+  | { installed: true; spamc: string | null; spamassassin: string | null }
+  | { installed: false }
 
 /** Locate the Homebrew engine without running anything (pm/run_checks.mdx §5.2 ToolLocator). */
 export function locateSpamAssassin(): SaAvailability {
@@ -112,7 +116,7 @@ export function locateSpamAssassin(): SaAvailability {
  */
 export async function scoreSample(
   raw: string,
-  opts: { enableNetworkTests?: boolean } = {},
+  opts: { enableNetworkTests?: boolean; signal?: AbortSignal } = {},
 ): Promise<SaRunOutcome | null> {
   const avail = locateSpamAssassin()
   if (!avail.installed) return null
@@ -120,6 +124,9 @@ export async function scoreSample(
     timeoutMs: SA_TIMEOUT_MS,
     stdin: raw,
     resource: "cpu" as const,
+    // Cooperative cancellation (pm/run_checks.mdx §10): the per-domain run deadline kills the
+    // child so a hung engine never outlives its run.
+    signal: opts.signal,
   }
 
   if (avail.spamc) {
@@ -144,7 +151,11 @@ export async function scoreSample(
       // Exit 1 = "message is spam" in some configurations; the report is still on stdout.
       const report = parseSaOutput(result.stdout)
       if (report) {
-        return { report, engine: "spamassassin", saVersion: await readSaVersion(avail.spamassassin) }
+        return {
+          report,
+          engine: "spamassassin",
+          saVersion: await readSaVersion(avail.spamassassin),
+        }
       }
     }
   }

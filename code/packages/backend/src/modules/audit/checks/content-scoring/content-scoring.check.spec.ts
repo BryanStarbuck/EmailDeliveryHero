@@ -6,7 +6,13 @@ import { join } from "node:path"
 process.env.EDH_STATE_DIR = mkdtempSync(join(tmpdir(), "edh-content-scoring-"))
 
 import type { CheckOutcome, Finding } from "../types"
-import { getActiveSample, listSamples, MAX_SAMPLE_BYTES, readSampleRaw, saveSample } from "./sample-store"
+import {
+  getActiveSample,
+  listSamples,
+  MAX_SAMPLE_BYTES,
+  readSampleRaw,
+  saveSample,
+} from "./sample-store"
 import { isHighWeightRule, parseSaOutput, subCheckForRule } from "./spamassassin"
 
 // The checker is exercised with the engine mocked (no Homebrew SpamAssassin in CI); the parser and
@@ -15,7 +21,11 @@ jest.mock("./spamassassin", () => {
   const actual = jest.requireActual("./spamassassin")
   return {
     ...actual,
-    locateSpamAssassin: jest.fn(() => ({ installed: true, spamc: null, spamassassin: "/opt/homebrew/bin/spamassassin" })),
+    locateSpamAssassin: jest.fn(() => ({
+      installed: true,
+      spamc: null,
+      spamassassin: "/opt/homebrew/bin/spamassassin",
+    })),
     scoreSample: jest.fn(),
   }
 })
@@ -124,7 +134,9 @@ describe("subCheckForRule / isHighWeightRule", () => {
   it("flags the high-weight families that force a critical sub-check (§8 AC 5)", () => {
     expect(isHighWeightRule({ rule: "HIDDEN_TEXT", score: 1.0, description: "" })).toBe(true)
     expect(isHighWeightRule({ rule: "FORGED_MUA", score: 0.5, description: "" })).toBe(true)
-    expect(isHighWeightRule({ rule: "MICROSOFT_EXECUTABLE", score: 0.1, description: "" })).toBe(true)
+    expect(isHighWeightRule({ rule: "MICROSOFT_EXECUTABLE", score: 0.1, description: "" })).toBe(
+      true,
+    )
     expect(isHighWeightRule({ rule: "SUBJ_ALL_CAPS", score: 1.2, description: "" })).toBe(false)
     expect(isHighWeightRule({ rule: "ANY_RULE", score: 3.5, description: "" })).toBe(true)
   })

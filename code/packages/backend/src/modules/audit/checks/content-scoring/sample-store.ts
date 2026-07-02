@@ -79,7 +79,8 @@ function parseHeader(raw: string, name: string): string | null {
     if (lines[i].toLowerCase().startsWith(prefix)) {
       let value = lines[i].slice(prefix.length)
       // RFC 5322 folding: continuation lines start with whitespace.
-      for (let j = i + 1; j < lines.length && /^[ \t]/.test(lines[j]); j++) value += ` ${lines[j].trim()}`
+      for (let j = i + 1; j < lines.length && /^[ \t]/.test(lines[j]); j++)
+        value += ` ${lines[j].trim()}`
       return value.trim() || null
     }
   }

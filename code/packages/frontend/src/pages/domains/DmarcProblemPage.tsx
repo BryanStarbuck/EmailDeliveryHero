@@ -1,8 +1,9 @@
 import { useNavigate, useParams } from "@tanstack/react-router"
-import { ArrowLeft, Star } from "lucide-react"
+import { ArrowLeft, ChevronLeft, ChevronRight, Star } from "lucide-react"
+import { useMemo } from "react"
 import { useAuditResults, useAuditRuns } from "@/api/audit"
 import { useDomains } from "@/api/domains"
-import type { DmarcResults } from "@/api/types"
+import type { AuditResult, DmarcResults } from "@/api/types"
 import { ProblemDrilldown } from "@/components/ProblemDrilldown"
 import { normalizeDmarcSection } from "@/lib/dmarc"
 import { problemStateById } from "@/lib/dmarc-problems"
@@ -38,6 +39,34 @@ export function DmarcProblemPage() {
     : (results ?? []).find((r) => r.domainId === id)
   const { record } = normalizeDmarcSection(result?.results?.dmarc)
 
+  // The same run context strip as the DMARC page (§7): this domain's runs in startedAt order
+  // give the ‹ prev / next › pager rail and the ★ newest badge.
+  const domainRuns = useMemo(
+    () =>
+      (runs ?? [])
+        .filter((r) => r.domainId === id)
+        .sort((a, b) => (a.startedAt ?? a.ranAt).localeCompare(b.startedAt ?? b.ranAt)),
+    [runs, id],
+  )
+  const indexInRail = domainRuns.findIndex((r) => r.runId && r.runId === result?.runId)
+  const effectiveIndex = indexInRail >= 0 ? indexInRail : !runId ? domainRuns.length - 1 : -1
+  const prevRun = effectiveIndex > 0 ? domainRuns[effectiveIndex - 1] : undefined
+  const nextRun =
+    effectiveIndex >= 0 && effectiveIndex < domainRuns.length - 1
+      ? domainRuns[effectiveIndex + 1]
+      : undefined
+  const isNewest = !runId || (effectiveIndex >= 0 && effectiveIndex === domainRuns.length - 1)
+
+  // Paging swaps :runId while keeping the same problem drill-down in view.
+  const goToRun = (r: AuditResult | undefined): void => {
+    if (r?.runId) {
+      navigate({
+        to: "/domains/$id/runs/$runId/dmarc/$problemId",
+        params: { id, runId: r.runId, problemId },
+      })
+    }
+  }
+
   const back = (): void => {
     if (runId) {
       navigate({ to: "/domains/$id/runs/$runId/dmarc", params: { id, runId } })
@@ -56,13 +85,33 @@ export function DmarcProblemPage() {
         <ArrowLeft className="h-4 w-4" /> Back to DMARC for {name}
       </button>
 
-      {/* Run context strip (§7): the drill-down keeps the run's vintage unmistakable. */}
+      {/* Run context strip (§7 — same strip as the DMARC page): the drill-down keeps the run's
+          vintage unmistakable, with the ‹ prev / next › pager stepping this domain's runs. */}
       {result && (
         <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-[var(--edh-muted)]">
           <span className="tabular-nums">
             Run {new Date(result.startedAt ?? result.ranAt).toLocaleString()}
           </span>
-          {!runId && (
+          <span>·</span>
+          <button
+            type="button"
+            onClick={() => goToRun(prevRun)}
+            disabled={!prevRun}
+            aria-label="Previous run"
+            className="inline-flex items-center gap-0.5 rounded border border-[var(--edh-border)] px-2 py-0.5 hover:bg-slate-50 disabled:opacity-40"
+          >
+            <ChevronLeft className="h-3.5 w-3.5" /> prev
+          </button>
+          <button
+            type="button"
+            onClick={() => goToRun(nextRun)}
+            disabled={!nextRun}
+            aria-label="Next run"
+            className="inline-flex items-center gap-0.5 rounded border border-[var(--edh-border)] px-2 py-0.5 hover:bg-slate-50 disabled:opacity-40"
+          >
+            next <ChevronRight className="h-3.5 w-3.5" />
+          </button>
+          {isNewest && (
             <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 font-medium text-amber-700">
               <Star className="h-3 w-3" /> newest
             </span>
@@ -137,7 +186,10 @@ function YourRunData({ record }: { record: DmarcResults | undefined }) {
             </thead>
             <tbody>
               {record.external_report_auth.map((a) => (
-                <tr key={a.auth_name + a.report_kind} className="border-t border-[var(--edh-border)]">
+                <tr
+                  key={a.auth_name + a.report_kind}
+                  className="border-t border-[var(--edh-border)]"
+                >
                   <td className="px-3 py-1.5 font-mono text-xs uppercase">{a.report_kind}</td>
                   <td className="break-all px-3 py-1.5 font-mono text-xs">{a.auth_name}</td>
                   <td className="px-3 py-1.5 font-mono text-xs">

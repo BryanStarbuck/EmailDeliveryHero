@@ -14,9 +14,15 @@ const ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2, ok: 
 export function TestResultsTable({
   findings,
   emptyText = "No tests in the latest run.",
+  expectedById,
 }: {
   findings: Finding[]
   emptyText?: string
+  /**
+   * Optional expected-DNS-value per finding id (pm/checks/dmarc.mdx §6.2 item 4 — the expanded
+   * row shows observed AND expected, e.g. `<auth_name> TXT "v=DMARC1"`).
+   */
+  expectedById?: Map<string, string>
 }) {
   const sorted = [...findings].sort((a, b) => ORDER[a.severity] - ORDER[b.severity])
   const counts = {
@@ -39,7 +45,7 @@ export function TestResultsTable({
         ) : (
           <ul>
             {sorted.map((f) => (
-              <TestRow key={f.id + f.title} finding={f} />
+              <TestRow key={f.id + f.title} finding={f} expected={expectedById?.get(f.id)} />
             ))}
           </ul>
         )}
@@ -48,7 +54,7 @@ export function TestResultsTable({
   )
 }
 
-function TestRow({ finding: f }: { finding: Finding }) {
+function TestRow({ finding: f, expected }: { finding: Finding; expected?: string }) {
   const [open, setOpen] = useState(f.severity === "critical")
   const icon =
     f.severity === "ok" ? (
@@ -83,6 +89,11 @@ function TestRow({ finding: f }: { finding: Finding }) {
           {f.evidence && (
             <p className="mt-1 break-all rounded bg-slate-50 p-2 font-mono text-xs text-slate-600">
               observed: {f.evidence}
+            </p>
+          )}
+          {expected && (
+            <p className="mt-1 break-all rounded bg-slate-50 p-2 font-mono text-xs text-slate-600">
+              expected: {expected}
             </p>
           )}
           {f.remediation && f.severity !== "ok" && (

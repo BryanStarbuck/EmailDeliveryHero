@@ -52,7 +52,8 @@ function getHeader(head: string, name: string): string | null {
   for (let i = 0; i < lines.length; i++) {
     if (lines[i].toLowerCase().startsWith(prefix)) {
       let value = lines[i].slice(prefix.length)
-      for (let j = i + 1; j < lines.length && /^[ \t]/.test(lines[j]); j++) value += ` ${lines[j].trim()}`
+      for (let j = i + 1; j < lines.length && /^[ \t]/.test(lines[j]); j++)
+        value += ` ${lines[j].trim()}`
       return value.trim() || null
     }
   }
@@ -77,7 +78,9 @@ function parseContentType(value: string | null): { type: string; params: Record<
 function decodeQuotedPrintable(s: string): string {
   return s
     .replace(/=\r?\n/g, "")
-    .replace(/=([0-9A-Fa-f]{2})/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .replace(/=([0-9A-Fa-f]{2})/g, (_, hex: string) =>
+      String.fromCharCode(Number.parseInt(hex, 16)),
+    )
 }
 
 function decodeTransfer(body: string, cte: string | null): string {
@@ -118,7 +121,12 @@ function splitHeadBody(entity: string): { head: string; body: string } {
   return { head: entity.slice(0, match.index), body: entity.slice(match.index + match[0].length) }
 }
 
-function walkEntity(head: string, body: string, out: { html: string[]; text: string[] }, depth: number): void {
+function walkEntity(
+  head: string,
+  body: string,
+  out: { html: string[]; text: string[] },
+  depth: number,
+): void {
   if (depth > 8) return // pathological nesting guard
   const ct = parseContentType(getHeader(head, "content-type"))
   if (ct.type.startsWith("multipart/") && ct.params.boundary) {
@@ -167,16 +175,51 @@ export function extractSampleParts(raw: string): SampleParts {
 // compact first-round stand-in for the full Public Suffix List (bundle+refresh the real PSL later —
 // see spec maintenance notes); it covers the overwhelming majority of real-world links.
 const MULTI_PART_SUFFIXES = new Set([
-  "co.uk", "org.uk", "gov.uk", "ac.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk", "sch.uk",
-  "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au",
-  "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp",
-  "com.br", "net.br", "org.br", "gov.br",
-  "co.nz", "net.nz", "org.nz", "govt.nz",
-  "co.za", "org.za",
-  "co.in", "net.in", "org.in", "gen.in", "firm.in",
-  "co.kr", "or.kr",
-  "com.sg", "com.hk", "com.tw", "com.mx",
-  "com.cn", "net.cn", "org.cn", "gov.cn",
+  "co.uk",
+  "org.uk",
+  "gov.uk",
+  "ac.uk",
+  "me.uk",
+  "ltd.uk",
+  "plc.uk",
+  "net.uk",
+  "sch.uk",
+  "com.au",
+  "net.au",
+  "org.au",
+  "edu.au",
+  "gov.au",
+  "id.au",
+  "co.jp",
+  "or.jp",
+  "ne.jp",
+  "ac.jp",
+  "go.jp",
+  "com.br",
+  "net.br",
+  "org.br",
+  "gov.br",
+  "co.nz",
+  "net.nz",
+  "org.nz",
+  "govt.nz",
+  "co.za",
+  "org.za",
+  "co.in",
+  "net.in",
+  "org.in",
+  "gen.in",
+  "firm.in",
+  "co.kr",
+  "or.kr",
+  "com.sg",
+  "com.hk",
+  "com.tw",
+  "com.mx",
+  "com.cn",
+  "net.cn",
+  "org.cn",
+  "gov.cn",
 ])
 
 /** PSL-registrable domain of a host: last two labels, or three when the last two are a public suffix. */
@@ -195,17 +238,69 @@ export function registrableDomain(host: string): string {
 
 /** Cyrillic/Greek/latin-lookalike → ASCII skeleton map (the classic confusable set). */
 const CONFUSABLES: Record<string, string> = {
-  а: "a", е: "e", о: "o", р: "p", с: "c", х: "x", у: "y", і: "i", ї: "i", ј: "j", ѕ: "s",
-  һ: "h", ԁ: "d", ԛ: "q", ԝ: "w", ѵ: "v", ɡ: "g", ɑ: "a", ɩ: "i", ł: "l",
-  α: "a", ε: "e", ι: "i", κ: "k", ν: "v", ο: "o", ρ: "p", τ: "t", υ: "u", ω: "w",
+  а: "a",
+  е: "e",
+  о: "o",
+  р: "p",
+  с: "c",
+  х: "x",
+  у: "y",
+  і: "i",
+  ї: "i",
+  ј: "j",
+  ѕ: "s",
+  һ: "h",
+  ԁ: "d",
+  ԛ: "q",
+  ԝ: "w",
+  ѵ: "v",
+  ɡ: "g",
+  ɑ: "a",
+  ɩ: "i",
+  ł: "l",
+  α: "a",
+  ε: "e",
+  ι: "i",
+  κ: "k",
+  ν: "v",
+  ο: "o",
+  ρ: "p",
+  τ: "t",
+  υ: "u",
+  ω: "w",
 }
 
 /** Brand labels a homograph most often impersonates; matched against the confusable skeleton. */
 const BRAND_LABELS = new Set([
-  "apple", "google", "gmail", "youtube", "microsoft", "outlook", "office365", "icloud",
-  "paypal", "amazon", "facebook", "instagram", "whatsapp", "netflix", "linkedin", "twitter",
-  "ebay", "walmart", "chase", "wellsfargo", "bankofamerica", "citibank", "coinbase", "binance",
-  "usps", "fedex", "ups", "dhl", "irs",
+  "apple",
+  "google",
+  "gmail",
+  "youtube",
+  "microsoft",
+  "outlook",
+  "office365",
+  "icloud",
+  "paypal",
+  "amazon",
+  "facebook",
+  "instagram",
+  "whatsapp",
+  "netflix",
+  "linkedin",
+  "twitter",
+  "ebay",
+  "walmart",
+  "chase",
+  "wellsfargo",
+  "bankofamerica",
+  "citibank",
+  "coinbase",
+  "binance",
+  "usps",
+  "fedex",
+  "ups",
+  "dhl",
+  "irs",
 ])
 
 /** Reduce a unicode host to an ASCII confusable skeleton (NFKD, strip marks, map lookalikes). */
@@ -230,7 +325,7 @@ export function homographBrandFor(host: string): string | null {
     return null
   }
   const skeleton = confusableSkeleton(unicode)
-  if (!/^[\x00-\x7f]+$/.test(skeleton)) return null // still non-ASCII → not a plain-brand lookalike
+  if (!/^\p{ASCII}+$/u.test(skeleton)) return null // still non-ASCII → not a plain-brand lookalike
   const sld = registrableDomain(skeleton).split(".")[0] ?? ""
   return BRAND_LABELS.has(sld) ? sld : null
 }
@@ -245,9 +340,29 @@ export function homographBrandFor(host: string): string | null {
  * the seed default the config store ships.
  */
 export const DEFAULT_SHORTENERS: string[] = [
-  "bit.ly", "t.co", "tinyurl.com", "ow.ly", "buff.ly", "goo.gl", "is.gd", "rebrand.ly",
-  "lnkd.in", "t.ly", "cutt.ly", "rb.gy", "shorturl.at", "bl.ink", "tiny.cc", "soo.gd",
-  "s.id", "trib.al", "dlvr.it", "shar.es", "mcaf.ee", "adf.ly", "clck.ru",
+  "bit.ly",
+  "t.co",
+  "tinyurl.com",
+  "ow.ly",
+  "buff.ly",
+  "goo.gl",
+  "is.gd",
+  "rebrand.ly",
+  "lnkd.in",
+  "t.ly",
+  "cutt.ly",
+  "rb.gy",
+  "shorturl.at",
+  "bl.ink",
+  "tiny.cc",
+  "soo.gd",
+  "s.id",
+  "trib.al",
+  "dlvr.it",
+  "shar.es",
+  "mcaf.ee",
+  "adf.ly",
+  "clck.ru",
 ]
 
 export interface LinkUrl {

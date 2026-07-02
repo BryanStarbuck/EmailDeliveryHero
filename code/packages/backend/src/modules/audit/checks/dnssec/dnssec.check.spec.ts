@@ -1,13 +1,17 @@
 import type { DnssecResults } from "./dnssec.check"
 
-jest.mock("../dns-util", () => ({ dig: jest.fn(), resolveSoa: jest.fn() }))
+jest.mock("../dns-util", () => ({ dig: jest.fn(), resolveSoa: jest.fn(), digDnssec: jest.fn() }))
+jest.mock("@shared/config-store", () => ({ readAppConfig: jest.fn() }))
 
-import { dig, resolveSoa } from "../dns-util"
+import { readAppConfig } from "@shared/config-store"
+import { type DigDnssecResponse, dig, digDnssec, resolveSoa } from "../dns-util"
 import type { CheckContext, CheckOutcome, Finding } from "../types"
 import { dnssecCheck } from "./dnssec.check"
 
 const mockDig = dig as jest.MockedFunction<typeof dig>
 const mockResolveSoa = resolveSoa as jest.MockedFunction<typeof resolveSoa>
+const mockDigDnssec = digDnssec as jest.MockedFunction<typeof digDnssec>
+const mockReadAppConfig = readAppConfig as jest.MockedFunction<typeof readAppConfig>
 
 /**
  * Recorded fixtures (deterministic — spec acceptance #4): the real cloudflare.com apex DNSKEY set
@@ -26,10 +30,9 @@ const DS_MISMATCH = "9999 13 2 32996839A6D808AFE3EB4A795A0E6A7A39A76FC52FF228B22
 
 /** A synthetic RSASHA1-NSEC3-SHA1 (alg 7) KSK: RFC 3110 key = [expLen=3][65537][modulus]. */
 function rsaDnskey(flags: number, alg: number, modulusBytes: number): string {
-  const key = Buffer.concat([
-    Buffer.from([3, 1, 0, 1]),
-    Buffer.alloc(modulusBytes, 0xab),
-  ]).toString("base64")
+  const key = Buffer.concat([Buffer.from([3, 1, 0, 1]), Buffer.alloc(modulusBytes, 0xab)]).toString(
+    "base64",
+  )
   return `${flags} 3 ${alg} ${key}`
 }
 
@@ -53,9 +56,58 @@ const byId = (findings: Finding[], id: string) => findings.find((f) => f.id === 
 const byCheckId = (findings: Finding[], checkId: string) =>
   findings.filter((f) => f.checkId === checkId)
 
+/** Route mocked digDnssec responses by `<TYPE>:<cd|nocd>` (default: empty NOERROR). */
+function deepAnswers(map: Record<string, Partial<DigDnssecResponse>>) {
+  mockDigDnssec.mockImplementation(async (_name, type, opts = {}) => {
+    const a = map[`${type}:${opts.cd ? "cd" : "nocd"}`]
+    return {
+      status: a?.status ?? "NOERROR",
+      adFlag: a?.adFlag ?? false,
+      answers: a?.answers ?? [],
+      ...(a?.error !== undefined ? { error: a.error } : {}),
+    }
+  })
+}
+
+/** Enable the deep `validateViaDig` path via the mocked config (pm/checks/dnssec.mdx §4). */
+function enableDeep(overrides: Record<string, unknown> = {}) {
+  mockReadAppConfig.mockReturnValue({
+    checks: {
+      dnssec: {
+        resolvers: ["1.1.1.1"],
+        rrsigLeadHours: 72,
+        validateViaDig: true,
+        algorithms: [],
+        ...overrides,
+      },
+    },
+  } as unknown as ReturnType<typeof readAppConfig>)
+}
+
+/** A DigAnswer row for the mocked +dnssec responses. */
+function rr(type: string, rdata: string) {
+  return { name: DOMAIN, ttl: 3600, type, rdata }
+}
+
+/** An RRSIG rdata covering `covered`, expiring at `exp` (YYYYMMDDHHMMSS). */
+function rrsig(covered: string, exp: string, keyTag = 2371) {
+  return rr("RRSIG", `${covered} 13 2 3600 ${exp} 20190101000000 ${keyTag} ${DOMAIN}. c2ln`)
+}
+
+/** Format a Date as the RRSIG presentation timestamp YYYYMMDDHHMMSS (UTC). */
+function ts(d: Date): string {
+  return d.toISOString().replace(/[-:T]/g, "").slice(0, 14)
+}
+
 beforeEach(() => {
   mockDig.mockReset()
   mockResolveSoa.mockReset()
+  mockDigDnssec.mockReset()
+  mockReadAppConfig.mockReset()
+  // Default: no config file → built-in defaults (validateViaDig OFF, presence-only round).
+  mockReadAppConfig.mockImplementation(() => {
+    throw new Error("no config in unit tests")
+  })
   mockResolveSoa.mockResolvedValue({
     record: {
       nsname: "ns1.cloudflare.com",
@@ -194,5 +246,126 @@ describe("dnssecCheck (pm/checks/dnssec.mdx)", () => {
     expect(outcome.findings[0].severity).toBe("info")
     expect(outcome.findings[0].checkId).toBe("infra.dnssec_signed")
     expect(outcome.results).toBeUndefined()
+  })
+
+  describe("deep validateViaDig path (spec §3 FUTURE, acceptance #5–#7)", () => {
+    const FRESH = ts(new Date(Date.now() + 30 * 24 * 3_600_000))
+    const NEAR = ts(new Date(Date.now() + 24 * 3_600_000))
+    const EXPIRED = "20200101000000"
+    const DNSKEY_CD = {
+      answers: [rr("DNSKEY", KSK_13), rr("DNSKEY", ZSK_13), rrsig("DNSKEY", FRESH)],
+    }
+
+    beforeEach(() => {
+      dnsAnswers({ DNSKEY: { records: [KSK_13, ZSK_13] }, DS: { records: [DS_SHA256] } })
+    })
+
+    it("AD=1 → validates ok; fresh RRSIGs ok; chain complete; DANE-ready (acceptance #13)", async () => {
+      enableDeep()
+      deepAnswers({
+        "SOA:nocd": { status: "NOERROR", adFlag: true, answers: [rr("SOA", "ns1 host 1 1 1 1 1")] },
+        "DNSKEY:cd": DNSKEY_CD,
+        "SOA:cd": { answers: [rr("SOA", "ns1 host 1 1 1 1 1"), rrsig("SOA", FRESH)] },
+      })
+      const { findings, results } = await run()
+      expect(byId(findings, "infra.dnssec_validates.ok")?.severity).toBe("ok")
+      expect(byId(findings, "infra.dnssec_rrsig_expiry.ok")?.severity).toBe("ok")
+      expect(byId(findings, "infra.dnssec_chain_complete.ok")?.severity).toBe("ok")
+      expect(byId(findings, "infra.dnssec_dane_ready.ok")?.severity).toBe("ok")
+      expect(results?.validates).toBe(true)
+      expect(results?.bogus).toBe(false)
+      expect(results?.resolverUsed).toBe("1.1.1.1")
+      expect(results?.dane_ready).toBe(true)
+      expect(typeof results?.rrsigEarliestExpiry).toBe("string")
+    })
+
+    it("SERVFAIL with CD=0 but success with CD=1 → bogus critical (acceptance #6)", async () => {
+      enableDeep()
+      deepAnswers({
+        "SOA:nocd": { status: "SERVFAIL" },
+        "SOA:cd": { status: "NOERROR", answers: [rr("SOA", "ns1 host 1 1 1 1 1")] },
+        "DNSKEY:cd": DNSKEY_CD,
+      })
+      const { findings, results } = await run()
+      const f = byId(findings, "infra.dnssec_validates.bogus")
+      expect(f?.severity).toBe("critical")
+      expect(f?.remediation).toMatch(/re-sign|DS/i)
+      expect(results?.validates).toBe(false)
+      expect(results?.bogus).toBe(true)
+    })
+
+    it("SERVFAIL with BOTH CD=0 and CD=1 → ordinary outage, info only — never bogus (acceptance #6)", async () => {
+      enableDeep()
+      deepAnswers({
+        "SOA:nocd": { status: "SERVFAIL" },
+        "SOA:cd": { status: "SERVFAIL" },
+        "DNSKEY:cd": DNSKEY_CD,
+      })
+      const { findings, results } = await run()
+      expect(byId(findings, "infra.dnssec_validates.bogus")).toBeUndefined()
+      const fs = byCheckId(findings, "infra.dnssec_validates")
+      expect(fs).toHaveLength(1)
+      expect(fs[0].severity).toBe("info")
+      expect(results?.bogus).toBe(false)
+    })
+
+    it("expired apex RRSIG → critical; within the 72h lead time → warning (acceptance #7)", async () => {
+      enableDeep()
+      deepAnswers({
+        "SOA:nocd": { status: "NOERROR", adFlag: true, answers: [rr("SOA", "x")] },
+        "DNSKEY:cd": { answers: [rr("DNSKEY", KSK_13), rrsig("DNSKEY", EXPIRED)] },
+      })
+      expect(byId((await run()).findings, "infra.dnssec_rrsig_expiry.expired")?.severity).toBe(
+        "critical",
+      )
+
+      deepAnswers({
+        "SOA:nocd": { status: "NOERROR", adFlag: true, answers: [rr("SOA", "x")] },
+        "DNSKEY:cd": { answers: [rr("DNSKEY", KSK_13), rrsig("DNSKEY", NEAR)] },
+      })
+      const { findings, results } = await run()
+      expect(byId(findings, "infra.dnssec_rrsig_expiry.near")?.severity).toBe("warning")
+      expect(results?.rrsigEarliestExpiry).not.toBeNull()
+    })
+
+    it("NSEC3 iterations > 0 → warning per RFC 9276; params land in results", async () => {
+      enableDeep()
+      deepAnswers({
+        "SOA:nocd": { status: "NOERROR", adFlag: true, answers: [rr("SOA", "x")] },
+        "DNSKEY:cd": DNSKEY_CD,
+        "NSEC3PARAM:cd": { answers: [rr("NSEC3PARAM", "1 0 5 AB12")] },
+      })
+      const { findings, results } = await run()
+      expect(byId(findings, "infra.dnssec_nsec3.params")?.severity).toBe("warning")
+      expect(results?.nsec3).toBe(true)
+      expect(results?.nsec3Iterations).toBe(5)
+      expect(results?.nsec3Optout).toBe(false)
+    })
+
+    it("all resolvers unreachable → every deep sub-check degrades to info, never critical (acceptance #5)", async () => {
+      enableDeep()
+      deepAnswers({
+        "SOA:nocd": { error: "timeout" },
+        "SOA:cd": { error: "timeout" },
+        "DNSKEY:cd": { error: "timeout" },
+        "NSEC3PARAM:cd": { error: "timeout" },
+        "MX:cd": { error: "timeout" },
+        "TXT:cd": { error: "timeout" },
+      })
+      const { findings, results } = await run()
+      for (const checkId of [
+        "infra.dnssec_validates",
+        "infra.dnssec_rrsig_expiry",
+        "infra.dnssec_nsec3",
+        "infra.dnssec_soa_signed",
+        "infra.dnssec_dane_ready",
+      ]) {
+        const fs = byCheckId(findings, checkId)
+        expect(fs.length).toBeGreaterThan(0)
+        for (const f of fs) expect(f.severity).toBe("info")
+      }
+      expect(results?.validates).toBeNull()
+      expect(results?.bogus).toBe(false)
+    })
   })
 })

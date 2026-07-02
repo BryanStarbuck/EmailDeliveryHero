@@ -16,6 +16,8 @@ export type TargetSource =
   | "spf_authorized"
   | "email_report"
   | "primary"
+  | "return_path"
+  | "dkim_d"
 
 /** Problem states PS-0..PS-13 from pm/checks/blacklists.mdx §16. */
 export type ProblemStateId =
@@ -55,6 +57,10 @@ export interface BlocklistZone {
   enabled: boolean
   /** Default severity for a listing when no return-code entry overrides it. */
   severity: Severity
+  /** Registry prose — the §20.3 zone explainer's "What this is" block (never computed). */
+  description?: string
+  /** Operator homepage from the registry — the explainer's References block. */
+  url?: string
   /** Exact return-code map, e.g. { "127.0.0.4": { label: "XBL", severity: "critical" } }. */
   codes?: Record<string, CodeMeaning>
   /** Bitmask decode of the answer's last octet (SURBL/URIBL style). */

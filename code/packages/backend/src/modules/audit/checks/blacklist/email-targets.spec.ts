@@ -2,12 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { gzipSync } from "node:zlib"
-import {
-  collectEmailReportIps,
-  extractReportXml,
-  isPublicIp,
-  parseRuaXml,
-} from "./email-targets"
+import { collectEmailReportIps, extractReportXml, isPublicIp, parseRuaXml } from "./email-targets"
 
 /** Offline fixtures for the §19 email-derived target pipeline (pm/checks/blacklists.mdx). */
 
@@ -89,10 +84,14 @@ describe("extractReportXml", () => {
 })
 
 describe("isPublicIp", () => {
-  it.each(["10.1.2.3", "172.16.0.1", "192.168.1.1", "127.0.0.1", "169.254.1.1", "100.64.0.1"])(
-    "rejects private/reserved %s",
-    (ip) => expect(isPublicIp(ip)).toBe(false),
-  )
+  it.each([
+    "10.1.2.3",
+    "172.16.0.1",
+    "192.168.1.1",
+    "127.0.0.1",
+    "169.254.1.1",
+    "100.64.0.1",
+  ])("rejects private/reserved %s", (ip) => expect(isPublicIp(ip)).toBe(false))
   it("accepts public space and rejects non-IPv4", () => {
     expect(isPublicIp("203.0.113.24")).toBe(true)
     expect(isPublicIp("2001:db8::1")).toBe(false)

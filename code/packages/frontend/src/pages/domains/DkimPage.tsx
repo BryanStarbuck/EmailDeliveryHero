@@ -15,7 +15,7 @@ import {
   X,
 } from "lucide-react"
 import { useEffect, useState } from "react"
-import { useAuditResults, useAuditRuns } from "@/api/audit"
+import { useAuditResults, useAuditRuns, useDkimDiscovery } from "@/api/audit"
 import { useDomains, useUpdateDomain } from "@/api/domains"
 import type { DkimResults, DkimSelectorResult, DkimToolRun, Finding, Severity } from "@/api/types"
 import { CopyFixButton } from "@/components/CopyFixButton"
@@ -93,6 +93,12 @@ export function DkimPage() {
     void runDomains([{ id, name: domain?.name ?? id }]).then(() => {
       navigate({ to: "/domains/$id/dkim", params: { id } })
     })
+  }
+
+  // Loading (pm/checks/dkim.mdx §6.2): skeleton header + selector cards + table rows, no layout
+  // shift — never the "No runs yet" empty state while the queries are still in flight.
+  if (domains === undefined || results === undefined || runs === undefined) {
+    return <DkimPageSkeleton />
   }
 
   if (runNotFound) {
@@ -228,7 +234,6 @@ export function DkimPage() {
             domainName={domain?.name ?? id}
             selectors={domain?.dkimSelectors ?? []}
             scanning={scanning}
-            onRunDiscovery={onRunAgain}
           />
 
           {problems.length > 0 && (
@@ -595,24 +600,25 @@ function SelectorCard({
 }
 
 /**
- * The per-domain config input (pm/checks/dkim.mdx §6.2 item 5): selector chips with remove, an add
- * field, and a run-discovery action (discovery runs automatically when the list is empty).
+ * The per-domain config input (pm/checks/dkim.mdx §6.2 item 6): selector chips with remove, an add
+ * field, and the "Run discovery now" action — a live probe of the §4 MX-guided common-selector
+ * wordlist whose hits are offered for one-click import. Edits affect FUTURE runs only; the run on
+ * screen is immutable history.
  */
 function SelectorsEditor({
   domainId,
   domainName,
   selectors,
   scanning,
-  onRunDiscovery,
 }: {
   domainId: string
   domainName: string
   selectors: string[]
   scanning: boolean
-  onRunDiscovery: () => void
 }) {
   const [draft, setDraft] = useState("")
   const update = useUpdateDomain()
+  const discovery = useDkimDiscovery()
 
   const save = (next: string[]) => update.mutate({ id: domainId, input: { dkimSelectors: next } })
   const add = () => {
@@ -622,17 +628,21 @@ function SelectorsEditor({
     setDraft("")
   }
 
+  const outcome = discovery.data
+  const newHits = (outcome?.hits ?? []).filter((h) => !selectors.includes(h.selector))
+
   return (
     <section className="mt-6 rounded-lg border border-[var(--edh-border)] bg-white p-4">
       <div className="flex items-center justify-between">
         <h2 className="font-semibold">Selectors</h2>
         <button
           type="button"
-          onClick={onRunDiscovery}
-          disabled={scanning}
-          className="text-sm text-[var(--edh-primary)] underline disabled:opacity-50"
-          title="Discovery probes 40+ common selector names when no selectors are configured"
+          onClick={() => discovery.mutate(domainId)}
+          disabled={scanning || discovery.isPending}
+          className="inline-flex items-center gap-1 text-sm text-[var(--edh-primary)] underline disabled:opacity-50"
+          title="Probes 40+ common selector names (MX-guided first) and offers one-click import of hits"
         >
+          {discovery.isPending && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
           Run discovery now
         </button>
       </div>
@@ -675,7 +685,113 @@ function SelectorsEditor({
           <Plus className="h-3.5 w-3.5" /> Add
         </button>
       </div>
+
+      {/* Discovery results (§6.2 item 6): hits offered for one-click import. */}
+      {discovery.isError && (
+        <p className="mt-3 rounded-md bg-amber-50 p-2 text-sm text-amber-800">
+          Discovery failed — check that the backend is reachable, then try again.
+        </p>
+      )}
+      {outcome?.wildcard_shadow && (
+        <p className="mt-3 rounded-md bg-amber-50 p-2 text-sm text-amber-800">
+          A wildcard TXT record answers every selector name for {domainName} — discovery results are
+          unreliable and were suppressed. Remove or scope the wildcard, then retry.
+        </p>
+      )}
+      {outcome && !outcome.wildcard_shadow && outcome.hits.length === 0 && (
+        <p className="mt-3 text-sm text-[var(--edh-muted)]">
+          No published keys found at {outcome.probed} common selector names. If mail signs with a
+          custom selector, read the s= tag from a real message (Gmail "Show original") and add it
+          above.
+        </p>
+      )}
+      {outcome && !outcome.wildcard_shadow && outcome.hits.length > 0 && (
+        <div className="mt-3 rounded-md border border-dashed border-slate-300 p-2">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-medium uppercase text-[var(--edh-muted)]">
+              Discovered selector{outcome.hits.length === 1 ? "" : "s"}
+            </p>
+            {newHits.length > 1 && (
+              <button
+                type="button"
+                onClick={() => save([...selectors, ...newHits.map((h) => h.selector)])}
+                disabled={update.isPending}
+                className="text-xs text-[var(--edh-primary)] underline disabled:opacity-50"
+              >
+                Import all
+              </button>
+            )}
+          </div>
+          <ul className="mt-2 flex flex-wrap gap-2">
+            {outcome.hits.map((hit) => {
+              const already = selectors.includes(hit.selector)
+              const keyLabel = hit.is_revoked
+                ? "revoked"
+                : hit.key_type === "rsa" && hit.key_bits
+                  ? `RSA ${hit.key_bits}`
+                  : (hit.key_type ?? "key")
+              return (
+                <li
+                  key={hit.selector}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--edh-border)] bg-slate-50 px-2.5 py-1 text-xs"
+                >
+                  <span className="font-mono">{hit.selector}</span>
+                  <span className={hit.is_revoked ? "text-red-600" : "text-[var(--edh-muted)]"}>
+                    {keyLabel}
+                  </span>
+                  {already ? (
+                    <span className="text-[var(--edh-muted)]">monitored</span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => save([...selectors, hit.selector])}
+                      disabled={update.isPending}
+                      className="inline-flex items-center gap-0.5 font-medium text-[var(--edh-primary)] hover:underline disabled:opacity-50"
+                    >
+                      <Plus className="h-3 w-3" /> Add
+                    </button>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      )}
     </section>
+  )
+}
+
+/**
+ * The §6.2 loading state: skeleton header + hero + two selector cards + table rows, mirroring the
+ * loaded layout so there is no layout shift when the data lands.
+ */
+function DkimPageSkeleton() {
+  return (
+    <div
+      className="mx-auto max-w-5xl animate-pulse"
+      role="status"
+      aria-busy="true"
+      aria-label="Loading DKIM run"
+    >
+      <div className="mb-4 flex items-center justify-between">
+        <div className="h-4 w-32 rounded bg-slate-200" />
+        <div className="h-9 w-48 rounded-md bg-slate-200" />
+      </div>
+      <div className="h-8 w-24 rounded bg-slate-200" />
+      <div className="mt-2 h-4 w-72 rounded bg-slate-200" />
+      <div className="mt-4 h-24 rounded-lg border border-[var(--edh-border)] bg-slate-100" />
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <div className="h-36 rounded-lg border border-[var(--edh-border)] bg-slate-100" />
+        <div className="h-36 rounded-lg border border-[var(--edh-border)] bg-slate-100" />
+      </div>
+      <div className="mt-4 overflow-hidden rounded-lg border border-[var(--edh-border)] bg-white">
+        {["a", "b", "c", "d"].map((k) => (
+          <div key={k} className="border-t border-[var(--edh-border)] px-3 py-3 first:border-t-0">
+            <div className="h-4 w-3/4 rounded bg-slate-100" />
+          </div>
+        ))}
+      </div>
+    </div>
   )
 }
 

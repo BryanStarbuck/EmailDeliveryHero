@@ -224,6 +224,11 @@ export const DNS_PROBLEM_STATES: DnsProblemState[] = [
       "dnssec_ds_algo_match",
       "dnssec_algorithm",
       "dnssec_key_rollover",
+      "dnssec_validates",
+      "dnssec_rrsig_expiry",
+      "dnssec_nsec3",
+      "dnssec_chain_complete",
+      "dnssec_soa_signed",
     ],
     concept: [
       "Two very different states share this family. Unsigned is an adoption gap: no DANE possible, lookups spoofable — advisory only. Signed-but-broken (DS↔DNSKEY mismatch, expired RRSIG, deprecated algorithm) is an outage: validating resolvers — Google, Cloudflare, Quad9, Comcast — SERVFAIL the entire zone, so mail to and from the domain fails.",

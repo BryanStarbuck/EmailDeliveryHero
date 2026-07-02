@@ -2,6 +2,7 @@ import { useNavigate, useParams } from "@tanstack/react-router"
 import { ArrowLeft, Terminal } from "lucide-react"
 import { useAuditResults, useAuditRuns } from "@/api/audit"
 import { useDomains } from "@/api/domains"
+import type { DkimResults } from "@/api/types"
 import { SeverityBadge } from "@/components/Badges"
 import { CopyFixButton } from "@/components/CopyFixButton"
 import { problemStateById } from "@/lib/dkim-problems"
@@ -93,6 +94,7 @@ export function DkimProblemPage() {
                 </li>
               ))}
             </ul>
+            <YourDataValues dkim={result?.results?.dkim} />
           </Section>
 
           <Section title="Diagnose it yourself">
@@ -162,6 +164,80 @@ export function DkimProblemPage() {
           </Section>
         </>
       )}
+    </div>
+  )
+}
+
+/**
+ * The §9 data fields RENDERED from this run's stored YAML (pm/checks/dkim.mdx §7 drill-down
+ * "Your data"): one monospace row per probed selector with the observed values, plus the
+ * domain-level wildcard/duplicate-key observations. Absent (older run / never run) renders nothing
+ * — the fields-to-look-at list above still explains where the data lives.
+ */
+function YourDataValues({ dkim }: { dkim?: DkimResults }) {
+  if (!dkim) return null
+  const cell = (v: boolean) => (v ? "true" : "false")
+  return (
+    <div className="mt-3 overflow-x-auto rounded-md border border-[var(--edh-border)]">
+      <table className="w-full text-left font-mono text-xs">
+        <thead className="bg-slate-50 text-[var(--edh-muted)]">
+          <tr>
+            <th className="px-2 py-1.5 font-medium">selector</th>
+            <th className="px-2 py-1.5 font-medium">source</th>
+            <th className="px-2 py-1.5 font-medium">present</th>
+            <th className="px-2 py-1.5 font-medium">parses</th>
+            <th className="px-2 py-1.5 font-medium">via</th>
+            <th className="px-2 py-1.5 font-medium">key</th>
+            <th className="px-2 py-1.5 font-medium">revoked</th>
+            <th className="px-2 py-1.5 font-medium">t=y</th>
+            <th className="px-2 py-1.5 font-medium">TXT#</th>
+          </tr>
+        </thead>
+        <tbody>
+          {dkim.selectors.length === 0 ? (
+            <tr>
+              <td colSpan={9} className="px-2 py-1.5 text-[var(--edh-muted)]">
+                no selectors probed in this run
+              </td>
+            </tr>
+          ) : (
+            dkim.selectors.map((s) => (
+              <tr key={s.selector} className="border-t border-[var(--edh-border)]">
+                <td className="px-2 py-1.5">{s.selector}</td>
+                <td className="px-2 py-1.5">{s.source}</td>
+                <td className={`px-2 py-1.5 ${s.present ? "" : "text-red-600"}`}>
+                  {cell(s.present)}
+                </td>
+                <td className={`px-2 py-1.5 ${s.parses || !s.present ? "" : "text-red-600"}`}>
+                  {cell(s.parses)}
+                </td>
+                <td className="max-w-56 truncate px-2 py-1.5" title={s.cname_target ?? undefined}>
+                  {s.resolved_via === "cname" ? `cname → ${s.cname_target ?? "?"}` : s.resolved_via}
+                </td>
+                <td className="px-2 py-1.5">
+                  {s.key_type === "rsa" && s.key_bits ? `rsa ${s.key_bits}` : (s.key_type ?? "—")}
+                </td>
+                <td className={`px-2 py-1.5 ${s.is_revoked ? "text-red-600" : ""}`}>
+                  {cell(s.is_revoked)}
+                </td>
+                <td className={`px-2 py-1.5 ${s.has_test_flag ? "text-amber-600" : ""}`}>
+                  {cell(s.has_test_flag)}
+                </td>
+                <td className={`px-2 py-1.5 ${s.txt_record_count > 1 ? "text-amber-600" : ""}`}>
+                  {s.txt_record_count}
+                </td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+      <p className="border-t border-[var(--edh-border)] bg-slate-50 px-2 py-1.5 font-mono text-xs text-slate-600">
+        wildcard_shadow: {cell(dkim.wildcard_shadow)} · working_selectors: {dkim.working_selectors}
+        {dkim.duplicate_keys.length > 0 &&
+          ` · duplicate_keys: ${dkim.duplicate_keys
+            .map((d) => `${d.key_sha256.slice(0, 12)}… on ${d.seen_on.join(", ")}`)
+            .join("; ")}`}
+      </p>
     </div>
   )
 }

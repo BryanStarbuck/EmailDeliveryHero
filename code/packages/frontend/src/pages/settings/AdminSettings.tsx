@@ -4,7 +4,9 @@ import { Loader2, Minus, Plus, ShieldAlert } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import {
+  type BimiMvaEntry,
   type SettingsView,
+  type TakeoverFingerprint,
   type UpdateAdminSettingsInput,
   useImportArchive,
   useResetApp,
@@ -43,6 +45,13 @@ interface Draft {
   contentThreshold: number
   contentSafeTarget: number
   contentNetworkTests: boolean
+  /** SpamAssassin binary-path overrides (pm/checks/content_scoring.mdx §4; empty = auto-detect). */
+  spamassassinPath: string
+  spamcPath: string
+  /** BIMI VMC/CMC issuer allow-list (pm/checks/bimi.mdx §4/§5 — admin-only). */
+  mvaAllowList: BimiMvaEntry[]
+  /** DNS-health subdomain-takeover fingerprints (pm/checks/dns_health.mdx §4/§5 — admin-only). */
+  fingerprints: TakeoverFingerprint[]
   webhookEnabled: boolean
   webhookUrl: string
   smtpHost: string
@@ -70,6 +79,13 @@ function toDraft(view: SettingsView): Draft {
     contentThreshold: checks.content?.threshold ?? 5.0,
     contentSafeTarget: checks.content?.safeTarget ?? 2.0,
     contentNetworkTests: checks.content?.networkTests ?? false,
+    spamassassinPath: tools.paths?.spamassassin ?? "",
+    spamcPath: tools.paths?.spamc ?? "",
+    mvaAllowList: (checks.bimi?.mvaAllowList ?? []).map((m) => ({
+      ...m,
+      markTypes: [...m.markTypes],
+    })),
+    fingerprints: (view.config.dns_health?.fingerprints ?? []).map((f) => ({ ...f })),
     webhookEnabled: notifications.webhook.enabled,
     webhookUrl: notifications.webhook.url,
     smtpHost: notifications.smtp.host,
@@ -83,8 +99,14 @@ function toDraft(view: SettingsView): Draft {
   }
 }
 
-const splitList = (value: string): string[] =>
-  [...new Set(value.split(",").map((s) => s.trim()).filter(Boolean))]
+const splitList = (value: string): string[] => [
+  ...new Set(
+    value
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  ),
+]
 
 function fromDraft(d: Draft): UpdateAdminSettingsInput {
   return {
@@ -98,6 +120,17 @@ function fromDraft(d: Draft): UpdateAdminSettingsInput {
         safeTarget: d.contentSafeTarget,
         networkTests: d.contentNetworkTests,
       },
+      // BIMI MVA allow-list (pm/checks/bimi.mdx §4/§5): blank rows are dropped on save.
+      bimi: {
+        mvaAllowList: d.mvaAllowList
+          .map((m) => ({
+            name: m.name.trim(),
+            issuerDnMatch: m.issuerDnMatch.trim(),
+            markTypes: m.markTypes,
+            enabled: m.enabled,
+          }))
+          .filter((m) => m.name && m.issuerDnMatch),
+      },
       thresholds: { green: d.green, amber: d.amber },
       weights: { critical: d.critical, warning: d.warning, info: d.info },
     },
@@ -106,8 +139,29 @@ function fromDraft(d: Draft): UpdateAdminSettingsInput {
       smtp: { host: d.smtpHost.trim(), port: d.smtpPort, from: d.smtpFrom.trim() },
     },
     storage: { retentionDays: d.retentionDays },
-    tools: { preferCli: d.preferCli, resolvers: splitList(d.resolvers), timeoutMs: d.timeoutMs },
+    tools: {
+      preferCli: d.preferCli,
+      resolvers: splitList(d.resolvers),
+      timeoutMs: d.timeoutMs,
+      // SpamAssassin binary-path overrides (pm/checks/content_scoring.mdx §4); an empty value
+      // clears the override so the ToolLocator falls back to PATH/Homebrew discovery.
+      paths: { spamassassin: d.spamassassinPath.trim(), spamc: d.spamcPath.trim() },
+    },
     access: { allowedDomains: splitList(d.allowedDomains) },
+    // Subdomain-takeover fingerprints (pm/checks/dns_health.mdx §4/§5): blank rows are dropped;
+    // the backend dedupes (provider, cname_suffix) pairs like the SQL UNIQUE constraint.
+    dns_health: {
+      fingerprints: d.fingerprints
+        .map((f) => ({
+          provider: f.provider.trim(),
+          cname_suffix: f.cname_suffix.trim(),
+          ...(f.unclaimed_signature?.trim()
+            ? { unclaimed_signature: f.unclaimed_signature.trim() }
+            : {}),
+          enabled: f.enabled,
+        }))
+        .filter((f) => f.provider && f.cname_suffix),
+    },
   }
 }
 
@@ -310,6 +364,162 @@ export function AdminSettings() {
           />
           Enable network content tests (URIBL/Razor/Pyzor/DCC — off keeps scoring deterministic)
         </label>
+
+        {/* BIMI VMC/CMC allow-list (pm/checks/bimi.mdx §4/§5): which Mark Verifying Authorities
+            are recognized when the future certificate-validation round checks the a= VMC issuer.
+            Admin-only — the backend refuses this write without role:admin. */}
+        <h3 className="mb-1 mt-4 text-sm font-medium">
+          BIMI — recognized Mark Verifying Authorities (VMC/CMC issuers)
+        </h3>
+        <p className="mb-1 text-xs text-[var(--edh-muted)]">
+          The future VMC certificate round matches each certificate&apos;s issuer DN against this
+          allow-list; an unrecognized issuer makes <code>content.bimi_vmc_valid</code> critical.
+        </p>
+        {draft.mvaAllowList.map((mva, i) => {
+          const setMva = (patch: Partial<BimiMvaEntry>) =>
+            set({
+              mvaAllowList: draft.mvaAllowList.map((m, j) => (j === i ? { ...m, ...patch } : m)),
+            })
+          const toggleMark = (mark: "vmc" | "cmc") =>
+            setMva({
+              markTypes: mva.markTypes.includes(mark)
+                ? mva.markTypes.filter((t) => t !== mark)
+                : [...mva.markTypes, mark],
+            })
+          return (
+            // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional edits
+            <div key={i} className="flex flex-wrap items-center gap-2 py-1">
+              <input
+                value={mva.name}
+                onChange={(e) => setMva({ name: e.target.value })}
+                placeholder="Name (e.g. DigiCert)"
+                aria-label={`MVA ${i + 1} name`}
+                className="w-40 rounded-md border border-[var(--edh-border)] px-2 py-1 text-sm"
+              />
+              <input
+                value={mva.issuerDnMatch}
+                onChange={(e) => setMva({ issuerDnMatch: e.target.value })}
+                placeholder="Issuer DN match"
+                aria-label={`MVA ${i + 1} issuer DN match`}
+                className="w-56 rounded-md border border-[var(--edh-border)] px-2 py-1 text-sm"
+              />
+              <label className="flex items-center gap-1 text-xs">
+                <input
+                  type="checkbox"
+                  checked={mva.markTypes.includes("vmc")}
+                  onChange={() => toggleMark("vmc")}
+                />
+                VMC
+              </label>
+              <label className="flex items-center gap-1 text-xs">
+                <input
+                  type="checkbox"
+                  checked={mva.markTypes.includes("cmc")}
+                  onChange={() => toggleMark("cmc")}
+                />
+                CMC
+              </label>
+              <label className="flex items-center gap-1 text-xs">
+                <input
+                  type="checkbox"
+                  checked={mva.enabled}
+                  onChange={(e) => setMva({ enabled: e.target.checked })}
+                />
+                enabled
+              </label>
+              <button
+                type="button"
+                onClick={() => set({ mvaAllowList: draft.mvaAllowList.filter((_, j) => j !== i) })}
+                aria-label={`Remove MVA ${mva.name || i + 1}`}
+                title="Remove this Mark Verifying Authority"
+                className="rounded p-1 text-[var(--edh-muted)] hover:bg-slate-100 hover:text-slate-700"
+              >
+                <Minus className="h-4 w-4" />
+              </button>
+            </div>
+          )
+        })}
+        <button
+          type="button"
+          onClick={() =>
+            set({
+              mvaAllowList: [
+                ...draft.mvaAllowList,
+                { name: "", issuerDnMatch: "", markTypes: ["vmc"], enabled: true },
+              ],
+            })
+          }
+          className="mt-1 inline-flex items-center gap-1 rounded-md border border-[var(--edh-border)] px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+        >
+          <Plus className="h-4 w-4" /> Add MVA
+        </button>
+
+        {/* DNS-health takeover fingerprints (pm/checks/dns_health.mdx §4/§5): the bundled
+            subdomain-takeover fingerprint list the dangling-CNAME sub-check matches CNAME chain
+            targets against. Admin-only — keep it fresh, new SaaS endpoints appear constantly. */}
+        <h3 className="mb-1 mt-4 text-sm font-medium">
+          DNS health — subdomain-takeover fingerprints
+        </h3>
+        <p className="mb-1 text-xs text-[var(--edh-muted)]">
+          A CNAME whose final target matches one of these suffixes and no longer resolves is flagged
+          as a critical <code>infra.dangling_cname</code> takeover risk.
+        </p>
+        {draft.fingerprints.map((fp, i) => {
+          const setFp = (patch: Partial<TakeoverFingerprint>) =>
+            set({
+              fingerprints: draft.fingerprints.map((f, j) => (j === i ? { ...f, ...patch } : f)),
+            })
+          return (
+            // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional edits
+            <div key={i} className="flex flex-wrap items-center gap-2 py-1">
+              <input
+                value={fp.provider}
+                onChange={(e) => setFp({ provider: e.target.value })}
+                placeholder="Provider (e.g. Heroku)"
+                aria-label={`Fingerprint ${i + 1} provider`}
+                className="w-44 rounded-md border border-[var(--edh-border)] px-2 py-1 text-sm"
+              />
+              <input
+                value={fp.cname_suffix}
+                onChange={(e) => setFp({ cname_suffix: e.target.value })}
+                placeholder="CNAME suffix (e.g. .herokudns.com)"
+                aria-label={`Fingerprint ${i + 1} CNAME suffix`}
+                className="w-56 rounded-md border border-[var(--edh-border)] px-2 py-1 font-mono text-sm"
+              />
+              <label className="flex items-center gap-1 text-xs">
+                <input
+                  type="checkbox"
+                  checked={fp.enabled}
+                  onChange={(e) => setFp({ enabled: e.target.checked })}
+                />
+                enabled
+              </label>
+              <button
+                type="button"
+                onClick={() => set({ fingerprints: draft.fingerprints.filter((_, j) => j !== i) })}
+                aria-label={`Remove fingerprint ${fp.provider || i + 1}`}
+                title="Remove this fingerprint"
+                className="rounded p-1 text-[var(--edh-muted)] hover:bg-slate-100 hover:text-slate-700"
+              >
+                <Minus className="h-4 w-4" />
+              </button>
+            </div>
+          )
+        })}
+        <button
+          type="button"
+          onClick={() =>
+            set({
+              fingerprints: [
+                ...draft.fingerprints,
+                { provider: "", cname_suffix: "", enabled: true },
+              ],
+            })
+          }
+          className="mt-1 inline-flex items-center gap-1 rounded-md border border-[var(--edh-border)] px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+        >
+          <Plus className="h-4 w-4" /> Add fingerprint
+        </button>
       </Panel>
 
       {/* §3 Scheduling is all-users — point at its tab rather than duplicating it here. */}
@@ -476,7 +686,8 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
   return (
     <section className="rounded-lg border border-[var(--edh-border)] bg-white p-5">
       <h2 className="mb-3 font-semibold">
-        {title} <span className="ml-1 align-middle text-xs text-[var(--edh-muted)]">🔒 admin-only</span>
+        {title}{" "}
+        <span className="ml-1 align-middle text-xs text-[var(--edh-muted)]">🔒 admin-only</span>
       </h2>
       {children}
     </section>

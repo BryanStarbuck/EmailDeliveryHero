@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process"
 import { accessSync, constants } from "node:fs"
 import { delimiter, join } from "node:path"
-import { readAppConfig } from "./config-store"
 import { type ResourceClass, withResource } from "./concurrency"
+import { readAppConfig } from "./config-store"
 
 /**
  * The shared child-process contract for Brew/OS-installed tools (pm/run_checks.mdx §5).
@@ -178,8 +178,6 @@ export function locateTool(name: string): string | null {
  * Stage-0 tool discovery, once per run (§5.2): the resolved map is cached in the RunContext and
  * surfaced by health-style diagnostics ("dig ✓ /opt/homebrew/bin/dig · spamassassin ✗").
  */
-export function locateTools(
-  names: readonly string[] = RUN_TOOLS,
-): Record<string, string | null> {
+export function locateTools(names: readonly string[] = RUN_TOOLS): Record<string, string | null> {
   return Object.fromEntries(names.map((n) => [n, locateTool(n)]))
 }

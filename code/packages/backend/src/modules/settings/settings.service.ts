@@ -4,11 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
 import { SchedulerService } from "@module/scheduler/scheduler.service"
-import {
-  BadRequestException,
-  Injectable,
-  ServiceUnavailableException,
-} from "@nestjs/common"
+import { BadRequestException, Injectable, ServiceUnavailableException } from "@nestjs/common"
 import {
   readAppConfig,
   readUserConfig,
@@ -85,6 +81,7 @@ export class SettingsService {
         storage: app.storage,
         tools: app.tools,
         access: app.access,
+        dns_health: app.dns_health,
       },
       me: {
         sub: user.userId,
@@ -128,6 +125,20 @@ export class SettingsService {
         // inbox-safe target, network content tests on/off.
         if (dto.checks.content)
           cfg.checks.content = { ...cfg.checks.content, ...dto.checks.content }
+        // BIMI admin settings (pm/checks/bimi.mdx §4/§5): the recognized-MVA allow-list the future
+        // VMC/CMC certificate round matches issuer DNs against. Admin-only; replaces the list.
+        if (dto.checks.bimi?.mvaAllowList)
+          cfg.checks.bimi.mvaAllowList = dto.checks.bimi.mvaAllowList
+            .map((m) => ({
+              name: m.name.trim(),
+              issuerDnMatch: m.issuerDnMatch.trim(),
+              markTypes: [...new Set(m.markTypes)],
+              enabled: m.enabled,
+            }))
+            .filter((m) => m.name.length > 0 && m.issuerDnMatch.length > 0)
+        // DANE / TLSA admin settings (pm/checks/dane_tlsa.mdx §4): the FUTURE :25 cert-match
+        // probe toggle + timeout and the require-AD-bit validating-resolver switch.
+        if (dto.checks.dane) cfg.checks.dane = { ...cfg.checks.dane, ...dto.checks.dane }
         if (dto.checks.thresholds)
           cfg.checks.thresholds = { ...cfg.checks.thresholds, ...dto.checks.thresholds }
         if (dto.checks.weights)
@@ -143,9 +154,45 @@ export class SettingsService {
         if (dto.tools.preferCli !== undefined) cfg.tools.preferCli = dto.tools.preferCli
         if (dto.tools.resolvers) cfg.tools.resolvers = cleanList(dto.tools.resolvers)
         if (dto.tools.timeoutMs !== undefined) cfg.tools.timeoutMs = dto.tools.timeoutMs
+        // Per-tool binary-path overrides (config.yaml → tools.paths — the ToolLocator's explicit
+        // resolution step 1). This carries the spamassassin/spamc binary-path admin setting of
+        // pm/checks/content_scoring.mdx §4; an empty value clears the override.
+        if (dto.tools.paths) {
+          const paths = { ...cfg.tools.paths }
+          for (const [name, value] of Object.entries(dto.tools.paths)) {
+            const key = name.trim()
+            if (!key || typeof value !== "string") continue
+            const path = value.trim()
+            if (path) paths[key] = path
+            else delete paths[key]
+          }
+          cfg.tools.paths = paths
+        }
       }
       if (dto.access?.allowedDomains)
         cfg.access.allowedDomains = cleanList(dto.access.allowedDomains)
+      // Takeover-fingerprint list (pm/checks/dns_health.mdx §4/§5 — the `takeover_fingerprints`
+      // reference table, admin-editable). Replaces the whole list; blank rows are dropped and
+      // (provider, cname_suffix) pairs deduped, mirroring the SQL UNIQUE constraint.
+      if (dto.dns_health?.fingerprints) {
+        const seen = new Set<string>()
+        cfg.dns_health.fingerprints = dto.dns_health.fingerprints
+          .map((f) => ({
+            provider: f.provider.trim(),
+            cname_suffix: f.cname_suffix.trim().toLowerCase(),
+            ...(f.unclaimed_signature?.trim()
+              ? { unclaimed_signature: f.unclaimed_signature.trim() }
+              : {}),
+            enabled: f.enabled,
+          }))
+          .filter((f) => {
+            if (!f.provider || !f.cname_suffix) return false
+            const key = `${f.provider}|${f.cname_suffix}`
+            if (seen.has(key)) return false
+            seen.add(key)
+            return true
+          })
+      }
     })
     if (dto.schedule) {
       // §3 owns scheduling — write through the scheduler so the active runner matches the save.
@@ -190,7 +237,9 @@ export class SettingsService {
           signal: AbortSignal.timeout(app.tools.timeoutMs),
         })
         result.webhook.ok = res.ok
-        result.webhook.detail = res.ok ? "Webhook accepted the test post." : `Webhook returned ${res.status}.`
+        result.webhook.detail = res.ok
+          ? "Webhook accepted the test post."
+          : `Webhook returned ${res.status}.`
       } catch (err) {
         result.webhook.detail = `Webhook post failed: ${(err as Error).message}`
       }
@@ -208,11 +257,16 @@ export class SettingsService {
           await execFileAsync(
             swaks,
             [
-              "--to", user.email,
-              "--from", smtp.from,
-              "--server", `${smtp.host}:${smtp.port}`,
-              "--header", "Subject: EmailDeliveryHero test notification",
-              "--body", "This is a test notification from EmailDeliveryHero Settings.",
+              "--to",
+              user.email,
+              "--from",
+              smtp.from,
+              "--server",
+              `${smtp.host}:${smtp.port}`,
+              "--header",
+              "Subject: EmailDeliveryHero test notification",
+              "--body",
+              "This is a test notification from EmailDeliveryHero Settings.",
             ],
             { timeout: 30_000 },
           )
@@ -246,7 +300,11 @@ export class SettingsService {
   async openStateDir(): Promise<{ opened: boolean; stateDir: string }> {
     const stateDir = resolveStateDir()
     const opener =
-      process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open"
+      process.platform === "darwin"
+        ? "open"
+        : process.platform === "win32"
+          ? "explorer"
+          : "xdg-open"
     try {
       await execFileAsync(opener, [stateDir], { timeout: 10_000 })
       return { opened: true, stateDir }
@@ -276,7 +334,10 @@ export class SettingsService {
       })
       const data = readFileSync(zipFile)
       const stamp = new Date().toISOString().slice(0, 10)
-      logInfo(`Settings export produced (${entries.length} entries, ${data.length} bytes)`, "Settings")
+      logInfo(
+        `Settings export produced (${entries.length} entries, ${data.length} bytes)`,
+        "Settings",
+      )
       return { fileName: `email-delivery-hero-${stamp}.zip`, data }
     } finally {
       rmSync(work, { recursive: true, force: true })
@@ -291,7 +352,8 @@ export class SettingsService {
    */
   async importArchive(archiveBase64: string): Promise<{ imported: string[] }> {
     const unzip = locateTool("unzip")
-    if (!unzip) throw new ServiceUnavailableException("The `unzip` tool is not installed on this host")
+    if (!unzip)
+      throw new ServiceUnavailableException("The `unzip` tool is not installed on this host")
     const work = mkdtempSync(join(tmpdir(), "edh-import-"))
     try {
       const zipFile = join(work, "import.zip")
@@ -346,7 +408,10 @@ export class SettingsService {
         logError(`Reset could not remove ${entry}`, err, "Settings")
       }
     }
-    logInfo(`Reset (${scope}) by ${user.email}: removed ${removed.join(", ") || "nothing"}`, "Settings")
+    logInfo(
+      `Reset (${scope}) by ${user.email}: removed ${removed.join(", ") || "nothing"}`,
+      "Settings",
+    )
     if (scope === "app") {
       // config.yaml is gone → the schedule block is back to its defaults (OFF); disarm the timer.
       await this.scheduler.updateConfig({})

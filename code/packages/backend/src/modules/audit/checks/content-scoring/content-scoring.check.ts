@@ -57,7 +57,8 @@ const SUB_CHECKS: Record<
 > = {
   "content.subject": {
     title: "Subject line signals",
-    okDetail: "The subject avoids spam signals (no ALL-CAPS, no excessive '!!!', no fake RE:/FWD:).",
+    okDetail:
+      "The subject avoids spam signals (no ALL-CAPS, no excessive '!!!', no fake RE:/FWD:).",
     remediation:
       "Use a concise honest subject in sentence case; at most one '!'; no RE:/FWD: unless it is a real thread; at most one emoji.",
   },
@@ -75,7 +76,8 @@ const SUB_CHECKS: Record<
   },
   "content.mime_valid": {
     title: "MIME well-formedness",
-    okDetail: "MIME structure is well-formed: matched boundaries, sane Content-Type, no truncated parts.",
+    okDetail:
+      "MIME structure is well-formed: matched boundaries, sane Content-Type, no truncated parts.",
     remediation:
       "Regenerate the message with a correct MIME library; ensure each part's boundary opens and closes and Content-Type matches the bytes.",
   },
@@ -87,19 +89,22 @@ const SUB_CHECKS: Record<
   },
   "content.header_sanity": {
     title: "Header sanity (Message-ID, Date, forgeries)",
-    okDetail: "A valid Message-ID is present, the Date is sane, and no forged/duplicated headers were seen.",
+    okDetail:
+      "A valid Message-ID is present, the Date is sane, and no forged/duplicated headers were seen.",
     remediation:
       "Have the sending MTA generate a unique Message-ID and a correct RFC 5322 Date; remove hand-injected or duplicated headers.",
   },
   "content.attachment_risk": {
     title: "Attachment risk",
-    okDetail: "No risky attachment types (executables, macro-enabled Office docs, script/archive payloads).",
+    okDetail:
+      "No risky attachment types (executables, macro-enabled Office docs, script/archive payloads).",
     remediation:
       "Do not attach executables or macro documents to bulk mail; link to a scanned download instead; use .pdf/.docx without macros.",
   },
   "content.html_hygiene": {
     title: "HTML hygiene (hidden text, tiny fonts)",
-    okDetail: "No hidden text, tiny/zero-size fonts, white-on-white content, or off-screen positioning.",
+    okDetail:
+      "No hidden text, tiny/zero-size fonts, white-on-white content, or off-screen positioning.",
     remediation:
       "Delete hidden/keyword-stuffing text; use readable font sizes (≥ 12px) and adequate contrast; keep inline CSS minimal and legitimate.",
   },
@@ -112,7 +117,8 @@ const SUB_CHECKS: Record<
   "content.charset": {
     title: "Charset consistency",
     okDetail: "The declared charset matches the bytes.",
-    remediation: "Declare UTF-8 and encode the body as UTF-8; do not declare a foreign/obscure charset.",
+    remediation:
+      "Declare UTF-8 and encode the body as UTF-8; do not declare a foreign/obscure charset.",
     advisory: true,
   },
   "content.bayes": {
@@ -165,6 +171,9 @@ function bandFor(total: number, safeTarget: number, threshold: number): Severity
   return "ok"
 }
 
+/** Band ordering for the §6 regression diff — higher rank = worse placement. */
+const BAND_RANK: Record<Severity, number> = { ok: 0, info: 0, warning: 1, critical: 2 }
+
 /**
  * Derive the finding list from one parsed SpamAssassin report (§3.4/§3.5): the headline
  * `content.spamassassin_score` finding plus one row per sub-check — fired sub-checks list the
@@ -173,12 +182,26 @@ function bandFor(total: number, safeTarget: number, threshold: number): Severity
 function deriveFindings(
   report: SaReport,
   sample: ContentSampleRecord,
-  opts: { safeTarget: number; engine: string },
+  opts: { safeTarget: number; engine: string; previous?: ContentScoreResults },
 ): Finding[] {
   const findings: Finding[] = []
   const band = bandFor(report.totalScore, opts.safeTarget, report.threshold)
   const sortedRules = [...report.rulesFired].sort((a, b) => b.score - a.score)
   const sampleLabel = `sample "${sample.subject ?? "(no subject)"}" from ${sample.fromHeader ?? "(unknown sender)"}`
+
+  // Regression diff against the previous content_score_results row (§6 / §8 AC 9): a total
+  // crossing 2.0 (green→amber) or 5.0 (amber→red), or a NEWLY fired high-weight rule, is flagged
+  // as a new problem — even when the sample bytes are unchanged (ruleset drift via sa-update).
+  const previous = opts.previous
+  const previousBand = previous
+    ? bandFor(previous.total_score, opts.safeTarget, previous.threshold)
+    : null
+  const previousRules = new Set((previous?.rules_fired ?? []).map((r) => r.rule))
+  const newHighWeightRules = previous
+    ? report.rulesFired.filter((r) => isHighWeightRule(r) && !previousRules.has(r.rule))
+    : []
+  const bandWorsened = previousBand !== null && BAND_RANK[band] > BAND_RANK[previousBand]
+  const totalIsNewProblem = band !== "ok" && (bandWorsened || newHighWeightRules.length > 0)
 
   findings.push({
     id: "content.spamassassin_score",
@@ -187,16 +210,22 @@ function deriveFindings(
     severity: band,
     detail:
       `The ${sampleLabel} scored ${report.totalScore.toFixed(1)} against the ${report.threshold.toFixed(1)} spam threshold ` +
-      `(inbox-safe target < ${opts.safeTarget.toFixed(1)}), with ${report.rulesFired.length} rule(s) fired via ${opts.engine}.`,
+      `(inbox-safe target < ${opts.safeTarget.toFixed(1)}), with ${report.rulesFired.length} rule(s) fired via ${opts.engine}.` +
+      (bandWorsened && previous
+        ? ` The total worsened from ${previous.total_score.toFixed(1)} on the previous score.`
+        : "") +
+      (newHighWeightRules.length > 0
+        ? ` Newly fired high-weight rule(s) since the previous score: ${newHighWeightRules.map((r) => r.rule).join(", ")}.`
+        : ""),
     evidence:
       sortedRules.map((r) => `${r.rule} ${formatPts(r.score)}`).join("; ") || "no rules fired",
+    ...(totalIsNewProblem && { isNew: true }),
     ...(band !== "ok" && {
-      remediation:
-        `Address the highest-scoring fired rules first (${sortedRules
-          .filter((r) => r.score > 0)
-          .slice(0, 3)
-          .map((r) => r.rule)
-          .join(", ")}); re-score until the total is below ${opts.safeTarget.toFixed(1)}.`,
+      remediation: `Address the highest-scoring fired rules first (${sortedRules
+        .filter((r) => r.score > 0)
+        .slice(0, 3)
+        .map((r) => r.rule)
+        .join(", ")}); re-score until the total is below ${opts.safeTarget.toFixed(1)}.`,
     }),
   })
 
@@ -224,6 +253,12 @@ function deriveFindings(
     else if (pts >= (meta.advisory ? 1.0 : 0.5)) severity = "warning"
     else severity = "info"
     const sorted = [...rules].sort((a, b) => b.score - a.score)
+    // A high-weight rule that did NOT fire on the previous score marks this sub-check as a new
+    // problem (§6 / §8 AC 9) — the re-score path has no run-level differ, so the flag lives here.
+    const hasNewHighWeight =
+      previous !== undefined &&
+      (severity === "warning" || severity === "critical") &&
+      rules.some((r) => isHighWeightRule(r) && !previousRules.has(r.rule))
     findings.push({
       id: sub,
       checkId: CHECK_ID,
@@ -233,6 +268,7 @@ function deriveFindings(
         `SpamAssassin rule(s) fired (${formatPts(pts)} pts total): ` +
         sorted.map((r) => `${r.rule} ${formatPts(r.score)} — ${r.description}`).join("; "),
       evidence: sorted.map((r) => `${r.rule} ${formatPts(r.score)}`).join("; "),
+      ...(hasNewHighWeight && { isNew: true }),
       // Every fired sub-check names its rules and the exact fix (§8 AC 6).
       remediation: `${meta.remediation} (fired: ${sorted.map((r) => r.rule).join(", ")})`,
     })
@@ -275,7 +311,8 @@ export const contentScoringCheck: Checker = {
           detail:
             "Content scoring grades a representative sample email (raw RFC 5322 headers + body) the way a receiving content filter does — subject signals, MIME structure, HTML hygiene, trigger phrases, header sanity, attachment risk, and encoding — reporting every SpamAssassin rule that fires with its individual score (safe 0–2, warning 2–5, critical ≥ 5.0). " +
             engineHint,
-          remediation: "Upload a representative .eml for this domain (drag-drop the raw email source or paste it) to enable content scoring.",
+          remediation:
+            "Upload a representative .eml for this domain (drag-drop the raw email source or paste it) to enable content scoring.",
           evidence: engine.installed ? "spamassassin: installed" : "spamassassin: not found",
         },
       ]
@@ -289,8 +326,7 @@ export const contentScoringCheck: Checker = {
           checkId: CHECK_ID,
           title: "SpamAssassin not installed",
           severity: "info",
-          detail:
-            `A sample message ("${sample.subject ?? "(no subject)"}") is stored for this domain, but the SpamAssassin engine is not installed, so it cannot be scored.`,
+          detail: `A sample message ("${sample.subject ?? "(no subject)"}") is stored for this domain, but the SpamAssassin engine is not installed, so it cannot be scored.`,
           remediation: "Install the engine with `brew install spamassassin`, then re-score.",
           evidence: "spamassassin: not found; spamc: not found",
         },
@@ -339,7 +375,10 @@ export const contentScoringCheck: Checker = {
       ]
     }
 
-    const outcome = await scoreSample(raw, { enableNetworkTests: cfg.networkTests })
+    const outcome = await scoreSample(raw, {
+      enableNetworkTests: cfg.networkTests,
+      signal: ctx.signal,
+    })
     if (!outcome) {
       return [
         {
@@ -349,13 +388,17 @@ export const contentScoringCheck: Checker = {
           severity: "info",
           detail:
             "The SpamAssassin binary is installed but no parseable report came back (spamd may be down and the standalone run failed or timed out). The audit continued without a content score.",
-          remediation: "Check that `spamassassin --lint` passes, then re-score. Starting spamd (`brew services start spamassassin`) makes scoring faster.",
+          remediation:
+            "Check that `spamassassin --lint` passes, then re-score. Starting spamd (`brew services start spamassassin`) makes scoring faster.",
         },
       ]
     }
 
     // Honor the admin threshold override when the engine reports a different required= value.
-    const report: SaReport = { ...outcome.report, threshold: cfg.threshold ?? outcome.report.threshold }
+    const report: SaReport = {
+      ...outcome.report,
+      threshold: cfg.threshold ?? outcome.report.threshold,
+    }
     const results: ContentScoreResults = {
       schema_version: 1,
       sample_id: sample.id,
@@ -371,7 +414,13 @@ export const contentScoringCheck: Checker = {
       checked_at: new Date().toISOString(),
     }
     return {
-      findings: deriveFindings(report, sample, { safeTarget: cfg.safeTarget, engine: outcome.engine }),
+      findings: deriveFindings(report, sample, {
+        safeTarget: cfg.safeTarget,
+        engine: outcome.engine,
+        // §6 regression detection: diff against the previous content_score_results row so a
+        // band crossing or newly fired high-weight rule is flagged even on an unchanged sample.
+        previous,
+      }),
       results,
     }
   },

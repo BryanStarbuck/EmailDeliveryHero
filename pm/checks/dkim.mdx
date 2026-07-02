@@ -1,6 +1,6 @@
 ---
 title: EmailDeliveryHero — DKIM check
-description: Engineering spec for the DKIM (DomainKeys Identified Mail) category — testing methodologies (DNS layer, selector discovery, message layer, rua observation), the per-selector sub-checks (presence, parse, key length, test flag, algorithm, flags, single-record, CNAME delegation, Ed25519-only, rotation, multi-selector, duplicate-key), the Brew/npm testing toolbox with the exact per-run tool command lines and the dkim.tool_runs[] capture contract, the per-run test-results YAML (the dkim key inside ~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml), the dashboard summary cell + the run-scoped "view one category run" DKIM page UX (header with prev/next run navigation, per-selector overview, sub-test results table), the fix-recommendation engine, and the DKIM problem-state catalog with per-state deep dives.
+description: Engineering spec for the DKIM (DomainKeys Identified Mail) category — testing methodologies (DNS layer, selector discovery, message layer, rua observation), the per-selector sub-checks (presence, parse, key length, test flag, algorithm, flags, single-record, CNAME delegation, Ed25519-only, rotation, multi-selector, duplicate-key, multi-resolver agreement, legacy ADSP/DomainKeys leftovers), the Brew/npm testing toolbox with the exact per-run tool command lines and the dkim.tool_runs[] capture contract, the per-run test-results YAML (the dkim key inside ~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml), the dashboard summary cell + the run-scoped "view one category run" DKIM page UX (header with prev/next run navigation, per-selector overview, sub-test results table), the grown drill-down surfaces (sub-test explainer pages with the locked five-band contract, selector detail pages with the tag-by-tag parsed-record breakdown table, run-over-run history & trends, external-reference footers, the scoped "Run DKIM now" re-run), the fix-recommendation engine, and the DKIM problem-state catalog with per-state deep dives.
 ---
 
 # EmailDeliveryHero — DKIM check
@@ -126,7 +126,7 @@ Every sub-check runs **per selector** unless noted as domain-scoped. Selectors c
 | Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
 | --- | --- | --- | --- | --- |
 | `dkim.present` | For each configured selector, a TXT (or CNAME→TXT) record exists at `<selector>._domainkey.<domain>`. | `resolveTxt('<selector>._domainkey.<domain>')`; on NODATA try `resolveCname` then resolve the target. | **critical:** no record for a selector known to sign mail (`permerror "no key for signature"` at every receiver). | Publish the public key your ESP/MTA generated as a TXT record at `<selector>._domainkey.<domain>` (or the CNAME your ESP specifies). |
-| `dkim.parses` | The record is a valid key: optional `v=DKIM1`, a `k=` type, and a **non-empty `p=`** whose base64 decodes to a well-formed public key (DER SPKI for RSA; raw 32 bytes for Ed25519). | Parse tag=value pairs; base64-decode `p=`; `crypto.createPublicKey` on the SPKI. | **critical:** record does not parse / bad base64 (pasted PEM armor, smart quotes, injected line breaks are the classic causes). | Republish the exact key exported from the signing system — single logical string, no `-----BEGIN…` armor, no quotes-in-quotes, no newlines. |
+| `dkim.parses` | The record is a valid key: optional `v=DKIM1`, a `k=` type, and a **non-empty `p=`** whose base64 decodes to a well-formed public key (DER SPKI for RSA; raw 32 bytes for Ed25519). Whitespace/FWS **inside** `p=` is legal (RFC 6376 folding) — the parser strips it before decoding and it is never, by itself, a parse failure. | Parse tag=value pairs; strip FWS; base64-decode `p=`; `crypto.createPublicKey` on the SPKI. | **critical:** record does not parse / bad base64 (pasted PEM armor, smart quotes, injected line breaks are the classic causes). | Republish the exact key exported from the signing system — single logical string, no `-----BEGIN…` armor, no quotes-in-quotes, no newlines. |
 | `dkim.revoked` | `p=` is not empty. An empty `p=` is a **valid revocation** (RFC 6376 §3.6.1) — fatal only if the selector still signs mail. | Detect empty `p=` during parse. | **critical:** empty `p=` on a configured (expected-to-sign) selector; **info:** empty `p=` on a discovered selector (proper decommissioning). | Point the signer at the new selector/key, or repopulate `p=` if the revocation was accidental. |
 | `dkim.keylength` | RSA modulus is **≥ 1024 bits (required)** and **≥ 2048 bits (recommended)** per RFC 8301; Ed25519 is fixed-strength and passes. | Decode `p=`, read the RSA modulus bit length (or detect `k=ed25519`). | **critical:** < 1024-bit RSA (factorable — the 2012 Google incident); **warning:** exactly 1024-bit RSA (upgrade advised). | Generate a **2048-bit** RSA key, publish it on a new selector, re-sign, then retire the old selector. (Avoid 4096 — it breaks the 255-byte TXT chunking at some DNS hosts.) |
 | `dkim.testflag` | The record is **not** in test mode. `t=y` tells verifiers to treat mail from the domain **as unsigned**. | Read the `t=` tag; look for the `y` flag. | **warning:** `t=y` present on a production selector. | Remove the `y` flag from the `t=` tag (or drop `t=` entirely) once testing is complete. `t=s` (strict subdomain flag) is separate — surface as `info` since it forbids subdomain `i=` identities. |
@@ -141,6 +141,8 @@ Every sub-check runs **per selector** unless noted as domain-scoped. Selectors c
 | `dkim.duplicate_key` | The **same public key (`p=`)** is not reused across multiple domains or multiple selectors within a domain (shared private key = shared blast radius + shared reputation). | Hash the decoded public key; compare across this run and the latest audit of every other monitored domain. | **warning:** identical `p=` seen on another domain/selector. | Generate a **unique key per domain** (and per rotation generation); never copy one private key across brands/domains. |
 | `dkim.record_size` | The TXT record stays within DNS limits: each character-string ≤ 255 bytes and the total answer avoids UDP truncation (RSA-2048 must be split into multiple 255-byte strings; 4096-bit keys frequently break resolvers without EDNS0/TCP fallback). | Inspect the TXT chunk lengths returned by `resolveTxt`. | **warning:** a single string > 255 bytes (some providers reject), or an oversize record risking truncation → intermittent `temperror`. | Split the `p=` value into correctly-quoted ≤255-byte strings (most DNS UIs do this automatically); prefer 2048-bit RSA or add Ed25519 for a far shorter record. |
 | `dkim.underscore_label` | The queried name is exactly `<selector>._domainkey.<domain>` (the fixed `_domainkey` label present, selector not doubled or misspelled), and a wildcard TXT is not shadowing every selector. | String-validate the constructed query name; probe a random nonexistent selector — if it "resolves", a wildcard is answering. | **warning:** a wildcard `*.<domain>` TXT makes every selector "resolve" with non-DKIM data (false positives for us *and* `permerror` junk for receivers). | Ensure the key sits under the literal `_domainkey` label; remove or scope any wildcard TXT that shadows `_domainkey`. |
+| `dkim.resolver_agreement` | Per selector: the record the **local resolver** returned matches what the big public resolvers — **Google 8.8.8.8** and **Cloudflare 1.1.1.1** — see. A split view means some receivers already verify against a different key than others (mid-propagation edit, inconsistent zone data across authoritative NS, split-horizon DNS). | `node:dns` `Resolver` with `setServers(['8.8.8.8'])` / `(['1.1.1.1'])` (3 s timeout, 1 try); compare the joined TXT record **sets** against the local answer. Pure `node:dns` — the kdig capture (§3 row 3) stays evidence-only. | **warning:** any resolver disagrees with the local view (record present at one, absent/different at another); **info:** cross-check unreachable (public resolvers blocked/offline) — never escalate an unreachable cross-check. | If you just edited DNS, wait out the old record's TTL. If it persists, make every authoritative NS serve the same record (`dig +short TXT <sel>._domainkey.<domain> @<each NS>`), and remove split-horizon overrides for `_domainkey` names. |
+| `dkim.adsp_legacy` | Domain-scoped: no **historic ADSP** record lingers at `_adsp._domainkey.<domain>` (RFC 5617 — declared **Historic**; DMARC replaced it) and no **legacy DomainKeys policy record** lingers at `_domainkey.<domain>` (RFC 4870, the pre-DKIM `o=`/`t=`/`n=` policy shape). Leftovers signal neglect, confuse tooling, and `dkim=discardable` can still make old implementations **silently discard** forwarded mail. | `resolveTxt('_adsp._domainkey.<domain>')` and `resolveTxt('_domainkey.<domain>')`; parse the `dkim=` (ADSP) / `o=` (DomainKeys) tags. | **warning:** ADSP `dkim=discardable` published; **info:** any other ADSP value or a DomainKeys `o=` policy leftover. | Delete the `_adsp._domainkey` and bare `_domainkey` TXT records — publish sender policy in DMARC (`_dmarc.<domain>`) instead. |
 | `dkim.alignment` *(future — message/rua layer)* | The signing `d=` domain **aligns** with the visible `From:` domain for DMARC (relaxed = org-domain match). `dkim=pass header.d=sendgrid.net` contributes nothing to your DMARC. | Parse `d=` from probe-message signatures / `rua` `auth_results`. | **warning:** mail signs with an ESP default domain — pass-but-unaligned. | Complete the ESP's custom-domain authentication (SendGrid Domain Authentication, SES Easy DKIM, Mailgun sending domain) so `d=` becomes your domain. |
 | `dkim.signature_verify` *(future — message layer)* | A **real sent message actually verifies**: `bh=` and `b=` check out; canonicalization (`c=relaxed/relaxed` preferred) survives transit; `h=` covers `From`/`To`/`Subject`/`Date`. | `swaks` probe send through the sender's MTA → verify with mailauth. | **critical:** signed message fails verification despite a healthy key (body-hash mismatch from footers/gateways; header rewrite under `c=simple`). | Sign as the *last* content-changing step; use relaxed/relaxed; stop modifying signed headers post-signing. |
 | `dkim.length_tag` *(future — message layer)* | No **`l=` body-length tag** in observed signatures (2024 Zone.eu exploit: append rendered content while DKIM/DMARC/BIMI keep passing). | Parse `l=` from observed `DKIM-Signature` headers. | **critical:** any `l=` present. | Remove `l=` from the signer config — always sign the whole body. |
@@ -257,6 +259,13 @@ Per tool, in execution order within a run:
 | 4 | **openssl** — key decode, once per parseable `p=` | `openssl pkey -pubin -inform DER -text -noout` (the base64-decoded `p=` bytes are piped on **stdin**; `parsed.stdin_source` records `"p= of <selector> (<n> bytes)"`) | `text` | 3 s kill | regex the first line — `RSA Public-Key: \((\d+) bit\)` or `ED25519 Public-Key` — cross-checks `key_type`/`key_bits` (primary decode is Node `crypto.createPublicKey`); non-zero exit → evidence on `dkim.parses.<selector>` |
 | 5 | **doggo** — wildcard probe, once per domain | `doggo zz-<random8>._domainkey.<domain> TXT --json --timeout 5s` | `json` | 5 s flag, 8 s kill | any answer → `wildcard_shadow: true` (`dkim.underscore_label`), discovery results suppressed |
 | 6 | **dnsx** — discovery sweep, only when no selectors configured | `dnsx -txt -cname -resp -json -silent -retry 1 -t 6` (candidate FQDNs `<sel>._domainkey.<domain>`, one per line, piped on **stdin**; `parsed.stdin_source` records `"wordlist (<n> names, MX-guided first)"`) | `json` (NDJSON) | 30 s kill (whole sweep) | `JSON.parse` per line; hits → `selectors[]` rows with `source: discovered` (`dkim.selector_discovery`) |
+| 7 | **doggo** — ADSP-leftover probe, once per domain | `doggo _adsp._domainkey.<domain> TXT --json --timeout 5s` | `json` | 5 s flag, 8 s kill | answers → evidence on `dkim.adsp_legacy` (`adsp.record`); the decision itself is the node:dns lookup |
+| 8 | **doggo** — legacy DomainKeys-policy probe, once per domain | `doggo _domainkey.<domain> TXT --json --timeout 5s` | `json` | 5 s flag, 8 s kill | answers → evidence on `dkim.adsp_legacy` (`legacy_domainkeys.record`); the decision itself is the node:dns lookup |
+
+**The multi-resolver cross-check is not a tool run.** `dkim.resolver_agreement` (§2) queries
+8.8.8.8 and 1.1.1.1 through `node:dns`'s `Resolver.setServers` — deterministic, no binary — so the
+sub-test verdict never depends on an installed tool, and the §3 rule that *tool runs never change a
+sub-test verdict* stays intact (the kdig capture in row 3 remains evidence that corroborates it).
 
 Future rounds append to the same array with the same shape: the message layer records
 `npx mailauth report /path/to/probe.eml` (JSON report → `dkim.signature_verify`, `dkim.alignment`,
@@ -311,7 +320,7 @@ selectors. Two passes:
    `hs2` (HubSpot), `km1`, `km2` (Klaviyo), `brevo1`, `brevo2` (Brevo/Sendinblue), `zendesk1`,
    `zendesk2`, `ctct1`, `ctct2` (Constant Contact), `zoho`, `zmail`, `protonmail`, `protonmail2`,
    `protonmail3`, `sig1` (Apple iCloud custom domains), `sfdc` (Salesforce convention),
-   `everlytickey1`, `everlytickey2`, `pdk1` (Mailgun), `mailo`.
+   `everlytickey1`, `everlytickey2`, `pdk1` (Mailgun), `mailo`, `fd`, `fd2` (Fastmail).
 
    Hits are `info` findings recommended for adding to config. It is deliberately a curated list (not
    a brute force) to stay polite to resolvers — Amazon SES's three random-token CNAME selectors and
@@ -324,14 +333,38 @@ compares it against the same hash from **other selectors in this run** and from 
 audit of every other monitored domain** (read from the store). A collision across domains is a
 shared private key → `warning`.
 
+**Multi-resolver agreement (`dkim.resolver_agreement`).** For every probed selector the checker
+re-queries `<selector>._domainkey.<domain>` TXT through two dedicated `node:dns` `Resolver`
+instances — `setServers(['8.8.8.8'])` and `setServers(['1.1.1.1'])`, each constructed with
+`{ timeout: 3000, tries: 1 }` — and compares the **joined record sets** (each answer's 255-byte
+chunks joined, the set sorted) against the local answer. All agree → `ok` (`resolvers_agree: true`);
+any public resolver returns a **different set** (record present at one, absent or different at
+another) → `warning` with both views in the evidence (`resolvers_agree: false`); a public resolver
+query **errors/times out** → that resolver is skipped, and when *no* public resolver could be
+reached the sub-test is `info` "could not cross-check" (`resolvers_agree: null`) — an unreachable
+resolver must never fabricate a disagreement. Failures here are commonly propagation lag after an
+edit (benign, self-healing within the TTL) or authoritative NS serving divergent zone data (real,
+persistent) — the finding text says how to tell them apart.
+
+**Legacy ADSP / DomainKeys leftovers (`dkim.adsp_legacy`).** Once per domain the checker resolves
+`_adsp._domainkey.<domain>` TXT (ADSP, RFC 5617 — **Historic** since 2013) and `_domainkey.<domain>`
+TXT (the pre-DKIM DomainKeys policy record, RFC 4870). ADSP records are parsed for the `dkim=` tag
+(`unknown` | `all` | `discardable`): `discardable` → `warning` (implementations that still honor
+ADSP may silently discard forwarded/unsigned mail); any other ADSP record → `info` (delete it —
+DMARC replaced ADSP). A bare `_domainkey.<domain>` TXT that parses as a DomainKeys policy
+(`o=-`/`o=~`, optionally `t=`/`n=`/`r=`) → `info` (harmless to verifiers, but it dates the zone and
+confuses audits — delete it). A TXT at `_domainkey.<domain>` that looks like an actual **key**
+record (`v=DKIM1`/`p=`) is *not* a policy leftover — it is a key published at the wrong name
+(selector forgotten), and the finding says exactly that. Nothing published at either name → `ok`.
+
 **Severity mapping.**
 
 | Condition | Severity |
 | --- | --- |
 | No record for a configured signing selector; unparseable record; empty `p=` (revoked) on a configured selector; RSA < 1024-bit; SHA-1-only; dangling CNAME target; zero working selectors | **critical** |
-| 1024-bit RSA; `t=y` in production; only one working selector; multiple TXT records at a selector; Ed25519-only; key past rotation window; duplicate key across domains; oversize record; wildcard shadowing; `s=` excludes email | **warning** |
-| Discovered-but-unconfigured selector; approaching rotation window; `t=s` strict flag; empty `p=` on a merely-discovered selector; `n=` notes | **info** |
-| Selector present, parses, ≥2048-bit RSA (or Ed25519 alongside RSA), no test flag, one TXT record, sane tags | **ok** |
+| 1024-bit RSA; `t=y` in production; only one working selector; multiple TXT records at a selector; Ed25519-only; key past rotation window; duplicate key across domains; oversize record; wildcard shadowing; `s=` excludes email; resolver split view (public resolvers see a different record than the local one); ADSP `dkim=discardable` leftover | **warning** |
+| Discovered-but-unconfigured selector; approaching rotation window; `t=s` strict flag; empty `p=` on a merely-discovered selector; `n=` notes; ADSP (non-discardable) / DomainKeys policy leftover; resolver cross-check unreachable | **info** |
+| Selector present, parses, ≥2048-bit RSA (or Ed25519 alongside RSA), no test flag, one TXT record, sane tags, all resolvers agree, no ADSP/DomainKeys leftovers | **ok** |
 
 **Edge cases.** (a) An empty `p=` is a **valid revocation**, not a parse error — `critical` only for
 a configured selector (see `dkim.revoked`). (b) `resolveTxt` returning multiple TXT records at one
@@ -342,7 +375,11 @@ discovery false-positives. (d) **Transient DNS failures** (`ESERVFAIL`/timeouts)
 as `warning "could not determine"`, **never** as a `critical` "missing" — a resolver hiccup must not
 fabricate a problem (important for the scheduler's regression diff). (e) Trailing-dot and case
 normalization on the domain before building the name. (f) CNAME chains longer than one hop resolve
-fine but are noted (fragility).
+fine but are noted (fragility). (g) **FWS/whitespace inside `p=`** is legal folding (RFC 6376) —
+strip it before decoding; only genuinely non-base64 bytes fail `dkim.parses`. (h) The
+resolver-agreement cross-check compares **record sets**, not answer order — DNS round-robin
+re-ordering is never a disagreement — and an unreachable public resolver downgrades the sub-test to
+`info`, never `warning`.
 
 **Caching / rate limits.** Pure-DNS sub-checks are cheap; results honor the record TTL implicitly
 via the OS resolver. Selector discovery is the only fan-out — cap concurrency (~6), short per-lookup
@@ -408,6 +445,7 @@ dkim:
       txt_record_count: 0
       oversize_chunk: false          # any character-string > 255 bytes
       flags: {}                      # long tail: {s: email, h: [sha256], g: "*", n: "..."}
+      resolvers_agree: false         # local vs 8.8.8.8/1.1.1.1 view: true | false | null (unchecked)
       first_seen_at: 2025-11-02T00:00:00Z   # earliest audit that saw this key (rotation age)
     - selector: google
       query_name: google._domainkey.example.com
@@ -427,9 +465,17 @@ dkim:
       txt_record_count: 1
       oversize_chunk: false
       flags: {}
+      resolvers_agree: true
       first_seen_at: 2024-03-14T00:00:00Z
   wildcard_shadow: false       # random-selector probe answered → wildcard TXT pollution
   duplicate_keys: []           # [{key_sha256, seen_on: ["other.com/s1"]}]
+  adsp:                        # historic ADSP leftover at _adsp._domainkey.<domain> (RFC 5617)
+    present: false
+    record: null               # the raw TXT when present, e.g. "dkim=discardable"
+    practice: null             # unknown | all | discardable | null
+  legacy_domainkeys:           # pre-DKIM DomainKeys policy record at _domainkey.<domain> (RFC 4870)
+    present: false
+    record: null               # the raw TXT when present, e.g. "o=-; n=notes"
   # ---- every external tool invocation this run made (§3), in execution order ----
   tool_runs:
     - tool: doggo
@@ -488,6 +534,22 @@ dkim:
       output_format: json
       parsed: []                     # no answer → wildcard_shadow stays false
       error: null
+    - tool: doggo
+      command: "doggo _adsp._domainkey.example.com TXT --json --timeout 5s"
+      started_at: 2026-07-01T16:14:05Z
+      duration_ms: 79
+      exit_code: 0
+      output_format: json
+      parsed: []                     # no answer → no ADSP leftover (dkim.adsp_legacy)
+      error: null
+    - tool: doggo
+      command: "doggo _domainkey.example.com TXT --json --timeout 5s"
+      started_at: 2026-07-01T16:14:06Z
+      duration_ms: 84
+      exit_code: 0
+      output_format: json
+      parsed: []                     # no answer → no DomainKeys policy leftover
+      error: null
   # ---- the per-test rows (the findings, pass and fail alike) ----
   tests:
     - id: dkim.present.s1
@@ -525,7 +587,9 @@ Field-name mapping: the run identity (`domain`, start/finish times) lives **only
 `run:` block — the `dkim` section never repeats it. `selectors[].*` keys are 1:1 with the
 `dkim_check_results` columns in §10
 (`selector`, `query_name`, `resolved_via`, `cname_target`, `raw_record`, `key_type`, `key_bits`,
-`key_sha256`, `has_test_flag`, `is_revoked`, `flags`, `first_seen_at`, `present`, `parses`);
+`key_sha256`, `has_test_flag`, `is_revoked`, `flags`, `resolvers_agree`, `first_seen_at`,
+`present`, `parses`); `adsp` and `legacy_domainkeys` are domain-level observation blocks
+(`dkim.adsp_legacy`) that live only in this section;
 `tool_runs[]` entries follow the §3 capture contract exactly
 (`tool`, `command` — the exact argv string with every input argument — `started_at`, `duration_ms`,
 `exit_code`, `output_format: json|text`, `parsed`, `error: null|string`);
@@ -611,7 +675,8 @@ Contents, in order (exact layout in §7):
    run**: selector name, `source` (configured /
    discovered), resolution chain (`TXT` or `CNAME → target`), key type + bit length badge
    (`RSA 2048` green / `RSA 1024` amber / `revoked` red / `ed25519` slate), test/strict flags, key
-   age, and the raw record (copyable, monospace, truncated with expand).
+   age, the resolver-agreement state (`resolvers agree` / amber `resolver split view` /
+   `not cross-checked`), and the raw record (copyable, monospace, truncated with expand).
 4. **Sub-test results table** — one row per §2 sub-test instance of this run (per selector where
    applicable), fed by the run YAML's `tests[]` (§5):
    pass/fail/warn/info icon, sub-test id, plain-language title, the observed value, and — expanded
@@ -643,6 +708,39 @@ skeleton selector cards + skeleton table rows (no layout shift). *No selectors +
 nothing* is **not** empty — it renders
 the `dkim.no_selectors` info plus the "likely unsigned" warning state (PS-12) with the selector
 editor front and center.
+
+**Grown in this pass.** Beyond the eight bands above, the category page gains three click-through
+layers and a history band, all specced in §7.1–§7.8: every **sub-test row** links to its run-scoped
+**sub-test explainer page** (§7.2), every **selector card** links to its **selector detail page**
+with the tag-by-tag parsed-record breakdown (§7.3–§7.4), a collapsed **History** band (between the
+tool-runs accordion and the selectors editor) renders run-over-run trends (§7.5), and the header
+gains a secondary **"Run DKIM now"** scoped re-run next to the whole-domain Re-run (§7.7).
+
+### 6.3 The run report's DKIM section — grown summary
+
+On the run report (`/domains/:domainId/runs/:runId` — `RunDetailPage`), the DKIM category currently
+renders a colored chip with a run-scoped **› chevron** and a collapsible findings section. It grows,
+staying entirely run-scoped:
+
+1. **Chip** — keeps the Dashboard cell's color + one-line label (§6.1) and adds a second muted
+   line: the working-selector/key-strength metric (`2 selectors · 2048-bit`) or, when unhealthy,
+   the top open problem's title (`selector "s1" missing`). The chevron still opens **this run's**
+   DKIM category page.
+2. **Per-sub-test status list** — the section body renders one compact row per §2 sub-test instance
+   from this run's `tests[]` (fail-first, same ORDER as the category page): status icon, finding id
+   in small caps, plain-language title, severity chip. **Each row is a link** to the run-scoped
+   **sub-test explainer page** (§7.2) for that instance —
+   `/domains/:domainId/runs/:runId/dkim/tests/:subTestId`.
+3. **Selector chips strip** — under the section header, one small chip per probed selector
+   (selector name + the §7 key badge, dashed border for discovered). **Each chip is a link** to the
+   run-scoped **selector detail page** (§7.3) —
+   `/domains/:domainId/runs/:runId/dkim/selectors/:selector`.
+4. **Section-scoped run-now** — a small "Run DKIM now ⟳" text action at the section header's right
+   edge triggers the scoped re-run (§7.7) without leaving the run report; on completion the report
+   navigates to the new run.
+
+All-healthy runs keep the collapsed "all healthy" header line; expanding still shows the full
+pass-list (rows remain links — healthy rows drill into "what this sub-test is" education).
 
 ---
 
@@ -699,8 +797,8 @@ Placement rules and rationale:
   never shows it.
 - **Second band: selector cards, two-up.** DKIM is inherently **per selector**, so the evidence
   surface is a card per selector, not one blob: name + verdict badge top-left, resolution chain and
-  raw record beneath (monospace, copy button), and the vitals line (key age, flags, record count)
-  at the card foot. Discovered-but-unconfigured selectors render with a dashed border and an
+  raw record beneath (monospace, copy button), and the vitals line (key age, flags, record count,
+  resolver agreement — "resolvers agree" or an amber "resolver split view") at the card foot. Discovered-but-unconfigured selectors render with a dashed border and an
   **"Add to monitored"** inline action. On narrow widths cards stack.
 - **Main table: sub-test results.** A table, not cards — users scan many rows; sort order is fixed
   fail → warn → info → pass (never alphabetical, never by selector). Each row: status icon (✗ red /
@@ -732,6 +830,213 @@ Placement rules and rationale:
   commands from §3 — the same commands the run itself executed appear pre-filled from
   `tool_runs[].command`), **Path forward** (numbered steps with copyable records), and a
   further-reading footer. Back chevron returns to this run's DKIM page anchor.
+
+### 7.1 The five-band explainer contract (locked)
+
+Every clickable DKIM concept — a sub-test row, a selector, a record tag, a problem state — must
+navigate to a destination page (or route-addressable panel) whose body renders the **same five
+bands, in this order**. This is the locked contract for all grown surfaces (§7.2–§7.4 and the §9
+drill-downs):
+
+| # | Band | Question it answers | Content rules |
+| --- | --- | --- | --- |
+| 1 | **What this is** | The concept: the record, mechanism, tag, sub-test, or state. | 2–3 short paragraphs; plain language first, the RFC citation last. Static copy from the frontend explainer catalog (never fetched). |
+| 2 | **Current status** | Is it healthy **for this domain, in this run**? | Severity chip (`ok` green / `warning` amber / `critical` red / `info` slate / `not evaluated` gray) + the observed evidence rendered from **this run's YAML**: exact DNS name, raw answer, decoded values, all monospace. The band is stamped with the run's start timestamp — never "now". |
+| 3 | **What it means** | Deliverability impact, plain language. | One short paragraph, receiver-specific where it matters (Gmail vs Microsoft vs Yahoo behavior). No RFC prose here. |
+| 4 | **What you can do** | The fix. | Numbered, copy-pasteable steps: exact TXT/CNAME values with `[copy]`, provider console paths (Google Admin → Apps → Gmail → *Authenticate email*; M365 Defender → *Email authentication settings* → DKIM; SendGrid → *Sender Authentication*; …). A collapsed **"Diagnose it yourself"** accordion inside this band carries the §3 terminal commands (domain/selector substituted, copyable) and this run's matching `tool_runs[].command` entries. |
+| 5 | **Run this check now** | Can I re-verify immediately? | The scoped re-run affordance (§7.7): button, one-line explanation of what will run ("re-runs the DKIM checker for `<domain>` — a few DNS lookups, ~5 s"), last-checked timestamp, spinner while running, and the post-run navigation described in §7.7. |
+
+Below the bands, every explainer surface ends with the **References footer** (§7.6) and back
+navigation that preserves run context (back returns to the surface the user came from, anchored).
+
+**The §9 problem drill-downs are re-shaped onto this contract** without losing content: *Concept* →
+band 1; *Your data* → band 2, grown from listing field names to **rendering this run's values**
+(field name → observed value rows, monospace); the new band 3 paragraph is added per PS;
+*Diagnose it yourself* + *Tools* + *Path forward* fold into band 4 (path-forward steps first,
+diagnose accordion beneath, tools as a footnote line); band 5 and the References footer are added.
+*More health metrics* renders after band 5 as the history hook (§7.5).
+
+### 7.2 Sub-test explainer pages
+
+**Routes (new, locked).** `/domains/:domainId/runs/:runId/dkim/tests/:subTestId`, newest-run alias
+`/domains/:domainId/dkim/tests/:subTestId`. `:subTestId` is the **full finding id** including any
+`.selector` suffix (`dkim.keylength.google`); the bare sub-check id (`dkim.keylength`) is also
+accepted and renders one band-2 status block **per selector instance** in this run. The literal
+`tests` segment cannot collide with `:problemId` (problem ids are `PS-xx`).
+
+**Reached from:** the run report's per-sub-test status list (§6.3), the category page's sub-test
+table (each expanded row gains an **"Explain ›"** link beside `[copy fix]`), and cross-links inside
+problem drill-downs ("detected by `dkim.keylength` ›").
+
+**Body = the five-band contract (§7.1)**, fed by two sources:
+
+- **Band 1/3 copy + the band-4 recipe** come from a static frontend catalog (`dkim-tests.ts`,
+  mirroring the §2 table row for the sub-check: what it verifies, how it is measured, the RFC, the
+  remediation recipe expanded into numbered steps). The §2 table is the source of truth — the
+  catalog must stay 1:1 with it.
+- **Band 2** renders this run's `tests[]` row (result, detail, evidence) plus the `tool_runs[]`
+  entries whose command names this sub-test's selector — the same evidence the category-page
+  accordion shows, pre-filtered.
+
+Below the contract: the **history strip** for this sub-test (§7.5b).
+
+**States.** Unknown `:subTestId` → "Unknown DKIM sub-test" with a link back to this run's DKIM
+page. Sub-test **not evaluated in this run** (e.g. `dkim.selector_discovery` when selectors were
+configured, or a future-layer id) → band 2 renders the gray `not evaluated` chip with the reason
+sentence; bands 1/3/4 still render (the page is education even without data). Run-not-found and
+loading states are identical to the category page (§6.2).
+
+### 7.3 Selector detail pages
+
+**Routes (new, locked).** `/domains/:domainId/runs/:runId/dkim/selectors/:selector`, newest-run
+alias `/domains/:domainId/dkim/selectors/:selector`. The literal `selectors` segment is likewise
+reserved against `:problemId`.
+
+**Reached from:** the selector card header on the category page (each card gains a **"Details ›"**
+chevron), the run report's selector chips (§6.3), and band 2 of any per-selector sub-test explainer
+(the selector name is a link).
+
+**Header** follows the §6.2 header rules (back link, domain, `DKIM · <selector>` title, run
+timestamp, ‹ prev / next › run navigation **staying on this selector's detail page**, Re-run,
+stale-run banner). If the selector was **not probed in the target run** (renamed, removed from
+config, discovery didn't run), band 2 renders "not probed in this run" with links to the runs
+where it was.
+
+**Body = the five-band contract:**
+
+1. **What this is** — what a DKIM selector is (the `s=` label, why many coexist, why they can't be
+   enumerated) plus this selector's provenance: `configured` vs `discovered`, and the likely
+   provider inferred from the selector name / CNAME target (`s1` + a `sendgrid.net` target →
+   SendGrid), clearly marked as a guess.
+2. **Current status** — the resolution chain rendered hop-by-hop (dead hop struck through), the
+   **full raw record** (copyable, chunk boundaries shown as separate quoted ≤255-byte strings —
+   exactly what the DNS answer carried), and the **tag-by-tag parsed breakdown table** (§7.4).
+3. **What it means** — one paragraph for this selector's aggregate state (e.g. "every message
+   signed as `s1` fails at every receiver").
+4. **What you can do** — the per-selector fix steps (publish / re-point / rotate / clean),
+   provider-aware when band 1 guessed one.
+5. **Run this check now** — §7.7.
+
+Below the contract: the selector's **change-event history** (§7.5c) and the References footer.
+
+### 7.4 The parsed-record breakdown table + tag explainer panel
+
+Band 2 of every selector detail page renders **one row per RFC 6376 tag**: every tag present in
+the record, plus the expected-but-absent ones (`v`, `k`, `p`, `t`, `s`, `h`; `g`/`n` only when
+present). Columns:
+
+| Column | Content |
+| --- | --- |
+| **Tag** | the tag name, monospace (`p=`); absent tags grayed with "(not set — default)" |
+| **Raw value** | verbatim from the record, monospace; `p=` truncated with expand |
+| **Parsed meaning** | the human reading: `v=DKIM1` → "key-record version"; `k=rsa` → "RSA key"; `p=MIGf…` → "RSA public key · 1024-bit modulus · sha256 9f2c…a41b"; `t=y` → "TEST MODE — verifiers treat mail as unsigned" |
+| **Status** | per-tag severity chip: green (sane), amber (`t=y`, deprecated `g=`, `s=` excluding email), red (`h=sha1`, empty `p=`, undecodable `p=`), slate (`n=` notes, defaults) |
+| **Note** | one short clause ("default when absent", "revoked — RFC 6376 §3.6.1", …) |
+
+**Every tag row is clickable** → the **tag explainer panel**: a right-side sheet (not a page)
+addressed by the `?tag=<name>` query param on the selector detail route, so it is shareable and
+the browser back button closes it. The panel renders the five-band contract in miniature: what the
+tag is (RFC 6376 §3.6.1 definition, one paragraph), this record's value + verdict chip, what the
+current value means, the exact edit (the **full corrected record** with the one tag fixed,
+`[copy]`), and the same run-now button. Unknown/misspelled tags render as red "unknown tag" rows
+whose panel explains that verifiers ignore unknown tags (harmless) **unless** it is a corruption of
+a meaningful tag (`p =` with a space, smart-quoted `“p=”`) — which breaks the whole record (PS-02).
+
+### 7.5 History & trends — run-over-run
+
+**Data source:** the existing run-history API (`GET /api/audit/runs?domainId=…`) — every stored run
+already carries `results.dkim` and `findings`; the frontend derives all series client-side. **No
+new endpoint.** Series are keyed per selector by `(selector, key_sha256)` and per sub-test by
+finding id, newest first, capped at the last 50 runs.
+
+Three surfaces:
+
+- **(a) Category page History band** — collapsed by default, between the tool-runs accordion and
+  the selectors editor: one sparkline row per selector (`key_bits` over time; runs where the
+  selector was missing render as red gaps) plus a run-by-run dot strip of the category's worst
+  severity. **Clicking any dot navigates to that run's DKIM page** (`…/runs/:runId/dkim`).
+- **(b) Sub-test explainer strip** — under the five bands: one chip per run (✓/⚠/✗/ⓘ), newest
+  first, with a regression callout when the newest failure has a first-failed run ("first failed in
+  the run of 2026-06-14 03:00 PM ›" — links that run's explainer page).
+- **(c) Selector detail change-event table** — **transitions only**, not every run: key rotated
+  (`key_sha256` changed), `key_bits` changed (1024 → 2048), `t=y` added/removed, `cname_target`
+  changed, went missing / came back, revoked. Each row: run timestamp (link), what changed,
+  old → new value. Quiet selectors render "No changes across N runs since `<date>`."
+
+**States.** Fewer than 2 stored runs → "History appears after the next run." Loading → sparkline /
+strip skeletons. Fetch error → the band degrades to the current run only, with an inline "retry"
+link (never blocks the rest of the page).
+
+### 7.6 External references — the footer contract
+
+Every explainer surface (§9 drill-downs, sub-test explainers, selector details, the tag panel) ends
+with a **References** footer: title + outbound link, opening in a new tab, defined in the frontend
+catalogs alongside the explainer copy. Canonical pool:
+
+- **RFC 6376** — DKIM signatures & key records (deep-anchor §3.6.1 for tags/revocation, §3.6.2.2
+  for multi-TXT); **RFC 8301** — key-strength floor / SHA-1 ban; **RFC 8463** — Ed25519;
+  **RFC 8601** — Authentication-Results; **M3AAWG** key-rotation best practices; **US-CERT
+  VU#268267** (the 2012 weak-key incident).
+- **Provider docs** (chosen by the selector's guessed provider, §7.3 band 1, when known): Google
+  Admin "Authenticate email with DKIM", Microsoft 365 Defender DKIM setup, SendGrid Domain
+  Authentication, Amazon SES Easy DKIM, Mailgun sending domains, Postmark DKIM, Mailchimp domain
+  authentication.
+
+Rules: **at most 6 links per surface** (most-relevant first — the RFC that defines the concept,
+then the provider doc that fixes it); never a link-farm; the reflectors/testers list (§3) appears
+only on PS drill-downs where hands-on verification is the fix path.
+
+### 7.7 "Run DKIM now" — the scoped re-run
+
+**Affordances.** (a) A secondary **"Run DKIM now ⟳"** button in the category-page header, next to
+the whole-domain **Re-run** (which keeps running all six categories); (b) the §6.3 run-report
+section action; (c) **band 5 of every explainer surface**, labeled "Run this check now". All three
+trigger the same scoped run.
+
+**Granularity honesty.** Sub-tests share the same DNS fetches, so the smallest executable unit is
+the **whole DKIM checker** (a few lookups, seconds). Band 5 on a sub-test explainer or tag panel
+says exactly that ("runs all DKIM sub-tests for this domain") and, on completion, deep-links back
+to the **same sub-test / selector / tag on the new run**.
+
+**UX flow.** Click → button disabled with spinner + "Checking DKIM…"; a category-scoped progress
+line replaces the app-wide scan banner (this is not a full scan). On completion: refetch
+results/runs; run-scoped surfaces navigate to the newest run's equivalent URL (aliases just
+refetch); a toast summarizes the delta from the previous run — "DKIM re-checked ·
+`dkim.keylength.google` warn → pass" or "no change". On failure: error toast, button re-enabled.
+While a full scan for the domain is already in flight the button is disabled with a tooltip
+("a full run is in progress").
+
+**Backend.** Today only the full-audit endpoint exists (`POST /api/audit/run/:domainId` →
+`AuditService.runForDomain`, which executes every registered checker). The precedent for a scoped
+re-run already ships in `content-sample.controller.ts` ("Re-score just the content check — no full
+re-audit"). Needed: one small endpoint —
+
+```
+POST /api/audit/run/:domainId/checks/dkim        → AuditResult (the new run, in full)
+```
+
+Semantics (locked): the audit service filters the checker registry to `checkId: "dkim"`, executes
+just that checker, and **persists a new run YAML** in which the `dkim` key (status, selectors,
+`tool_runs[]`, `tests[]`, `problem_states`) is fresh while the other five category keys are
+**copied unchanged from the domain's previous newest run**; the `run:` block records
+`trigger: "scoped"` and a `partial: [dkim]` marker naming the re-executed categories
+(coordinate the `partial` field with [../storage.mdx](../storage.mdx), which owns the `run:`
+block). Because a scoped re-run is **just a new run**, immutability, ‹ prev / next › navigation,
+the newest-run aliases, and the YAML file layout all keep working with zero special cases. The
+Runs table renders partial runs with a slate **"DKIM only"** chip; the scheduler's regression
+differ diffs **only** the re-executed categories of a partial run. Returns `409` when a run for
+the domain is already in progress. **No prior run** → the endpoint falls back to a full audit
+(nothing to carry forward) and the band-5 copy says so ("first run checks everything").
+
+### 7.8 Loading / empty / error states — locked for all grown surfaces
+
+| Surface | Loading | Empty / not-applicable | Error |
+| --- | --- | --- | --- |
+| Sub-test explainer (§7.2) | skeleton bands 1–5, no layout shift | gray `not evaluated` chip in band 2 + reason; bands 1/3/4 still render | unknown id → "Unknown DKIM sub-test" + back link; run-not-found → §6.2 state |
+| Selector detail (§7.3) | skeleton header + table | "not probed in this run" band 2 + links to runs where it was | unknown selector (never probed in any run) → "No run has probed `<selector>`" + selectors-editor link |
+| Tag panel (§7.4) | sheet skeleton | absent tag → "(not set — default)" explainer of the default behavior | unknown `?tag=` → "unknown tag" education (still useful) |
+| History band/strip (§7.5) | sparkline skeletons | < 2 runs → "History appears after the next run" | degrade to current run + inline retry; never blocks the page |
+| Scoped re-run (§7.7) | button spinner + "Checking DKIM…" | — | error toast + button re-enabled; `409` while scanning → disabled + tooltip |
 
 ---
 
@@ -1240,6 +1545,54 @@ so the Dashboard, store, and scheduler never change as the message and observati
     renders concept, the data fields from this run's YAML, diagnose-it-yourself commands (§3
     tools), and the numbered
     path forward.
+21. Every explainer surface — problem drill-downs, sub-test explainers, selector details, and the
+    tag panel — renders the locked **five-band contract** (§7.1) in order: what this is, current
+    status (severity chip + this run's evidence, stamped with the run's start time), what it means,
+    what you can do (numbered copyable steps with the diagnose accordion), and Run this check now;
+    followed by the References footer. The §9 drill-downs are re-shaped onto the contract with
+    *Your data* rendering observed values, not just field names.
+22. Sub-test explainer pages exist at `/domains/:domainId/runs/:runId/dkim/tests/:subTestId` with
+    the newest-run alias `/domains/:domainId/dkim/tests/:subTestId`; they accept both the full
+    per-selector instance id and the bare sub-check id (one band-2 block per instance); band-1/3/4
+    copy comes from a `dkim-tests.ts` catalog kept 1:1 with the §2 table; band 2 renders this run's
+    `tests[]` row plus the selector-filtered `tool_runs[]`; unknown ids and not-evaluated sub-tests
+    render the §7.8 states. They are linked from the run report's per-sub-test rows (§6.3) and from
+    an "Explain ›" link in every expanded category-page table row.
+23. Selector detail pages exist at `/domains/:domainId/runs/:runId/dkim/selectors/:selector` (+
+    newest-run alias), reached from selector-card "Details ›" chevrons and the run report's selector
+    chips; band 2 renders the hop-by-hop resolution chain, the full raw record with its ≤255-byte
+    chunk boundaries, and the **tag-by-tag parsed breakdown table** (§7.4 columns: tag, raw value,
+    parsed meaning, per-tag status chip, note), including expected-but-absent tags; prev/next run
+    navigation stays on the same selector's page.
+24. Every tag row opens the **tag explainer panel** (right-side sheet addressed by `?tag=<name>` —
+    shareable, browser-back closes it) rendering the five-band contract in miniature with the full
+    corrected record as the copyable fix; unknown/misspelled tags render the red "unknown tag" row
+    and its corruption education.
+25. Run-over-run history derives entirely from the existing `GET /api/audit/runs?domainId=…`
+    responses (no new endpoint) and renders on three surfaces: the category page's collapsed
+    History band (per-selector `key_bits` sparklines with red missing-gaps + a clickable worst-
+    severity dot strip), the sub-test explainer's per-run chip strip with the "first failed in …"
+    regression callout, and the selector detail change-event table (transitions only). Fewer than
+    two stored runs renders "History appears after the next run."
+26. Every explainer surface ends with a References footer of at most six outbound links drawn from
+    the §7.6 canonical pool, provider-aware when the selector's provider was guessed, opening in
+    new tabs.
+27. The scoped re-run endpoint `POST /api/audit/run/:domainId/checks/dkim` executes only the DKIM
+    checker and persists a **new run** whose `dkim` key is fresh while the other five category keys
+    are copied unchanged from the previous newest run, marked `trigger: "scoped"` +
+    `partial: [dkim]` in the `run:` block (field coordinated with ../storage.mdx); it returns the
+    full new `AuditResult`, responds `409` while a run for the domain is in flight, and falls back
+    to a full audit when the domain has no prior run. The Runs table shows partial runs with a
+    "DKIM only" chip and the regression differ diffs only the re-executed categories.
+28. The "Run DKIM now" affordance appears in the category-page header (beside the whole-domain
+    Re-run), on the run report's DKIM section, and as band 5 of every explainer surface ("Run this
+    check now" — honestly labeled as running all DKIM sub-tests); while running it shows the
+    spinner + "Checking DKIM…", and on completion it refetches, navigates run-scoped surfaces to
+    the newest run's equivalent URL (deep-linking back to the same sub-test/selector/tag), and
+    toasts the delta versus the previous run ("warn → pass" / "no change").
+29. Every grown surface implements the §7.8 loading/empty/error matrix exactly (skeletons without
+    layout shift; `not evaluated` and "not probed in this run" states that keep the education
+    bands; history degradation that never blocks the page; the 409-disabled run-now button).
 
 <!--
   Maintenance notes:
@@ -1257,6 +1610,19 @@ so the Dashboard, store, and scheduler never change as the message and observati
   - dkim_check_results extends the shared core tables (audit_runs, domains, findings) and READS the
     shared dkim_selectors list — do not redefine core tables here.
   - Problem-state ids PS-00…PS-16 are stable API for the frontend drill-down routes — never renumber.
+  - Grown-surface routes are stable API too: /domains/:domainId/runs/:runId/dkim/tests/:subTestId
+    and /domains/:domainId/runs/:runId/dkim/selectors/:selector (+ their newest-run aliases), with
+    the tag panel addressed by ?tag= on the selector detail route. The literal segments `tests` and
+    `selectors` are RESERVED under /dkim/ — they must never collide with :problemId (safe today:
+    problem ids are PS-xx) and no new dynamic segment may shadow them.
+  - The five-band explainer contract (§7.1) is locked across all DKIM explainer surfaces; band-1/3/4
+    copy lives in frontend catalogs (dkim-tests.ts, the PS catalog in dkim-problems.ts, the tag
+    catalog) that must stay 1:1 with the §2 table, §9, and RFC 6376 §3.6.1 respectively.
+  - The scoped re-run (§7.7) endpoint POST /api/audit/run/:domainId/checks/dkim introduces
+    run.partial: [<category>...] + trigger: "scoped" in the run: block — the run: block is OWNED by
+    ../storage.mdx, so coordinate that field there (and mirror the partial-run "DKIM only" chip in
+    ../dashboard.mdx's Runs table) before implementing. History/trends (§7.5) intentionally add NO
+    backend endpoint — they derive from GET /api/audit/runs?domainId=.
   - LOCKED shared conventions (identical across all six category specs — do not deviate):
     Run → Test → Sub-test vocabulary (../dashboard.mdx §1); run storage = ONE YAML per run at
     ~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml (owned by ../storage.mdx —

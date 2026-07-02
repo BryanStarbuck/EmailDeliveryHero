@@ -1,7 +1,8 @@
 import { createHash, createPublicKey, randomBytes } from "node:crypto"
 import { mapLimit } from "@shared/concurrency"
+import { readAppConfig } from "@shared/config-store"
 import { resolveCname, resolveMx, resolveTxt } from "../dns-util"
-import type { Checker, CheckOutcome, Finding } from "../types"
+import type { Checker, CheckOutcome, Finding, Severity } from "../types"
 import { DkimToolBench, type DkimToolRun } from "./dkim-tools"
 
 /**
@@ -17,7 +18,21 @@ import { DkimToolBench, type DkimToolRun } from "./dkim-tools"
 
 /** M3AAWG rotation guidance: warn past ~6 months, note when approaching. */
 const ROTATION_WARN_DAYS = 180
-const ROTATION_INFO_DAYS = 150
+/** The "approaching the window" info fires this many days before the warning. */
+const ROTATION_INFO_LEAD_DAYS = 30
+
+/**
+ * The configured rotation window (pm/checks/dkim.mdx §2.2 `dkim.rotation` — "config window default
+ * 180 days"): `config.yaml → checks.dkim.rotationWindowDays`, falling back to the M3AAWG default.
+ */
+function rotationWindowDays(): number {
+  try {
+    const days = readAppConfig().checks.dkim?.rotationWindowDays
+    return typeof days === "number" && days > 0 ? days : ROTATION_WARN_DAYS
+  } catch {
+    return ROTATION_WARN_DAYS
+  }
+}
 
 /** Bounded fan-out for discovery probes (pm/checks/dkim.mdx §4 — polite, not brute force). */
 const DISCOVERY_CONCURRENCY = 6
@@ -47,6 +62,7 @@ export const COMMON_SELECTORS = [
   "s1",
   "s2",
   "smtpapi",
+  "s1024",
   "mx",
   "google",
   "mandrill",
@@ -107,8 +123,27 @@ export interface DkimSelectorResult {
   first_seen_at: string | null
 }
 
-/** Structured payload persisted as `results.dkim` (pm/checks/dkim.mdx §5). */
+/** One per-sub-test row of §5's `tests:` list (`result` ⇔ finding severity ok/critical/warning/info). */
+export interface DkimTestRow {
+  id: string
+  /** Present on per-selector rows (finding ids are suffixed `.<selector>`). */
+  selector?: string
+  title: string
+  result: "pass" | "fail" | "warn" | "info"
+  detail?: string
+  evidence?: string
+  fix?: string
+}
+
+/**
+ * The whole `dkim:` section of the run YAML (pm/checks/dkim.mdx §5) — the category `status`, the
+ * structured per-selector observation, the `tool_runs[]` capture, the per-sub-test `tests[]` rows,
+ * and the derived §9 `problem_states`. Persisted verbatim as `results.dkim` under the run file's
+ * top-level `dkim` key.
+ */
 export interface DkimResults {
+  /** Worst severity across the tests below (the §5 category status). */
+  status: Severity
   selectors_configured: string[]
   discovery_ran: boolean
   working_selectors: number
@@ -117,6 +152,10 @@ export interface DkimResults {
   selectors: DkimSelectorResult[]
   /** Every external tool invocation this run made, in execution order (§3 capture contract). */
   tool_runs: DkimToolRun[]
+  /** The per-sub-test rows (§5 `tests[]`) — the findings mapped 1:1, pass and fail alike. */
+  tests: DkimTestRow[]
+  /** Matched §9 problem-state ids (PS-00…PS-12), derived from the finding ids — never stored separately. */
+  problem_states: string[]
 }
 
 /** Tokenize a raw DKIM key record into a tag map (names lower-cased, first occurrence wins). */
@@ -510,10 +549,13 @@ export const dkimCheck: Checker = {
   label: "DKIM keys",
   async run(ctx): Promise<CheckOutcome> {
     const findings: Finding[] = []
+    // Trailing-dot and case normalization before building any query name (§4 edge case e).
+    const domain = normalizeDomain(ctx.domain)
     // The evidence bench (§3): doggo/kdig/openssl/dnsx captures recorded into tool_runs[]. The
     // runs array is shared by reference so entries land in the results as they are captured.
     const bench = new DkimToolBench(ctx.signal, ctx.tools)
     const results: DkimResults = {
+      status: "ok",
       selectors_configured: [...ctx.dkimSelectors],
       discovery_ran: false,
       working_selectors: 0,
@@ -521,13 +563,15 @@ export const dkimCheck: Checker = {
       duplicate_keys: [],
       selectors: [],
       tool_runs: bench.runs,
+      tests: [],
+      problem_states: [],
     }
 
     // Wildcard-TXT guard (dkim.underscore_label): if a random selector that cannot exist answers,
     // every probe on this domain "resolves" with junk — receivers permerror and discovery is
     // unreliable. The label is `zz-<random8>` per pm/checks/dkim.mdx §3 row 5 / §4 edge case (c).
     const wildcardSelector = `zz-${randomBytes(4).toString("hex")}`
-    const wildcardName = `${wildcardSelector}._domainkey.${ctx.domain}`
+    const wildcardName = `${wildcardSelector}._domainkey.${domain}`
     const wildcardProbe = await resolveTxt(wildcardName)
     await bench.doggoTxt(wildcardName) // §3 row 5 — evidence capture, once per domain
     if (wildcardProbe.records.length > 0) {
@@ -537,8 +581,8 @@ export const dkimCheck: Checker = {
         checkId: "dkim",
         title: "A wildcard TXT record shadows _domainkey",
         severity: "warning",
-        detail: `A TXT lookup for a selector that cannot exist (${wildcardName}) returned an answer — a wildcard *.${ctx.domain} TXT is answering every DKIM query with non-DKIM data. Receivers get permerror junk and selector discovery is unreliable.`,
-        remediation: `Publish explicit records under _domainkey and remove or scope the wildcard TXT so it no longer covers *._domainkey.${ctx.domain}.`,
+        detail: `A TXT lookup for a selector that cannot exist (${wildcardName}) returned an answer — a wildcard *.${domain} TXT is answering every DKIM query with non-DKIM data. Receivers get permerror junk and selector discovery is unreliable.`,
+        remediation: `Publish explicit records under _domainkey and remove or scope the wildcard TXT so it no longer covers *._domainkey.${domain}.`,
         evidence: wildcardProbe.records[0],
       })
     }
@@ -560,11 +604,11 @@ export const dkimCheck: Checker = {
       })
       if (!results.wildcard_shadow) {
         results.discovery_ran = true
-        const ordered = await discoveryOrder(ctx.domain)
+        const ordered = await discoveryOrder(domain)
         // §3 row 6 — the dnsx sweep evidence capture (the decision engine stays node:dns below).
-        await bench.dnsxSweep(ordered.map((s) => `${s}._domainkey.${ctx.domain}`))
+        await bench.dnsxSweep(ordered.map((s) => `${s}._domainkey.${domain}`))
         const hits = await mapLimit(ordered, DISCOVERY_CONCURRENCY, async (selector) => {
-          const lookup = await resolveTxt(`${selector}._domainkey.${ctx.domain}`)
+          const lookup = await resolveTxt(`${selector}._domainkey.${domain}`)
           return lookup.records.some(looksLikeDkim) ? selector : null
         })
         probeList = hits
@@ -576,7 +620,7 @@ export const dkimCheck: Checker = {
             checkId: "dkim",
             title: `Discovered DKIM selector "${selector}"`,
             severity: "info",
-            detail: `A published DKIM key was found at ${selector}._domainkey.${ctx.domain} that is not in this domain's monitored selector list.`,
+            detail: `A published DKIM key was found at ${selector}._domainkey.${domain} that is not in this domain's monitored selector list.`,
             remediation: `Add "${selector}" to the domain's selectors so it is audited on every run.`,
           })
         }
@@ -597,7 +641,7 @@ export const dkimCheck: Checker = {
 
     // Probe every selector (bounded — configured lists are small, discovery lists already filtered).
     const analyses = await mapLimit(probeList, DISCOVERY_CONCURRENCY, ({ selector, source }) =>
-      probeSelector(ctx.domain, selector, source, bench),
+      probeSelector(domain, selector, source, bench),
     )
     for (const a of analyses) {
       findings.push(...a.findings)
@@ -608,6 +652,8 @@ export const dkimCheck: Checker = {
     // published on the same selector; a new key (or first run) starts the clock now.
     const previous = (ctx.previousResults?.dkim as DkimResults | undefined)?.selectors ?? []
     const nowIso = new Date().toISOString()
+    const rotationWarnDays = rotationWindowDays()
+    const rotationInfoDays = Math.max(1, rotationWarnDays - ROTATION_INFO_LEAD_DAYS)
     for (const sel of results.selectors) {
       if (!sel.key_sha256) continue
       const prev = previous.find(
@@ -615,7 +661,7 @@ export const dkimCheck: Checker = {
       )
       sel.first_seen_at = prev?.first_seen_at ?? nowIso
       const ageDays = Math.floor((Date.now() - Date.parse(sel.first_seen_at)) / 86_400_000)
-      if (ageDays >= ROTATION_WARN_DAYS) {
+      if (ageDays >= rotationWarnDays) {
         findings.push({
           id: `dkim.rotation.${sel.selector}`,
           checkId: "dkim",
@@ -625,7 +671,7 @@ export const dkimCheck: Checker = {
           remediation:
             "Rotate: publish a fresh key on a new selector ≥48h ahead, switch signing to it, keep the old record 7–30 days, then revoke it (empty p=).",
         })
-      } else if (ageDays >= ROTATION_INFO_DAYS) {
+      } else if (ageDays >= rotationInfoDays) {
         findings.push({
           id: `dkim.rotation.${sel.selector}`,
           checkId: "dkim",
@@ -696,7 +742,7 @@ export const dkimCheck: Checker = {
       if (!sel.key_sha256) continue
       seenOn.set(sel.key_sha256, [
         ...(seenOn.get(sel.key_sha256) ?? []),
-        `${ctx.domain}/${sel.selector}`,
+        `${domain}/${sel.selector}`,
       ])
     }
     for (const peer of ctx.peerDkimKeys ?? []) {
@@ -722,8 +768,153 @@ export const dkimCheck: Checker = {
       })
     }
 
+    // ---- The §5 `dkim:` section tail — status (worst severity), tests[], problem_states ------
+    results.status = worstDkimSeverity(findings)
+    results.tests = buildDkimTests(findings, new Set(results.selectors.map((s) => s.selector)))
+    results.problem_states = deriveDkimProblemStates(findings, results)
+
     return { findings, results }
   },
+}
+
+const SEVERITY_RANK: Record<Severity, number> = { ok: 0, info: 1, warning: 2, critical: 3 }
+
+/** Finding severity ⇔ §5 `tests[].result` (ok→pass, critical→fail, warning→warn, info→info). */
+const RESULT_OF: Record<Severity, DkimTestRow["result"]> = {
+  ok: "pass",
+  critical: "fail",
+  warning: "warn",
+  info: "info",
+}
+
+/** Worst severity across the run's DKIM findings — the §5 category `status`. */
+export function worstDkimSeverity(findings: Finding[]): Severity {
+  let worst: Severity = "ok"
+  for (const f of findings) if (SEVERITY_RANK[f.severity] > SEVERITY_RANK[worst]) worst = f.severity
+  return worst
+}
+
+/**
+ * Findings → §5 `tests[]` rows, pass and fail alike, so the DKIM run page renders one explicit
+ * row per sub-test instance. Per-selector finding ids keep their `.<selector>` suffix and the row
+ * carries the selector explicitly (the §5 example shape).
+ */
+export function buildDkimTests(findings: Finding[], selectors: Set<string>): DkimTestRow[] {
+  return findings.map((f) => {
+    const suffix = f.id.split(".").slice(2).join(".")
+    const selector = suffix && selectors.has(suffix) ? suffix : undefined
+    return {
+      id: f.id,
+      ...(selector ? { selector } : {}),
+      title: f.title,
+      result: RESULT_OF[f.severity],
+      ...(f.detail ? { detail: f.detail } : {}),
+      ...(f.evidence ? { evidence: f.evidence } : {}),
+      ...(f.remediation ? { fix: f.remediation } : {}),
+    }
+  })
+}
+
+/**
+ * The §9 problem-state mapping: finding ids at warning/critical severity, matched on their
+ * `dkim.<subcheck>` prefix (per-selector ids keep their suffix), → PS ids. PS-00 is the healthy
+ * goal state (no open warnings/criticals and ≥1 working selector); PS-13…PS-16 are FUTURE
+ * (message/rua layers) and never derived here.
+ */
+export function deriveDkimProblemStates(findings: Finding[], results: DkimResults): string[] {
+  const failing: string[] = []
+  for (const f of findings) {
+    if (f.severity === "warning" || f.severity === "critical") failing.push(f.id)
+  }
+  const has = (...prefixes: string[]): boolean =>
+    prefixes.some((p) => failing.some((id) => id === p || id.startsWith(`${p}.`)))
+  const out: string[] = []
+  if (has("dkim.present", "dkim.cname_delegation")) out.push("PS-01")
+  if (has("dkim.parses")) out.push("PS-02")
+  if (has("dkim.revoked")) out.push("PS-03")
+  if (has("dkim.keylength")) out.push("PS-04")
+  if (has("dkim.testflag")) out.push("PS-05")
+  if (has("dkim.algorithm")) out.push("PS-06")
+  if (has("dkim.cname_delegation")) out.push("PS-07")
+  if (has("dkim.single_record", "dkim.record_size", "dkim.underscore_label")) out.push("PS-08")
+  if (has("dkim.multi", "dkim.rotation")) out.push("PS-09")
+  if (has("dkim.duplicate_key")) out.push("PS-10")
+  if (has("dkim.ed25519_only")) out.push("PS-11")
+  if (has("dkim.unsigned")) out.push("PS-12")
+  if (out.length === 0 && failing.length === 0 && results.working_selectors >= 1) out.push("PS-00")
+  return out
+}
+
+/** One hit from an on-demand discovery probe (the selectors editor's "Run discovery now"). */
+export interface DkimDiscoveryHit {
+  selector: string
+  query_name: string
+  key_type: string | null
+  key_bits: number | null
+  is_revoked: boolean
+}
+
+/** The on-demand discovery outcome returned to the selectors editor (pm/checks/dkim.mdx §6.2 item 6). */
+export interface DkimDiscoveryOutcome {
+  /** True when a wildcard TXT answers every selector — hits are suppressed (§4 edge case c). */
+  wildcard_shadow: boolean
+  /** How many candidate names were probed (0 when the wildcard guard fired). */
+  probed: number
+  hits: DkimDiscoveryHit[]
+}
+
+/**
+ * On-demand selector discovery for the selectors editor's "Run discovery now" action
+ * (pm/checks/dkim.mdx §6.2 item 6): probes the §4 MX-guided wordlist regardless of whether
+ * selectors are configured, and returns the hits for one-click import. Same politeness rules as
+ * the in-run discovery (wildcard guard first, bounded concurrency, curated list — never brute
+ * force). This is a live probe, not a run — nothing is persisted.
+ */
+export async function discoverDkimSelectors(rawDomain: string): Promise<DkimDiscoveryOutcome> {
+  const domain = normalizeDomain(rawDomain)
+  // Wildcard guard: a wildcard TXT would make every candidate "resolve" with junk (§4 edge case c).
+  const wildcardProbe = await resolveTxt(
+    `zz-${randomBytes(4).toString("hex")}._domainkey.${domain}`,
+  )
+  if (wildcardProbe.records.length > 0) return { wildcard_shadow: true, probed: 0, hits: [] }
+
+  const ordered = await discoveryOrder(domain)
+  const probes = await mapLimit(
+    ordered,
+    DISCOVERY_CONCURRENCY,
+    async (selector): Promise<DkimDiscoveryHit | null> => {
+      const queryName = `${selector}._domainkey.${domain}`
+      let records = (await resolveTxt(queryName)).records
+      if (!records.some(looksLikeDkim)) {
+        // CNAME-delegated selectors whose target the local resolver did not chase.
+        const target = (await resolveCname(queryName)).records[0]
+        if (!target) return null
+        records = (await resolveTxt(target)).records
+      }
+      const record = records.find(looksLikeDkim)
+      if (!record) return null
+      const tags = parseDkimRecord(record)
+      const keyType = (tags.k ?? "rsa").toLowerCase()
+      const decoded = tags.p ? decodeDkimKey(tags.p, keyType) : null
+      return {
+        selector,
+        query_name: queryName,
+        key_type: keyType,
+        key_bits: decoded?.keyBits ?? null,
+        is_revoked: tags.p === "",
+      } satisfies DkimDiscoveryHit
+    },
+  )
+  return {
+    wildcard_shadow: false,
+    probed: ordered.length,
+    hits: probes.filter((h): h is DkimDiscoveryHit => h !== null),
+  }
+}
+
+/** Trailing-dot and case normalization on the domain before building names (§4 edge case e). */
+function normalizeDomain(domain: string): string {
+  return domain.trim().replace(/\.+$/, "").toLowerCase()
 }
 
 /** MX-guided discovery order: provider-hinted selectors first, then the rest of the wordlist. */
@@ -782,6 +973,27 @@ async function captureSelectorEvidence(
   }
 }
 
+/**
+ * String-validate a selector before building `<selector>._domainkey.<domain>` (pm/checks/dkim.mdx
+ * §2.2 `dkim.underscore_label` — "the fixed `_domainkey` label present, selector not doubled or
+ * misspelled"). Returns the human-readable problem, or null when the selector is a sane DNS name.
+ */
+export function invalidSelectorReason(selector: string): string | null {
+  if (!selector) return "the selector is empty"
+  if (/\s/.test(selector)) return "the selector contains whitespace"
+  if (selector.toLowerCase().split(".").includes("_domainkey")) {
+    return 'the selector repeats the fixed "_domainkey" label (it would be queried doubled)'
+  }
+  for (const label of selector.split(".")) {
+    if (!label) return "the selector has an empty DNS label (leading/trailing or doubled dot)"
+    if (label.length > 63) return `the DNS label "${label.slice(0, 24)}…" exceeds 63 octets`
+    if (!/^[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?$/.test(label)) {
+      return `the DNS label "${label}" contains characters that are not valid in a DNS name`
+    }
+  }
+  return null
+}
+
 /** Resolve one selector (TXT, falling back through a CNAME delegation) and analyze the record. */
 async function probeSelector(
   domain: string,
@@ -811,6 +1023,27 @@ async function probeSelector(
     flags: {},
     first_seen_at: null,
   })
+
+  // §2.2 dkim.underscore_label — string-validate the constructed query name before any DNS: a
+  // doubled "_domainkey", stray dot, or junk character would otherwise surface as a misleading
+  // "selector missing" critical when the real problem is the selector string itself.
+  const invalidReason = invalidSelectorReason(selector)
+  if (invalidReason) {
+    return {
+      findings: [
+        {
+          id: `dkim.underscore_label.${selector}`,
+          checkId: "dkim",
+          title: `Selector "${selector}" is not a valid DNS name`,
+          severity: "warning",
+          detail: `The configured selector cannot form a valid query name (${invalidReason}). The key must live at exactly <selector>._domainkey.${domain} — verifiers would never find a record at "${name}".`,
+          remediation: `Fix the selector string in the domain's selector list — enter only the selector label(s) (e.g. "s1"), never the full "_domainkey" name; copy the exact selector from your provider's dashboard or the s= tag of a real DKIM-Signature header.`,
+          evidence: name,
+        } satisfies Finding,
+      ],
+      result: emptyResult("none", null),
+    }
+  }
 
   const lookup = await rawResolveTxt(name)
   if (lookup.error) {
@@ -912,10 +1145,14 @@ async function probeSelector(
 
 /**
  * Like dns-util's resolveTxt but keeps the raw character-string lengths so the record_size check
- * can spot >255-byte strings (dns-util joins the chunks and loses that information).
+ * can spot >255-byte strings (dns-util joins the chunks and loses that information). Transient
+ * failures (ESERVFAIL/timeout — anything that is not a definitive ENOTFOUND/ENODATA) are retried
+ * ONCE before being surfaced, per pm/checks/dkim.mdx §11 "retry-once-then-warning" — a resolver
+ * hiccup must never fabricate a "missing" critical or poison the scheduler's regression diff.
  */
 async function rawResolveTxt(
   name: string,
+  retried = false,
 ): Promise<{ records: string[]; chunkLengths: number[]; error?: string }> {
   const { promises: dns } = await import("node:dns")
   try {
@@ -927,6 +1164,7 @@ async function rawResolveTxt(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code
     if (code === "ENOTFOUND" || code === "ENODATA") return { records: [], chunkLengths: [] }
+    if (!retried) return rawResolveTxt(name, true)
     return {
       records: [],
       chunkLengths: [],

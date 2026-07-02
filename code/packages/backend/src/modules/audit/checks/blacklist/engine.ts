@@ -4,6 +4,7 @@ import type {
   BlacklistRunResults,
   BlocklistZone,
   CodeMeaning,
+  IpTarget,
   PositiveReputation,
   ProblemStateId,
   ZoneHealth,
@@ -253,8 +254,10 @@ export function detectProblemStates(args: {
   zoneHealth: ZoneHealth[]
   positive: PositiveReputation
   zones: BlocklistZone[]
+  /** IP target context (PTR/FCrDNS) — enables PS-7 detection when provided. */
+  ipTargets?: IpTarget[]
 }): ProblemStateId[] {
-  const { results, zoneHealth, positive } = args
+  const { results, zoneHealth, positive, ipTargets } = args
   const states = new Set<ProblemStateId>()
   const listings = results.filter((r) => r.listed)
 
@@ -287,6 +290,17 @@ export function detectProblemStates(args: {
   // PS-10: dead or wildcarding zone encountered this run.
   if (zoneHealth.some((z) => z.status === "dead" || z.status === "wildcarding")) {
     states.add("PS-10")
+  }
+
+  // PS-7: an rDNS/FCrDNS defect is driving listings — a listed IP whose PTR is missing or
+  // fails forward-confirmation (SpamRATS NoPtr/Dyna and PBL-class listings follow from it).
+  if (ipTargets) {
+    const defective = new Set(
+      ipTargets.filter((t) => t.ptr === null || t.fcrdns_ok === false).map((t) => t.ip),
+    )
+    if (listings.some((r) => r.kind === "ip" && defective.has(r.target))) {
+      states.add("PS-7")
+    }
   }
 
   // PS-11: new-domain signals (ZRD 127.0.2.x hour codes / SEM-FRESH).

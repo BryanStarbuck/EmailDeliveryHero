@@ -1,6 +1,6 @@
 ---
 title: MX Records & Mail Routing
-description: Audits a domain's MX resource records and inbound mail-routing topology — presence, priorities, hostname resolution, public routability, redundancy/ASN diversity, RFC 7505 null-MX correctness, CNAME violations, and SMTP reachability — and prescribes the exact records to publish.
+description: Audits a domain's MX resource records and inbound mail-routing topology — presence, priorities, hostname resolution, public routability, redundancy/ASN diversity, RFC 7505 null-MX correctness, CNAME violations, expected-MX drift, and SMTP reachability — and prescribes the exact records to publish. Also owns the interior copy of the run-scoped mx-routing check-detail explainer page (what it is / healthy this run / what it means / what to do / run it now).
 ---
 
 # MX Records & Mail Routing
@@ -53,6 +53,24 @@ Every remediation is a concrete record or step. `example.com` is the audited dom
 | `infra.mx_greylash` | Advisory: greylisting behavior likely to delay first-contact mail *(FUTURE — probe/heuristic)* | Heuristic on 4xx tempfail on first probe | **info** advisory only | None required; note expected first-delivery delay to senders |
 | `infra.backup_mx_hygiene` | Backup (higher-preference) MX is not an open relay / spamtrap magnet *(FUTURE — probe)* | Relay-test the backup MX; confirm it enforces the same anti-spam as primary | **warning** if backup accepts relay or lacks recipient validation | Configure backup MX to validate recipients and reject relay; or drop the backup if unmaintained |
 | `infra.mx_matches_a` | If no MX, does the domain fall back to its A record (RFC 5321 implicit MX)? | If MX empty, check `resolve4(domain)` | **info** that mail will implicit-route to the A host (fragile) | Publish an explicit MX rather than relying on implicit A fallback |
+| `infra.mx_expected_drift` | Published MX set matches the operator's optional expected-MX allow-list (§4) | Set-compare normalized (lowercased, FQDN, A-label) published targets vs `config.mx.expectedHosts` | **warning** on drift (hosts expected-but-missing or published-but-unexpected — possible DNS compromise); **ok** when the sets match; silent when no allow-list is configured | Publish the missing `IN MX` line(s) / remove the unexpected line(s) — or update the allow-list in the domain's Mail-routing settings if the change was intentional |
+
+**Finding-id shapes as implemented.** Per-host sub-checks suffix the target onto the id —
+`infra.mx_not_cname.<host>`, `infra.mx_resolve.<host>`, `infra.mx_public_ip.<host>`,
+`infra.mx_localhost.<host>`, `infra.mx_trailing_dot.<host>`, `infra.mx_a_consistency.<host>` —
+so the category's problem-state matching is **by id prefix** ([./dns.mdx](./dns.mdx) §9).
+Transient resolver failures never fabricate a verdict: a failed MX lookup emits
+`infra.mx_present.lookup_failed` (**info**, no topology snapshot), and a transiently
+unresolvable target emits an **info** `infra.mx_resolve.<host>` ("resolvability was not
+determined") instead of a false dangling-critical. Every pass also emits an explicit **ok**
+finding (`infra.mx_present`, `infra.mx_not_cname`, `infra.mx_resolve`, `infra.mx_public_ip`,
+`infra.mx_priority`, `infra.mx_target_count`, `infra.mx_redundancy`,
+`infra.mx_a_consistency.<host>`, `infra.mx_expected_drift`, and the correct-null-MX
+`infra.mx_null`) so the UI renders a passed row per test, per the category contract
+([./dns.mdx](./dns.mdx) §2). When the domain sets `skipSmtpProbe` (§4), the SMTP-gated future
+infos (`infra.mx_reachable`, `infra.mx_banner`, `infra.mx_greylash`,
+`infra.backup_mx_hygiene`) are **omitted entirely** rather than reported as "not yet
+evaluated"; only the probe-independent `infra.mx_ttl` info remains.
 
 ## 3. How it is measured
 
@@ -92,6 +110,11 @@ DNS & Infrastructure ▸ MX Records & Mail Routing            [ 1 critical · 1 
 │ ○ info      infra.mx_ttl        TTL not evaluated in first round (needs dig)   │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Check-detail explainer.** The family group header on the DNS category page carries a
+`details ›` link, and every underlined MX concept term anywhere in the product deep-links, to
+the run-scoped **mx-routing check-detail explainer page** — §9 of this spec owns its interior
+copy; [./dns.mdx](./dns.mdx) §14 owns the shell (routes, five-block order, chrome, states).
 
 **Per-domain config inputs.** A small "Mail routing" panel on the domain settings page lets the operator declare intent so the checker can judge correctly: a toggle **"This domain receives mail"** (drives whether an empty or null MX is critical vs expected), an **expected-MX allow-list** (optional; flags drift if published MX differs), and a **skip-SMTP-probe** switch (for hosts whose egress blocks port 25). Fields map to `domains` config plus a small `mx_expectations` shape (see §5).
 
@@ -200,6 +223,18 @@ When the store moves to PostgreSQL, this is a single-module change: the store ad
 10. The audit-detail UI renders the MX topology table plus per-finding rows with severity badges and a working copy-to-clipboard of each fix, and the DNS & Infrastructure dashboard cell rolls up to the worst MX severity.
 11. On a scheduled re-run, an MX that changes from resolvable to dangling (or ok→private-IP) is diffed and surfaced as a **new problem**; a fixed MX clears its prior finding.
 12. Null MX short-circuits target resolution/reachability sub-checks (no target to probe) without emitting false dangling-MX findings.
+13. Given a domain with `config.mx.expectedHosts` set and a published MX set that differs, `infra.mx_expected_drift` is **warning** with both directions of drift named (missing vs unexpected) and a reconciliation remediation; with matching sets it is **ok**; with no allow-list it is silent.
+14. The explainer page renders at `/domains/:domainId/runs/:runId/dns/check/mx-routing` (newest alias `/domains/:domainId/dns/check/mx-routing`) with the five locked blocks in order and a back link to the same run's DNS category page ([./dns.mdx](./dns.mdx) §14.2); the alias rewrites to the canonical run URL.
+15. Block 1 contains the seven `#concept-<term>` anchor sections of §9.2 — deep-linking `…#concept-null-mx` from any surface scrolls to the null-MX section with the run context preserved.
+16. Block 2's parsed breakdown renders one row per MX host with per-field verdict chips (priority, target, CNAME?, resolved IPs, public?, network prefix) plus the summary-field table; `rrset_ttl` and `asn` render as "not captured this run" — never invented (no re-query at render time).
+17. Block 2's raw pane shows the observed MX RRset and per-target answer lines with a working copy button, sourced from the run's snapshot and linked `tool_runs[]` only.
+18. Every fix recipe in block 4 carries a copy button whose payload is a complete publishable zone line (or provider value set — Google Workspace / Microsoft 365 variants included); none is generic prose.
+19. Block 5's button POSTs `/api/audit/run/:domainId/check/dns/mx-routing`, a new run file is written with `run.scope = dns.mx_routing`, and on completion the page navigates to the new run's explainer with the ~2 s diff flash on any sub-test whose severity changed ([./dns.mdx](./dns.mdx) §15).
+20. On `infra.mx_present.lookup_failed` (transient), block 2 renders the info finding and **no topology table** (the run persisted no snapshot; the UI must not render false topology); block 5 doubles as the retry affordance.
+21. On a correct null MX, block 2 replaces the topology table with the one-line null-MX statement and lists the short-circuited sub-checks as "skipped — no target (RFC 7505)", not as failures.
+22. The footer history strip renders ≤30 cells (runs whose scope included mx-routing), with a change marker under any cell where the MX target set / `host_count` / `network_count` changed even at unchanged severity ([./dns.mdx](./dns.mdx) §16.3).
+23. Every warning/critical finding row on the explainer and category page deep-links to the PS-01 drill-down `/domains/:domainId/dns/PS-01?run=<runId>` preserving the viewed run; every resolved IP in the topology table links to the same run's reverse-dns explainer.
+24. The references footer renders the §9.8 rows (RFC 5321/7505/2181/1918+6598, provider MX docs, validators) plus the three category-common receiver-requirement rows, as plain external anchors opening a new tab.
 
 <!--
 MAINTENANCE NOTES

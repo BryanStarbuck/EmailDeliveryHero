@@ -1,4 +1,4 @@
-import { ApiPropertyOptional, ApiProperty } from "@nestjs/swagger"
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger"
 import { Type } from "class-transformer"
 import {
   ArrayMaxSize,
@@ -8,6 +8,7 @@ import {
   IsIn,
   IsInt,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   Max,
@@ -100,7 +101,10 @@ export class ChecksDkimDto {
 }
 
 export class ChecksDnsblDto {
-  @ApiPropertyOptional({ type: [String], description: "DNSBL zones the Blacklists category queries" })
+  @ApiPropertyOptional({
+    type: [String],
+    description: "DNSBL zones the Blacklists category queries",
+  })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(100)
@@ -130,6 +134,83 @@ export class ChecksContentDto {
   @IsOptional()
   @IsBoolean()
   networkTests?: boolean
+}
+
+/**
+ * One recognized Mark Verifying Authority (pm/checks/bimi.mdx §5 — the `bimi_mva` reference table
+ * mapped onto `config.yaml → checks.bimi.mvaAllowList`). The future VMC/CMC certificate round
+ * matches `issuerDnMatch` against the certificate issuer DN.
+ */
+export class BimiMvaEntryDto {
+  @ApiProperty({ description: "MVA display name, e.g. DigiCert or Entrust" })
+  @IsString()
+  @MaxLength(100)
+  name!: string
+
+  @ApiProperty({ description: "Substring matched against the VMC/CMC certificate issuer DN" })
+  @IsString()
+  @MaxLength(500)
+  issuerDnMatch!: string
+
+  @ApiProperty({
+    type: [String],
+    description: 'Mark types the MVA may issue: "vmc" (registered trademark) and/or "cmc"',
+    example: ["vmc", "cmc"],
+  })
+  @IsArray()
+  @ArrayMaxSize(2)
+  @IsIn(["vmc", "cmc"], { each: true })
+  markTypes!: ("vmc" | "cmc")[]
+
+  @ApiProperty({ description: "Whether this MVA is currently recognized" })
+  @IsBoolean()
+  enabled!: boolean
+}
+
+/**
+ * BIMI admin settings (pm/checks/bimi.mdx §4/§5): the VMC/CMC issuer allow-list ("VMC allow-list
+ * editing — which MVAs are recognized — is an admin-only setting").
+ */
+export class ChecksBimiDto {
+  @ApiPropertyOptional({
+    type: [BimiMvaEntryDto],
+    description: "Recognized Mark Verifying Authorities (replaces the whole list)",
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @ValidateNested({ each: true })
+  @Type(() => BimiMvaEntryDto)
+  mvaAllowList?: BimiMvaEntryDto[]
+}
+
+/**
+ * DANE / TLSA admin settings (pm/checks/dane_tlsa.mdx §4, admin-only): the FUTURE :25 STARTTLS
+ * cert-match probe toggle (it opens outbound SMTP connections), its per-MX timeout, and whether
+ * the DNSSEC prerequisite must be confirmed via the AD bit from a validating resolver (FUTURE).
+ */
+export class ChecksDaneDto {
+  @ApiPropertyOptional({
+    description: "Enable the :25 STARTTLS cert-match probe (opens outbound SMTP; default off)",
+  })
+  @IsOptional()
+  @IsBoolean()
+  probeEnabled?: boolean
+
+  @ApiPropertyOptional({ description: "Per-MX probe timeout in ms (default 10000)" })
+  @IsOptional()
+  @IsInt()
+  @Min(500)
+  @Max(120000)
+  probeTimeoutMs?: number
+
+  @ApiPropertyOptional({
+    description:
+      "Require the DNSSEC AD bit from a validating resolver (FUTURE) instead of the first-round DS/DNSKEY observation",
+  })
+  @IsOptional()
+  @IsBoolean()
+  requireAdBit?: boolean
 }
 
 export class ChecksThresholdsDto {
@@ -205,6 +286,18 @@ export class ChecksConfigDto {
   @ValidateNested()
   @Type(() => ChecksContentDto)
   content?: ChecksContentDto
+
+  @ApiPropertyOptional({ type: ChecksBimiDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ChecksBimiDto)
+  bimi?: ChecksBimiDto
+
+  @ApiPropertyOptional({ type: ChecksDaneDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ChecksDaneDto)
+  dane?: ChecksDaneDto
 
   @ApiPropertyOptional({ type: ChecksThresholdsDto })
   @IsOptional()
@@ -308,6 +401,63 @@ export class ToolsConfigDto {
   @Min(100)
   @Max(120000)
   timeoutMs?: number
+
+  @ApiPropertyOptional({
+    description:
+      "Explicit per-tool binary-path overrides (config.yaml → tools.paths), e.g. " +
+      '{ "spamassassin": "/opt/homebrew/bin/spamassassin", "spamc": "/opt/homebrew/bin/spamc" } ' +
+      "(pm/checks/content_scoring.mdx §4 — the SpamAssassin/spamc binary path; empty value clears)",
+    example: { spamassassin: "/opt/homebrew/bin/spamassassin" },
+  })
+  @IsOptional()
+  @IsObject()
+  paths?: Record<string, string>
+}
+
+/**
+ * One subdomain-takeover fingerprint (pm/checks/dns_health.mdx §5 — the `takeover_fingerprints`
+ * reference table mapped onto `config.yaml → dns_health.fingerprints`, admin-editable §4). The
+ * dangling-CNAME sub-check matches each CNAME chain's final target against `cname_suffix`;
+ * `unclaimed_signature` is stored for the future HTTP "unclaimed endpoint" confirmation probe.
+ */
+export class TakeoverFingerprintDto {
+  @ApiProperty({ description: 'Provider display name, e.g. "Heroku" or "GitHub Pages"' })
+  @IsString()
+  @MaxLength(100)
+  provider!: string
+
+  @ApiProperty({
+    description: 'Suffix matched against the final CNAME target, e.g. ".herokudns.com"',
+  })
+  @IsString()
+  @MaxLength(253)
+  cname_suffix!: string
+
+  @ApiPropertyOptional({
+    description: 'HTTP body marker for the future "unclaimed endpoint" probe',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  unclaimed_signature?: string
+
+  @ApiProperty({ description: "Whether this fingerprint is currently matched" })
+  @IsBoolean()
+  enabled!: boolean
+}
+
+/** DNS-health admin settings (pm/checks/dns_health.mdx §4): the takeover-fingerprint list. */
+export class DnsHealthSettingsDto {
+  @ApiPropertyOptional({
+    type: [TakeoverFingerprintDto],
+    description: "Subdomain-takeover fingerprint list (replaces the whole list)",
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(200)
+  @ValidateNested({ each: true })
+  @Type(() => TakeoverFingerprintDto)
+  fingerprints?: TakeoverFingerprintDto[]
 }
 
 export class AccessConfigDto {
@@ -359,6 +509,12 @@ export class UpdateAdminSettingsDto {
   @ValidateNested()
   @Type(() => AccessConfigDto)
   access?: AccessConfigDto
+
+  @ApiPropertyOptional({ type: DnsHealthSettingsDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => DnsHealthSettingsDto)
+  dns_health?: DnsHealthSettingsDto
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +522,9 @@ export class UpdateAdminSettingsDto {
 // ---------------------------------------------------------------------------
 
 export class ImportArchiveDto {
-  @ApiProperty({ description: "Base64-encoded zip previously produced by GET /api/settings/export" })
+  @ApiProperty({
+    description: "Base64-encoded zip previously produced by GET /api/settings/export",
+  })
   @IsString()
   @IsBase64()
   archiveBase64!: string
@@ -375,7 +533,8 @@ export class ImportArchiveDto {
 export class ResetDto {
   @ApiProperty({
     enum: ["audit_history", "app"],
-    description: "audit_history = delete run history only; app = clear the whole state back to defaults",
+    description:
+      "audit_history = delete run history only; app = clear the whole state back to defaults",
   })
   @IsIn(["audit_history", "app"])
   scope!: "audit_history" | "app"

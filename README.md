@@ -2,71 +2,140 @@
 
 **Audit your email deliverability — find out whether your domains are landing in spam or on blacklists, and get the exact fixes to apply.**
 
-EmailDeliveryHero is an open source web app you run on your own machine (`localhost`) to police the health of the email domains you care about. It continuously watches for the problems that quietly kill your open rates — spam filtering and blacklisting — and tells you, in plain language, how to fix them.
+EmailDeliveryHero is an open source web app you run on your own machine (`localhost`) to police the health of the email domains you send from. It runs a deep battery of deliverability checks — the same DNS records, blocklists, and transport signals that Gmail, Outlook, and Yahoo actually use to decide inbox-vs-spam — and for every problem it finds, it prescribes the concrete remediation: the exact TXT record to publish, the delisting form to file, the policy to tighten.
 
 ---
 
 ## Why This Exists
 
-You can send a perfect email and still never reach the inbox. Somewhere between "Send" and your recipient, a spam filter or a domain blacklist can silently drop or bury your message — and most senders never find out why their deliverability is bad. There's no bounce, no error, just silence.
+You can send a perfect email and still never reach the inbox. Somewhere between "Send" and your recipient, a spam filter or a domain blacklist can silently drop or bury your message — and most senders never find out why. There's no bounce, no error, just silence.
 
-EmailDeliveryHero closes that visibility gap. Point it at your domains and it tells you whether you're actually landing in inboxes, whether you've been blacklisted anywhere, and precisely what to change to recover.
+EmailDeliveryHero closes that visibility gap. Point it at your domains and it tells you whether your authentication is set up correctly, whether you've been blacklisted anywhere, whether your mail transport is secure, and precisely what to change to recover — then keeps re-checking on a schedule so new problems surface the day they appear.
 
 ---
 
 ## What It Does
 
-* **Spam filter checks** — Determines whether your email domains are getting caught by spam filters.
-* **Blacklist checks** — Determines whether your domains appear on email blacklists.
-* **Actionable fixes** — For every problem it finds, it tells you the specific fix to apply.
-* **Continuous monitoring** — Runs periodic checks on a schedule and surfaces new problems as they appear.
-* **Clear reporting** — Reports the problems it finds alongside the exact remediation steps.
+* **Audits your sending domains** — add the domains you send from and run a full health check on each.
+* **Finds the problems that kill deliverability** — missing or broken SPF/DKIM/DMARC, blacklist listings, DNS misconfiguration, weak mail-transport security, and spam-prone content signals.
+* **Prescribes the exact fix** — every finding carries a severity (`ok` / `info` / `warning` / `critical`) and a concrete remediation string: the record to publish, the setting to change, the delisting steps to follow. Never just a red light.
+* **Runs on a schedule** — recurring checks (macOS launchd, Linux cron/systemd, Windows Task Scheduler) re-audit your domains and surface newly introduced problems.
+* **Ingests the reports receivers send you** — parses inbound DMARC aggregate (`rua`) XML and TLS-RPT JSON report emails to reveal unauthorized senders, alignment gaps, spoofing, and silent TLS breakage.
+* **Reports it all on a dashboard** — one row per run, six color-coded category columns, drill-down pages for every check and every finding.
 
-You "police" your domains: add the ones you care about, let EmailDeliveryHero watch them, and act on what it flags.
+---
+
+## The Checks
+
+Every audit runs checks across **six categories**. Each category rolls up into one color-coded dashboard cell; each check produces findings with a severity and a fix.
+
+| Category | What it covers |
+| --- | --- |
+| **SPF** | A single valid `v=spf1` record, the 10-DNS-lookup limit, the terminal `all` qualifier, syntax, and DMARC alignment. |
+| **DKIM** | Per-selector public-key presence and parseability, key length (RFC 8301), rotation headroom, CNAME-delegated selectors. |
+| **DMARC** | Policy presence and enforcement (`none` → `quarantine` → `reject`), alignment, subdomain policy, `rua`/`ruf` reporting, plus ARC for forwarded mail. |
+| **Blacklists** | Your domains and sending IPs against the major DNSBLs/RHSBLs — Spamhaus ZEN/SBL/XBL/PBL/DBL, Barracuda, SpamCop, SORBS, UCEPROTECT, Invaluement, SURBL — with per-zone delisting steps. |
+| **DNS & Infrastructure** | MX records and mail routing, reverse DNS / PTR / FCrDNS, STARTTLS and MX certificate health, MTA-STS, TLS-RPT, DANE/TLSA, DNSSEC, nameserver/zone health and dangling-record risk, WHOIS/RDAP domain reputation, SMTP server hardening (open relay, VRFY/EXPN). |
+| **Spam & Content** | SpamAssassin-style content scoring of a sample message, BIMI, List-Unsubscribe / one-click (the 2024 Gmail/Yahoo bulk-sender rules), link/URL reputation against URI blocklists, sender-reputation metrics, and seed-list inbox placement across Gmail, Outlook, Yahoo, and Apple. |
+
+The full engineering spec for every check — sub-checks, detection method, UI, schema, and remediation — lives under [`pm/checks/`](./pm/checks/overview.mdx).
+
+---
+
+## Who It Helps
+
+| You are… | EmailDeliveryHero gives you… |
+| --- | --- |
+| **A deliverability owner / ops person** | One dashboard over all your sending domains, a worked list of open problems, and the fix for each. |
+| **An engineer / DNS admin** | The exact record-level remediation — the SPF/DKIM/DMARC TXT to publish — ready to paste into your DNS provider. |
+| **A small business or indie sender** | A free, self-hosted alternative to paid deliverability monitoring: no data leaves your machine. |
+| **Anyone whose email suddenly stopped landing** | A diagnosis: which filter, which blocklist, which broken record — and how to undo it. |
 
 ---
 
 ## How It Works
 
-EmailDeliveryHero is a **web app that runs locally on `localhost`**. You start it, open it in your browser, add the domains you want to protect, and review the audit results and fixes it produces. Behind the scenes it leans on proven, widely available command-line tooling to run its checks, so results reflect the same signals real mail systems use.
+EmailDeliveryHero is a **local-first web app** — a TypeScript-on-Node monorepo you run yourself:
+
+* **Frontend:** React 19 + Vite UI at **`http://localhost:4444/`**.
+* **Backend:** NestJS REST API on port **9312** (proxied at `/api`).
+* **Checks engine:** pluggable checkers driven by Node's native DNS plus proven Brew-installed command-line tooling, so results reflect the same signals real mail systems use. Runs are parallel per domain with bounded concurrency.
+* **Storage:** plain JSON/YAML files under `~/.email_delivery_hero/` — no database. Your domain list, run history, and findings are transparent files on your own disk.
+* **Scheduling:** the OS-native scheduler (launchd on macOS, cron/systemd on Linux, Task Scheduler on Windows) fires recurring audits even when the app isn't open in a browser.
 
 ---
 
 ## Getting Started
 
-> EmailDeliveryHero runs on localhost. Clone the repo, start the app, and open it in your browser.
+Requirements: **macOS or Linux**, [Homebrew](https://brew.sh/), and Brew-installed `node` (>= 20), `pnpm`, and [`just`](https://github.com/casey/just).
 
 ```bash
-# 1. Clone the repository
+# 1. Clone the repository (and its auth library as a sibling)
 git clone https://github.com/BryanStarbuck/EmailDeliveryHero.git
+git clone https://github.com/BryanStarbuck/OpenAuthFederated.git
 cd EmailDeliveryHero
 
-# 2. Start the app (see setup notes below)
-#    Then open the printed localhost URL in your browser.
+# 2. Build — installs deps, compiles frontend + backend,
+#    and installs the scheduled-audit agent
+just build
+
+# 3. Run — starts the web app in the background
+just run
+
+# 4. Open http://localhost:4444/ in your browser
 ```
 
-Once the app is running, open it in your browser, sign in, add your domains, and run your first audit.
+Then add the domains you send from, click **Run checks**, and work the findings.
 
-### Requirements
+Other useful recipes:
 
-* A Mac or Linux machine capable of running the local web app.
-* **[Homebrew](https://brew.sh/)** — EmailDeliveryHero uses Brew-installed command-line tools to perform many of its checks.
+```bash
+just status   # is the app / scheduler running?
+just logs     # follow the web app log
+just stop     # shut it down
+just dev      # run with backend watch-mode (for hacking on the code)
+```
 
 ---
 
-## Authentication
+## Authentication (Optional)
 
-EmailDeliveryHero uses **[OpenAuth Federated](https://github.com/BryanStarbuck/OpenAuthFederated)** for authentication — an open source, self-hostable authentication layer used much like Clerk or Auth0. This keeps your sign-in fully under your control, in keeping with the local-first, open source spirit of the project.
+**Login is optional.** The app is fully usable logged out as a single local `default` user. Signing in — via **[OpenAuthFederated](https://github.com/BryanStarbuck/OpenAuthFederated)**, an open source, self-hostable identity layer used much like Clerk or Auth0 — upgrades you to a per-person identity and unlocks admin-only settings. There is no email/password; sign-in is federated Google Workspace SSO, and it stays fully under your control in keeping with the local-first spirit of the project.
+
+---
+
+## Project Layout
+
+```
+EmailDeliveryHero/
+├── code/          # the app: pnpm monorepo
+│   └── packages/
+│       ├── backend/    # NestJS REST API (port 9312)
+│       └── frontend/   # React 19 + Vite UI (port 4444)
+├── pm/            # product & engineering specs (MDX) — start at pm/overview.mdx
+│   ├── checks/    # one deep spec per deliverability check topic
+│   └── use_cases/ # end-to-end user flows
+├── emails/        # sample corpus of real DMARC / TLS-RPT report emails
+└── justfile       # build / run / stop / status
+```
+
+The [`pm/overview.mdx`](./pm/overview.mdx) file is the table of contents for every specification — the product charter, the check catalog, the UI, storage, scheduling, and error-handling specs.
 
 ---
 
 ## Contributing
 
-EmailDeliveryHero is open source and contributions are welcome. Open an issue to report a bug or request a feature, or send a pull request. If you're adding a new deliverability check, prefer widely available Brew-installed tooling so results stay reproducible across machines.
+EmailDeliveryHero is open source and contributions are welcome. Open an issue to report a bug or request a feature, or send a pull request.
+
+* Everything is **TypeScript on Node** (strict) — backend, frontend, and background jobs alike.
+* New deliverability checks are pluggable checkers; each starts with a spec under `pm/checks/` defining its sub-checks, detection method, and remediations.
+* Prefer widely available Brew-installed tooling for probes so results stay reproducible across machines.
 
 ---
 
 ## Links
 
 * **Repository:** https://github.com/BryanStarbuck/EmailDeliveryHero
+* **Specifications:** [`pm/overview.mdx`](./pm/overview.mdx)
+* **Check catalog:** [`pm/checks/overview.mdx`](./pm/checks/overview.mdx)
 * **Authentication (OpenAuth Federated):** https://github.com/BryanStarbuck/OpenAuthFederated

@@ -359,6 +359,285 @@ store interface, no checker changes.
     index enforced); today this is the embedded `checkResults.mta_sts` object in the audit JSON file.
 15. The scheduler flags a domain as a **new problem** when MTA-STS regresses (enforce→testing, policy
     dropped, or `mx_match` flips false) versus the prior run.
+16. The MTA-STS explainer page renders at `/domains/:domainId/runs/:runId/dns/check/mta-sts`
+    (newest alias `/domains/:domainId/dns/check/mta-sts`) with the five blocks of §9 in the
+    locked order — never reordered, never omitted (an inapplicable block states why instead of
+    disappearing).
+17. Block 1 contains the five `#concept-*` anchor sections of §9.2 (`mta-sts`, `mode-enforce`,
+    `policy-id`, `max-age`, `policy-file`), and every underlined MTA-STS term anywhere in the app
+    deep-links to one of them, run-scoped (the viewed `:runId` is preserved).
+18. Block 2 renders one row per finding this family emitted **in the viewed run** — exactly the
+    ids and severities of §9.3, including the transient-lookup `info` variants — plus the raw TXT
+    answer with a copy button and the parsed tag table of §9.3.2; policy-body fields render as
+    "not captured this run" while the HTTPS probe is off, never as invented values.
+19. Blocks 3 and 4 select their copy by the observed state per §9.4/§9.5; every fix step's copy
+    button carries a publishable record or policy body (with the domain and live MX substituted
+    in), never prose.
+20. Block 5's button calls `POST /api/audit/run/:domainId/check/dns/mta-sts`, the resulting run
+    file carries `run.scope = dns.mta_sts`, and on completion the page navigates to the new
+    run's explainer with the §15-of-dns.mdx diff flash. The button is disabled with an inline
+    reason while any run for the domain is in flight.
+21. The footer history strip shows up to 30 runs whose scope included `mta_sts`, and the trended
+    fields are the TXT `id` and (once fetched) `mode` — an `id` change renders a change marker
+    even when severity did not move.
+22. Every finding id in §10's mapping table routes its "Learn more ›" to the PS-08 drill-down
+    (`/domains/:domainId/dns/PS-08?run=:runId`) and its row label to the explainer anchor listed
+    for it; `infra.mta_sts_vs_tlsrpt` additionally cross-links the TLS-RPT explainer.
+23. The explainer's unknown-`:checkKey`, unknown-`:runId`, never-audited, and loading states
+    behave per §9.7 (matching dns.mdx §14.5); blocks 1/3/references render without run data.
+24. The run file gains the §9.3.3 `mta_sts` snapshot (TXT fields now, policy fields when the
+    probe ships); until it lands, block 2 derives the raw TXT from finding `evidence` and says
+    so ("reconstructed from finding evidence") rather than re-querying DNS at render time.
+
+---
+
+## 9. Check-detail explainer page — `/domains/:domainId/runs/:runId/dns/check/mta-sts`
+
+The per-family reference page from [dns.mdx §14](./dns.mdx): the DNS & Infrastructure category
+spec owns the **shell** (routes, run strip, the five-block order, the raw+parsed frame, the
+history strip, references frame, and error states); **this spec owns the MTA-STS interior copy**
+— the concept text and anchors, the sub-test rows, the parsed-field table, the conditional
+impact/fix copy, and the references rows. Nothing here reorders or removes the five blocks.
+
+### 9.1 Route and entry points
+
+| Page | Route |
+| --- | --- |
+| MTA-STS explainer, one specific run | `/domains/:domainId/runs/:runId/dns/check/mta-sts` |
+| MTA-STS explainer, newest run (alias) | `/domains/:domainId/dns/check/mta-sts` |
+
+`mta-sts` is the fixed `:checkKey` slug (kebab-case of family key `mta_sts`, equal to the
+backend directory `checks/mta-sts/`). Row label everywhere the family renders as a row:
+**"MTA-STS"**; one-line meaning: **"Is there a downgrade-resistant TLS policy that senders must
+honor?"** (both fixed by dns.mdx §14.1 — never re-worded locally).
+
+Reached from: the DNS category page's MTA-STS group header `details ›` and its family strip
+cell; the run report's ten-family list row; every underlined MTA-STS concept term app-wide
+(§9.2 anchors); the PS-08 drill-down's mechanism links; and the [TLS-RPT](./tls_rpt.mdx) /
+[TLS transport](./tls_transport.mdx) / [DANE](./dane_tlsa.mdx) explainers' cross-references.
+The back link returns to the same run's DNS category page.
+
+### 9.2 Block 1 — WHAT THIS IS (concept copy + anchors)
+
+Two to four short paragraphs, plain language first (the §1 "tell senders: always TLS, and these
+are my real MX hosts" framing), standards second (RFC 8461, paired with RFC 8460). Static
+content — renders instantly with no run data. It must carry these **anchored sub-headings**,
+the destinations dns.mdx §14.6 assigns to this family; each is 2-5 sentences:
+
+| Anchor | Term(s) that link here | Required copy covers |
+| --- | --- | --- |
+| `#concept-mta-sts` | "MTA-STS" | The two moving parts (TXT + HTTPS policy), who enforces (the *sender*), why opportunistic STARTTLS alone is downgradeable. |
+| `#concept-mode-enforce` | "`mode: enforce`", "testing mode" | `enforce` vs `testing` vs `none`; testing = report-only; the testing→enforce migration gate (validate 14-30 days of TLS-RPT first). |
+| `#concept-policy-id` | "policy id", "`id=`" | The `id` token is the cache-buster: senders re-fetch only when it changes; the stale-id trap (edited policy, unchanged id). |
+| `#concept-max-age` | "`max_age`" | Cache lifetime in seconds; sane band 604800–31557600; too short = no protection between fetches, too long = a bad policy is pinned. |
+| `#concept-policy-file` | "policy file", "`.well-known/mta-sts.txt`" | The HTTPS-served key/value body, its exact URL, the no-redirect and valid-cert rules, `text/plain`. |
+
+Terms belonging to **other** families are underlined and link out, run-scoped: "MX hosts" →
+`…/dns/check/mx-routing#concept-mx-record`, "STARTTLS" →
+`…/dns/check/tls-transport#concept-starttls`, "TLS-RPT" → `…/dns/check/tls-rpt#concept-tls-rpt`,
+"DANE" (the DNSSEC-based alternative) → `…/dns/check/dane-tlsa#concept-dane`.
+
+### 9.3 Block 2 — IS IT HEALTHY RIGHT NOW? (this run's evidence)
+
+Header: the family StatusCell + one verdict sentence ("2 of 6 sub-tests fail — the TXT record
+is malformed"), computed from the viewed run only.
+
+#### 9.3.1 Sub-test rows
+
+One row per finding the checker emitted in this run — the row set below mirrors
+`checks/mta-sts/mta-sts.check.ts` exactly (title strings and severities as coded; fail rows
+pre-expanded, `ok` rows collapsed):
+
+| Finding id | Row states the checker actually produces |
+| --- | --- |
+| `infra.mta_sts_txt` | `ok` "MTA-STS TXT record present" · `warning` "MTA-STS TXT record is malformed" · `info` "No MTA-STS policy published" (feature absent) · `info` "Could not look up MTA-STS TXT" (transient DNS failure — status unknown this run) |
+| `infra.mta_sts_txt_single` | `ok` "Single MTA-STS TXT record" · `warning` "Multiple MTA-STS TXT records" (evidence = all candidates joined with ` \| `) |
+| `infra.mta_sts_version` | `ok` "MTA-STS version tag valid" · `warning` "MTA-STS version tag invalid" (detail names the observed first tag) |
+| `infra.mta_sts_id_format` | `ok` "MTA-STS id is valid" · `warning` "MTA-STS id is malformed" / "MTA-STS id is missing" |
+| `infra.mta_sts_vs_tlsrpt` | `ok` "TLS-RPT reporting present" · `info` "MTA-STS present but no TLS-RPT" · `info` "Could not check TLS-RPT" (transient) |
+| `infra.mta_sts_policy` | `info` "MTA-STS policy-file checks pending" — the collapsed HTTPS family until the probe ships (§7). Renders as a **pending** row, styled like the `.pending` families of dns.mdx §14.5, with the full list of what the probe will verify. |
+
+When the feature is absent (no TXT), the checker emits only the single `info`
+`infra.mta_sts_txt` row; block 2 then shows that row plus a static note: "Policy-file checks
+are not applicable — senders never fetch a policy the TXT does not advertise." Once the HTTPS
+probe ships, the eleven `**(HTTPS)**` sub-checks of §2 each become their own row here.
+
+#### 9.3.2 Raw + parsed breakdown
+
+Per dns.mdx §14.3, always both views, sourced from the run file — **never re-queried at render
+time** (block 5 is how you get "now"):
+
+- **Raw** — monospace + copy button: the concatenated `_mta-sts.<domain>` TXT value exactly as
+  observed (e.g. `"v=STSv1; id=20260701"`), the `_smtp._tls.<domain>` companion answer when
+  looked up, and — future — the fetched policy body verbatim plus the HTTP status line and
+  `Content-Type` header. Each raw item links its matching `tool_runs[]` entry (tool, argv,
+  duration) exactly as on the category page.
+- **Parsed** — **Field | Observed | Expected / sane range | Verdict** (per-field ✓/✗/⚠/ⓘ chip),
+  the "one row per policy tag" shape dns.mdx §14.3 fixes for mta-sts:
+
+| Field | Observed (example) | Expected / sane range | Verdict source |
+| --- | --- | --- | --- |
+| `v` (TXT) | `STSv1` | exactly `STSv1`, first tag | `infra.mta_sts_version` |
+| `id` (TXT) | `20260701` | `^[A-Za-z0-9]{1,32}$`, changes on every policy edit | `infra.mta_sts_id_format` |
+| STSv1 record count | `1` | exactly 1 | `infra.mta_sts_txt_single` |
+| TLS-RPT companion | `_smtp._tls` TXT present | present (`v=TLSRPTv1; rua=…`) | `infra.mta_sts_vs_tlsrpt` |
+| `version` (policy) | *not captured this run* | `version: STSv1`, first line | future `infra.mta_sts_policy_version` |
+| `mode` (policy) | *not captured this run* | `enforce` (vs the admin-set desired mode) | future `infra.mta_sts_mode` |
+| `max_age` (policy) | *not captured this run* | `604800`–`31557600` | future `infra.mta_sts_max_age` |
+| each `mx:` pattern | *not captured this run* | one row per pattern, matched against the live MX set from `resolveMx` (RFC 8461 wildcard rules) | future `infra.mta_sts_mx_match` |
+
+Fields the run did not capture render "not captured this run" — the breakdown never invents
+data. The live-MX comparison column links "live MX set" to the same run's
+`…/dns/check/mx-routing` explainer.
+
+#### 9.3.3 Proposed recording additions (small checker/store change)
+
+Today the checker emits findings only; the raw TXT survives solely in finding `evidence`. So
+that this block and the §16-of-dns.mdx trends render from structured data, the run file's
+`dns_infra` section gains an **`mta_sts` snapshot** (the first-round subset of §5's
+`checkResults.mta_sts`): `txt_present`, `txt_raw`, `txt_id`, `txt_version`, `txt_count`,
+`tlsrpt_present`, plus null-until-probe `mode` / `max_age` / `policy_mx[]` / `policy_hash`.
+This is additive — no finding shapes change. Until it lands, the explainer reconstructs the
+raw view from `evidence` and labels it "reconstructed from finding evidence".
+
+### 9.4 Block 3 — WHAT IT MEANS (conditional impact copy)
+
+One short paragraph selected by the observed state — the *rejected now / reputation eroding /
+hardening available* framing:
+
+| Observed state | Copy renders |
+| --- | --- |
+| No TXT (`info`, feature absent) | **Hardening available.** Mail still flows, but transport to your MX is downgradeable by any on-path attacker, and you forgo a positive signal Google/Microsoft/Yahoo publish and honor themselves. Nothing is broken; this is the next rung after STARTTLS. |
+| TXT malformed / duplicate / bad id (`warning`) | **Worse than absent-looking.** Senders that parse strictly ignore the record — you appear configured while getting zero protection; a missing/frozen `id` means even a corrected policy won't propagate until `max_age` expires. |
+| TXT ok, policy checks pending (`info`) | **Half-verified.** The DNS half is correct, but a TXT that advertises an unusable policy (404, bad cert) is the classic silent failure — enable/await the HTTPS probe before trusting the enforce switch. |
+| (future) policy unusable — 404/cert/no-`mx`/consistency (`critical`) | **Protection is null or mail is blocked.** In `enforce`, an MX that matches no `mx:` pattern means senders defer/bounce your legitimate inbound mail. |
+| (future) `mode: testing`/`none`, stale `mx:`, `max_age` out of band (`warning`) | **Enforcement never engages.** Senders report but never enforce; drift accumulates until the enforce switch would break mail. |
+| Transient lookup failure (`info`) | **Unknown this run.** No verdict — re-run rather than act. |
+
+Enforcement context (static, always shown after the conditional paragraph): the sender is the
+enforcer, so this protects *inbound* mail; Gmail, Microsoft, and Yahoo all publish MTA-STS for
+their own domains and honor it when sending.
+
+### 9.5 Block 4 — WHAT YOU CAN DO (fix recipes)
+
+Numbered steps, each with a copy button carrying the publishable artifact — never prose. The
+recipe set is selected by state; records are rendered with the viewed domain and its live MX
+set (from the same run's `mx_routing` snapshot) substituted in:
+
+**Deploy from scratch** (no TXT):
+1. Serve the policy file first, in testing mode — copy button carries a ready-to-serve body
+   built from the observed MX set:
+   ```
+   version: STSv1
+   mode: testing
+   mx: mail.example.com
+   max_age: 604800
+   ```
+   at `https://mta-sts.example.com/.well-known/mta-sts.txt` (valid CA cert for
+   `mta-sts.example.com`, `Content-Type: text/plain`, HTTP 200, no redirect).
+2. Publish the TXT — copy: `_mta-sts.example.com TXT "v=STSv1; id=20260701120000"`.
+3. Publish TLS-RPT so testing mode reports somewhere — copy:
+   `_smtp._tls.example.com TXT "v=TLSRPTv1; rua=mailto:tlsrpt@example.com"` (details:
+   [TLS-RPT explainer](./tls_rpt.mdx)).
+4. After 14-30 clean days of TLS-RPT, switch to `mode: enforce` **and bump `id`**.
+
+**Repair a malformed TXT** (`_version` / `_id_format` / `_txt` warnings): one step — copy the
+exact corrected record `"v=STSv1; id=<fresh-timestamp>"`, with the observed broken value shown
+struck-through above it. **Duplicate records** (`_txt_single`): "Delete the extra `_mta-sts`
+TXT so exactly one remains" with both observed values listed and the keeper marked. **Missing
+TLS-RPT** (`_vs_tlsrpt`): step 3 above alone. **(Future) policy findings**: each HTTPS
+sub-check's remediation from §2 becomes its own step (serve the file / fix the cert / add
+`mx:` lines for the named unmatched MX hosts / set `max_age: 604800` / bump `id`).
+
+**Ladder cross-link rule** (dns.mdx §8/§14.2): when this run's `tls_transport` family is
+failing (STARTTLS or MX cert broken), this block **leads** with "Fix STARTTLS and the MX
+certificate first — MTA-STS in enforce mode would block your own mail until they pass" linking
+that explainer. Conversely, never recommend `mode: enforce` while `infra.mta_sts_mx_match` (or
+the mail-path panel) shows an unmatched live MX.
+
+### 9.6 Block 5 — RUN THIS CHECK NOW (family spot-check)
+
+The dns.mdx §15 affordance scoped to this family:
+
+- **Endpoint:** `POST /api/audit/run/:domainId/check/dns/mta-sts` → a **new** run file tagged
+  `run.scope = dns.mta_sts` containing only this family's findings/snapshot/tool_runs. Category
+  variant (`POST …/check/dns`) is reachable from the category page, not here.
+- **Button label:** "⟳ Run MTA-STS only" with the fixed scope/cost line: "re-runs 1 of 10
+  families; 2 DNS TXT lookups only, ~2 s · last ran <timestamp of the newest run that included
+  mta_sts>". Once the HTTPS probe ships and is enabled the line becomes "…plus one HTTPS fetch,
+  ~10 s max"; with the probe off it appends "policy-file checks stay pending (probe disabled)".
+- **State machine:** idle → running → done-with-diff-flash → error, exactly as dns.mdx §15.2 —
+  on done, navigate to the new scoped run's mta-sts explainer and flash any sub-test whose
+  severity changed ("was ⚠ · now ✓"). Disabled with inline reason while any run for this domain
+  is in flight.
+- Scoped runs are real runs: they enter the run strip, `GET /api/audit/runs`, the history strip
+  (dotted underline), and advance only the DNS cell of the dashboard roll-up (dns.mdx §15.3).
+
+### 9.7 Footer — history, references, states
+
+**History strip** (dns.mdx §16.2): ≤ 30 cells, oldest→newest, one per run whose scope included
+`mta_sts`; cell color = the family's worst severity that run; viewed run ringed; click swaps
+`:runId`. **Trended fields** (dns.mdx §16.3): the TXT **`id`** and (once fetched) **`mode`** —
+a change marker under a cell whenever `id` changed, and specifically the **stale-id trap**
+(policy `policy_hash` changed, `id` did not — detectable only across runs, powering
+`infra.mta_sts_id_freshness`).
+
+**References block** — this family's rows (plus the three category-common receiver-guideline
+rows dns.mdx §14.4 puts on every explainer):
+
+| Standard / doc | Why it matters here |
+| --- | --- |
+| RFC 8461 — SMTP MTA Strict Transport Security | Defines the TXT record, policy file, modes, wildcard matching, and the no-redirect fetch rules this check verifies. |
+| RFC 8460 — SMTP TLS Reporting | The failure-report channel `infra.mta_sts_vs_tlsrpt` insists on. |
+| Google Workspace "About MTA-STS and TLS reporting" | Provider setup doc; Gmail both publishes and honors MTA-STS. |
+| Microsoft "Enhancing mail flow with MTA-STS" (Exchange Online) | Outlook.com/EXO enforcement + hosting the policy file guidance. |
+| `dig TXT _mta-sts.<domain>` / `curl -s https://mta-sts.<domain>/.well-known/mta-sts.txt` | The two diagnose-by-hand commands (PS-08's debug list), shown as copyable lines. |
+
+**Loading / empty / error states** — the shell rules of dns.mdx §14.5 apply verbatim: blocks
+1/3-static/references render immediately; block 2 + history skeleton-load; unknown `:runId` →
+"This run no longer exists" + newest-run link; never-audited domain → blocks 1/3/4 render fully,
+block 2 shows the gray never-run cell + "Run an audit" CTA, and block 5 stays active (the
+spot-check may create the domain's first, scoped, run). MTA-STS-specific: the pending
+`infra.mta_sts_policy` row renders as a `.pending`-style block-2 row (not an error), and block
+5 is **never** disabled for this family (the DNS half always runs — unlike the probe-gated
+tls-transport/smtp-security families).
+
+---
+
+## 10. Finding → drill-down mapping and clickable sub-concepts
+
+**Problem drill-down mapping.** Every MTA-STS finding belongs to the category problem state
+**PS-08 — Encryption-in-transit gaps** (dns.mdx §9), the cross-family *story* page
+(STARTTLS + MTA-STS + TLS-RPT). Row "Learn more ›" chevrons route to the drill-down; the row's
+mechanism label routes to this explainer's anchor — stories to drill-downs, mechanisms to
+explainers (dns.mdx §14.6):
+
+| Finding id | Drill-down ("Learn more ›") | Explainer anchor (mechanism label) |
+| --- | --- | --- |
+| `infra.mta_sts_txt` | `/domains/:domainId/dns/PS-08?run=:runId` | `…/dns/check/mta-sts#concept-mta-sts` |
+| `infra.mta_sts_txt_single` | PS-08 | `#concept-mta-sts` |
+| `infra.mta_sts_version` | PS-08 | `#concept-mta-sts` |
+| `infra.mta_sts_id_format` | PS-08 | `#concept-policy-id` |
+| `infra.mta_sts_policy` (and all future policy-family ids) | PS-08 | `#concept-policy-file` (mode findings → `#concept-mode-enforce`, max_age → `#concept-max-age`) |
+| `infra.mta_sts_vs_tlsrpt` | PS-08 | `…/dns/check/tls-rpt#concept-tls-rpt` (cross-family — the mechanism lives there) |
+| (future) `infra.mta_sts_mx_match` | PS-08 | `#concept-policy-file`, with "live MX set" linking `…/dns/check/mx-routing#concept-mx-record` |
+
+The PS-08 drill-down in turn cross-links back: its "MTA-STS" mechanism mentions deep-link
+`#concept-mta-sts` here, so the story page never dead-ends.
+
+**Clickable sub-concepts on this detail page** (first occurrence per region underlined):
+
+| Term on this page | Navigates to |
+| --- | --- |
+| MTA-STS, policy id / `id=`, `max_age`, `mode: enforce` / testing, policy file | this page's §9.2 anchors (in-page) |
+| MX hosts / live MX set / MX priority | `…/dns/check/mx-routing#concept-mx-record` (run-scoped) |
+| STARTTLS, MX certificate, SAN | `…/dns/check/tls-transport#concept-starttls` / `#concept-mx-certificate` |
+| TLS-RPT, `rua`, reporting mailbox | `…/dns/check/tls-rpt#concept-tls-rpt` |
+| DANE / TLSA (the DNSSEC-based alternative) | `…/dns/check/dane-tlsa#concept-dane` |
+| wildcard record pinning (`_mta-sts` above a wildcard) | `…/dns/check/dns-health#concept-wildcard` |
+| "Encryption-in-transit gaps" (the story) | `/domains/:domainId/dns/PS-08?run=:runId` |
+
+All cross-family links preserve the viewed `:runId` (alias form when on the alias route).
 
 <!--
   MAINTENANCE NOTES

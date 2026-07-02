@@ -6,7 +6,8 @@
  * of its own — it feeds DMARC; `dnsbl` is the Blacklists prefix the specs use, `blacklist` the
  * checker's registry id.
  */
-import type { DkimResults, Finding, Severity } from "@/api/types"
+import type { DkimResults, DmarcResults, DmarcSection, Finding, Severity } from "@/api/types"
+import { normalizeDmarcSection } from "@/lib/dmarc"
 
 /** The six locked column keys, in display order. */
 export type CategoryKey = "spf" | "dkim" | "dmarc" | "blacklists" | "dnsInfra" | "spamContent"
@@ -133,10 +134,22 @@ function dkimLabel(dkim: DkimResults): string {
 }
 
 /**
+ * The DMARC cell's decision-relevant metric (pm/checks/dmarc.mdx §6.1): the **policy level** —
+ * `p=reject` / `p=quarantine` / `p=none` / `No record`. A record that yields no valid policy
+ * (broken syntax, duplicates) keeps the generic "K of M fail" label.
+ */
+function dmarcLabel(record: DmarcResults, fallback: string): string {
+  if (!record.record_found) return "No record"
+  if (record.policy) return `p=${record.policy}`
+  return fallback
+}
+
+/**
  * Roll a whole audit's findings into the six category cells (in locked order). Pass the run's
  * structured `results` too when available — categories whose spec defines a richer cell metric
- * (DKIM: working selectors + key strength, pm/checks/dkim.mdx §6.1) use it for the label; the
- * color always stays the worst finding severity.
+ * (DKIM: working selectors + key strength, pm/checks/dkim.mdx §6.1; DMARC: the policy level,
+ * pm/checks/dmarc.mdx §6.1) use it for the label; the color always stays the worst finding
+ * severity.
  */
 export function rollupCategories(
   findings: Finding[] | undefined,
@@ -156,6 +169,11 @@ export function rollupCategories(
   const dkim = results?.dkim as DkimResults | undefined
   if (findings && dkim && out.dkim !== NEVER_CELL) {
     out.dkim = { ...out.dkim, label: dkimLabel(dkim) }
+  }
+  const dmarcRaw = results?.dmarc as DmarcSection | DmarcResults | undefined
+  if (findings && dmarcRaw && out.dmarc !== NEVER_CELL) {
+    const { record } = normalizeDmarcSection(dmarcRaw)
+    if (record) out.dmarc = { ...out.dmarc, label: dmarcLabel(record, out.dmarc.label) }
   }
   return out
 }

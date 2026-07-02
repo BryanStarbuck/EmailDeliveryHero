@@ -4,7 +4,11 @@
 #                  "plist-based cron job" so scheduled audits run on localhost.
 #   just run     → stop any pre-existing instance, then start BOTH the frontend and backend in the
 #                  BACKGROUND as one localhost web app (http://localhost:4444, API proxied to :9312).
-#                  Waits for both ports to bind, then frees the command line. `just logs` follows it.
+#                  The backend is compiled and served from dist/ (no file watcher), so in-flight
+#                  audit runs survive editors/git syncs touching the tree. Waits for both ports to
+#                  bind, then frees the command line. `just logs` follows it.
+#   just dev     → same, but the backend runs under `nest start --watch` (restarts on source
+#                  changes — an API restart kills any audit run in flight; use while hacking only).
 #   just stop    → kill the background webapp and free both ports.
 #
 # The app is a TypeScript-on-Node monorepo under ./code (NestJS backend + Vite/React frontend).
@@ -138,11 +142,17 @@ uninstall-agent:
 # Preflight (tools, env, state dir), STOP any pre-existing instance, then start
 # frontend + backend together in the BACKGROUND as one web app. Depending on `stop`
 # guarantees a fresh restart (no port collision — Vite uses strictPort and would die
-# on a stale :4444). The dev servers keep running after this recipe returns; the
+# on a stale :4444). The servers keep running after this recipe returns; the
 # command line is freed. Follow output with `just logs`; shut down with `just stop`.
 #
+# The backend is compiled once and served from dist/ (`pnpm start` → node dist/main.js),
+# NOT `nest start --watch`: a watch-mode API restarts on any source-file mtime change
+# (editors, git pull/sync loops touching the tree) and every audit run in flight dies
+# with it — the UI then pops "Audit failed" for each domain. Use `just dev` when you
+# actually want restart-on-change.
+#
 # Start the web app in the BACKGROUND (fresh restart; web :4444 + API :9312).
-run: _preflight-tools _preflight-openauth stop
+run mode="app": _preflight-tools _preflight-openauth stop
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -165,10 +175,18 @@ run: _preflight-tools _preflight-openauth stop
       pnpm -C "{{code}}" install
     fi
 
-    # 4) Launch both packages in the background. `pnpm dev` runs @edh/frontend +
-    #    @edh/backend in parallel = one web app (Vite proxies /api → :{{api_port}}).
+    # 4) Launch both packages in the background = one web app (Vite proxies /api → :{{api_port}}).
+    #    app mode: compile the backend, then `pnpm start` (Vite UI + node dist/main.js — no watcher).
+    #    dev mode: `pnpm dev` (Vite UI + `nest start --watch`).
+    if [ "{{mode}}" = "dev" ]; then
+      launch="dev"
+    else
+      echo "▶ Compiling backend…"
+      pnpm -C "{{code}}" --filter @edh/backend build
+      launch="start"
+    fi
     echo "▶ Starting EmailDeliveryHero in the background — web :{{web_port}} + API :{{api_port}}…"
-    nohup pnpm -C "{{code}}" dev >"{{webapp_log}}" 2>&1 &
+    nohup pnpm -C "{{code}}" "$launch" >"{{webapp_log}}" 2>&1 &
     pid=$!
     echo "$pid" >"{{pid_file}}"
 
@@ -209,6 +227,12 @@ run: _preflight-tools _preflight-openauth stop
     printf "  PID  → %s   (stop: just stop)\n" "$pid"
     printf "  Background audits also keep running via the launchd agent.\n"
     exit 0
+
+# A watch-mode API restart (on every backend source change) kills any audit run in
+# flight — that is why `run` serves the compiled backend and this is a separate recipe.
+#
+# Start in DEV mode: backend under `nest start --watch` (restarts on source changes).
+dev: (run "dev")
 
 # Follow the background webapp log.
 logs:
