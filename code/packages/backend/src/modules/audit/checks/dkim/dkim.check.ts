@@ -68,6 +68,7 @@ export const COMMON_SELECTORS = [
 	"s1024",
 	"mx",
 	"google",
+	"google2",
 	"mandrill",
 	"mte1",
 	"mte2",
