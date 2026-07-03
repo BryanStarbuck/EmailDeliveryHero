@@ -7,7 +7,7 @@ import type {
 	SchedulerRunOutcome,
 	SchedulerStatus,
 } from "./schedule.types";
-import type { SchedulerService } from "./scheduler.service";
+import { SchedulerService } from "./scheduler.service";
 
 /**
  * The scheduled-checks API (pm/scheduled_checks.mdx §"API"): status + config for the dashboard

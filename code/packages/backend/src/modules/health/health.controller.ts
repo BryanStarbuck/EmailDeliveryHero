@@ -5,7 +5,7 @@ import {
 import { resolveGoogleRedirectUri } from "@module/auth/auth-frontend";
 import { Public } from "@module/auth/public.decorator";
 import { Body, Controller, Get, HttpCode, Post } from "@nestjs/common";
-import type { ConfigService } from "@nestjs/config";
+import { ConfigService } from "@nestjs/config";
 import { ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { logError, logWarn } from "@shared/logging";
 import { locateTools } from "@shared/tool-runner";

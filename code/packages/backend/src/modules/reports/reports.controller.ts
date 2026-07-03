@@ -1,7 +1,8 @@
 import { Controller, Get, Param, Post } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import type { IngestSummary } from "./report.types";
-import type { DomainReportsView, ReportsService } from "./reports.service";
+import type { DomainReportsView } from "./reports.service";
+import { ReportsService } from "./reports.service";
 
 /**
  * The report-email ingestion API (pm/emails.mdx §7.1/§10):

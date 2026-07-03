@@ -7,7 +7,7 @@ import {
 	statSync,
 } from "node:fs";
 import { join } from "node:path";
-import type { DomainsService } from "@module/domains/domains.service";
+import { DomainsService } from "@module/domains/domains.service";
 import {
 	Injectable,
 	type OnModuleDestroy,

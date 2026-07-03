@@ -1,5 +1,5 @@
 import { type ExecutionContext, Injectable } from "@nestjs/common";
-import type { Reflector } from "@nestjs/core";
+import { Reflector } from "@nestjs/core";
 import { AuthGuard } from "@nestjs/passport";
 import { type AuthUser, DEFAULT_USER } from "@shared/current-user.decorator";
 import { logWarn } from "@shared/logging";

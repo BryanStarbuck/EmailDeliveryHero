@@ -16,7 +16,7 @@ import type {
 	UpdateAdminSettingsDto,
 	UpdateUserSettingsDto,
 } from "./dto/settings.dto";
-import type { SettingsService } from "./settings.service";
+import { SettingsService } from "./settings.service";
 import type {
 	ResetResult,
 	SettingsView,

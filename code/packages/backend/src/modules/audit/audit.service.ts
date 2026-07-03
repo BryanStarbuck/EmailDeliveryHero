@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { MonitoredDomain } from "@module/domains/domain.types";
-import type { DomainsService } from "@module/domains/domains.service";
+import { DomainsService } from "@module/domains/domains.service";
 import { Injectable } from "@nestjs/common";
 import { mapLimit } from "@shared/concurrency";
 import { readAppConfig } from "@shared/config-store";

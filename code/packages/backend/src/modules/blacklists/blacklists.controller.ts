@@ -46,7 +46,7 @@ import {
 	PROVIDER_PORTALS,
 	saveZoneOverride,
 } from "../audit/checks/blacklist/zones";
-import type { DomainsService } from "../domains/domains.service";
+import { DomainsService } from "../domains/domains.service";
 
 /** The effective registry view served to the §17 dashboard and the Blocklist Zones admin panel. */
 export interface BlacklistRegistryInfo {

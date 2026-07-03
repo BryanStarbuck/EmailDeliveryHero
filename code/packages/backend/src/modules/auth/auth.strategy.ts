@@ -1,5 +1,5 @@
 import { federatedClient } from "@auth/backend";
-import type { AppConfig } from "@config/app-config";
+import { AppConfig } from "@config/app-config";
 import { Injectable, UnauthorizedException } from "@nestjs/common";
 import { PassportStrategy } from "@nestjs/passport";
 import type { AuthUser } from "@shared/current-user.decorator";

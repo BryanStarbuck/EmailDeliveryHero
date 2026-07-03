@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import type { ConfigService } from "@nestjs/config";
+import { ConfigService } from "@nestjs/config";
 
 /**
  * Typed configuration accessor. Reads secrets/ports/origins/domains from the environment via

@@ -5,7 +5,6 @@ import { toast } from "sonner"
 import {
   fetchJobStatus,
   type InstallJobStatus,
-  type PreflightResult,
   type ToolCategory,
   type ToolManager,
   type ToolStatus,
@@ -19,7 +18,7 @@ import {
  * and — when reached from a diverted run (?intent) — a footer that resumes the run afterward (§8).
  */
 
-type RowPhase = "idle" | "installing" | "done" | "failed"
+type RowPhase = "idle" | "queued" | "installing" | "done" | "failed"
 
 const CATEGORY_LABEL: Record<ToolCategory, string> = {
   dns: "DNS & Domain",
@@ -79,7 +78,6 @@ export function InstallPage() {
   const [phase, setPhase] = useState<Record<string, RowPhase>>({})
   const [tail, setTail] = useState<Record<string, string[]>>({})
   const [running, setRunning] = useState(false)
-  const [installedCount, setInstalledCount] = useState(0)
   const esRef = useRef<EventSource | null>(null)
 
   // Seed selection when the preflight first loads: missing (default tier) checked, optional not.
@@ -167,7 +165,6 @@ export function InstallPage() {
       const status = await pollUntilDone(jobId)
       esRef.current?.close()
       const okCount = status.results.filter((r) => r.ok).length
-      setInstalledCount((c) => c + okCount)
       const failed = status.results.filter((r) => !r.ok)
       if (failed.length > 0)
         toast.error(`${failed.length} install${failed.length > 1 ? "s" : ""} failed — see the red rows.`)
@@ -386,6 +383,8 @@ function Chip({ children }: { children: React.ReactNode }) {
 }
 
 function StatusDot({ phase }: { phase: RowPhase }) {
+  if (phase === "queued")
+    return <span className="text-xs text-slate-400">● queued</span>
   if (phase === "installing")
     return (
       <span className="inline-flex items-center gap-1 text-xs text-amber-600">

@@ -1,7 +1,7 @@
 import { join } from "node:path";
-import type { AuditService } from "@module/audit/audit.service";
+import { AuditService } from "@module/audit/audit.service";
 import type { AuditTrigger } from "@module/audit/checks/types";
-import type { DomainsService } from "@module/domains/domains.service";
+import { DomainsService } from "@module/domains/domains.service";
 import {
 	Injectable,
 	type OnModuleDestroy,

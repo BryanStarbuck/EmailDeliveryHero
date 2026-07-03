@@ -11,7 +11,7 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { type AuthUser, CurrentUser } from "@shared/current-user.decorator";
 import type { MonitoredDomain } from "./domain.types";
-import type { DomainsService } from "./domains.service";
+import { DomainsService } from "./domains.service";
 import type { CreateDomainDto, UpdateDomainDto } from "./dto/domain.dto";
 
 @ApiTags("domains")

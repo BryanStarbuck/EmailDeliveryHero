@@ -4,7 +4,7 @@ import {
 	ForbiddenException,
 	Injectable,
 } from "@nestjs/common";
-import type { Reflector } from "@nestjs/core";
+import { Reflector } from "@nestjs/core";
 import { type AuthUser, DEFAULT_USER } from "@shared/current-user.decorator";
 import { logWarn } from "@shared/logging";
 import {

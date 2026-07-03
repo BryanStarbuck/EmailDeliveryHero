@@ -27,7 +27,7 @@ import {
 	MinLength,
 } from "class-validator";
 import {
-	type AuditService,
+	AuditService,
 	RunInFlightError,
 	type SpotCheckResult,
 } from "./audit.service";

@@ -1,4 +1,4 @@
-import type { DomainsService } from "@module/domains/domains.service";
+import { DomainsService } from "@module/domains/domains.service";
 import {
 	BadRequestException,
 	Body,
@@ -16,7 +16,7 @@ import {
 	ApiTags,
 } from "@nestjs/swagger";
 import { IsString, MaxLength, MinLength } from "class-validator";
-import type { AuditService } from "./audit.service";
+import { AuditService } from "./audit.service";
 import {
 	type ContentSampleRecord,
 	getActiveSample,

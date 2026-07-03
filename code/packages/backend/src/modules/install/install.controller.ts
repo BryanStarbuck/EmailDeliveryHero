@@ -12,7 +12,7 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { map, type Observable } from "rxjs";
 import { catalogEntry, type ToolManager, type ToolStatus } from "./catalog";
-import type { InstallService } from "./install.service";
+import { InstallService } from "./install.service";
 import type {
 	InstallJobAccepted,
 	InstallJobStatus,

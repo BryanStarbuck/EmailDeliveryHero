@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { SchedulerService } from "@module/scheduler/scheduler.service";
+import { SchedulerService } from "@module/scheduler/scheduler.service";
 import {
 	BadRequestException,
 	Injectable,

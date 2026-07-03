@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { RequireRole } from "@module/auth/roles.decorator";
-import type { DomainsService } from "@module/domains/domains.service";
+import { DomainsService } from "@module/domains/domains.service";
 import {
 	Body,
 	ConflictException,
