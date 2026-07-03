@@ -199,10 +199,18 @@ function DomainHealthTable({
 														to: "/blacklists/$domain",
 														params: { domain: d.name },
 													})
-											: techRoute
-												? () =>
-														navigate({ to: techRoute, params: { id: d.id } })
-												: undefined;
+											: c.key === "dnssec"
+												? // DNSSEC has no standalone page; its drill-in is the DNS-family
+													// explainer (pm/checks/dns.mdx §6.2) for the newest run.
+													() =>
+														navigate({
+															to: "/domains/$id/dns/check/$checkKey",
+															params: { id: d.id, checkKey: "dnssec" },
+														})
+												: techRoute
+													? () =>
+															navigate({ to: techRoute, params: { id: d.id } })
+													: undefined;
 									return (
 										<td key={c.key} className="px-2 py-2">
 											<TestCell

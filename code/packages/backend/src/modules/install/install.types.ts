@@ -7,10 +7,13 @@ export interface PreflightResult {
 	brewPresent: boolean | null;
 	/** How pnpm can be enabled if absent: 'corepack' | 'npm' | 'none'. */
 	pnpmEnable: "corepack" | "npm" | "none";
-	/** Tools this scope NEEDS that are absent (default tier) — the page pre-checks these. */
+	/** Absent default-tier tools this scope NEEDS — a non-empty `missing` is what DIVERTS a run. */
 	missing: ToolStatus[];
-	/** Optional tools for this scope that are absent (extended tier) — shown unchecked. */
+	/** Absent extended-tier tools for this scope — shown as rows; a missing one never diverts a run. */
 	optional: ToolStatus[];
+	// NB: the page pre-checks EVERY auto-installable row across BOTH missing and optional
+	// (pm/install_brew.mdx §4.2 — "check them all unless there's a good reason not to"). The
+	// missing/optional split only gates the run-divert decision, not which checkboxes start checked.
 	/** Already-installed tools for this scope (for the Settings coverage view). */
 	installed: ToolStatus[];
 }

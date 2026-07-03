@@ -3,8 +3,6 @@ import { Link, useLocation } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 import {
 	appNavItems,
-	appTitle,
-	appTitleRoute,
 	settingsBackRoute,
 	settingsGroups,
 	settingsHeaderLabel,
@@ -15,8 +13,10 @@ import { NavIcon } from "./NavIcon";
 
 export type SidebarVariant = "app" | "settings";
 
+// As narrow as the nav labels allow (pm/leftbar.mdx §1) so the Dashboard gets the width: no
+// wordmark, w-44 instead of w-64.
 const SHELL =
-	"flex h-full w-64 shrink-0 flex-col border-r border-[var(--edh-border)] bg-white";
+	"flex h-full w-44 shrink-0 flex-col border-r border-[var(--edh-border)] bg-white";
 // Left-bar text is BLACK (pm/leftbar.mdx §2): green stays green (active item, wordmark),
 // medium grey becomes black. Hover keeps its light-grey fill.
 const ITEM =
@@ -52,16 +52,10 @@ function AppSidebar() {
 
 	return (
 		<nav className={SHELL}>
-			<div className="flex h-14 items-center gap-2 border-b border-[var(--edh-border)] px-4">
-				{/* Wordmark: spaced "Email Delivery Hero", green, normal tracking, routes to / (§1). */}
-				<Link
-					to={appTitleRoute}
-					className="text-lg font-semibold tracking-normal text-[var(--edh-primary)]"
-				>
-					{appTitle}
-				</Link>
-			</div>
-			<div className="flex-1 space-y-1 overflow-y-auto p-2">
+			{/* No wordmark (pm/leftbar.mdx §1): the nav starts at the top so the bar stays as narrow and
+			    as tall as possible, handing the width back to the Dashboard. */}
+			<div className="flex-1 space-y-1 overflow-y-auto p-2 pt-3">
+
 				{appNavItems
 					.filter((item) => gate(item.permission_gate))
 					.map((item) => (

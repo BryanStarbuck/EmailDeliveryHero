@@ -1,11 +1,13 @@
 ---
 title: EmailDeliveryHero — Left Bar
-description: The left navigation bar specification — the human companion to pm/left_bar.yaml (the machine source of truth the frontend imports). Defines the "Email Delivery Hero" wordmark (spaces between the three words), the LOCKED color rules (all left-bar text black; anything green stays green; medium grey becomes black), the two bar variants (app + settings), every nav item, the bottom account slot, active/hover states, and permission gates.
+description: The left navigation bar specification — the human companion to pm/left_bar.yaml (the machine source of truth the frontend imports). Defines the narrow, wordmark-free bar (removed to hand width back to the Dashboard), the LOCKED color rules (all left-bar text black; anything green stays green; medium grey becomes black), the two bar variants (app + settings), every nav item, the bottom account slot, active/hover states, and permission gates.
 ---
 
 # EmailDeliveryHero — Left Bar
 
-The **left bar** is the fixed 256px navigation column on every screen. There are **two** left bars —
+The **left bar** is a **narrow** (`w-44`, 176px) fixed navigation column on every screen — kept as
+narrow as the nav labels allow so the Dashboard (the widest screen) gets the space. There are
+**two** left bars —
 the **app bar** (main navigation) and the **settings bar** (under `/settings/*`) — both data-driven
 from **`pm/left_bar.yaml`**, which the frontend imports raw (`src/config/left_bar.ts`, via Vite
 `?raw`). There is no second code copy of the nav content.
@@ -24,20 +26,17 @@ Siblings: [Overview](./overview.mdx) (product charter), [UI](./ui.mdx) (app fram
 
 ---
 
-## 1. The wordmark (top of the bar)
+## 1. No wordmark (top of the bar)
 
-The header of the app bar shows the product name as **text only** — no icon mark:
+The app bar has **no wordmark and no header band** — the nav list starts at the top of the column
+(small top padding only). The "Email Delivery Hero" wordmark was **removed** from the left bar so
+the bar can be as narrow as possible and hand the width back to the Dashboard.
 
-* The label is **"Email Delivery Hero"** — with a **space between "Email" and "Delivery"** and a
-  **space between "Delivery" and "Hero"**. Never `EmailDeliveryHero` run together.
-* Normal letter tracking (`tracking-normal`) — plain readable text, not a tracked-out logotype.
-* It keeps its **green** brand color (`--edh-primary`, `#0f766e`) — green stays green (§2).
-* `text-lg font-semibold`, vertically centered in the 56px header band, left-padded to align with
-  the nav items, bottom border `--edh-border`.
-* Clicking it routes to `/` (the Dashboard).
-
-The label string itself lives in `pm/left_bar.yaml` (`header.label`) so the frontend renders it
-verbatim — the yaml carries the spaced form.
+* The app bar renders **no** product-name header, no icon mark, and no top border band.
+* The product name still appears as the **`BrandHeader`** on the Dashboard screen itself (see
+  [UI §3](./ui.mdx)) — that is a separate surface and is **unchanged**; only the left-bar copy is gone.
+* `pm/left_bar.yaml` still carries `header.label` for the **settings** bar's back-header ("Settings")
+  and for the (now unused) app header label; the frontend simply no longer renders an app-bar header.
 
 ---
 
@@ -51,7 +50,6 @@ The left bar's text is **black**. The complete rule set:
 | Settings group headers (e.g. "GENERAL") | medium grey (`--edh-muted`) | **black** (`text-black`) |
 | Account slot name / email lines | name dark, email medium grey (`--edh-muted`) | **both black** (`text-black`) |
 | Back-to-app link (settings bar) | medium grey | **black** |
-| Wordmark "Email Delivery Hero" | green (`--edh-primary`) | **stays green** |
 | Active nav item | green text on green-tint background | **stays green** |
 | "Sign in" accent in the account slot | green | **stays green** |
 | Hover background (`hover:bg-slate-100`) | light grey fill | unchanged (it is a fill, not text) |
@@ -64,7 +62,7 @@ on white passes WCAG AAA; the green active state keeps its tint background for s
 
 ## 3. The app bar (main navigation)
 
-A flat, ordered list under the wordmark; the account slot pinned to the bottom. Content from
+A flat, ordered list starting at the top of the bar; the account slot pinned to the bottom. Content from
 `pm/left_bar.yaml` (`Location: app`):
 
 | Order | Item | Icon (lucide) | Route | Purpose |
@@ -106,8 +104,9 @@ Rendered instead of the app bar under `/settings/*`. Content from `pm/left_bar.y
 Pinned to the bottom of both bars, always visible ([UI §1.5](./ui.mdx),
 [Security §3.2](./security.mdx)):
 
-* **Logged out** → a **"Sign in"** button (green accent — stays green) with the subtitle
-  "Using default settings" in **black**. No screen ever forces sign-in.
+* **Logged out** → a single **"Sign in"** button (green accent — stays green), no subtitle. The
+  former "Using default settings" caption was **removed** to keep the slot compact. No screen ever
+  forces sign-in.
 * **Signed in** → avatar + **name** + **email**, both text lines **black** (§2). Clicking opens an
   **upward-expanding** popup menu (items from the yaml `footer`): **Settings**, **Admin** (only
   with `role:admin`), **Log out**. Log out returns to the `default` user — it never ejects the
@@ -117,8 +116,8 @@ Pinned to the bottom of both bars, always visible ([UI §1.5](./ui.mdx),
 
 ## 6. Layout & behavior
 
-* Fixed width **256px** (`w-64`), full height, white background, right border `--edh-border`;
-  the nav list scrolls independently if it overflows.
+* Narrow fixed width **176px** (`w-44`) — as narrow as the nav labels allow — full height, white
+  background, right border `--edh-border`; the nav list scrolls independently if it overflows.
 * The bar **variant is chosen by route**: settings bar under `/settings/*`, app bar everywhere
   else.
 * Permission gates come from OpenAuthFederated claims (e.g. `role:admin`); a gated item is
@@ -131,12 +130,12 @@ Pinned to the bottom of both bars, always visible ([UI §1.5](./ui.mdx),
 
 ## 7. Acceptance criteria
 
-1. The app-bar header reads **"Email Delivery Hero"** — spaces between *Email*/*Delivery* and
-   *Delivery*/*Hero*, normal tracking, green (`--edh-primary`), and routes to `/`.
+1. The app bar has **no wordmark and no header band** — the nav list starts at the top. The bar is
+   `w-44` (176px) wide.
 2. All left-bar text is **black**: nav labels, icons, settings group headers, the back link, and
-   both account-slot text lines. Nothing in the bar renders in medium grey.
-3. Green elements keep their green: the wordmark, the active nav item (text + tint background),
-   and the Sign-in accent.
+   the account-slot text. Nothing in the bar renders in medium grey.
+3. Green elements keep their green: the active nav item (text + tint background) and the Sign-in
+   accent.
 4. Both bars render their content **from `pm/left_bar.yaml`** — items, order, icons, routes,
    labels, and gates; no hard-coded copies in components.
 5. The app bar lists exactly: Dashboard, Domains, Audits, Blacklists, Reports, Settings — in that
@@ -147,9 +146,9 @@ Pinned to the bottom of both bars, always visible ([UI §1.5](./ui.mdx),
 
 <!--
   This file is the styling/behavior spec; pm/left_bar.yaml is the content source of truth the
-  frontend imports raw. LOCKED here: the spaced wordmark "Email Delivery Hero", and the color rule
+  frontend imports raw. LOCKED here: the wordmark-free narrow (`w-44`) bar, and the color rule
   "green stays green, medium grey becomes black" — every text element in the bar is black except the
-  green wordmark / active item / sign-in accent. When adding a nav item, edit the yaml (content) and,
+  green active item / sign-in accent. When adding a nav item, edit the yaml (content) and,
   if it needs special treatment, add a row to §3 here. Keep ui.mdx §2–§3 pointing at this file
   instead of restating it.
 -->

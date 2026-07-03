@@ -66,7 +66,7 @@ Once you have it running on your local computer, then navigate to localhost:4444
 
 <a href="pm/images/Large_File_Brdige_6.jpeg"><img src="pm/images/Large_File_Brdige_6.jpeg" width="100%" alt="EmailDeliveryHero running in a browser at localhost:4444"></a>
 
-**Dashboard** — one row per domain with six color-coded category cells, plus the full run history below.
+**Dashboard** — one row per domain with a color-coded cell per check category, plus the full run history below.
 
 <a href="pm/images/Large_File_Brdige_1.jpeg"><img src="pm/images/Large_File_Brdige_1.jpeg" width="100%" alt="EmailDeliveryHero dashboard: domain-health table and run history"></a>
 
@@ -85,6 +85,10 @@ Once you have it running on your local computer, then navigate to localhost:4444
 **Scheduling** — recurring, unattended re-audits via the OS-native scheduler, configurable by time and day.
 
 <a href="pm/images/Large_File_Brdige_5.jpeg"><img src="pm/images/Large_File_Brdige_5.jpeg" width="100%" alt="Settings: scheduling recurring audits"></a>
+
+**DNSSEC** — fleet-wide DNSSEC hygiene: which domains are signed, DS presence, signing algorithm, and soonest RRSIG expiry, with an Expiry radar tab.
+
+<a href="pm/images/Large_File_Brdige_7.jpeg"><img src="pm/images/Large_File_Brdige_7.jpeg" width="100%" alt="Fleet-wide DNSSEC status page with per-domain signing and RRSIG expiry"></a>
 
 ---
 

@@ -43,12 +43,7 @@ export function AccountMenu() {
 					<span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-200">
 						<LogIn className="h-4 w-4" />
 					</span>
-					<span className="min-w-0 flex-1">
-						<span className="block truncate">Sign in</span>
-						<span className="block truncate text-xs font-normal text-black">
-							Using default settings
-						</span>
-					</span>
+					<span className="min-w-0 flex-1 truncate">Sign in</span>
 				</Link>
 			</div>
 		);

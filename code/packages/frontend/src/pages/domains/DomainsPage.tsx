@@ -40,7 +40,7 @@ import {
 } from "@/lib/categories";
 import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext";
 
-/** One table row: the monitored domain plus its six latest category cells (pm/domains.mdx §3.1). */
+/** One table row: the monitored domain plus its latest category cells (pm/domains.mdx §3.1). */
 interface DomainRow {
 	domain: MonitoredDomain;
 	cells: Record<CategoryKey, CellStatus>;
@@ -61,7 +61,7 @@ const TD_CLASS: Record<string, string> = {
 
 /**
  * The Domains CRUD surface (pm/domains.mdx). A TanStack Table of monitored domains — one row per
- * domain — each row showing its six latest LOCKED category cells (same colors as the Dashboard),
+ * domain — each row showing its latest category cells (same colors as the Dashboard),
  * its per-domain scheduled-checks toggle (ANDed with the global switch, §6), and per-row actions
  * (run audit now, edit, remove behind a confirm dialog, open run history). Plus the header's
  * Run all + Add domain buttons and the Add/Edit dialog with an Advanced (optional) disclosure.
@@ -112,7 +112,8 @@ export function DomainsPage() {
 		const byId = new Map((results ?? []).map((r) => [r.domainId, r]));
 		return list.map((d) => ({
 			domain: d,
-			// Structured results give DKIM/DMARC their spec'd cell labels (selectors · bits / p=<policy>).
+			// Every category cell reads "Healthy" / "K of M fail" (pm/ui.mdx §1.3); the per-check
+			// detail (policy, selectors, key bits) lives on the drill-in page, not the cell.
 			cells: rollupCategories(
 				byId.get(d.id)?.findings,
 				byId.get(d.id)?.results,
@@ -146,7 +147,8 @@ export function DomainsPage() {
 	const openDetail = (d: MonitoredDomain) =>
 		navigate({ to: "/domains/$id", params: { id: d.id } });
 
-	// Nine columns (pm/domains.mdx §3.2): Domain, the six LOCKED categories, Scheduled, Actions.
+	// Columns (pm/domains.mdx §3.2): Domain, the category cells (SPF, DKIM, DMARC, Blacklists, DNS,
+	// DNSSEC, Spam & Content), Scheduled, Actions.
 	const columns: ColumnDef<DomainRow>[] = [
 		{
 			id: "name",
