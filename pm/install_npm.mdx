@@ -49,7 +49,7 @@ an **opt-in to an optional capability** (L2).
 | --- | --- | --- | --- |
 | N1 | **Fresh machine, no pnpm** — user cloned the repo, has Node, no pnpm. | Preflight finds no `pnpm` | The page's top row is **"Enable pnpm"** (corepack) — one click; then L1 becomes installable. |
 | N2 | **Workspace not installed** — `node_modules` missing (never ran `just build`). | Preflight finds pnpm but a broken import surface | A single **"Install workspace dependencies (`pnpm install`)"** row restores every L1 package at once. |
-| N3 | **Opt into an optional package** — user enables an advanced capability (e.g. richer DMARC-report parsing). | Install page, L2 rows (unchecked by default) | `pnpm add` that one package; the capability lights up on the next run. |
+| N3 | **Opt into an optional package** — user enables an advanced capability (e.g. richer DMARC-report parsing). | Install page, L2 rows (pre-checked, since they auto-install; uncheck to skip) | `pnpm add` the selected package(s); the capability lights up on the next run. |
 | N4 | **Diverted run needs a JS capability** — rare, since L1 ships with the app, but a run that needs an L2 package (a check gated on an optional lib) diverts here. | Run trigger → preflight(`manager=npm`) → `/install?manager=npm&from&intent` | Install the package, then **resume the run** ([install_brew.mdx §8](./install_brew.mdx)). |
 | N5 | **Unified "install everything"** — reached from Settings, the page shows **both** brew and npm missing tools together. | Settings → Tools & environment → Install missing tools | One list, two managers; each row installs through its own manager (§5). |
 
@@ -108,7 +108,13 @@ user can see the coverage:
 | `node:tls` | STARTTLS connect + `getPeerCertificate(true)` — most TLS-transport checks |
 | `node:zlib` + `JSON.parse` | **TLS-RPT report parsing** — RFC 8460 is gzipped JSON; **no npm library exists**, so this is the DIY path (§3.4) |
 
-### 3.4 Optional / on-demand (L2) — unchecked by default
+### 3.4 Optional / on-demand (L2) — pre-checked when auto-installable
+
+These `pnpm add` rows are auto-installable, so — following the shared "check them all unless there's
+a good reason not to" rule ([install_brew.mdx §4.2](./install_brew.mdx)) — they now start **checked**
+like every other installable row, not opt-in. Their `extended` tier still keeps them out of the
+run-divert decision (a missing L2 package never diverts a run, §5) and orders them below the L1 core;
+it no longer gates the checkbox. The user unchecks any they don't want before pressing Install.
 
 | Package | License | Maps to | When |
 | --- | --- | --- | --- |
@@ -251,8 +257,10 @@ the manager is data on the row.
 4. `mailauth` is documented as covering **SPF, DKIM verify, DMARC, ARC, BIMI, MTA-STS**; `dnsbl` maps
    to blacklists (with the OpenDNS-resolver override gotcha noted); the DMARC/TLS-RPT report pipeline
    maps to `mailparser` + `fast-xml-parser` + `node:zlib` (**TLS-RPT has no npm parser — DIY**).
-5. L2 packages (`dmarc-report-parser`, `dns2`, `whoiser`, `spamscanner`…) render **unchecked**;
-   selecting one runs `pnpm --filter backend add <fixed catalog pkg>`; `pkg` is never user input.
+5. L2 packages (`dmarc-report-parser`, `dns2`, `whoiser`, `spamscanner`…) render **pre-checked**
+   (they auto-install, so the "check them all unless there's a good reason" rule applies —
+   [install_brew.mdx §4.2](./install_brew.mdx)); the user can uncheck any before installing, and each
+   selected row runs `pnpm --filter backend add <fixed catalog pkg>` with `pkg` never user input.
 6. Node built-ins (`node:dns`, `node:tls`, `node:zlib`) are shown as **always-satisfied**, never on
    the missing list; the **no pure-JS spam scorer** and **no TLS-RPT npm parser** gaps and the
    **`mailparser` EUPL license** are surfaced as row notes.

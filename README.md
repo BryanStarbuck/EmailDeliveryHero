@@ -1,33 +1,70 @@
 # EmailDeliveryHero
 
-**Audit your email deliverability — find out whether your domains are landing in spam or on blacklists, and get the exact fixes to apply.**
+**New domain? Your email is probably landing in spam. EmailDeliveryHero shows you exactly what's misconfigured — and how to fix it.**
 
-EmailDeliveryHero is an open source web app you run on your own machine (`localhost`) to police the health of the email domains you send from. It runs a deep battery of deliverability checks — the same DNS records, blocklists, and transport signals that Gmail, Outlook, and Yahoo actually use to decide inbox-vs-spam — and for every problem it finds, it prescribes the concrete remediation: the exact TXT record to publish, the delisting form to file, the policy to tighten.
+You set up a new domain, wired up email, and started sending — but your messages keep landing in the spam folder, or never arrive at all. It's almost never your writing. It's the invisible setup behind your domain: the DNS records and authentication that prove to Gmail, Outlook, and Yahoo that your mail is really you. When those aren't configured correctly, mailbox providers quietly filter you to spam. EmailDeliveryHero is a free app you run on your own computer that inspects that setup the same way the big mailbox providers do, finds what's missing or wrong, and hands you the exact fix for each problem.
 
 ---
 
 ## Why This Exists
 
-You can send a perfect email and still never reach the inbox. Somewhere between "Send" and your recipient, a spam filter or a domain blacklist can silently drop or bury your message — and most senders never find out why. There's no bounce, no error, just silence.
+A brand-new domain starts with no reputation and, usually, none of the records that mailbox providers look for before they trust your mail — so your email gets sent to spam or silently dropped. The worst part: there's no bounce and no error message. Your email just doesn't show up, and you're left guessing why.
 
-EmailDeliveryHero closes that visibility gap. Point it at your domains and it tells you whether your authentication is set up correctly, whether you've been blacklisted anywhere, whether your mail transport is secure, and precisely what to change to recover — then keeps re-checking on a schedule so new problems surface the day they appear.
+EmailDeliveryHero closes that gap. Point it at your domain and it tells you, in plain terms, whether the things that decide inbox-vs-spam are set up right: Is your email authenticated (SPF, DKIM, DMARC)? Is your domain or sending IP on a blacklist? Is anything misconfigured or missing? And for every problem it finds, it gives you the precise fix — the exact record to add to your DNS, the setting to change, the form to file — so you can go from "landing in spam" to "landing in the inbox."
 
 ---
 
 ## What It Does
 
-* **Audits your sending domains** — add the domains you send from and run a full health check on each.
-* **Finds the problems that kill deliverability** — missing or broken SPF/DKIM/DMARC, blacklist listings, DNS misconfiguration, weak mail-transport security, and spam-prone content signals.
-* **Prescribes the exact fix** — every finding carries a severity (`ok` / `info` / `warning` / `critical`) and a concrete remediation string: the record to publish, the setting to change, the delisting steps to follow. Never just a red light.
-* **Runs on a schedule** — recurring checks (macOS launchd, Linux cron/systemd, Windows Task Scheduler) re-audit your domains and surface newly introduced problems.
-* **Ingests the reports receivers send you** — parses inbound DMARC aggregate (`rua`) XML and TLS-RPT JSON report emails to reveal unauthorized senders, alignment gaps, spoofing, and silent TLS breakage.
-* **Reports it all on a dashboard** — one row per run, six color-coded category columns, drill-down pages for every check and every finding.
+* **Checks the domain you send from** — add your domain and run a full deliverability health check in one click. No prior expertise required.
+* **Finds what's sending you to spam** — missing or broken email authentication (SPF / DKIM / DMARC), blacklist listings, DNS mistakes, insecure mail transport, and spam-triggering message content.
+* **Tells you exactly how to fix it** — every problem comes with a plain-English severity (`ok` / `info` / `warning` / `critical`) and a concrete fix: the exact DNS record to publish, the setting to change, the delisting steps to follow. Never just a red light with no answer.
+* **Keeps watching** — re-checks your domain automatically on a schedule, so if something breaks or a new problem appears, you find out the day it happens instead of months later.
+* **Reads the reports mailbox providers send back** — ingests the DMARC and TLS-RPT report emails receivers send you, to reveal spoofing, senders impersonating your domain, and silent delivery failures you'd otherwise never see.
+* **Shows it all on one dashboard** — a single health view per domain, with drill-down pages for every check and every fix.
+
+---
+
+## Getting Started
+
+Requirements: **macOS or Linux**, [Homebrew](https://brew.sh/), and Brew-installed `node` (>= 20), `pnpm`, and [`just`](https://github.com/casey/just).
+
+```bash
+# 1. Clone the repository (and its auth library as a sibling)
+git clone https://github.com/BryanStarbuck/EmailDeliveryHero.git
+git clone https://github.com/BryanStarbuck/OpenAuthFederated.git
+cd EmailDeliveryHero
+
+# 2. Build — installs deps, compiles frontend + backend,
+#    and installs the scheduled-audit agent
+just build
+
+# 3. Run — starts the web app in the background
+just run
+
+# 4. Open http://localhost:4444/ in your browser
+```
+
+Then add the domains you send from, click **Run checks**, and work the findings.
+
+Other useful recipes:
+
+```bash
+just status   # is the app / scheduler running?
+just logs     # follow the web app log
+just stop     # shut it down
+just dev      # run with backend watch-mode (for hacking on the code)
+```
 
 ---
 
 ## Screenshots
 
 _Click any screenshot to open it full size._
+
+Once you have it running on your local computer, then navigate to localhost:4444 to use it.
+
+<a href="pm/images/Large_File_Brdige_6.jpeg"><img src="pm/images/Large_File_Brdige_6.jpeg" width="100%" alt="EmailDeliveryHero running in a browser at localhost:4444"></a>
 
 **Dashboard** — one row per domain with six color-coded category cells, plus the full run history below.
 
@@ -179,39 +216,6 @@ EmailDeliveryHero is a **local-first web app** — a TypeScript-on-Node monorepo
 * **Checks engine:** pluggable checkers driven by Node's native DNS plus proven Brew-installed command-line tooling, so results reflect the same signals real mail systems use. Runs are parallel per domain with bounded concurrency.
 * **Storage:** plain JSON/YAML files under `~/.email_delivery_hero/` — no database. Your domain list, run history, and findings are transparent files on your own disk.
 * **Scheduling:** the OS-native scheduler (launchd on macOS, cron/systemd on Linux, Task Scheduler on Windows) fires recurring audits even when the app isn't open in a browser.
-
----
-
-## Getting Started
-
-Requirements: **macOS or Linux**, [Homebrew](https://brew.sh/), and Brew-installed `node` (>= 20), `pnpm`, and [`just`](https://github.com/casey/just).
-
-```bash
-# 1. Clone the repository (and its auth library as a sibling)
-git clone https://github.com/BryanStarbuck/EmailDeliveryHero.git
-git clone https://github.com/BryanStarbuck/OpenAuthFederated.git
-cd EmailDeliveryHero
-
-# 2. Build — installs deps, compiles frontend + backend,
-#    and installs the scheduled-audit agent
-just build
-
-# 3. Run — starts the web app in the background
-just run
-
-# 4. Open http://localhost:4444/ in your browser
-```
-
-Then add the domains you send from, click **Run checks**, and work the findings.
-
-Other useful recipes:
-
-```bash
-just status   # is the app / scheduler running?
-just logs     # follow the web app log
-just stop     # shut it down
-just dev      # run with backend watch-mode (for hacking on the code)
-```
 
 ---
 

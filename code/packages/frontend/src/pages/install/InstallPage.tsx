@@ -80,11 +80,16 @@ export function InstallPage() {
   const [running, setRunning] = useState(false)
   const esRef = useRef<EventSource | null>(null)
 
-  // Seed selection when the preflight first loads: missing (default tier) checked, optional not.
+  // Seed selection when the preflight first loads. Policy (pm/install_brew.mdx §4.2): pre-check
+  // EVERY missing tool we can actually batch-install — default AND extended tiers alike. The only
+  // "good reason not to" check a row is that it can't be auto-installed (copy-only: Docker/root/os,
+  // or a pipx tool with no pipx) — and those render a Copy button, not a checkbox, so `autoInstallable`
+  // is the whole gate. The user can still uncheck anything they don't want before installing.
   useEffect(() => {
     if (!preflight.data) return
     const next = new Set<string>()
-    for (const t of preflight.data.missing) if (t.autoInstallable) next.add(t.id)
+    for (const t of [...preflight.data.missing, ...preflight.data.optional])
+      if (t.autoInstallable) next.add(t.id)
     setSelected(next)
   }, [preflight.data])
 
@@ -223,7 +228,7 @@ export function InstallPage() {
           <p className="mt-1 text-sm text-[var(--edh-muted)]">
             {rows.length === 0
               ? "Everything needed is already installed."
-              : `${preflight.data?.missing.length ?? 0} needed · ${selected.size} selected`}
+              : `${rows.length} missing · ${selected.size} selected`}
           </p>
         </div>
         <button

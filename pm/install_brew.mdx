@@ -126,10 +126,15 @@ are **checked by default** on the Install page.
 > check (2026-07-02) confirms **both are Homebrew-core formulas** (the maintainers publish
 > `python-app` wrappers). We install them via `brew`, not `pip`, to keep one manager on the brew side.
 
-### 3.2 Extended / diagnostic (opt-in) — all Homebrew core
+### 3.2 Extended / diagnostic — all Homebrew core
 
-Unchecked by default; a user or an advanced check can add them. These deepen coverage but are not
-required for the core audit.
+These deepen coverage beyond the core audit. They are **not required** to get a first-round result,
+but — like every other Homebrew formula — they install with **one click and zero root**, so there is
+**no good reason to leave them unchecked** on a fresh machine. They are therefore **pre-checked by
+default** alongside the default tier (§4.2): we check every missing tool we can actually install, and
+the user unchecks the handful they don't want. The `tier` still drives **ordering** (default rows
+render above extended within a category) and the **preflight divert decision** (only a missing
+*default* tool diverts a run, §5.3) — it no longer gates the checkbox.
 
 | id | `brew install` | Binaries | Category | Serves |
 | --- | --- | --- | --- | --- |
@@ -243,9 +248,14 @@ single scrollable column of **tool rows** bracketed by two identical **Install**
 Each missing tool is a **rounded rectangle** (`rounded-lg border border-edh-border p-4`), able to
 span **multiple lines**, with a **checkbox on the left**:
 
-* **Checkbox** — left edge, vertically centered. Checked = "install this". Default-tier rows start
-  **checked**; extended and `special` rows start **unchecked** (the user opts into the heavier ones).
-  Toggling recomputes the "N selected" counters in both action bars.
+* **Checkbox** — left edge, vertically centered. Checked = "install this". **Every row we can
+  auto-install starts checked** — default *and* extended tier alike. The guiding rule is **check them
+  all unless there's a good reason not to**, and the only good reason is *"this tool can't be
+  batch-installed"*: a `special` row that needs Docker, a password/root, or a missing `pipx`
+  (`autoInstallable: false`) has **no checkbox at all** — it's replaced by a **Copy** button (last
+  bullet below). So the set that starts checked is exactly the set that is one-click installable.
+  Nothing installs without the user pressing Install, and they can uncheck any row first. Toggling
+  recomputes the "N selected" counters in both action bars.
 * **Line 1** — the tool name(s) (the `binaries`, e.g. `spamassassin  spamc`) in `font-medium`, with a
   right-aligned pair of chips: the **category** (DNS/SPF/DKIM/DMARC/BLACKLIST/SPAM/TLS) and the
   **manager** (`brew` / `cpanm` / `pipx` / `docker` / `os`).
@@ -335,8 +345,11 @@ checks that will execute (all enabled checks for `run-all`/`run-domain`; the sin
 A `run-check=spf` preflight therefore lists only SPF/DNS tools, never `swaks` or `spamassassin`.
 
 `GET /api/install/preflight?manager=brew&scope=<scope>&domainId=<id?>` →
-`{ brewPresent, missing: ToolStatus[], installed: ToolStatus[] }`. The default tier of the missing
-set is what the page pre-checks.
+`{ brewPresent, missing: ToolStatus[], optional: ToolStatus[], installed: ToolStatus[] }`, where
+`missing` is the uninstalled **default** tier and `optional` the uninstalled **extended** tier. Both
+are shown as rows, and the page **pre-checks every auto-installable row across both** (§4.2) — the
+tier split only decides which absences **divert a run** (a missing `missing` entry does; a missing
+`optional` entry does not), never which boxes start checked.
 
 ---
 
@@ -540,7 +553,10 @@ engine's graceful degradation is that a full toolbox is *better*, never *require
    shows SPF/DNS tools only, never `swaks`/`spamassassin`.
 3. Each row is a rounded, multi-line card with a **left checkbox**, name/category/manager chips, the
    summary, the exact install command, a live status dot, and (where relevant) the gotcha note.
-   Default-tier rows start checked; extended and `special` rows start unchecked.
+   **Every auto-installable row starts checked** — default *and* extended tier — per the "check them
+   all unless there's a good reason not to" rule; the only rows that don't start checked are the ones
+   that **can't be batch-installed** (Docker/root/os/pipx-absent), which show a **Copy** button
+   instead of a checkbox.
 4. There are **two** Install bars (top and bottom); both show the live selected-count and start the
    same batch; unchecked rows are **not** installed.
 5. Installs run **serially** via `execFile` (no shell) through the existing `ToolRunner`, with a
