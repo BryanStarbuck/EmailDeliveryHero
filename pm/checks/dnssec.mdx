@@ -71,8 +71,8 @@ down. Weak-but-working (deprecated algorithm, near-expiry, missing DS on a signe
 
 | Sub-check (checkId) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
 | --- | --- | --- | --- | --- |
-| `infra.dnssec_signed` | The zone is signed: at least one **DNSKEY** RRset exists at the apex and RRSIGs cover the zone's records. | `dig +dnssec DNSKEY <domain>` / `resolve(domain, 'DNSKEY')`; presence of DNSKEY + RRSIG. | **info:** no DNSKEY — zone is unsigned (no tamper-evidence, DANE impossible). | Enable DNSSEC at your DNS provider/registrar (one-click at most: Cloudflare, Route 53, Google Domains, etc.). |
-| `infra.dnssec_ds_present` | A **DS** record for this zone is published in the *parent* zone (registrar), establishing the chain of trust. | `dig DS <domain>` at the parent / `resolve(domain, 'DS')`. | **warning:** zone has DNSKEY but no DS at parent — "island of security", validation impossible. | Copy the DS/DNSKEY digest from your DNS provider into your registrar's DNSSEC panel so the parent publishes the DS. |
+| `infra.dnssec_signed` | The zone is signed: at least one **DNSKEY** RRset exists at the apex and RRSIGs cover the zone's records. | `dig DNSKEY <domain>` (via the `dig` helper — `DNSKEY` is not a `node:dns` resolver type); presence of DNSKEY. | **info:** no DNSKEY — zone is unsigned (no tamper-evidence, DANE impossible). | Enable DNSSEC at your DNS provider/registrar (one-click at most: Cloudflare, Route 53, Google Domains, etc.). |
+| `infra.dnssec_ds_present` | A **DS** record for this zone is published in the *parent* zone (registrar), establishing the chain of trust. | `dig DS <domain>` at the parent (via the `dig` helper). | **warning:** zone has DNSKEY but no DS at parent — "island of security", validation impossible. | Copy the DS/DNSKEY digest from your DNS provider into your registrar's DNSSEC panel so the parent publishes the DS. |
 | `infra.dnssec_validates` | A **validating resolver** accepts the chain: answer carries **AD=1** and RRSIGs verify (not "bogus"). | `dig +dnssec` against a validating resolver (e.g. `1.1.1.1`/`8.8.8.8`) and read the `ad` flag / `AUTHENTICATED DATA`; SERVFAIL with CD=0 but success with CD=1 ⇒ bogus. | **critical:** resolver returns **SERVFAIL / bogus** (broken chain — domain dark to validating resolvers). | Fix the signing chain: re-sign the zone, correct the DS to match the live KSK, or roll back the broken key. |
 | `infra.dnssec_algorithm` | Signing algorithm is modern. Prefer **ECDSAP256SHA256 (13)** or **RSASHA256 (8)**; flag deprecated **RSASHA1 (5)** and **RSASHA1-NSEC3-SHA1 (7)**. | Parse the `algorithm` field of each DNSKEY / RRSIG. | **warning:** DNSKEY uses algorithm 5/7 (RSASHA1) — deprecated, being removed from validators. | Roll to a modern algorithm: ECDSAP256SHA256 (13) is compact and fast; RSASHA256 (8) is the RSA fallback. Update the DS after the roll. |
 | `infra.dnssec_rrsig_expiry` | RRSIGs are not expired and not near expiry (typical signatures last ~2–4 weeks and auto-refresh). | Parse `Signature Expiration` of the apex RRSIGs; compare to now with a lead-time threshold (e.g. 72h). | **critical:** an RRSIG is already expired (validators return bogus). **warning:** expires within threshold. | Restore automatic re-signing on your signer; if manual, re-sign immediately. Investigate why the re-sign job stalled. |
@@ -87,14 +87,18 @@ down. Weak-but-working (deprecated algorithm, near-expiry, missing DS on a signe
 
 ## 3. How it is measured
 
-**First round (pure `node:dns/promises`, presence only).** Node's resolver can fetch the records but
-**does not validate** — `node:dns/promises` returns cached answers from the OS/upstream resolver and
-does **not** expose the AD flag or verify signatures. So the first round observes *presence* only:
+**First round (presence only, via the `dig` helper — not `node:dns/promises`).** Node's stock
+resolver **cannot query the DNSSEC record types at all**: `dns.resolve` supports only
+A/AAAA/CAA/CNAME/MX/NAPTR/NS/PTR/SOA/SRV/TXT — there is no `DNSKEY` or `DS` resolver type — and even
+for the types it does support it returns cached answers without exposing the AD flag or verifying
+signatures. So the first round fetches DNSKEY/DS **presence** through the Brew-installed `dig` helper
+(`checks/dns-util.ts`), parsing the record fields directly; only `SOA` presence uses
+`node:dns/promises` (`resolveSoa`):
 
-* `dnsPromises.resolve(domain, 'DNSKEY')` → drives `infra.dnssec_signed` (any DNSKEY ⇒ signed).
-* `dnsPromises.resolve(domain, 'DS')` → drives `infra.dnssec_ds_present`.
-* `dnsPromises.resolve(domain, 'RRSIG')` where supported, and `resolveSoa` presence → `infra.dnssec_soa_signed` (partial; presence heuristic).
-* From the DNSKEY answers we can read `algorithm` and `flags` (KSK 257 / ZSK 256) and key length ⇒ `infra.dnssec_algorithm`, `infra.dnssec_key_rollover` (advisory, static parse — no validation needed).
+* `dig(domain, 'DNSKEY')` → drives `infra.dnssec_signed` (any DNSKEY ⇒ signed).
+* `dig(domain, 'DS')` → drives `infra.dnssec_ds_present`.
+* `resolveSoa(domain)` presence (via `node:dns/promises`) → `infra.dnssec_soa_signed` (partial; presence heuristic — full per-RRset RRSIG coverage is the deep path below).
+* From the DNSKEY answers we read `algorithm` and `flags` (KSK 257 / ZSK 256) and key length ⇒ `infra.dnssec_algorithm`, `infra.dnssec_key_rollover` (advisory, static parse — no validation needed).
 
 Everything requiring **validation or signature contents** is **FUTURE** and needs shelling to `dig`
 (Brew-installed) or a validating-resolver library, because the AD flag and RRSIG expiry/verification
@@ -255,7 +259,8 @@ When storage graduates to PostgreSQL the reconciliation is mechanical: `results.
   catches `infra.dnssec_rrsig_expiry` at `warning` (within lead time) *before* it becomes a `critical`
   domain-wide outage. Consider a tighter cadence (e.g. hourly) for zones flagged near-expiry.
 * **First-round vs future:** presence sub-checks (`dnssec_signed`, `dnssec_ds_present`,
-  `dnssec_algorithm`, `dnssec_key_rollover`) are **first round** on `node:dns/promises`. Validation,
+  `dnssec_algorithm`, `dnssec_key_rollover`) are **first round** via the `dig` helper (DNSKEY/DS
+  presence) plus `node:dns/promises` for SOA presence. Validation,
   RRSIG-expiry, NSEC3 params, and full chain verification are **future**, gated behind shelling to
   `dig +dnssec` / a validating-resolver library — Node does not expose the AD flag or verify
   signatures.
@@ -272,10 +277,10 @@ When storage graduates to PostgreSQL the reconciliation is mechanical: `results.
 
 ## 7. First round vs future
 
-| Sub-check (checkId) | First round (pure `node:dns/promises`) | Future (probe / external tool) |
+| Sub-check (checkId) | First round (presence, via `dig` helper — `DNSKEY`/`DS` are not `node:dns` resolver types) | Future (probe / external tool) |
 | --- | --- | --- |
-| `infra.dnssec_signed` | ✅ `resolve(domain,'DNSKEY')` presence | — |
-| `infra.dnssec_ds_present` | ✅ `resolve(domain,'DS')` presence | — |
+| `infra.dnssec_signed` | ✅ `dig(domain,'DNSKEY')` presence | — |
+| `infra.dnssec_ds_present` | ✅ `dig(domain,'DS')` presence | — |
 | `infra.dnssec_algorithm` | ✅ parse DNSKEY `algorithm`/`flags`/bits | — |
 | `infra.dnssec_key_rollover` | ✅ static parse of DNSKEY set | — |
 | `infra.dnssec_validates` | — | 🔻 `dig +dnssec` AD flag + CD-flag bogus probe / validating resolver |
@@ -283,7 +288,7 @@ When storage graduates to PostgreSQL the reconciliation is mechanical: `results.
 | `infra.dnssec_nsec3` | — | 🔻 `dig +dnssec <nxdomain>` NSEC3PARAM parse |
 | `infra.dnssec_ds_algo_match` | ⚠️ partial (recompute DS digest locally) | 🔻 full chain via validator library |
 | `infra.dnssec_chain_complete` | — | 🔻 walk DS→DNSKEY→RRSIG via `dig`/validator |
-| `infra.dnssec_soa_signed` | ⚠️ presence heuristic | 🔻 confirm RRSIG covers each RRset |
+| `infra.dnssec_soa_signed` | ⚠️ presence heuristic (`resolveSoa` via `node:dns/promises`) | 🔻 confirm RRSIG covers each RRset |
 | `infra.dnssec_dane_ready` | ⚠️ derived (signed only) | 🔻 signed **AND** validates |
 
 ---
@@ -297,8 +302,9 @@ When storage graduates to PostgreSQL the reconciliation is mechanical: `results.
    Infrastructure cell amber.
 3. For a **signed zone with no DS at the parent** it emits `infra.dnssec_ds_present` at `warning` with
    a remediation instructing the operator to publish the DS/DNSKEY digest at the registrar.
-4. First-round presence sub-checks use only `node:dns/promises` and are deterministic against recorded
-   DNS fixtures in CI.
+4. First-round presence sub-checks fetch DNSKEY/DS via the `dig` helper (the DNSSEC record types are
+   not `node:dns` resolver types; SOA presence uses `node:dns/promises`) and are deterministic against
+   mocked `dig`/recorded DNS fixtures in CI.
 5. Validation-dependent sub-checks (`dnssec_validates`, `dnssec_rrsig_expiry`, `dnssec_nsec3`,
    `dnssec_chain_complete`) are clearly gated as future and **degrade gracefully** to `info`
    ("validation unavailable") when the `dig`/validating-resolver path is disabled — never a false
@@ -817,15 +823,17 @@ outputs.*
 
 | Library | Tier ([`../install_npm.mdx`](../install_npm.mdx)) | Inputs | Outputs | Role for DNSSEC |
 | --- | --- | --- | --- | --- |
-| **`node:dns/promises`** (built-in) | bundled | `resolve(domain,'DNSKEY'\|'DS')`, `resolveSoa`, `resolveMx`, `resolveTxt` | record arrays (or throws on NXDOMAIN/SERVFAIL) | **First round.** Presence-only: drives `dnssec_signed` (any DNSKEY), `dnssec_ds_present` (any DS), and the static `dnssec_algorithm`/`dnssec_key_rollover` parse. **Cannot validate** — it returns cached upstream answers and does not expose the AD flag or verify signatures. |
+| **`dig` helper** (`checks/dns-util.ts`, Brew `dig`) | bundled tool | `dig(domain,'DNSKEY'\|'DS')` | record-line arrays (or an `error` on NXDOMAIN/SERVFAIL/missing binary) | **First round.** The DNSSEC record types (`DNSKEY`, `DS`) are **not** `node:dns` resolver types, so presence is fetched here: drives `dnssec_signed` (any DNSKEY), `dnssec_ds_present` (any DS), and the static `dnssec_algorithm`/`dnssec_key_rollover` parse off the DNSKEY fields. |
+| **`node:dns/promises`** (built-in) | bundled | `resolveSoa`, `resolveMx`, `resolveTxt` | record arrays (or throws on NXDOMAIN/SERVFAIL) | **First round (SOA only).** `resolveSoa` drives the `dnssec_soa_signed` presence heuristic. Supports **no** `DNSKEY`/`DS` resolver type, and even for supported types returns cached upstream answers without the AD flag or signature verification — hence the `dig` helper above and the deep path below. |
 | **`node:crypto`** (built-in) | bundled | DNSKEY RDATA (owner name + wire bytes) | SHA-256 digest, computed key tag | Local DS recomputation (RFC 4034 §5.1.4) for `dnssec_ds_algo_match` / `dnssec_chain_complete` — no network, no external tool. Already used by `dnssec.check.ts` (`computeDsDigest`, `keyTag`). |
 | **`dns2`** | L2 optional ([`../install_npm.mdx`](../install_npm.mdx) — "only if we add RRSIG/DS inspection or DoH resolvers") | a query name/type, a resolver (incl. **DoH** endpoints) | raw DNS packets incl. RRSIG/DS/NSEC3 RDATA and header flags | Optional: fetch DNSSEC RDATA and query DoH resolvers **without** shelling to `dig`. A pure-Node path to the AD flag and RRSIG bytes if we want to avoid the CLI dependency. |
 | **`@relaycorp/dnssec`** | L2 optional (candidate; not yet in catalog) | DNS responses in **wire format** containing RRSIG/DNSKEY/DS, plus an optional validation `Date`/`IDatePeriod` | a `VerificationResult` — `SECURE` / `INSECURE` / `BOGUS` with the failure reason and the validated RRset | The only **resolver-agnostic pure-JS validator** — lets us verify the chain and produce a real bogus/secure verdict in Node, replacing the `delv`/`dig +cd` shell path. Pair with `dns2` (wire-format fetch) → fully in-process deep path. |
 | **`rdapper`** | L1 ([`../install_npm.mdx`](../install_npm.mdx)) | a domain | registrar, nameservers, EPP statuses, key dates, **DNSSEC flag** (delegation signed / DS at registry) | Cross-check of `dnssec_ds_present` from the registry/RDAP side (does the *registry* say the delegation is signed), independent of DNS answers. |
 
 **How the two paths compose:**
-* **Today (first round):** `node:dns/promises` + `node:crypto` only — presence + local DS math. Zero
-  external network beyond the OS resolver, deterministic against DNS fixtures in CI (§8 AC#4).
+* **Today (first round):** the `dig` helper (DNSKEY/DS presence) + `node:dns/promises` (SOA presence)
+  + `node:crypto` (local DS math). No validating-resolver traffic; deterministic against mocked
+  `dig`/DNS fixtures in CI (§8 AC#4).
 * **Deep path — CLI variant (current):** shell to `dig +dnssec`/`delv`/`drill` via
   `dns-util.ts::digDnssec` for AD flag, RRSIG expiry, NSEC3 params, chain walk (§20).
 * **Deep path — pure-Node variant (future option):** `dns2` (wire fetch, incl. DoH) →
@@ -844,8 +852,8 @@ is a broken chain — that is a §16 "wrong" case, not a §15 "missing" case).
 
 | Missing condition | How detected | Finding id | Severity | Remediation carried |
 | --- | --- | --- | --- | --- |
-| Zone not signed (no DNSKEY at apex) | `resolve(domain,'DNSKEY')` empty / NODATA | `dnssec_signed.unsigned` | `info` | Enable DNSSEC at the DNS provider (one-click at Cloudflare/Route 53/Google Cloud DNS). |
-| No DS at the parent, but the zone is signed (*island of security*) | `resolve(domain,'DS')` empty **while** `signed=true` | `dnssec_ds_present.missing` | `warning` | Copy the DS/DNSKEY digest from the DNS provider into the registrar's DNSSEC panel (digest type 2). |
+| Zone not signed (no DNSKEY at apex) | `dig(domain,'DNSKEY')` empty / NODATA | `dnssec_signed.unsigned` | `info` | Enable DNSSEC at the DNS provider (one-click at Cloudflare/Route 53/Google Cloud DNS). |
+| No DS at the parent, but the zone is signed (*island of security*) | `dig(domain,'DS')` empty **while** `signed=true` | `dnssec_ds_present.missing` | `warning` | Copy the DS/DNSKEY digest from the DNS provider into the registrar's DNSSEC panel (digest type 2). |
 | An RRset returns without an RRSIG on a "signed" zone (partial signing) | `dig +dnssec <type>` returns records but no accompanying RRSIG | `dnssec_soa_signed.partial` | `warning` | Re-sign the full zone so the signer covers every RRset, not just the apex. |
 | No RRSIG present at all on a signed zone (deep path) | `dig +dnssec DNSKEY` returns no RRSIG | `dnssec_rrsig_expiry.no_rrsig` | `warning` | Signer is not producing signatures — restart/repair the signing job. |
 | DS present but references a key tag absent from the DNSKEY set (the KSK is *missing*) | recompute: no live DNSKEY matches the published DS key tag | `dnssec_chain_complete.broken` | **critical** | Re-align the parent DS with the live KSK (this is a *broken* chain — treated as §16 severity even though a key is "missing"). |
@@ -1028,8 +1036,8 @@ The checker's own runner is `dns-util.ts` (it calls `execFile` directly, **not**
 
 | Step | Invocation (input) | Output consumed |
 | --- | --- | --- |
-| Presence: signed | `resolve(domain,'DNSKEY')` (node) / `dig +short DNSKEY <domain>` | key list → `signed`, `dnskeyAlgos[]`, `algorithms[]` |
-| Presence: DS | `resolve(domain,'DS')` / `dig +short DS <domain>` | DS list → `dsPresent`, `dsRecords[]`, `dsDigestType` |
+| Presence: signed | `dig DNSKEY <domain>` (`DNSKEY` is not a `node:dns` resolver type) | key list → `signed`, `dnskeyAlgos[]`, `algorithms[]` |
+| Presence: DS | `dig DS <domain>` | DS list → `dsPresent`, `dsRecords[]`, `dsDigestType` |
 | Local DS match | `node:crypto` recompute vs published DS | `dsAlgoMatch`, chain-complete verdict |
 | Deep: validate | `digDnssec(domain,'SOA',{resolver})` + `{cd:true}` probe | `adFlag` → `validates`; SERVFAIL-vs-CD → `bogus` |
 | Deep: RRSIG expiry | `dig +dnssec DNSKEY <domain>` | RRSIG `Signature Expiration` → `rrsigEarliestExpiry`, `rrsigs[]` |

@@ -25,6 +25,32 @@ EmailDeliveryHero closes that visibility gap. Point it at your domains and it te
 
 ---
 
+## Screenshots
+
+_Click any screenshot to open it full size._
+
+**Dashboard** — one row per domain with six color-coded category cells, plus the full run history below.
+
+<a href="pm/images/Large_File_Brdige_1.jpeg"><img src="pm/images/Large_File_Brdige_1.jpeg" width="100%" alt="EmailDeliveryHero dashboard: domain-health table and run history"></a>
+
+**Run report** — a domain's overall score, the six categories, and a per-check pass/fail breakdown with a copy-paste fix for every finding.
+
+<a href="pm/images/Large_File_Brdige_3.jpeg"><img src="pm/images/Large_File_Brdige_3.jpeg" width="100%" alt="Per-domain run report with score, category cells, and per-check breakdown"></a>
+
+**DNS & Infrastructure detail** — mail path, nameserver/zone health, and the underlying test results behind one category cell.
+
+<a href="pm/images/Large_File_Brdige_2.jpeg"><img src="pm/images/Large_File_Brdige_2.jpeg" width="100%" alt="DNS and Infrastructure check detail: mail path and zone health"></a>
+
+**Blacklists** — fleet-wide blocklist status across every monitored domain and sending IP, with per-zone delisting steps.
+
+<a href="pm/images/Large_File_Brdige_4.jpeg"><img src="pm/images/Large_File_Brdige_4.jpeg" width="100%" alt="Fleet-wide blacklist status page"></a>
+
+**Scheduling** — recurring, unattended re-audits via the OS-native scheduler, configurable by time and day.
+
+<a href="pm/images/Large_File_Brdige_5.jpeg"><img src="pm/images/Large_File_Brdige_5.jpeg" width="100%" alt="Settings: scheduling recurring audits"></a>
+
+---
+
 ## The Checks
 
 Every audit runs checks across **six categories**. Each category rolls up into one color-coded dashboard cell; each check produces findings with a severity and a fix.
