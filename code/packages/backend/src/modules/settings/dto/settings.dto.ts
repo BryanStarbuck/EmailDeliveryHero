@@ -268,6 +268,41 @@ export class ChecksDaneDto {
 }
 
 /**
+ * DNSSEC admin settings (pm/checks/dnssec.mdx §4/§18.7, admin-only): the validating resolver(s) the
+ * deep check queries for the AD flag, the RRSIG near-expiry warning lead time, and the deep-path
+ * toggle (OFF = presence-only first round; ON = shell `dig +dnssec` for validation/RRSIG/NSEC3/chain).
+ * The `algorithms` reference seed (§5) is read-only IANA policy and is not editable through the API.
+ */
+export class ChecksDnssecDto {
+	@ApiPropertyOptional({
+		type: [String],
+		description:
+			"Validating resolvers the deep check queries for the AD flag (default 1.1.1.1, 8.8.8.8)",
+	})
+	@IsOptional()
+	@IsArray()
+	@IsString({ each: true })
+	resolvers?: string[];
+
+	@ApiPropertyOptional({
+		description: "Warn this many hours before an RRSIG expires (default 72)",
+	})
+	@IsOptional()
+	@IsInt()
+	@Min(1)
+	@Max(24 * 90)
+	rrsigLeadHours?: number;
+
+	@ApiPropertyOptional({
+		description:
+			"Run the deep validation/RRSIG-expiry/NSEC3/chain sub-checks via `dig +dnssec` (default off)",
+	})
+	@IsOptional()
+	@IsBoolean()
+	validateViaDig?: boolean;
+}
+
+/**
  * List-Unsubscribe / one-click admin settings (pm/checks/list_unsubscribe.mdx §4 "Admin-only
  * settings"): the Gmail/Yahoo bulk-sender daily threshold (default 5,000), the endpoint-probe
  * timeout (default 5s), whether the live one-click POST probe is globally permitted at all, and
@@ -399,6 +434,12 @@ export class ChecksConfigDto {
 	@ValidateNested()
 	@Type(() => ChecksDaneDto)
 	dane?: ChecksDaneDto;
+
+	@ApiPropertyOptional({ type: ChecksDnssecDto })
+	@IsOptional()
+	@ValidateNested()
+	@Type(() => ChecksDnssecDto)
+	dnssec?: ChecksDnssecDto;
 
 	@ApiPropertyOptional({ type: ChecksListUnsubDto })
 	@IsOptional()

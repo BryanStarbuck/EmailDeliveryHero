@@ -51,6 +51,10 @@ interface Draft {
 	unsubProbeTimeoutMs: number;
 	unsubProbeAllowed: boolean;
 	unsubProbeCadenceHours: number;
+	/** DNSSEC admin settings (pm/checks/dnssec.mdx §4/§18.7 — admin-only). */
+	dnssecResolvers: string;
+	dnssecRrsigLeadHours: number;
+	dnssecValidateViaDig: boolean;
 	/**
 	 * URL Reputation admin settings (pm/checks/link_url_reputation.mdx §4/§5): the public
 	 * URL-shortener domain list (comma-separated; empty = the bundled seed list) and the Google
@@ -102,6 +106,11 @@ function toDraft(view: SettingsView): Draft {
 		unsubProbeTimeoutMs: checks.listUnsub?.probeTimeoutMs ?? 5000,
 		unsubProbeAllowed: checks.listUnsub?.probeAllowed ?? false,
 		unsubProbeCadenceHours: checks.listUnsub?.probeCadenceHours ?? 24,
+		dnssecResolvers: (checks.dnssec?.resolvers ?? ["1.1.1.1", "8.8.8.8"]).join(
+			", ",
+		),
+		dnssecRrsigLeadHours: checks.dnssec?.rrsigLeadHours ?? 72,
+		dnssecValidateViaDig: checks.dnssec?.validateViaDig ?? false,
 		urlShorteners: (checks.content?.url?.shorteners ?? []).join(", "),
 		safeBrowsingKey: checks.content?.url?.safeBrowsingKey ?? "",
 		spamassassinPath: tools.paths?.spamassassin ?? "",
@@ -176,6 +185,12 @@ function fromDraft(d: Draft): UpdateAdminSettingsInput {
 						enabled: m.enabled,
 					}))
 					.filter((m) => m.name && m.issuerDnMatch),
+			},
+			// DNSSEC (pm/checks/dnssec.mdx §4/§18.7): resolvers, RRSIG near-expiry lead time, deep toggle.
+			dnssec: {
+				resolvers: splitList(d.dnssecResolvers),
+				rrsigLeadHours: d.dnssecRrsigLeadHours,
+				validateViaDig: d.dnssecValidateViaDig,
 			},
 			thresholds: { green: d.green, amber: d.amber },
 			weights: { critical: d.critical, warning: d.warning, info: d.info },
@@ -754,6 +769,46 @@ export function AdminSettings() {
 				>
 					<Plus className="h-4 w-4" /> Add watchlist entry
 				</button>
+			</Panel>
+
+			{/* DNSSEC admin settings (pm/checks/dnssec.mdx §4/§18.7 / §22.4). */}
+			<Panel title="DNSSEC">
+				<p className="mb-3 text-sm text-[var(--edh-muted)]">
+					Controls for the DNSSEC check (pm/checks/dnssec.mdx §4). The IANA
+					signing-algorithm reference table is read-only policy and is not
+					editable here.
+				</p>
+				<div className="grid gap-3 sm:grid-cols-2">
+					<LabeledInput
+						label="Validating resolvers (comma-separated) — queried for the AD flag"
+						value={draft.dnssecResolvers}
+						onChange={(v) => set({ dnssecResolvers: v })}
+						placeholder="1.1.1.1, 8.8.8.8"
+						wide
+					/>
+					<NumberInput
+						label="RRSIG near-expiry lead time (hours)"
+						value={draft.dnssecRrsigLeadHours}
+						onChange={(v) => set({ dnssecRrsigLeadHours: v })}
+					/>
+				</div>
+				<label className="mt-3 flex items-start gap-2 text-sm">
+					<input
+						type="checkbox"
+						className="mt-0.5"
+						checked={draft.dnssecValidateViaDig}
+						onChange={(e) =>
+							set({ dnssecValidateViaDig: e.target.checked })
+						}
+					/>
+					<span>
+						Deep validation via <code>dig +dnssec</code>
+						<span className="mt-0.5 block text-xs text-[var(--edh-muted)]">
+							When off, the validation, RRSIG-expiry, NSEC3, and chain
+							sub-checks stay pending (presence-only first round).
+						</span>
+					</span>
+				</label>
 			</Panel>
 
 			{/* §3 Scheduling is all-users — point at its tab rather than duplicating it here. */}

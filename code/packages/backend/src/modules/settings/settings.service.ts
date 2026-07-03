@@ -194,6 +194,19 @@ export class SettingsService {
 				// probe toggle + timeout and the require-AD-bit validating-resolver switch.
 				if (dto.checks.dane)
 					cfg.checks.dane = { ...cfg.checks.dane, ...dto.checks.dane };
+				// DNSSEC admin settings (pm/checks/dnssec.mdx §4/§18.7): validating resolvers, the
+				// RRSIG near-expiry lead time, and the deep-path (`dig +dnssec`) toggle. The read-only
+				// `algorithms` IANA seed is preserved — never overwritten via the API.
+				if (dto.checks.dnssec) {
+					const { resolvers, rrsigLeadHours, validateViaDig } =
+						dto.checks.dnssec;
+					cfg.checks.dnssec = {
+						...cfg.checks.dnssec,
+						...(resolvers ? { resolvers: cleanList(resolvers) } : {}),
+						...(rrsigLeadHours !== undefined ? { rrsigLeadHours } : {}),
+						...(validateViaDig !== undefined ? { validateViaDig } : {}),
+					};
+				}
 				// List-Unsubscribe / one-click admin settings (pm/checks/list_unsubscribe.mdx §4): the
 				// bulk-sender daily threshold, probe timeout, global probe permission, and probe cadence.
 				if (dto.checks.listUnsub)

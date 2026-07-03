@@ -1,0 +1,318 @@
+---
+title: EmailDeliveryHero — Competitive gap analysis (what others check that we don't)
+description: A competitive map of every paid and free email-deliverability product that checks a sending domain — GlockApps, Validity, Folderly, MailReach, Warmup Inbox, InboxAlly, Mailtrap, Mailgun, EasyDMARC, dmarcian, Valimail, PowerDMARC, Red Sift, URIports, Postmark, Mimecast, Mail-Tester, MXToolbox, MailGenius, DKIMValidator, LearnDMARC, Google Postmaster Tools, Cisco Talos, Barracuda, Spamhaus, Kitterman, AboutMy.email — the exact checks each performs, and a running list of what EmailDeliveryHero is missing versus what it already does better than the field.
+---
+
+# Competitive gap analysis — what the others check that we don't (yet)
+
+This is the market map for EmailDeliveryHero. It exists so we can say, with receipts,
+that we check **more than our competitors** — and so we always know exactly which
+gaps remain to close.
+
+Read it alongside:
+
+* [../README.md](../README.md) — **List of What we Check**: our code-verified list of
+  the **23 registered checkers** across six categories.
+* [./checks/overview.mdx](./checks/overview.mdx) — the deep per-check specs.
+* [./spam_checks.mdx](./spam_checks.mdx) — the master catalog.
+
+The document has three parts:
+
+1. **What we're missing** — the running to-add list: capabilities competitors ship
+   that we do not, or only do partially. This is the section we grow.
+2. **What we already do that most competitors don't** — our edge, so we don't
+   accidentally "add" something we already lead on.
+3. **The field, product by product** — every product and the exact things it checks.
+
+> Sourcing note: check rosters below are compiled from each vendor's own
+> feature/pricing/tool pages (July 2026). Exact blacklist counts and seed-address
+> counts are rarely published in full by any vendor; where a number is quoted it is
+> the vendor's own claim.
+
+---
+
+## Part 1 — What we're missing (the to-add list)
+
+Ranked roughly by how often the field ships it and how much it would strengthen our
+"we check more" claim. `MISSING` = we don't do it at all. `PARTIAL` = we do a
+narrower version and could extend it.
+
+### 1.1 Reputation & recipient-side telemetry
+
+| # | Capability | Status | Who ships it | Note |
+|---|---|---|---|---|
+| 1 | **Live Google Postmaster Tools metric ingestion** (Gmail spam-rate, domain/IP reputation, TLS %, delivery errors, FBL rate) | PARTIAL | GlockApps, Validity, InboxAlly, Mailtrap, Mailgun | We only *verify Postmaster domain enrollment* + FBL enrollment (`content.reputation`). We do not pull the live metrics. |
+| 2 | **Microsoft SNDS integration** (Outlook/Hotmail IP data, complaint rates) | MISSING | Mailgun Optimize | Pairs with #1 to cover the two hardest inbox providers. |
+| 3 | **Industry reputation index / score** (Validity Sender Score 0–100; Cisco Talos −10..+10 Email vs Web reputation, spam-volume trend) | MISSING | Validity (Sender Score), Cisco Talos | We compute no cross-provider reputation number. |
+| 4 | **Spam-trap / honeypot network monitoring** | MISSING | Validity, Mailgun (+ at validation time) | Requires a proprietary trap network — a build-or-partner decision. |
+| 5 | **Sender-reputation trend over time, per provider** (Google vs Microsoft split) | PARTIAL | MailReach, Warmup Inbox | We keep a blocklist-history trend (`content.blocklist_history`); we don't yet split reputation per receiver. |
+
+### 1.2 Inbox placement & warmup
+
+| # | Capability | Status | Who ships it | Note |
+|---|---|---|---|---|
+| 6 | **Built-in seed-list inbox-placement network** (Gmail/Outlook/Yahoo/Apple, inbox-vs-Promotions-vs-spam) | PARTIAL | GlockApps, Validity (90–140+ providers), Folderly, MailReach, Mailtrap, Mailgun, InboxAlly | Our `content.inbox_placement` is real but **gated on a user-supplied seed list** — we ship no seed network of our own. |
+| 7 | **Email warmup / engagement network** (auto send-reply, mark-important, spam→inbox rescue) | MISSING | MailReach (30k), Warmup Inbox (20–30k), InboxAlly (native-UI), Folderly | Arguably an adjacent product, but the whole cold-email segment expects it. |
+| 8 | **Promotions-tab vs Spam-folder distinction** in placement | PARTIAL | Folderly, GlockApps, Mailgun | Fold into #6 when we build a seed path. |
+
+### 1.3 Content & message-level checks
+
+| # | Capability | Status | Who ships it | Note |
+|---|---|---|---|---|
+| 9 | **Multi-engine spam scoring** (SpamAssassin **+** Barracuda **+** Google spam/"Phishy" verdict) | PARTIAL | GlockApps (3 engines), MailGenius (SA + Barracuda) | We run **one** SpamAssassin-style engine (`content.scoring`). Adding a second/third engine is a strong differentiator. |
+| 10 | **Dedicated spam-word / trigger-word checker with in-context rewrite suggestions** | PARTIAL | Folderly (4-bucket), InboxAlly (200+ words) | Our content scoring flags trigger phrases; it doesn't suggest rewrites. |
+| 11 | **HTML/CSS rendering preview across email clients** (per-client compatibility %, viewport/broken-image states) | MISSING | GlockApps, Validity, Mailtrap, Mailgun (100+ clients), AboutMy.email | |
+| 12 | **Deep image diagnostics** (native-vs-rendered geometry, alt-text, per-image URL/redirect timing) | MISSING | GlockApps, AboutMy.email | We check image-to-text ratio only. |
+
+### 1.4 Authentication depth & report ingestion
+
+| # | Capability | Status | Who ships it | Note |
+|---|---|---|---|---|
+| 13 | **DMARC forensic (RUF) report ingestion & parsing** | PARTIAL | dmarcian, PowerDMARC, URIports (PGP), Red Sift, Mimecast, EasyDMARC | We validate the `ruf` **tag** and ingest **aggregate (RUA)** XML; we do not ingest/parse **forensic failure** emails. |
+| 14 | **Named-sender / ESP source identification** (map report IPs → vendor by name; "who sends as you") | MISSING | Valimail (1000s), EasyDMARC (1,200+ sources), PowerDMARC, dmarcian, MXToolbox, Mimecast | We surface source IPs from reports; we don't resolve them to a named vendor catalog. |
+| 15 | **Geographic abuse map of report sources** | MISSING | EasyDMARC (GeoMaps), dmarcian, PowerDMARC, Mimecast | |
+
+### 1.5 Remediation you *apply*, not just prescribe (hosted/managed)
+
+We are an **auditor** — we prescribe the exact fix. Competitors increasingly *host the
+record for you*. Consider whether any of these belong in scope.
+
+| # | Capability | Status | Who ships it | Note |
+|---|---|---|---|---|
+| 16 | **Hosted / dynamic SPF flattening** (beat the 10-lookup PermError) | MISSING | EasyDMARC (EasySPF), PowerDMARC (PowerSPF + macros), Valimail (Instant SPF), Red Sift (Dynamic SPF) | We *detect* the 10-lookup breach; we don't host a flattened record. |
+| 17 | **Hosted/managed DMARC, DKIM, MTA-STS, BIMI + VMC provisioning** | MISSING | EasyDMARC, PowerDMARC, Valimail, Red Sift, Mimecast | |
+| 18 | **Record generators** (SPF/DMARC/DKIM/BIMI generators, BIMI logo→SVG converter, VMC validation) | MISSING | EasyDMARC, InboxAlly, dmarcian, Mimecast | Cheap to add; a nice funnel/utility. |
+
+### 1.6 Adjacent / infrastructure
+
+| # | Capability | Status | Who ships it | Note |
+|---|---|---|---|---|
+| 19 | **Email list validation / verification** (syntax, MX, role, disposable, catch-all, spam-trap, typo suggest) | MISSING | Mailgun (deep, 450B corpus), Validity BriteVerify, GlockApps, MailReach, InboxAlly | A whole adjacent category. |
+| 20 | **Certificate Transparency log monitoring** (newly issued certs, lifecycle, CAA) | PARTIAL | Red Sift Certificates, URIports | We check MX cert validity/expiry (`infra.tls_transport`), not CT logs. |
+| 21 | **Subdomain-takeover / dangling-DNS / SubdoMailing detection** | PARTIAL | Red Sift (DNS Guardian) | We flag dangling-record risk in `infra.dns_health`; not full takeover detection. |
+| 22 | **AI threat intelligence / anomaly detection / lookalike-domain finder** | MISSING | PowerDMARC (DMARC AI + SecLytics), Valimail, Red Sift | |
+| 23 | **Alerting channels** (Slack / Teams / Telegram / webhook / PagerDuty) + **public status pages** | MISSING | GlockApps, dmarcian, PowerDMARC, URIports (Telegram) | We re-audit on a schedule but push no outbound alerts. High value, low cost. |
+| 24 | **Uptime / SRE monitoring of DNS-record health** (1-min polling, incident alerts) | MISSING | GlockApps (Uptime Monitor) | |
+| 25 | **Raw SMTP-transcript + full DNS-query-log forensic view** | MISSING | AboutMy.email, LearnDMARC (animated), Cisco Talos (file/SHA256) | The single-message microscope. |
+| 26 | **Multi-tenant / MSP mode** (client workspaces, RBAC, SSO/SAML) | MISSING | PowerDMARC (Partner), dmarcian, Red Sift, Mimecast | Only relevant for the future hosted version. |
+| 27 | **Broaden the blacklist roster toward ~100 zones** | PARTIAL | MXToolbox (~105 zones), Spamhaus (all zones), GlockApps/InboxAlly/Folderly (50+) | We query the major zones; MXToolbox's ~105-zone breadth is the bar to beat. |
+
+---
+
+## Part 2 — What we already do that most competitors don't (our edge)
+
+Do **not** list these as gaps. These are where EmailDeliveryHero already leads the field:
+
+* **DANE / TLSA validation** — across this entire field only **Red Sift** and **URIports**
+  meaningfully check DANE. We ship `infra.dane_tlsa` as a core check.
+* **DNSSEC chain validation** (flags `bogus`) — essentially **Red Sift-only** among
+  competitors. We ship `infra.dnssec`.
+* **SMTP server hardening probes** — **open relay**, **VRFY / EXPN** exposure
+  (`infra.smtp_security`). MXToolbox does an open-relay + response-time probe; almost
+  no one else does VRFY/EXPN.
+* **The full transport-security stack in one audit** — STARTTLS + MX cert +
+  **MTA-STS + TLS-RPT + DANE + DNSSEC** together. Most DMARC platforms cover MTA-STS/
+  TLS-RPT but stop before DANE/DNSSEC.
+* **Local-first, self-hosted, free, zero data egress** — the whole audit runs on
+  `localhost` against live DNS and mail-server probes; **no domain data leaves the
+  machine**. Every paid competitor is a cloud SaaS that ingests your reports.
+* **Local report-email ingestion** — we parse DMARC aggregate + TLS-RPT reports on
+  your own disk (`emails/`), not in someone's cloud.
+* **One unified six-category audit** — SPF, DKIM, DMARC(+ARC), Blacklists, DNS &
+  Infrastructure, Spam & Content — instead of a single-purpose tool per checkbox.
+
+The strategic read from the research: the **least-covered checks across the whole
+field are DANE, DNSSEC, and SMTP-server hardening — and we already have all three.**
+Our biggest genuine gaps are **recipient-side reputation telemetry (Postmaster/SNDS/
+Sender Score), seed-list placement, and forensic/named-source DMARC reporting.**
+
+---
+
+## Part 3 — The field, product by product
+
+Grouped as: **(A)** all-in-one deliverability suites, **(B)** DMARC / authentication
+platforms, **(C)** free & DNS-focused tools.
+
+### Group A — All-in-one deliverability suites
+
+#### GlockApps — https://glockapps.com/
+*All-in-one suite: seed-list placement + continuous auth/blacklist/DMARC/IP-reputation/uptime monitoring.*
+
+* **Inbox Insight (seed placement)** — ~115 seeds / 70+ accounts across Gmail, Yahoo, AOL, Outlook/Hotmail, Yandex, Zoho, Laposte, Mail.ru + custom; per-provider **Inbox / Tabs / Spam / Missing** rates; manual, smart, automatic, and API modes.
+* **Auth per test** — SPF, DKIM + **DKIM alignment**, DMARC, domain blocklist.
+* **Multi-engine spam scoring** — **SpamAssassin** (rule breakdown) + **Barracuda** (score) + **Google spam filter** (Spam/Not-Spam **and Phishy/Not-Phishy**).
+* **IP analytics** — whole **chain of relay IPs**, rDNS per IP, blocklist count per IP, per-IP inbox/tabs/spam, Sender Score.
+* **Content** — size, image count/size, link count, **HTML client-compatibility %**, per-image redirects/response times, per-link anchor/status.
+* **Blacklist monitor** — 50+ blacklists (Spamhaus, SURBL, SORBS, Invaluement, SpamCop, Barracuda, Postini) + delisting help.
+* **DMARC Analytics** — aggregate + forensic, per-source pass %, 10k free DMARC msgs/mo, unlimited domains.
+* **Google Postmaster** — domain/IP reputation, spam rate, SPF/DKIM/DMARC %, **TLS inbound/outbound**, FBL, delivery errors w/ SMTP reasons.
+* **Uptime Monitor** — DNS-record + HTTP/TLS/TCP health, 1-min polling, Email/Telegram/Slack/PagerDuty alerts, **public status pages**.
+* **Distinctive:** three named spam engines incl. Phishy; whole-chain IP analysis; SRE-style uptime monitoring + status pages.
+
+#### Validity — Everest / Sender Score / 250ok — https://www.validity.com/everest/
+*Enterprise "email success platform" (merged Return Path + 250ok + BriteVerify).*
+
+* **Inbox placement** — inbox/spam/promotions/missing across **90–140+ providers** (incl. **Apple Mail/iOS**), **weighted by your actual list composition**, via SmartSeeds.
+* **Sender Score** — free industry-standard **0–100 IP reputation**; nine inputs incl. blocklists, complaints, infra/auth, gateway rejections, filtered-to-spam, **spam traps (7-day)**, MBP spam rate, unknown-user bounces, volume swings.
+* **Blocklist monitoring** — real-time IP/domain (Spamhaus SBL, SURBL, "all key operators"); **proprietary spam-trap network**.
+* **Auth** — SPF, DKIM (+ **ARC seal verification**), DMARC alignment + full reporting, **BIMI**, **one-click List-Unsubscribe**, **DANE/TLSA**.
+* **Integrations** — native Google Postmaster, universal webhook, Gmail Annotations.
+* **Content/engagement** — rendering previews (list-weighted); opens, **read vs skim %, average read time, dwell**; competitor creative intel.
+* **List validation** — BriteVerify built in.
+* **Distinctive:** Sender Score is the de-facto industry reputation index; 80+ provider Data Network; proprietary trap network; Return Path Certification.
+
+#### Folderly — https://folderly.com/
+*AI + human-specialist managed deliverability for B2B.*
+
+* **Auth/DNS** — SPF, DKIM, DMARC, **BIMI**; continuous drift alerts; validated against live send conditions; free SPF/DMARC generators.
+* **Blacklist/reputation** — IPs + domains vs **50+ blacklists**, real-time alerts + delisting steps; IP insights (type, sender score, blacklist status); domain health.
+* **Inbox placement** — Gmail, Outlook/365, Yahoo; **Promotions vs Spam distinction**; daily w/ 1-yr history; alerts via Email/Slack/**SMS**.
+* **Content (core strength)** — **Folderly Score**; spam triggers across **domain/IP/template/mailbox**; **Spam Words Checker** w/ in-context replacements; **humans manually rewrite templates**.
+* **Warmup** — bundled, custom strategies, ongoing maintenance.
+* **Distinctive:** human-in-the-loop managed service; four-bucket spam-trigger model; AI contextual rewrites.
+
+#### MailReach — https://www.mailreach.co/
+*Warmup + spam/deliverability testing for cold outreach.*
+
+* **Spam test → score /10** — rotating pool of **30+ real mailboxes**; Inbox/Spam/Promotions across Gmail.com, Workspace, Outlook, Office 365, Hotmail, Yahoo.
+* **Auth/DNS** — SPF, DKIM, DMARC, **MX**, **reverse DNS**, **domain age**.
+* **Blacklist** — domain + mail-server IP.
+* **Content** — spam words, blacklisted linked domains, broken/insecure links, attachments, **image-to-text ratio**, tracking pixels, HTML complexity.
+* **Reputation** — **Google vs Microsoft split**, per-inbox health; scheduled tests + **Slack/webhook** alerts + **Spam Test API**.
+* **Warmup** — 30,000+ real Workspace/365 mailboxes; AI real-time-adjusting.
+* **Distinctive:** per-provider reputation split; scheduled automated tests via API.
+
+#### Warmup Inbox — https://www.warmupinbox.com/
+*Budget, deliberately simple warmup + reputation for solo/small senders.*
+
+* **Warmup network** — 20k–30k real inboxes; auto send/reply, mark-important, **auto spam-folder rescue**.
+* **Monitoring** — community-benchmarked **Reputation Score** w/ drop alerts; ESP-specific reputation (Pro/Max); **blacklist monitoring** (no zone count published); SPF/DKIM/DMARC + domain age (some gated to Max); **free spam checker** (Google + Outlook "and others").
+* **Providers** — Gmail/Workspace, Outlook/365, Yahoo, **iCloud**, Zoho, SendGrid, Mailgun, SES, custom SMTP/IMAP.
+* **Distinctive:** auto spam rescue; ESP-specific scoring. Positioned on simplicity/price — lighter on granular checks. *(No rDNS/MX checks. "Deliverability Wizard" is a GlockApps feature, not this.)*
+
+#### InboxAlly — https://www.inboxally.com/
+*Reputation repair via a network of real seed inboxes generating authentic engagement.*
+
+* **Engagement engine** — seeds across Gmail/Yahoo/Microsoft acting through the **native web UI**; Open/Click/Reply/Star/Mark-important/**Spam→Primary**/**Promotions→Primary**; randomized nightly timing.
+* **Intelligence** — **IA Score + Reputation Score**; **native Google Postmaster** integration; per-provider placement; list verification; REST API.
+* **In-app auth tools** — SPF (live), DKIM, DMARC, **BIMI**, **reverse DNS (PTR) setup**, custom tracking domain.
+* **Free tools** — Spam Checker (0–100, 7 checks: SPF/DKIM/headers/domain-reputation/HTML/URL scan/template quality); **Spam Word Checker (200+ words + rewrites)**; **Blacklist Checker (50+, all four Spamhaus zones, Barracuda, SORBS, SpamCop, UCEPROTECT L1/2/3, Invaluement, PSBL)**; list verify; SPF/DMARC/BIMI generators; header analyzer; 16-inbox placement tester.
+* **Distinctive:** native-UI engagement (replies + stars, not scripted API); explicit Spam→Primary and Promotions→Primary moves.
+
+#### Mailtrap — https://mailtrap.io/
+*Pre-send Email Testing sandbox + Email Sending with built-in deliverability monitoring.*
+
+* **Testing sandbox (pre-send)** — **SpamAssassin** score + **per-rule breakdown**; **blocklist report** (IP + domain; PSBL, LASHBACK, w/ delisting links); **HTML/CSS validation + client rendering support**; content/link scanning; SPF/DKIM/DMARC at registration.
+* **Sending (monitoring)** — domain auth kept in sync; stats **by mailbox provider** (365, Outlook, Gmail, Workspace); 30-day logs; **bounce & complaint alerts** + auto-suppression; IP/domain reputation + blocklist; separate transactional/bulk streams; dedicated IPs + auto warm-up.
+* **Google Postmaster** — spam rate, domain/IP reputation, delivery errors, auth %.
+* **Distinctive:** full spam + blacklist + HTML analysis **before any real send**; unified test+send+monitor.
+
+#### Mailgun — Optimize + Email Validation (Sinch)
+*https://www.mailgun.com/products/optimize/ · /validate/*
+
+* **Optimize** — inbox placement down to tab/folder via seedboxes; per-test header analysis, content scoring, suspicious attachments, DKIM/SPF/DMARC; blocklist + spam traps; **Google Postmaster AND Microsoft SNDS** in one pane; **DMARC RUA** aggregation; bounce monitoring; preview on **100+ clients**; auto IP warm-up.
+* **Email Validation** — RFC syntax, **MX + server verification**, mailbox-exists ping, role-based, disposable/gibberish, **catch-all (engagement-aware)**, **spam-trap detection**, did-you-mean typo suggest, risk score + predictive engagement; **450B-email corpus**.
+* **Distinctive:** spam-trap detection at validation time; engagement-aware catch-all; both Postmaster + SNDS.
+
+### Group B — DMARC / authentication platforms
+
+#### EasyDMARC — https://easydmarc.com/
+* DMARC checker/generator, **XML analyzer bucketing Compliant/Non-Compliant/Threat-Unknown/Forwarded**, failure (RUF) reports, **GeoMaps**, Managed DMARC.
+* SPF check/generator/raw + **EasySPF dynamic flattening + macros** (beat 10-lookup PermError).
+* DKIM check/generator + Managed DKIM; **BIMI checker/generator + logo→SVG converter** + Managed BIMI.
+* MTA-STS + TLS-RPT checkers/generators + managed; **source ID across 1,200+ vendors**.
+* Reputation/blacklist monitoring + alerts; domain scanner, DNS checker, phishing-link checker; deliverability test, email verification, header analyzer.
+* **Distinctive:** broadest free toolbox; dynamic SPF. *(No DANE/DNSSEC.)*
+
+#### dmarcian — https://dmarcian.com/
+* Domain Overview (per-domain DMARC/SPF/DKIM status + abuse map); **Detail Viewer**; **Source Viewer** (auto legit-vs-suspicious classification, bulk authorize/block); **Alert Central** (email/Slack/Teams/webhook); auto domain discovery + subdomain risk scoring; RUA ingest + redacted forensic.
+* Free tools: DMARC Inspector, DKIM Inspector, Domain Checker, **SPF Surveyor** (graphical include-chain tree), XML-to-Human.
+* **Distinctive:** DMARC-spec-author pedigree; source-classification engine; graphical SPF Surveyor. *(Free tools = DMARC/SPF/DKIM only; no BIMI/MTA-STS/TLS-RPT/DANE/DNSSEC.)*
+
+#### Valimail — https://www.valimail.com/
+* **Instant SPF®** (hosted unlimited/hidden SPF, beats 10-lookup); DKIM checker + automated management; DMARC Monitor (free) → Enforce (hourly SPF/DKIM/DMARC checks, one-click authorize).
+* **Precision Sender Intelligence** — identifies **thousands of senders by name**; SPF/DKIM pass-rate via alignment; allowed/rejected/quarantined per sender.
+* MTA-STS hosting; TLS-RPT (Enforce); **BIMI + VMC automation**; threat blocking + lookalike finder.
+* **Distinctive:** named-sender directory approach; Instant SPF hidden records; **FedRAMP**. *(No DANE.)*
+
+#### PowerDMARC — https://powerdmarc.com/
+* DMARC Report Analyzer (RUA → dashboards, sender-by-name, trends); **RUF forensic** (real-time, subject/IP); hosted policy switching.
+* **PowerSPF** (auto flattening + macros); hosted DKIM; **hosted MTA-STS + TLS-RPT**; **hosted BIMI + VMC**.
+* **DMARC AI** + AI threat detection + **SecLytics** predictive; **200+ blocklist monitoring**; PowerToolbox (SPF/DMARC/DKIM/BIMI/MTA-STS/TLS-RPT/NS/MX); alerts; **MSP/multi-tenant Partner tier**.
+* **Distinctive:** AI layer + 200+ blocklists + broadest hosted-record suite + MSP. *(No prominent DANE/DNSSEC.)*
+
+#### Red Sift OnDMARC — https://redsift.com/pulse-platform/ondmarc
+* **Dynamic SPF** (query-time flattening, no macros); managed DKIM; full DMARC progression; MTA-STS, TLS, TLS-RPT, **BIMI + VMC**.
+* **Investigate (free)** — sends a **real test email**, checks DMARC/SPF(10-lookup)/DKIM/BIMI/MTA-STS/TLS/**FCrDNS** in ~30s.
+* **Hardenize/ASM** — the only competitor that explicitly validates **DNSSEC and DANE** across the estate + attack surface; **Certificates** (CT-log monitoring, CAA); **DNS Guardian** (SubdoMailing, dangling DNS, CNAME takeover).
+* **Distinctive:** real-email dynamic testing; **DANE + DNSSEC + CT-log + takeover detection** — the closest competitor to our infrastructure depth.
+
+#### URIports — https://www.uriports.com/
+* DMARC monitoring (auto-organized aggregate) + **RUF with OpenPGP encryption**; SPF/DKIM alignment; unknown-source ID; TLS-RPT; **DANE & MTA-STS monitored**; hosted MTA-STS; DNS + certificate monitoring.
+* **Browser/web reporting** — CSP, NEL, Reporting API, Permissions Policy, COOP/COEP; validators for SPF/DMARC/DKIM/MTA-STS/MX/BIMI/**DANE**/**Security.txt**; alerts via webhook/email/**Telegram**.
+* **Distinctive:** first-class web reporting stack; dedicated DANE + Security.txt validators. *(Report-driven, not an active RBL poller.)*
+
+#### Postmark — dmarc.postmarkapp.com · spamcheck.postmarkapp.com
+* **Free DMARC tool** — parses **RUA** → weekly human-readable digest; source ID w/ IPs; free-tier caps (top 10 sources, 5 IPs, <100k records, 3MB). No RUF, no live dashboard (paid Digests add those).
+* **Spam Check** — **SpamAssassin** score + **machine-readable `rules` array** + full report; API-first.
+* **Distinctive:** rule-level SpamAssassin **JSON API** + free weekly-digest model.
+
+#### Mimecast DMARC Analyzer — https://www.mimecast.com/products/dmarc-analyzer/
+* DMARC setup wizard + **360 monitoring**; ingests **aggregate + forensic + TLS** reports; recommendation engine; source ID w/ geo/IP; **human managed services**.
+* Free inspectors: SPF (syntax + **10-lookup count**), DKIM (selector/key/alignment readiness), DMARC (policy/enforcement), BIMI.
+* **Distinctive:** managed-services layer + integration into the Mimecast security gateway. *(Free checkers = SPF/DKIM/DMARC/BIMI only.)*
+
+### Group C — Free & DNS-focused tools
+
+#### Mail-Tester — https://www.mail-tester.com/
+*Free send-to-test /10 scorer.* Full **SpamAssassin** rule report; **SPF/DKIM/DMARC + reverse DNS/PTR**; blacklist (Spamhaus, Barracuda, SORBS, SpamCop); broken links, missing plain-text, text-to-image ratio, missing List-Unsubscribe, HTML validity, Message-ID. **Distinctive:** validates DKIM/SPF on the *actually delivered* message + full SA + blacklist + links in one /10.
+
+#### MXToolbox — https://mxtoolbox.com/
+*Industry-standard free DNS/email diagnostics + paid Delivery Center.* SuperTool: MX, DNS (A/AAAA/CNAME/NS/SOA/TXT), **PTR**, SPF (+>10-lookup), DKIM, DMARC, BIMI, MTA-STS, TLS-RPT, **SMTP diagnostics (open-relay + response-time)**, HTTP headers. **Blacklist scan ~105 zones** (Spamhaus ZEN/SBL/XBL/PBL/CBL/DBL, Barracuda, SpamCop, Invaluement, UCEPROTECT L1/2/3, Backscatterer, Mailspike, PSBL, SORBS, Hostkarma, Lashback, GBUdb, SURBL, URIBL, Spamrats, ProofPoint, +more). Delivery Center: SPF/DKIM % passing, DMARC RUA/RUF, **adaptive blacklist monitoring of DMARC-discovered IPs**, sender discovery + IP reputation/geo. **Distinctive:** ~105-zone blacklist breadth; `command:` power syntax; open-relay + response-time SMTP probe.
+
+#### MailGenius — https://www.mailgenius.com/
+*Free send-and-score for cold email.* SPF/DKIM/DMARC (+ alignment), **reverse DNS/PTR**, **domain age**, **TLD reputation**; IP + domain + **link** blacklists; runs **both SpamAssassin AND Barracuda**; broken links, HTML signals, subject wording, text-to-image — "25+ factors." **Distinctive:** dual-engine (SA + Barracuda) + domain-age/TLD flags.
+
+#### Postmark Spam Check — https://spamcheck.postmarkapp.com/
+*Free JSON API.* **SpamAssassin** `score` + `rules` array + `report`; content/header/MIME/Bayesian rules. **Explicitly not:** attachments, deep URL, DMARC, live SPF/DKIM, blacklists. **Distinctive:** API-first structured rules array for CI.
+
+#### DKIMValidator — https://dkimvalidator.com/
+*Free send-to-test.* **DKIM** (fetches public key **live from your authoritative NS each test**; catches canonicalization/in-transit changes/CNAME selectors) + **SPF** + **SpamAssassin** (vanilla, daily `sa-update`); full received headers. **Distinctive:** live authoritative-NS key fetch (great for freshly rotated keys).
+
+#### LearnDMARC — https://www.learndmarc.com/
+*Free animated teaching tool.* Visualizes the live **SMTP transaction** (source IP, reverse DNS, HELO/MAIL FROM/RCPT/DATA), **SPF** (domain/identity/result/alignment), **DKIM** (d=/s=/algorithm, DNS key lookup, **body hash `bh=` + signature `b=`**), **DMARC** (RFC5322.From, policy, relaxed/strict alignment, disposition). **Distinctive:** animates the live SMTP session + full cryptographic DKIM; distinguishes envelope-from vs header-From.
+
+#### Google Postmaster Tools — https://postmaster.google.com/
+*Gmail recipient-side telemetry.* **Compliance Status** (v2: SPF/DKIM auth, DNS, formatting, encryption, spam rate, DMARC, one-click unsub); **Spam Rate** (<0.3% hard, <0.1% ideal); ~~Domain/IP Reputation Bad/Low/Medium/High~~ (**removed in v2, late 2025**); **FBL** rate; **Authentication** (SPF/DKIM/DMARC %); **Encryption** (TLS %); **Delivery Errors** by reason. Needs ~100+ emails/day to Gmail. **Distinctive:** Gmail's own recipient-side signals — real complaint rate, reputation, TLS %.
+
+#### Cisco Talos — https://talosintelligence.com/reputation_center
+*Real-time IP/domain/URL/file reputation.* **Email Reputation** (Good/Neutral/Poor) + **Web Reputation**, content category, score **−10..+10**, aggregates **25+ block lists**; **spam-volume Last Day/Last Month + change**; block-list status; Hostname/PTR, network owner, country; **file/SHA256** reputation. **Distinctive:** separate Email vs Web reputation + numeric score + volume trend + file rep in one lookup.
+
+#### Barracuda Central (BRBL) — https://www.barracudacentral.org/rbl
+*Free real-time DNSBL.* Binary **listed/not-listed** for `b.barracudacentral.org`; assigns poor reputation from spam/virus/open-proxy/botnet history via honeypots + global appliance telemetry; also URL reputation; **human-reviewed manual delisting**. **Distinctive:** human-reviewed delisting; appliance sensor network.
+
+#### Spamhaus — https://check.spamhaus.org/
+*The authoritative DNSBL set + free reputation checker.* Zones: **SBL** (spam sources), **XBL** (exploited/compromised IPs), **PBL** (policy — no-direct-mail ranges), **CSS** (snowshoe/low-rep), **ZEN** (combined SBL+CSS+XBL+PBL), **DBL** (domain RHSBL); (+ ZRD, HBL). Checker: all-zone listing status + **DNS/PTR + HELO config diagnostics** + self-service delisting. **Distinctive:** multiple purpose-specific zones with distinct return codes + combined ZEN + domain DBL.
+
+#### Kitterman SPF Tools — https://www.kitterman.com/spf/validate.html
+*Free RFC-7208 `pyspf` SPF validator (SPF-only).* Record retrieval; **syntax validation of a proposed record**; sender testing (IP/record/MAIL FROM/HELO → pass/fail/softfail); **dynamic 10-DNS-lookup PermError detection**. **Distinctive:** real RFC-compliant `pyspf` engine; tests not-yet-published records.
+
+#### AboutMy.email — https://aboutmy.email/  *(by Steve Atkins, Word to the Wise)*
+*Free deep single-message forensic — 30+ checks.* SPF (+ live lookups), DKIM (**selector/key/signature internals**), DMARC, **BIMI (VMC cert + image)**, **ARC**; **full SMTP transcript**, **FCrDNS**, **TLS/STARTTLS state**, **IPv6**, **full DNS-query log**; message structure (line-length, non-ASCII, non-CRLF, **MIME-after-decode**, **link inventory by host + alignment**, **image native-vs-rendered geometry + alt-text**), **HTML previews across viewports**; List-Unsubscribe/List-Unsubscribe-Post/List-Id + **Gmail/Yahoo bulk-sender checklist**. **Distinctive:** raw SMTP transcript + DNS-query log + DKIM internals + ARC + image geometry — the deepest free single-message microscope.
+
+---
+
+## Appendix — least-covered checks in the field (our opportunity)
+
+Across all 27 products, the rarest capabilities are:
+
+* **DANE** — only Red Sift & URIports. **We have it.**
+* **DNSSEC** — essentially Red Sift-only. **We have it.**
+* **SMTP-server hardening (open relay, VRFY/EXPN)** — only MXToolbox (partial). **We have it.**
+* **Content-level spam scoring inside a DMARC/auth tool** — only Postmark. **We have it.**
+
+Our genuine build priorities, in order: **(1)** recipient-side reputation telemetry
+(Google Postmaster + Microsoft SNDS ingestion, §1.1), **(2)** outbound alerting
+channels (§1.6 #23 — cheap, high value), **(3)** DMARC forensic/RUF + named-source
+identification (§1.4), **(4)** a seed-list placement path (§1.2), **(5)** multi-engine
+spam scoring (§1.3 #9).

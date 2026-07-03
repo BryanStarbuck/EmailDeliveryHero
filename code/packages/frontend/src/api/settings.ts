@@ -104,6 +104,16 @@ export interface ChecksConfig {
 		requireAdBit: boolean;
 	};
 	/**
+	 * DNSSEC admin settings (pm/checks/dnssec.mdx §4/§18.7): the validating resolvers the deep check
+	 * queries for the AD flag, the RRSIG near-expiry lead time (hours), and the deep-path toggle. The
+	 * read-only `algorithms` IANA seed is not surfaced here. Optional so older payloads stay valid.
+	 */
+	dnssec?: {
+		resolvers: string[];
+		rrsigLeadHours: number;
+		validateViaDig: boolean;
+	};
+	/**
 	 * List-Unsubscribe / one-click admin settings (pm/checks/list_unsubscribe.mdx §4): the
 	 * bulk-sender daily threshold (default 5000), probe timeout (default 5s), whether the live
 	 * endpoint probe is globally permitted, and the probe cadence (default 24h). Optional so older
@@ -233,6 +243,11 @@ export interface UpdateAdminSettingsInput {
 			probeEnabled?: boolean;
 			probeTimeoutMs?: number;
 			requireAdBit?: boolean;
+		};
+		dnssec?: {
+			resolvers?: string[];
+			rrsigLeadHours?: number;
+			validateViaDig?: boolean;
 		};
 		listUnsub?: {
 			bulkThresholdPerDay?: number;

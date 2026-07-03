@@ -13,6 +13,8 @@ import { AuditsPage } from "@/pages/audits/AuditsPage";
 import { BlacklistDomainPage } from "@/pages/blacklists/BlacklistDomainPage";
 import { BlacklistStatePage } from "@/pages/blacklists/BlacklistStatePage";
 import { BlacklistsPage } from "@/pages/blacklists/BlacklistsPage";
+import { DnssecExpiryPage } from "@/pages/dnssec/DnssecExpiryPage";
+import { DnssecPage } from "@/pages/dnssec/DnssecPage";
 import { BlacklistTargetPage } from "@/pages/blacklists/BlacklistTargetPage";
 import { BlacklistZonePage } from "@/pages/blacklists/BlacklistZonePage";
 import { ContentScoringPage } from "@/pages/domains/ContentScoringPage";
@@ -259,6 +261,18 @@ const blacklistsRoute = createRoute({
 	path: "/blacklists",
 	component: BlacklistsPage,
 });
+// DNSSEC fleet boards (pm/checks/dnssec.mdx §19). Static "/dnssec/expiry" is registered before the
+// bare "/dnssec" so the more specific path wins the match.
+const dnssecExpiryRoute = createRoute({
+	getParentRoute: () => appLayoutRoute,
+	path: "/dnssec/expiry",
+	component: DnssecExpiryPage,
+});
+const dnssecRoute = createRoute({
+	getParentRoute: () => appLayoutRoute,
+	path: "/dnssec",
+	component: DnssecPage,
+});
 // The Blacklists technology full page and its problem-state deep dives (pm/checks/blacklists.mdx §13/§16).
 // The run-scoped page (pm/checks/blacklists.mdx §13.2): /domains/$id/runs/$runId/blacklists with the
 // newest-run alias /domains/$id/blacklists; /blacklists/$domain is the left-bar redirect shorthand.
@@ -393,6 +407,8 @@ const routeTree = rootRoute.addChildren([
 		contentScoringRoute,
 		auditsRoute,
 		blacklistsRoute,
+		dnssecExpiryRoute,
+		dnssecRoute,
 		domainBlacklistsRoute,
 		runBlacklistsRoute,
 		blacklistDomainRoute,

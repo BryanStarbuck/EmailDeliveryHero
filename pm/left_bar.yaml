@@ -77,18 +77,25 @@ Left_Nav:
           order: 4
           description: "DNS blacklist (DNSBL) status for your sending IPs, with delisting steps."
 
+        - id: dnssec
+          label: "DNSSEC"
+          icon: "ShieldCheck"
+          route: "/dnssec"
+          order: 5
+          description: "Cross-domain DNSSEC hygiene: signed / DS / validates / algorithm per domain, plus an RRSIG expiry radar. See pm/checks/dnssec.mdx §19."
+
         - id: reports
           label: "Reports"
           icon: "Mailbox"
           route: "/reports"
-          order: 5
+          order: 6
           description: "The report library: the newest health-check reports (one per run, from the on-disk run history), each opening the full view-one-report page. See pm/reports.mdx. Planned second section: ingested DMARC (rua) & TLS-RPT report emails per pm/emails.mdx."
 
         - id: settings
           label: "Settings"
           icon: "Settings"
           route: "/settings"
-          order: 6
+          order: 7
           description: "Account, scheduling, and app configuration."
 
       # Footer: account block (avatar/name/email) -> popup menu (expands UP).

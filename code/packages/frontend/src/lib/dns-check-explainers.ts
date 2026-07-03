@@ -399,6 +399,46 @@ export const DNS_CHECK_EXPLAINERS: Record<DnsFamilyKey, DnsCheckExplainer> = {
 				term: "RRSIG",
 				text: "The signature record over one record set, with an inception/expiration window. Expired RRSIGs are the classic 'signed once, broke later' outage.",
 			},
+			{
+				anchor: "algorithm-13",
+				term: "algorithm 13",
+				text: "ECDSAP256SHA256 — the recommended default signing algorithm (RFC 8624/9904): compact and fast. 15 (Ed25519) is also good, 8 (RSASHA256) acceptable at ≥ 2048-bit; 5/7 (RSASHA1) are deprecated.",
+			},
+			{
+				anchor: "signed-but-broken",
+				term: "signed-but-broken",
+				text: "An expired RRSIG, a DS that matches no live DNSKEY, or otherwise-bogus signatures. Strictly worse than unsigned: validating resolvers SERVFAIL the entire zone, so mail to and from the domain goes dark.",
+			},
+			{
+				anchor: "ksk-zsk",
+				term: "KSK / ZSK",
+				text: "The key-signing key (flags 257) signs the DNSKEY set; the zone-signing key (flags 256) signs the records. The parent DS points at the KSK. Rollovers follow RFC 6781 timing.",
+			},
+			{
+				anchor: "ad-flag",
+				term: "AD flag",
+				text: "The Authenticated Data bit a validating resolver sets once it has verified the chain root→TLD→zone. It is the pass/fail wire signal this check reads — dig only reports it, delv actually computes it.",
+			},
+			{
+				anchor: "island-of-security",
+				term: "island of security",
+				text: "A zone that is signed but has no DS published at the parent (registrar). No resolver on Earth can validate it, so it provides zero protection despite being 'signed' — copy the DS into the registrar to fix.",
+			},
+			{
+				anchor: "nsec3",
+				term: "NSEC3",
+				text: "Authenticated denial of existence: proves 'no such name' without leaking the zone contents. Iterations must be 0 (RFC 9276); opt-out is rarely appropriate outside large delegation-heavy registries.",
+			},
+			{
+				anchor: "cds-cdnskey",
+				term: "CDS / CDNSKEY",
+				text: "RFC 8078 automation records that let a key roll update the parent DS automatically, without a manual registrar step — turn them on so future rollovers can't strand the chain.",
+			},
+			{
+				anchor: "bogus",
+				term: "bogus",
+				text: "The validator's verdict when data exists but its signatures do not verify: a CD=1 (checking-disabled) query succeeds while the normal CD=0 query SERVFAILs. A bare SERVFAIL alone is never reported as bogus.",
+			},
 		],
 	},
 	// Interior content per pm/checks/dns_health.mdx §9.2 (block-1 copy) and §9.7 (the ten

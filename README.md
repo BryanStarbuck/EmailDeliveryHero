@@ -42,6 +42,97 @@ The full engineering spec for every check — sub-checks, detection method, UI, 
 
 ---
 
+## List of What we Check
+
+Every audit runs the following checks. This is the exact, code-verified list of
+registered checkers in the audit engine
+([`code/packages/backend/src/modules/audit/checks/`](./code/packages/backend/src/modules/audit/checks/)),
+grouped by the six dashboard categories. Each checker produces one or more
+findings, each with a severity (`ok` / `info` / `warning` / `critical`) and a
+concrete remediation.
+
+**SPF**
+
+1. **SPF record** — a single valid `v=spf1` record exists; syntax is well-formed;
+   the terminal `all` qualifier is present and correctly set; every `include` /
+   `redirect` / `a` / `mx` mechanism resolves; the RFC 7208 **10-DNS-lookup limit**
+   is not exceeded; no recursion loops; and the record aligns with DMARC.
+
+**DKIM**
+
+2. **DKIM keys** — for each configured selector: the public key is present in DNS
+   and parseable; the key length meets RFC 8301 (flags short/weak keys);
+   CNAME-delegated selectors resolve; and rotation headroom is assessed.
+
+**DMARC**
+
+3. **DMARC record** — a valid `v=DMARC1` record exists; policy enforcement level
+   (`none` → `quarantine` → `reject`); `sp` subdomain policy; alignment mode;
+   `pct`; and `rua` / `ruf` reporting addresses.
+4. **DMARC reports** — parses ingested DMARC **aggregate (`rua`) XML** report
+   emails to reveal unauthorized senders, SPF/DKIM alignment gaps, and spoofing
+   seen in the wild by receivers.
+5. **ARC (Authenticated Received Chain)** — for declared forwarders / mailing
+   lists, verifies the ARC signer domain/selector so legitimately forwarded mail
+   survives DMARC.
+
+**Blacklists**
+
+6. **DNS blacklists** — checks your domains and sending IPs against the major
+   DNSBLs / RHSBLs (Spamhaus ZEN/SBL/XBL/PBL/DBL, Barracuda, SpamCop, SORBS,
+   UCEPROTECT, Invaluement, SURBL) and provides per-zone delisting steps.
+
+**DNS & Infrastructure**
+
+7. **MX & Mail Routing** — MX records are present and resolve; mail-routing
+   sanity.
+8. **Reverse DNS / PTR** — PTR records exist for sending IPs (IPv4 and IPv6) and
+   confirm forward-confirmed reverse DNS (FCrDNS).
+9. **STARTTLS & MX TLS** — each MX host offers STARTTLS and presents a valid,
+   in-date TLS certificate.
+10. **MTA-STS** — the MTA-STS TXT record and policy are published and valid.
+11. **TLS-RPT** — the TLS-RPT (`rua`) record is present, valid, and its reporting
+    mailbox resolves.
+12. **DANE / TLSA** — TLSA records are present and valid, with the DNSSEC
+    prerequisite checked.
+13. **DNSSEC** — the zone is signed and the DNSSEC chain validates (flags
+    `bogus`).
+14. **DNS Zone & NS Health** — nameserver and zone health: lame delegation,
+    parent/child NS consistency, all-NS-answer, glue records, and
+    dangling-record risk.
+15. **Domain Registration Reputation** — WHOIS / RDAP domain registration
+    signals, including domain expiry.
+16. **SMTP Server Security** — SMTP server hardening probes (open relay,
+    VRFY / EXPN exposure).
+
+**Spam & Content**
+
+17. **BIMI** — the BIMI record and its logo/VMC references are valid.
+18. **Message Content Spam Scoring** — SpamAssassin-style scoring of a sample
+    message: subject-line signals, image-to-text ratio, plain-text alternative
+    (multipart/alternative), MIME well-formedness, trigger phrases / obfuscation,
+    and header sanity (Message-ID, Date, forgeries).
+19. **Report corpus scan** — scans the ingested report-email corpus so the DMARC
+    and TLS-RPT checks read a fresh store.
+20. **List-Unsubscribe & One-Click** — the `List-Unsubscribe` header and RFC 8058
+    one-click unsubscribe (the 2024 Gmail/Yahoo bulk-sender rules).
+21. **Link / URL Reputation** — extracts links from a sample message and checks
+    them against URI blocklists.
+22. **Sender Reputation Metrics** — Google Postmaster verification, FBL
+    enrollment, and a trend over our own stored blacklist history (recurring
+    listings). Complaint/bounce/reputation *rates* are surfaced when a reputation
+    integration (Google Postmaster Tools, ESP, or FBL) is connected.
+23. **Inbox Placement Testing** — seed-list inbox placement across Gmail,
+    Outlook / Microsoft 365, Yahoo / AOL, and Apple iCloud. Runs when a seed list
+    is configured.
+
+> Checks **22** and **23** additionally light up when you connect a reputation
+> integration or configure a seed list; until then they report status/advisory
+> findings rather than pass/fail. Everything else runs against live DNS and
+> mail-server probes on every audit with no extra setup.
+
+---
+
 ## Who It Helps
 
 | You are… | EmailDeliveryHero gives you… |
