@@ -27,6 +27,9 @@ Every check in this catalog is one implementation of the `Checker` interface fro
 `remediation` string (the exact record to publish or the step to take). Adding a check is adding one
 file.
 
+Implemented in code:
+Every checker lives under `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/` and is registered in the `CHECKERS` array in `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/index.ts`. The primary checker per category: `spfCheck` (`spf/spf.check.ts`), `dkimCheck` (`dkim/dkim.check.ts`), `dmarcCheck` (`dmarc/dmarc.check.ts`), `blacklistCheck` (`blacklist/blacklist.check.ts`), the `infra.*` family (`mx-routing/`, `reverse-dns/`, `tls-transport/`, `mta-sts/`, `tls-rpt/`, `dane-tlsa/`, `dnssec/`, `dns-health/`), and the `content.*` family (`content-scoring/content-scoring.check.ts` — `contentScoringCheck`, plus `bimi/`, `link-url-reputation/`, `list-unsubscribe/`, `inbox-placement/`, `report-emails/`). The runner is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/audit.service.ts` — class `AuditService`.
+
 ## The six categories (the dashboard columns)
 
 Every sub-check in this document belongs to **exactly one** of six categories. These are the six

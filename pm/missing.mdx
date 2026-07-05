@@ -126,6 +126,9 @@ field are DANE, DNSSEC, and SMTP-server hardening — and we already have all th
 Our biggest genuine gaps are **recipient-side reputation telemetry (Postmaster/SNDS/
 Sender Score), seed-list placement, and forensic/named-source DMARC reporting.**
 
+Implemented in code (the standout differentiators above):
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dane-tlsa/dane-tlsa.check.ts` — `daneTlsaCheck` (id `"infra.dane_tlsa"`); `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dnssec/dnssec.check.ts` — `dnssecCheck` (id `"infra.dnssec"`); `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/smtp-security/smtp-security.check.ts` — `smtpSecurityCheck` (id `"infra.smtp_security"`). Every checker is registered in `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/index.ts`.
+
 ---
 
 ## Part 3 — The field, product by product

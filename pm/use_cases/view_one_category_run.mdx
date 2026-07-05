@@ -193,6 +193,9 @@ switcher and newest-run alias resolve through `GET /api/audit/runs?domainId=`. N
 category-specific endpoint exists: the run file is the single source of truth, which is what makes
 prev/next comparison across runs cheap and exact.
 
+Implemented in code:
+The per-category pages live under `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/domains/` — e.g. `SpfPage.tsx` (`SpfPage`), `DkimPage.tsx` (`DkimPage`), `DmarcPage.tsx`, `DnsPage.tsx` — plus `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/blacklists/BlacklistsPage.tsx`; they share the sub-test table `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/TestResultsTable.tsx` — `TestResultsTable`. The slug↔category routing is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/lib/categories.ts` — function `techPageRoute()`. Data comes from `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/audit.controller.ts` — class `AuditController`, method `getRun()` (`GET /api/audit/runs/:runId`).
+
 ---
 
 ## 10. Acceptance criteria

@@ -130,6 +130,9 @@ The load-bearing pieces are the **global exception filter** (every HTTP error) p
 **process handlers** (every non-HTTP error). Together they mean a developer never has to remember to
 wrap a handler — anything that throws anywhere is already captured.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/all-exceptions.filter.ts` — class `AllExceptionsFilter` (`@Catch()`), method `catch()`; the process-level handlers and `app.useLogger`/`useGlobalFilters` wiring are in `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/main.ts`. The frontend fault ingest is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/health/health.controller.ts` — class `HealthController`, method `clientError()` (`POST /api/health/client-error`).
+
 ---
 
 ## 4. When we log INFO — the operational trail
@@ -199,6 +202,9 @@ Helper signatures (kept stable so existing call sites keep working):
 
 **Logging must never throw.** Every write path is guarded; a logging failure degrades to `stderr` and
 the request/loop continues. A logger that can crash the process it is instrumenting is a bug.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/logging.ts` — class `AppLogger` (implements `LoggerService`) and the `appLogger` singleton + `logInfo`/`logWarn`/`logError`/`logDebug`/`logFatal` helpers; the low-level sink is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/rolling-file-writer.ts` — class `RollingFileWriter`.
 
 ---
 

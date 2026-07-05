@@ -68,6 +68,9 @@ domain, filename = the run's start timestamp ([Storage §7](./storage.mdx)) — 
 * `GET /api/audit/runs` — all kept runs, newest `startedAt` first (optional `?domainId=` filter).
 * `GET /api/audit/runs/:runId` — one run in full (the run report's data).
 
+Implemented in code:
+The page is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/app/DashboardPage.tsx` — `DashboardPage` (two TanStack tables), rendering cells via `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/StatusCell.tsx` — `StatusCell` and the brand header `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/BrandHeader.tsx` — `BrandHeader`. The per-category worst-severity roll-up is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/lib/categories.ts` — function `rollupCategories()`. The run-history endpoints are served by `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/audit.controller.ts` — class `AuditController`, methods `runs()` / `run()` (backed by `runs-store.ts`).
+
 ---
 
 ## 2. Layout

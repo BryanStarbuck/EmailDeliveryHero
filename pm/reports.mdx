@@ -68,6 +68,9 @@ The REST contract (already served by `modules/audit/audit.controller.ts`):
 Frontend access is through the existing TanStack Query hooks in `src/api/audit.ts`
 (`useAuditRuns`, `useAuditRun`, `useDeleteRun`) — no new API code.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/audit.controller.ts` — class `AuditController` (`GET /runs`, `GET /runs/:runId`, `DELETE /runs/:runId`), delegating to `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/audit.service.ts` — class `AuditService`, methods `listRuns()`, `getRun()`, `deleteRun()`, `persistResult()`. The on-disk `runs.json` history (newest-first, 50-per-domain cap) is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/runs-store.ts` — `saveRun()`, `listRuns()`, `getRun()`, `deleteRun()`. The page UI is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/reports/ReportsPage.tsx` — `ReportsPage`.
+
 ---
 
 ## 3. Layout — the Reports dashboard (route `/reports`)

@@ -126,6 +126,9 @@ const claims = await federatedClient.verifyToken(bearerToken);
 // → { sub, email, org_id, roles, permissions, ... }
 ```
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/auth/auth.strategy.ts` — class `AuthFederatedStrategy`, method `validate()` (calls `federatedClient.verifyToken`).
+
 ### 3.3 Global NestJS `JwtAuthGuard` ("identify, don't gate")
 
 A **global `JwtAuthGuard`** is registered app-wide (`APP_GUARD`). It extracts the Bearer token, calls
@@ -144,6 +147,9 @@ check.
 health() { return { status: 'ok' }; }
 ```
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/auth/jwt-auth.guard.ts` — class `JwtAuthGuard`, method `canActivate()`; registered globally as `APP_GUARD` in `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/app.module.ts`. The `@Public()` decorator is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/auth/public.decorator.ts` — `Public`.
+
 ### 3.4 Permission gates via token claims (`role:admin`)
 
 Authentication (who you are) is Google Workspace. **Authorization** (what you may do) reads the
@@ -153,6 +159,9 @@ uses a single elevated gate:
 * **`role:admin`** — unlocks admin-only sections (the **Admin** item in the account menu, plus any
   admin-only settings). Enforced on the backend by a permissions guard reading `req.user`; the
   frontend additionally hides/disables admin controls as UX only (backend is authoritative).
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/auth/roles.guard.ts` — class `RolesGuard`, method `canActivate()` (reads `req.user.roles`/`permissions`); the `@RequireRole(...)` / `@RequirePermission(...)` decorators are `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/auth/roles.decorator.ts` — `RequireRole`, `RequirePermission`.
 
 ---
 
@@ -194,6 +203,9 @@ Read the values under the key **`email_delivery_hero.google`**:
   path or JSON key.
 * The credentials file lives **outside the repo** (under `~/.credentials/`) so secrets are never
   committed. If a secret leaks, rotate it.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/config/credentials-file.ts` — function `googleCredentialsFromFile()` (path resolved by `credentialsFilePath()`); the resolved id/secret are passed into `createFederatedFrontend()` in `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/auth/auth-frontend.ts` — function `buildAuthFrontend()`.
 
 ---
 

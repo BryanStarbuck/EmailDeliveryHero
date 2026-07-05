@@ -281,6 +281,9 @@ calls the generated TanStack-Query hooks ([Engineering §4](./engineering.mdx)):
 On Add/Edit success the form closes and the domains list query invalidates so the new/updated row
 appears.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/domains/domains.controller.ts` — class `DomainsController` (`GET /` list, `GET /:id`, `POST /` create, `PATCH /:id` update, `DELETE /:id`), delegating to `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/domains/domains.service.ts` — class `DomainsService`, methods `list()`, `get()`, `create()`, `update()`, `remove()`. The request bodies are `CreateDomainDto` / `UpdateDomainDto` in `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/domains/dto/domain.dto.ts`. The table UI is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/domains/DomainsPage.tsx`.
+
 ---
 
 ## 5. Multiple domains, one audit surface
@@ -401,6 +404,9 @@ read, an empty or `null` document is treated as an empty list, and older records
 filesystem directly ([Engineering §7](./engineering.mdx)). The third record above
 (`scheduleEnabled: false`, never audited) is a domain that is **off the schedule and never audited** —
 it renders with all six gray never-run cells.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/yaml-store.ts` — functions `writeYaml()` (atomic write-temp-then-rename) and `readYaml()` (empty/`null` doc → fallback); the `domains.yaml` read/write and missing-field backfill live in `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/domains/domains.service.ts` — class `DomainsService`.
 
 ---
 

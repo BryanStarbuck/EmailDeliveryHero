@@ -146,6 +146,9 @@ Authentication is **identify, don't gate** for ordinary routes:
   logged out actually stops you. Ungated routes carry no decorator and stay open to everyone. The
   frontend also hides admin controls as UX, but the backend is authoritative.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/auth/jwt-auth.guard.ts` — class `JwtAuthGuard`, method `canActivate()` (falls back to the `default` user, never `401`) and `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/auth/roles.guard.ts` — class `RolesGuard`, method `canActivate()`; both registered as `APP_GUARD` (JwtAuthGuard first) in `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/app.module.ts`. The `default` `AuthUser` is `DEFAULT_USER` in `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/current-user.decorator.ts` (also exports the `@CurrentUser()` decorator); `GET /auth/me` is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/auth/auth.controller.ts` — class `AuthController`, method `me()`.
+
 ### 3.4 Authentication enforcement points (frontend)
 
 * The app shell renders for everyone; it does **not** redirect to `/sign-in` when there is no session.

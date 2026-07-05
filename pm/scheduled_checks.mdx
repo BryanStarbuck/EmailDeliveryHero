@@ -154,6 +154,9 @@ REST endpoints (backend `scheduler` module, under `/api`, NestJS on port **9312*
 > `POST /api/scheduler/run`) are extended here with the two `/config` endpoints; the module and
 > contracts are otherwise unchanged.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/scheduler/scheduler.controller.ts` — class `SchedulerController` (routes `getConfig()`, `updateConfig()`, `status()`, `run()`, `preview()`), delegating to `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/scheduler/scheduler.service.ts` — class `SchedulerService`, methods `updateConfig()` (re-arms the in-process timer), `runNow()`, `install()`, `uninstall()`. The `schedule:` block model and OS-kind detection are `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/scheduler/schedule-config.store.ts` — `normalizeSchedule()`, `detectOsKind()`.
+
 ---
 
 ## Two ways it runs: in-process vs OS-level
@@ -304,6 +307,9 @@ In all three cases the config page can **generate** the artifact from your saved
 target endpoint you configured. If the backend may not be running at trigger time, the generated
 artifact can instead invoke the CLI (`edh scheduler run`), which performs the audit headlessly using
 the same engine and store.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/scheduler/os-artifact.ts` — functions `renderLaunchdPlist()`, `renderSystemdUnits()`, `renderCrontab()`, `schtasksCommands()` (per-OS artifact generation), and `previewArtifact()` / `installArtifact()` / `uninstallArtifact()` (preview/install/uninstall). The trigger script the artifact invokes is `~/BGit/Bryan_git/EmailDeliveryHero/code/deploy/launchd/trigger-scheduler.mjs`.
 
 ---
 

@@ -57,6 +57,9 @@ findings and their fixes.** It builds on the sibling specs and does not repeat t
    an **audit result** with a numeric **score** and an overall **status** (the worst severity
    present), and writes it to `~/.email_delivery_hero/audits/<domainId>/<auditId>.json`.
 
+Implemented in code:
+The manual run is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/audit.controller.ts` — class `AuditController`, method `run()` (`POST /api/audit/run/:domainId`), delegating to `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/audit.service.ts` — class `AuditService`, method `runForDomain()` (runs every registered checker, rolls up score/status, persists via `persistResult()`). Adding the domain is `DomainsController.create()` in `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/domains/domains.controller.ts`.
+
 ### 2.3 Read the findings and fixes
 
 1. The UI navigates to the audit result (also reachable later under **Audits**). The user sees the

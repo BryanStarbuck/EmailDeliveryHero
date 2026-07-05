@@ -71,6 +71,9 @@ does not repeat them:
    newest-run alias `/domains/:domainId` resolves the domain's most recent run
    (`GET /api/audit/runs?domainId=` → first item) and renders the same page.
 
+Implemented in code:
+The report page is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/domains/RunDetailPage.tsx` — `RunDetailPage`; it fetches the run via `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/audit.controller.ts` — class `AuditController`, method `getRun()` (`GET /api/audit/runs/:runId`). The NEW/STILL-PRESENT/RESOLVED regression annotations (§7) are `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/lib/run-diff.ts` — function `computeRunDiff()`.
+
 ---
 
 ## 3. Page layout

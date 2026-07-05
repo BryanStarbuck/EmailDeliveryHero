@@ -106,6 +106,9 @@ already-decompressed XML/JSON; `application/octet-stream` with a `.gz`/`.zip` fi
 bytes); oversized reports (stream-decompress with a hard cap, default 25 MB uncompressed, to avoid a
 zip-bomb); a non-report email in the mailbox (no matching part → skip, log `info`, do not error).
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/reports/mime.ts` — functions `extractReportPayloads()` (MIME walk + base64 decode), `decompressPayload()` (magic-byte ZIP/gzip, capped at `MAX_UNCOMPRESSED_BYTES`), and `classifyPayload()` (§4.2 media-type/payload-root classification).
+
 ---
 
 ## 3. What problems these reports reveal
@@ -225,6 +228,9 @@ corpus produces no duplicates.
 Normalized rows are aggregated over a rolling window (default 7 days), scored against §3's catalog
 into `Finding`s (§5), and persisted (§9). The findings attach to the domain's audit surface so they
 appear on the dashboard and in the Reports view (§7).
+
+Implemented in code:
+Parsing is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/reports/dmarc-xml.ts` — function `parseDmarcAggregateXml()` and `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/reports/tlsrpt-json.ts` — function `parseTlsRptJson()`. Aggregation + §3-catalog scoring into findings is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/reports/derive-findings.ts` — functions `aggregateDmarc()`, `aggregateTlsRpt()`, `deriveDmarcReportFindings()`, `deriveTlsRptFindings()`. The pipeline is orchestrated by `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/reports/reports.service.ts` — class `ReportsService`, method `ingest()`.
 
 ---
 
@@ -381,6 +387,9 @@ the normal audit document's `findings[]` (with a `source:"report"` marker) so th
 detail read them with no special path. Because the store module abstracts all of this, the file→DB
 move is a single-module change.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/reports/report-store.ts` — functions `saveDmarcReport()` / `saveTlsRptReport()` (deduped writes under `reports/<domainId>/`), `listDmarcReports()` / `listTlsRptReports()`, `hasAnyReports()`, and `readIngestState()` / `writeIngestState()` (the `ingest-state.json` cursor). The on-demand "Ingest now" API is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/reports/reports.controller.ts` — class `ReportsController`, method `ingest()` (`POST /api/domains/:id/reports/ingest`).
+
 ---
 
 ## 10. When we run it & regression detection
@@ -485,6 +494,9 @@ the report-email corpus, attributes each email to its domain, and analyzes the p
 **Ordering.** In the run graph the `content.report_emails` scan runs **before**
 `dmarc.reports` and the TLS-RPT derivation, so the per-category findings (§5) read a store the
 same run just refreshed — scan once, analyze everywhere.
+
+Implemented in code:
+The run-time corpus scan is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/report-emails/report-emails.check.ts` — `reportEmailsCheck` (the `Checker`, id `"content.report_emails"`), `run()` method. The DMARC-category derivation that reads the same refreshed store is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dmarc-reports/dmarc-reports.check.ts` — `dmarcReportsCheck` (id `"dmarc.reports"`), `run()` method.
 
 ### 13.2 Findings emitted (`checkId: content.report_emails`, all with `source:"report"`)
 

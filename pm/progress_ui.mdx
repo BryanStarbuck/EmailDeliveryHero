@@ -239,6 +239,9 @@ State (React context, `ScanProgressProvider`):
 * `modules/audit/audit.service.ts` — `runForAll` uses `mapLimit` (bounded parallel); add
   `persistResult` guarded by an async write-lock; `runForDomain` persists through it.
 
+Implemented in code:
+The scan dock state + fan-out is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/scan/ScanProgressContext.tsx` — `ScanProgressProvider`, `useScanProgress()`, `useScanRunner()`; the card UI is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/ScanProgressDock.tsx` — `ScanProgressDock`. The bounded limiter is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/lib/concurrency.ts` and `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/concurrency.ts` — function `mapLimit()`. The parallel runner + serialized persist is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/audit.service.ts` — class `AuditService`, methods `runForAll()`, `runForDomain()`, `persistResult()`.
+
 ---
 
 ## 7. Acceptance criteria

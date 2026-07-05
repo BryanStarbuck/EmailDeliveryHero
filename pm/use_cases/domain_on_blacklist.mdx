@@ -48,6 +48,9 @@ the IP is **listed** on that blocklist; a `TXT` lookup at the same name usually 
 Example: to test `203.0.113.24` against `zen.spamhaus.org`, it looks up
 `24.113.0.203.zen.spamhaus.org` — a returned `127.0.0.x` answer means listed.
 
+Implemented in code:
+The checker is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/blacklist/blacklist.check.ts` — `blacklistCheck` (the `Checker`, id `"blacklist"`), `run()` method; the reversed-IP query + answer classification are `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/blacklist/engine.ts` — functions `reverseIpv4()`, `buildQueryName()`, `classifyAnswer()`, and the zone list is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/blacklist/zones.ts` (registry `blacklists.yaml`). The on-demand recheck API is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/blacklists/blacklists.controller.ts` — class `BlacklistsController`, method `recheck()` (`POST /api/blacklists/:domainId/recheck`); the Blacklists view is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/blacklists/BlacklistsPage.tsx` — `BlacklistsPage`.
+
 ---
 
 ## 3. The finding EmailDeliveryHero raises

@@ -270,6 +270,9 @@ REST contract (backend `scheduler` module, NestJS on **9312**):
 | `PUT /api/scheduler/config` | Write the `schedule:` block (whole or partial); validates, seeds `times: ["06:00"]` when enabling with none, persists to `config.yaml`, and **re-arms the in-process timer** to match. | all users |
 | `POST /api/scheduler/run` | Trigger a scheduled run now. Honors the flag: when `enabled: false` it **skips** (`{ started: false, reason: "disabled" }`) unless the body carries `{ "force": true }`. Also skips if a scheduled run started within the last 5 minutes (dedupe — protects against the in-process timer and the OS agent firing together). | all users |
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/scheduler/scheduler.controller.ts` — class `SchedulerController` (routes `status()`, `getConfig()`, `updateConfig()`, `run()`), delegating to `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/scheduler/scheduler.service.ts` — class `SchedulerService`, methods `getConfig()`, `updateConfig()`, `status()`, `runNow()`. The computed `nextRunAt` is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/scheduler/next-run.ts` — function `computeNextRun()`; the `schedule:` block read/write is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/scheduler/schedule-config.store.ts` — `readScheduleConfig()` / `writeScheduleConfig()` / `defaultScheduleConfig()`.
+
 Two scheduling layers consume this storage (details in
 [Scheduled checks](./scheduled_checks.mdx)):
 
@@ -491,6 +494,9 @@ frontend calls the generated TanStack-Query hooks (see [Engineering](./engineeri
 `GET/PUT` operate on the file store transactionally via the `store` module (atomic
 write-temp-then-rename, per-file mutex, schema validation on read) — see
 [Engineering](./engineering.mdx) §7.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/settings/settings.controller.ts` — class `SettingsController` (routes `view()`, `updateUser()`, `updateAdmin()` [carries `@RequireRole("admin")`], `testNotification()`, `detectTools()`), delegating to `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/settings/settings.service.ts` — class `SettingsService`, methods `view()`, `updateUser()`, `updateAdmin()`, `exportArchive()`, `importArchive()`, `reset()`. Tool detection (§6) is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/settings/tools-detect.ts` — function `detectTools()`.
 
 ---
 
