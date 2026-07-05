@@ -3,6 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Favicon lives in public/ (served at web root by Vite). An email-envelope icon,
+         copied from the Large File Bridge app. To swap it, replace public/favicon.ico.
+         NOTE: an ICO-only <link> is unreliable in Chrome (it often skips it on localhost),
+         so we also ship a 32x32 PNG (Chrome prefers it) plus an apple-touch-icon. -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>EmailDeliveryHero</title>
   </head>
   <body>

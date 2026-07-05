@@ -373,6 +373,9 @@ The rule stated in §1, made testable:
 * The **CLI entrypoint** (`edh scheduler run`) boots the store + audit engine headlessly (no HTTP
   server) and calls the same `runForAll`. It exists for OS schedulers on machines where the
   backend isn't kept running; it is a thin `main()` around the same service.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/cli.ts` — `main()` (`edh scheduler run` boots a headless Nest context and calls `AuditService.runForAll`). The overlap/dedupe guard and telemetry live in `modules/scheduler/scheduler.service.ts` (`SchedulerService.runNow()`).
 * **Overlap guard:** if a scheduled tick fires while the previous scheduled run is still in
   flight, the new tick is **skipped with an INFO line** (never queued — audits are idempotent and
   the next tick is hours away). A *manual* run during a scheduled run is allowed; the per-domain

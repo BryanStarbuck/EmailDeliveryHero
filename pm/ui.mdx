@@ -212,6 +212,10 @@ A group with no visible items (all gated out) does not render its header.
 
 Route `/`. The landing screen and the one users live in. See [Dashboard](./dashboard.mdx).
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/app/DashboardPage.tsx` — component `DashboardPage`, with
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/BrandHeader.tsx` — component `BrandHeader`.
+
 ```
 ┌────────────┬──────────────────────────────────────────────────────────────┐
 │            │      Email Delivery Hero                        ┌────────────┐ │
@@ -259,6 +263,9 @@ Route `/domains/$id`. Reached by clicking a Dashboard row, a Domains row's **ope
 the Audits view. This is where the product delivers its promise: **the exact fix for every problem.**
 See [View a health-check run](./use_cases/view_health_check_run.mdx).
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/domains/RunDetailPage.tsx` — component `RunDetailPage`.
+
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  ‹ Back to dashboard        whitehatengineering.com     ⟳ Run checks again │
@@ -294,6 +301,9 @@ See [View a health-check run](./use_cases/view_health_check_run.mdx).
 
 Route `/domains`. The primary object of the app is a domain; this is where they are registered and
 managed. See [Domains](./domains.mdx).
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/domains/DomainsPage.tsx` — component `DomainsPage`.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -333,17 +343,26 @@ A per-domain list: one card per domain with its latest status/score and an expan
 [FindingsList](#14-the-common-finding-presentation-pattern), plus a per-domain **Run audit** button.
 It is the "read every finding across the fleet without leaving the page" companion to the run detail.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/audits/AuditsPage.tsx` — component `AuditsPage`.
+
 ### 7.2 Blacklists (`/blacklists`)
 
 Pulls just the `blacklist`-category findings out of every domain's latest audit into one place, so a
 user sees which sending IPs are listed and the **delisting steps** for each — the specific removal
 URL for the specific blocklist, never a generic note. Empty state prompts an audit.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/blacklists/BlacklistsPage.tsx` — component `BlacklistsPage`.
+
 ### 7.3 Reports (`/reports`)
 
 The **report library** — full spec in [Reports](./reports.mdx). A *report* is the rendered view of
 one **run** ([Dashboard §1](./dashboard.mdx)); this page lists the newest ones so the user can come
 back and open any of them.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/reports/ReportsPage.tsx` — component `ReportsPage`.
 
 * A page title (`Reports`) + one-line subtitle over **one stacked table of the newest 10 reports**
   across all domains, newest `startedAt` first, read from the on-disk run history (`runs.json` via
@@ -365,6 +384,10 @@ back and open any of them.
 ### 7.4 Settings (`/settings/*`)
 
 Left sub-nav (settings bar, §3.2) + right content pane. First round is intentionally lean:
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/settings/SettingsPage.tsx` — component `SettingsPage`
+(sections `GeneralSettings`, `SchedulingSettings`, `AdminSettings`).
 
 * **Account** — the signed-in identity (name/email from the OpenAuthFederated session), or a note
   that you are the `default` user with a Sign-in prompt. No password to manage.
@@ -444,6 +467,9 @@ watch cells go green. See [View a health-check run](./use_cases/view_health_chec
   progress dock** — stacked per-domain "Running <domain>" cards that drain as each finishes. Both
   surfaces, plus the parallel-scan concurrency model, are specified in
   [Toasts & scan progress](./progress_ui.mdx).
+  Implemented in code:
+  `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/ScanProgressDock.tsx` — component `ScanProgressDock`, driven by
+  `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/scan/ScanProgressContext.tsx` — `ScanProgressProvider` / `useScanRunner`.
 * **Icons** — lucide-react throughout (`RefreshCw`, `Play`, `Pencil`, `Trash2`, `ArrowUpRight`,
   `ChevronRight`, `Copy`, `Wrench`, …).
 * **Styling** — Tailwind with the app's CSS variables (`--edh-primary`, `--edh-border`, `--edh-muted`);
@@ -453,6 +479,8 @@ watch cells go green. See [View a health-check run](./use_cases/view_health_chec
 * **Errors & logging** — uncaught frontend errors are forwarded to the backend fault trail (see
   [Error handling & logging](./errors.mdx)); a run that errors on a checker still renders (the checker
   contributes a warning finding rather than failing the page).
+  Implemented in code:
+  `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/lib/logger.ts` — `logger` + function `installGlobalErrorHandlers` (POSTs to `/api/health/client-error`).
 
 ---
 

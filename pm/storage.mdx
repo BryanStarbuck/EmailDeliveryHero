@@ -75,6 +75,9 @@ stateDir =
 Nothing under the state root is ever committed to the repo — it is the boundary between code and
 runtime data (`~/BGit/Bryan_git/EmailDeliveryHero/CLAUDE.md`).
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/state-dir.ts` — `resolveStateDir()` (the `EDH_STATE_DIR` → homedir → temp resolution + legacy-dir adopt), `stateSubdir()`, and `resolveLogDir()`.
+
 ---
 
 ## 2. Directory layout
@@ -234,6 +237,9 @@ Secrets never go here — Google client credentials come from env or the out-of-
 ([Authentication](./authentication.mdx) §credentials); the auth signing secret is its own file
 (§8). `config.yaml` holds only non-secret ports, flags, and PM/admin-editable settings.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/config-store.ts` — `readAppConfig()` (validated deep-merge over `defaultAppConfig()`) and `updateAppConfig()` (read-modify-write, stamps `schema_version`/`updated_at`, atomic YAML write).
+
 ---
 
 ## 4. Per-logged-in-user storage — the per-user requirement
@@ -302,6 +308,9 @@ tables:
 * **Sanitize defensively:** reject/strip any `/`, `\`, `..`, or NUL before using the value as a path
   segment. It comes from a trusted JWT, but we never build a path from an unsanitized string.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/config-store.ts` — `readUserConfig()` / `updateUserConfig()` (lazy per-user file) and `sanitizeUserKey()` (lowercase, strip `/`,`\`,`..`,NUL, `default` fallback); the folder is created by `stateSubdir("users", key)`.
+
 ---
 
 ## 5. `domains.yaml` — the domain list + each domain's sync on/off flag
@@ -349,6 +358,9 @@ A legacy `domains.json` from an earlier install is migrated to `domains.yaml` on
   this file through the `yaml-store` helper (§9). Records written by an older version that lack
   `label` / `scheduleEnabled` are backfilled with defaults (empty label, schedule **on**) on read.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/domains/domains.service.ts` — class `DomainsService` (CRUD → `writeYaml(domains.yaml)`, one-time `domains.json` adoption, `onRemoved` listeners that purge audit history).
+
 ---
 
 ## 6. `audits.json` — the latest-result cache
@@ -357,6 +369,9 @@ The **latest** audit result per domain persists under the state root (already im
 `code/packages/backend/src/modules/audit/audit.service.ts`) as a single JSON map of **latest result
 keyed by domain id** — the fast cache the Dashboard's Domain-health table reads. The full per-run
 history is the `runs/` YAML tree (§7).
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/audit.service.ts` — class `AuditService`, method `persistResult()` (writes `audits.json` + the run file under the `writeChain` mutex) and `latest()` / `latestAll()` reads.
 
 ```json
 {
@@ -481,6 +496,9 @@ filename, the `run:` block, and the six category keys.
   **50 runs per domain** are kept ([Dashboard §1](./dashboard.mdx)); pruning deletes whole files,
   never rewrites them. Deleting a domain removes its `runs/<domain>/` directory.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/runs-store.ts` — `saveRun()` (one immutable YAML/run, filename from `runFileTimestamp()` + `_2` collision rule), `listRuns()` / `getRun()` (decode + sort on ISO `started_at`), `deleteRun()`, `deleteDomainRuns()`, `pruneRuns()`, and `migrateLegacyRunsJson()`.
+
 ### 7.5 Current implementation & migration (code today)
 
 * **Code today persists history as `runs.json`** — a flat JSON array of `AuditResult` records,
@@ -545,6 +563,9 @@ blacklists/<sanitized-domain-name>/
   history sparkline); BlacklistStatePage (one problem state).
 * **User can edit:** the **provider-portal checklist** — each provider pill cycles
   Unverified → Clean → Problem and PATCHes `portals.yaml`. Real user-editable persisted state.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/blacklist/store.ts` — `saveBlacklistRun()` (`latest.yaml` + pruned `runs/<audit_id>.yaml`), `readLatestBlacklistRun()` / `readBlacklistHistory()`, and `readPortalStates()` / `writePortalState()` (the user-editable `portals.yaml`), all via `stateSubdir()` + the `yaml-store` helper.
 
 ### Zone reference data — two layers
 
@@ -620,6 +641,9 @@ change; services never touch the filesystem directly.
 guard for every read-modify-write; `schema_version` validation on read (loud on *corrupt*, silent
 on *absent*) — silently falling back on a corrupt file hides data loss.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/yaml-store.ts` — `readYaml()` / `writeYaml()` (unique-temp + rename + unlink-on-fail); JSON equivalents in `shared/json-store.ts` (`readJson()`/`writeJson()`); the per-file mutex is `withFileLock()` in `shared/config-store.ts`.
+
 ---
 
 ## 10. Browser `localStorage` conventions (frontend)
@@ -677,6 +701,9 @@ implemented in `code/packages/backend/src/shared/logging.ts` +
 * The full behavior — the global exception filter, process handlers, per-checker capture, and the
   frontend-error ingest that make *anything that can go wrong* land in `error.err` — is specified in
   **[Error handling & logging](./errors.mdx)**. This section is only the on-disk (storage) view.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/logging.ts` — class `AppLogger` (`logInfo`/`logWarn`/`logError`; WARN/ERROR/FATAL to both files) backed by `RollingFileWriter` in `shared/rolling-file-writer.ts` (5 MiB cap × 5 backups, synchronous `appendFileSync`).
 
 ---
 

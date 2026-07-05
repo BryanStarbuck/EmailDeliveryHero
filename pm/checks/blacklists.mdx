@@ -1358,6 +1358,9 @@ partial run is never mistaken for a full audit. The recheck endpoint obeys every
 rule (pinned resolver, 5 s timeout, concurrency 8, refusal codes → inconclusive, dead-zone
 hard-block) — it is the same engine entry point (`engine.ts`), minus the run-file writer.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/blacklist/recheck.ts` — function `liveRecheck()` (the `POST /api/blacklists/:domainId/recheck` live recheck)
+
 ### 21.2 Zone-scoped ([Run this zone ⟳], §20.3)
 
 Calls the recheck endpoint with `zones: [":zoneId"]`, all current targets. The zone page's block 2
