@@ -198,6 +198,9 @@ Implemented in code:
   numeric `score` is computed by deducting weighted points per finding (critical > warning > info).
   This makes the dashboard sortable and lets periodic checks detect regressions.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/index.ts` — the `CHECKERS` registry; the runner is `AuditService.runForDomain()` in `modules/audit/audit.service.ts` over the `runCheckerGraph()` in `run-graph.ts`; score/status roll-up is `summarize()` in `checks/types.ts`.
+
 ### 6.3 First-round checkers
 
 Each is a file under `src/audit/checkers/`, registered in the registry:
@@ -210,6 +213,9 @@ Each is a file under `src/audit/checkers/`, registered in the registry:
 | `mx.checker.ts` | `mx` | `resolveMx(domain)` → require ≥1 record, valid priorities, resolvable hosts. |
 | `ptr.checker.ts` | `ptr` | For each sending IP: `reverse(ip)` → require a PTR that forward-resolves back to the IP (FCrDNS). |
 | `dnsbl.checker.ts` | `dnsbl` | For each sending IP: reverse the octets and `resolve4('<rev-ip>.<zone>')` against DNSBL zones (Spamhaus ZEN, Barracuda, SpamCop). A resolving A record = listed. |
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/index.ts` — the `CHECKERS` array wiring each check (as built the files are `checks/<name>/<name>.check.ts`, e.g. `spf/spf.check.ts` exporting `spfCheck`; `mx`/`ptr`/`dnsbl` ship as `mx-routing`/`reverse-dns`/`blacklist`, and the DNS/Spam families extend the six listed here).
 
 > **Future enhancement (noted, not first round):** any checker may shell out to Brew-installed tools
 > (`dig`, etc.) instead of `node:dns/promises` for richer output or to sidestep resolver caching —
