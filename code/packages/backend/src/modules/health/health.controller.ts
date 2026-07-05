@@ -4,10 +4,11 @@ import {
 } from "@config/credentials-file";
 import { resolveGoogleRedirectUri } from "@module/auth/auth-frontend";
 import { Public } from "@module/auth/public.decorator";
+import { RateLimit } from "@module/auth/rate-limit.decorator";
 import { Body, Controller, Get, HttpCode, Post } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
-import { logError, logWarn } from "@shared/logging";
+import { logError, logWarn, stripControlChars } from "@shared/logging";
 import { locateTools } from "@shared/tool-runner";
 import type { ClientErrorDto } from "./dto/client-error.dto";
 
@@ -68,6 +69,7 @@ export class HealthController {
 	}
 
 	@Public()
+  @RateLimit(30, 60_000)
   @Post("client-error")
   @HttpCode(204)
   @ApiOperation({
@@ -76,10 +78,17 @@ export class HealthController {
   clientError(@Body() body: ClientErrorDto): void {
     // The browser has no filesystem, so front-end faults are forwarded here to land in the ONE
     // error file tagged [Frontend] (pm/errors.mdx §3). Public so an error on the sign-in page
-    // (pre-auth) is still captured.
-    const context = body.context ? `Frontend:${body.context}` : "Frontend"
-    const detail = [body.url ? `url=${body.url}` : "", body.stack ?? ""].filter(Boolean).join(" ")
-    if (body.level === "warn") logWarn(`${body.message} ${detail}`.trim(), context)
-    else logError(body.message, detail || undefined, context)
+    // (pre-auth) is still captured. Every caller-supplied field is control-char-stripped before it
+    // is logged so a CR/LF-laced payload cannot forge log lines (security audit finding #8); the
+    // route is also rate-limited per source to bound log-flooding. Length caps come from the DTO.
+    const context = body.context
+      ? `Frontend:${stripControlChars(body.context, 200)}`
+      : "Frontend"
+    const message = stripControlChars(body.message, 2000)
+    const url = body.url ? `url=${stripControlChars(body.url, 500)}` : ""
+    const stack = body.stack ? stripControlChars(body.stack, 8000) : ""
+    const detail = [url, stack].filter(Boolean).join(" ")
+    if (body.level === "warn") logWarn(`${message} ${detail}`.trim(), context)
+    else logError(message, detail || undefined, context)
   }
 }

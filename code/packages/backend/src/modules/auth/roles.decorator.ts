@@ -10,6 +10,17 @@ import { SetMetadata } from "@nestjs/common";
 
 export const REQUIRED_ROLES_KEY = "requiredRoles";
 export const REQUIRED_PERMISSIONS_KEY = "requiredPermissions";
+export const REQUIRE_AUTH_KEY = "requireAuth";
+
+/**
+ * Require a verified, signed-in company identity — ANY authenticated user, not a specific role.
+ * The domain allowlist is already enforced by the auth strategy before a token is accepted, so this
+ * gates a route to "a real logged-in employee" and 403s the logged-out `default` user. Use it on
+ * state-changing / host-touching routes that any employee may drive but an anonymous caller must
+ * not (e.g. triggering audits, mutating monitored domains). For admin-only routes use
+ * {@link RequireRole}("admin") instead.
+ */
+export const RequireAuth = () => SetMetadata(REQUIRE_AUTH_KEY, true);
 
 /**
  * Require the current user to hold at least ONE of the listed roles (from the OpenAuthFederated

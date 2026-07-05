@@ -9,6 +9,7 @@ import {
 	Query,
 	Sse,
 } from "@nestjs/common";
+import { RequireRole } from "@module/auth/roles.decorator";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { map, type Observable } from "rxjs";
 import { catalogEntry, type ToolManager, type ToolStatus } from "./catalog";
@@ -24,13 +25,16 @@ function asManager(v: unknown): ToolManager | "all" {
 }
 
 /**
- * The Install API (pm/install_brew.mdx §7.1, pm/install_npm.mdx §6). All signed-in (usable by the
- * `default` user — installing local CLI tools on your own machine is the app's core job). The
- * `tools:install` permission hook is the single-decorator way to lock this down if a deployment
- * wants to.
+ * The Install API (pm/install_brew.mdx §7.1, pm/install_npm.mdx §6). Installing host CLI tools runs
+ * package-manager processes (brew/npm/pipx) — with maintainer post-install scripts — as the service
+ * account, so the WHOLE controller is admin-gated (@RequireRole("admin")): the logged-out `default`
+ * user and any non-admin signed-in user are refused 403 on every route, including the catalog reads.
+ * This closes the unauthenticated remote-install surface (security audit finding #1). Never rely on
+ * the UI hiding the page — the backend is authoritative.
  */
 @ApiTags("install")
 @ApiBearerAuth()
+@RequireRole("admin")
 @Controller("install")
 export class InstallController {
 	constructor(private readonly install: InstallService) {}

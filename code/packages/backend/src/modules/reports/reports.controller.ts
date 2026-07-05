@@ -1,3 +1,4 @@
+import { RequireAuth } from "@module/auth/roles.decorator";
 import { Controller, Get, Param, Post } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import type { IngestSummary } from "./report.types";
@@ -26,6 +27,7 @@ export class ReportsController {
   }
 
 	@Post("ingest")
+  @RequireAuth()
   @ApiOperation({ summary: "Ingest now — scan the report drop folder / mailbox on demand" })
   async ingest(
     @Param("id") id: string,

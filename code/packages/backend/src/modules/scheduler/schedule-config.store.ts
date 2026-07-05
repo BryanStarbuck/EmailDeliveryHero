@@ -21,6 +21,20 @@ const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export const DEFAULT_OS_LABEL = "com.emaildeliveryhero.scheduler";
 
+/**
+ * Allowed shape for an OS scheduler label (security audit finding #2). The label is interpolated
+ * into a filesystem path (`~/Library/LaunchAgents/<label>.plist`, systemd unit names, schtasks task
+ * names), so it must be a single reverse-DNS-style segment with NO path separators, `..`, or
+ * whitespace — otherwise a crafted label (e.g. "../../../tmp/evil") escapes the managed directory
+ * when joined. Only these characters are permitted; anything else falls back to DEFAULT_OS_LABEL.
+ */
+const OS_LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
+
+/** True when `label` is a safe, path-separator-free scheduler label. */
+export function isSafeOsLabel(label: string): boolean {
+	return OS_LABEL_RE.test(label) && !label.includes("..");
+}
+
 /** The OS scheduler flavor for the platform we are running on. */
 export function detectOsKind(
 	platform: NodeJS.Platform = process.platform,
@@ -151,7 +165,7 @@ export function normalizeSchedule(raw: unknown): ScheduleConfig {
 			kind,
 			installed: rawOs.installed === true,
 			label:
-				typeof rawOs.label === "string" && rawOs.label.trim() !== ""
+				typeof rawOs.label === "string" && isSafeOsLabel(rawOs.label.trim())
 					? rawOs.label.trim()
 					: DEFAULT_OS_LABEL,
 		},

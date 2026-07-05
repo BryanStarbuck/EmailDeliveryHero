@@ -22,7 +22,9 @@ async function main() {
 		const res = await fetch(URL, {
 			method: "POST",
 			signal: ac.signal,
-			headers: { "content-type": "application/json" },
+			// X-EDH-Trigger satisfies the scheduler-run endpoint's anti-CSRF custom-header requirement
+			// (security audit finding #9); the JSON body already makes this a non-simple request too.
+			headers: { "content-type": "application/json", "x-edh-trigger": "os" },
 			body: JSON.stringify({ trigger: "os" }),
 		});
 		const body = await res.text().catch(() => "");

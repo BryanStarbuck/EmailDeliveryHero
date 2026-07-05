@@ -1,3 +1,4 @@
+import { RequireAuth } from "@module/auth/roles.decorator";
 import { DomainsService } from "@module/domains/domains.service";
 import {
 	BadRequestException,
@@ -95,6 +96,7 @@ export class ContentSampleController {
   }
 
 	@Put(":domainId")
+	@RequireAuth()
 	@ApiOperation({
 		summary:
 			"Upload/paste a new sample .eml (becomes the active scored sample)",
@@ -125,6 +127,7 @@ export class ContentSampleController {
   }
 
 	@Post(":domainId/rescore")
+  @RequireAuth()
   @ApiOperation({ summary: "Re-score just the content check (no full re-audit)" })
   rescore(@Param("domainId") domainId: string): Promise<AuditResult> {
     return this.audit.rescoreContent(domainId)

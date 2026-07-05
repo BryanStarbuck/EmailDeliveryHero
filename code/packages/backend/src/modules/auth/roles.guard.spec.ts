@@ -2,6 +2,7 @@ import type { ExecutionContext } from "@nestjs/common";
 import type { Reflector } from "@nestjs/core";
 import { type AuthUser, DEFAULT_USER } from "@shared/current-user.decorator";
 import {
+	REQUIRE_AUTH_KEY,
 	REQUIRED_PERMISSIONS_KEY,
 	REQUIRED_ROLES_KEY,
 } from "./roles.decorator";
@@ -22,7 +23,7 @@ function signedIn(roles: string[] = [], permissions: string[] = []): AuthUser {
 
 /** Build a guard whose Reflector returns the given route metadata, plus a context with `user`. */
 function setup(
-	meta: { roles?: string[]; permissions?: string[] },
+	meta: { roles?: string[]; permissions?: string[]; requireAuth?: boolean },
 	user?: AuthUser,
 ) {
 	const reflector = {
@@ -31,7 +32,9 @@ function setup(
 				? meta.roles
 				: key === REQUIRED_PERMISSIONS_KEY
 					? meta.permissions
-					: undefined,
+					: key === REQUIRE_AUTH_KEY
+						? meta.requireAuth
+						: undefined,
 	} as unknown as Reflector;
 	const guard = new RolesGuard(reflector);
 	const context = {
@@ -92,5 +95,15 @@ describe("RolesGuard", () => {
 	it("falls back to the default user (denies) when request.user is missing", () => {
 		const { guard, context } = setup({ roles: ["admin"] }, undefined);
 		expect(() => guard.canActivate(context)).toThrow();
+	});
+
+	it("refuses @RequireAuth() for the logged-out default user with 403", () => {
+		const { guard, context } = setup({ requireAuth: true }, DEFAULT_USER);
+		expect(() => guard.canActivate(context)).toThrow(/permission/i);
+	});
+
+	it("allows @RequireAuth() for any signed-in user (no role needed)", () => {
+		const { guard, context } = setup({ requireAuth: true }, signedIn([]));
+		expect(guard.canActivate(context)).toBe(true);
 	});
 });

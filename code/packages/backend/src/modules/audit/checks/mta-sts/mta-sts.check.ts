@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
+import { isIP } from "node:net";
 import { checkServerIdentity, type TLSSocket } from "node:tls";
 import { withResource } from "@shared/concurrency";
 import { readAppConfig } from "@shared/config-store";
@@ -203,19 +205,93 @@ interface PolicyFetchOutcome {
 }
 
 /**
+ * Numeric test for an IPv4 dotted-quad in a private / reserved / loopback / link-local range — the
+ * addresses an outbound audit probe must never be steered to (SSRF guard, security audit finding #5).
+ */
+function isBlockedIpv4(ip: string): boolean {
+	const parts = ip.split(".").map((p) => Number(p));
+	if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+		return true; // unparseable → block, fail closed
+	}
+	const [a, b] = parts;
+	if (a === 0 || a === 127) return true; // this-host / loopback
+	if (a === 10) return true; // private
+	if (a === 172 && b >= 16 && b <= 31) return true; // private
+	if (a === 192 && b === 168) return true; // private
+	if (a === 169 && b === 254) return true; // link-local (incl. cloud metadata 169.254.169.254)
+	if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64.0.0/10
+	if (a === 192 && b === 0 && parts[2] === 0) return true; // 192.0.0.0/24 (IETF protocol)
+	if (a >= 224) return true; // multicast (224/4) + reserved (240/4)
+	return false;
+}
+
+/** True when a resolved address (v4 or v6) is private/reserved/link-local/loopback → refuse to connect. */
+function isBlockedAddress(ip: string): boolean {
+	const kind = isIP(ip);
+	if (kind === 4) return isBlockedIpv4(ip);
+	if (kind === 6) {
+		const lower = ip.toLowerCase();
+		// IPv4-mapped (::ffff:a.b.c.d) — judge by the embedded IPv4.
+		const mapped = lower.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+		if (mapped) return isBlockedIpv4(mapped[1]);
+		if (lower === "::1" || lower === "::") return true; // loopback / unspecified
+		if (lower.startsWith("fe8") || lower.startsWith("fe9") || lower.startsWith("fea") || lower.startsWith("feb")) {
+			return true; // fe80::/10 link-local
+		}
+		if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // fc00::/7 unique-local
+		if (lower.startsWith("ff")) return true; // ff00::/8 multicast
+		return false;
+	}
+	return true; // not a valid IP literal → block
+}
+
+/**
+ * Resolve the policy host and return a PUBLIC IP to connect to, or null when every resolved address
+ * is private/reserved (SSRF guard, security audit finding #5). Connecting to the validated IP (with
+ * SNI/Host still set to the original host) also closes the DNS-rebinding TOCTOU window.
+ */
+async function resolveSafeAddress(host: string): Promise<string | null> {
+	// A literal IP as the host is unusual for mta-sts.<domain>; judge it directly.
+	if (isIP(host)) return isBlockedAddress(host) ? null : host;
+	let records: { address: string }[];
+	try {
+		records = await lookup(host, { all: true });
+	} catch {
+		return null; // unresolvable → nothing to connect to
+	}
+	const safe = records.find((r) => !isBlockedAddress(r.address));
+	return safe ? safe.address : null;
+}
+
+/**
  * One conservative HTTPS GET of `https://mta-sts.<domain>/.well-known/mta-sts.txt` (spec §3):
  * SNI = the policy host, NO redirect following (a 3xx is returned as-is and judged by
- * `infra.mta_sts_https_redirect`), a hard total timeout, and a capped body. The TLS handshake is
- * allowed to complete even with an invalid certificate (`rejectUnauthorized: false`) so the cert
- * verdict is OUR finding (`infra.mta_sts_https_cert`) rather than an opaque fetch failure — the
- * chain/expiry verdict comes from `socket.authorized`, the name match from `checkServerIdentity`.
+ * `infra.mta_sts_https_redirect`), a hard total timeout, and a capped body. The target host is first
+ * resolved and refused if it maps to a private/reserved address (SSRF guard, security audit finding
+ * #5), then the connection goes to that validated IP with TLS certificate validation ENFORCED
+ * (rejectUnauthorized stays true) — `socket.authorized` + `checkServerIdentity` still yield the
+ * `infra.mta_sts_https_cert` verdict for certs that complete a validated handshake.
  */
-function fetchPolicy(
+async function fetchPolicy(
 	host: string,
 	timeoutMs: number,
 	maxBodyBytes: number,
 	signal?: AbortSignal,
 ): Promise<PolicyFetchOutcome> {
+	const address = await resolveSafeAddress(host);
+	if (!address) {
+		return {
+			ok: false,
+			status: null,
+			body: null,
+			contentType: null,
+			certOk: null,
+			certDetail: null,
+			error:
+				"policy host did not resolve to a public address (refused: SSRF/private-range guard)",
+			truncated: false,
+		};
+	}
 	return new Promise((resolve) => {
 		let settled = false;
 		const done = (outcome: PolicyFetchOutcome): void => {
@@ -226,13 +302,13 @@ function fetchPolicy(
 		};
 		const req = httpsRequest(
 			{
-				host,
+				host: address,
 				servername: host,
 				port: 443,
 				path: "/.well-known/mta-sts.txt",
 				method: "GET",
-				// The cert verdict is a finding, not a fetch failure (infra.mta_sts_https_cert).
-				rejectUnauthorized: false,
+				// Enforce TLS certificate validation — never disable it (security audit finding #5).
+				rejectUnauthorized: true,
 				timeout: timeoutMs,
 				...(signal ? { signal } : {}),
 				headers: {

@@ -36,10 +36,16 @@ export const registerAuthBridge = (b: AuthBridge) => {
 	resolveBridgeReady();
 };
 
-/** Single shared axios instance. `withCredentials` lets the auth session cookie travel on calls. */
+/**
+ * Single shared axios instance. `withCredentials` lets the auth session cookie travel on calls.
+ * The default `X-Requested-With` header makes every app request a non-"simple" CORS request, so a
+ * hostile page cannot silently drive a state-changing endpoint cross-origin without a (blocked)
+ * preflight (security audit finding #9 — CSRF hardening).
+ */
 export const api = axios.create({
 	baseURL: import.meta.env.VITE_API_BASE ?? "/api",
 	withCredentials: true,
+	headers: { "X-Requested-With": "XMLHttpRequest" },
 });
 
 // Request: attach the short-lived JWT from the active OpenAuthFederated session.

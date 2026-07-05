@@ -21,6 +21,22 @@ import { resolveLogDir } from "./state-dir";
  *     logging (bootstrap, request errors, etc.) through the same rolling files.
  */
 
+/**
+ * Strip control characters (< 0x20 and 0x7F) from an untrusted string before it is written to a log
+ * line, so newline/CR-laced input cannot forge additional log lines (log-injection defense). An
+ * optional cap bounds the field length. Uses char codes rather than a control-char regex literal so
+ * this source file stays clean ASCII.
+ */
+export function stripControlChars(value: string, maxLength = 4000): string {
+	let out = "";
+	for (const ch of value) {
+		const code = ch.charCodeAt(0);
+		out += code < 0x20 || code === 0x7f ? " " : ch;
+		if (out.length >= maxLength) break;
+	}
+	return out.slice(0, maxLength);
+}
+
 /** The log directory (state root by default; EDH_LOG_DIR override) and the two target files. */
 export const LOG_DIR = resolveLogDir();
 export const LOG_FILE = join(LOG_DIR, "log.log");

@@ -2,6 +2,7 @@ import { AppConfigModule } from "@config/app-config.module";
 import { AuditModule } from "@module/audit/audit.module";
 import { AuthModule } from "@module/auth/auth.module";
 import { JwtAuthGuard } from "@module/auth/jwt-auth.guard";
+import { RateLimitGuard } from "@module/auth/rate-limit.guard";
 import { RolesGuard } from "@module/auth/roles.guard";
 import { BlacklistsModule } from "@module/blacklists/blacklists.module";
 import { DomainsModule } from "@module/domains/domains.module";
@@ -18,8 +19,9 @@ import { APP_GUARD } from "@nestjs/core";
  * Root module. Two global guards run in order (pm/security.mdx §3.3):
  *   1. JwtAuthGuard — "identify, don't gate": verifies any Bearer token and attaches the current
  *      user (the `default` user when logged out); never 401s. @Public() routes skip it.
- *   2. RolesGuard — enforces @RequireRole / @RequirePermission where present (403 for the `default`
- *      user and anyone else lacking the role/permission); ungated routes pass through untouched.
+ *   2. RolesGuard — enforces @RequireAuth / @RequireRole / @RequirePermission where present (403 for
+ *      the `default` user and anyone else lacking the role/permission); ungated routes pass through.
+ *   3. RateLimitGuard — throttles routes carrying @RateLimit(...) per client source; inert elsewhere.
  * Registration order matters: JwtAuthGuard must populate request.user before RolesGuard reads it.
  */
 @Module({
@@ -39,6 +41,7 @@ import { APP_GUARD } from "@nestjs/core";
 	providers: [
 		{ provide: APP_GUARD, useClass: JwtAuthGuard },
 		{ provide: APP_GUARD, useClass: RolesGuard },
+		{ provide: APP_GUARD, useClass: RateLimitGuard },
 	],
 })
 export class AppModule {}

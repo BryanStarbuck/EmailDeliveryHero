@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { logInfo } from "@shared/logging";
 import type {
@@ -64,10 +64,16 @@ export function findTriggerScript(startDir: string = __dirname): string | null {
 	return null;
 }
 
+/**
+ * The custom header the scheduler-run endpoint requires so it is never a CORS-"simple" request a
+ * hostile page could fire cross-origin (security audit finding #9). All OS trigger commands send it.
+ */
+const TRIGGER_HEADER = "X-EDH-Trigger: os";
+
 function triggerCommand(): string[] {
 	const script = findTriggerScript();
 	if (script) return [process.execPath, script];
-	return ["/usr/bin/curl", "-fsS", "-X", "POST", RUN_URL];
+	return ["/usr/bin/curl", "-fsS", "-H", TRIGGER_HEADER, "-X", "POST", RUN_URL];
 }
 
 function xmlEscape(s: string): string {
@@ -85,7 +91,17 @@ function activeWeekdays(cfg: ScheduleConfig): Weekday[] {
 /* ---------------------------------------- launchd ---------------------------------------- */
 
 export function launchdPlistPath(label: string): string {
-	return join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+	const agentsDir = join(homedir(), "Library", "LaunchAgents");
+	const path = join(agentsDir, `${label}.plist`);
+	// Defense-in-depth (security audit finding #2): even though the label is sanitized in the config
+	// store, refuse any resolved path that escapes ~/Library/LaunchAgents before we write/load it.
+	const resolved = resolve(path);
+	if (resolved !== path || !resolved.startsWith(agentsDir + sep)) {
+		throw new Error(
+			`Refusing launchd label "${label}": resolves outside ~/Library/LaunchAgents`,
+		);
+	}
+	return path;
 }
 
 export function renderLaunchdPlist(cfg: ScheduleConfig): string {
@@ -204,7 +220,7 @@ WantedBy=timers.target
 
 /** The equivalent crontab lines — shown in the Linux preview alongside the systemd units. */
 export function renderCrontab(cfg: ScheduleConfig): string {
-	const cmd = `curl -fsS -X POST ${RUN_URL} >> /tmp/edh.cron.log 2>&1`;
+	const cmd = `curl -fsS -H "${TRIGGER_HEADER}" -X POST ${RUN_URL} >> /tmp/edh.cron.log 2>&1`;
 	if (cfg.cadence === "interval")
 		return `0 */${cfg.everyHours} * * *  ${cmd}\n`;
 	const dow =
@@ -237,7 +253,7 @@ function schtasksTaskNames(cfg: ScheduleConfig): string[] {
 }
 
 export function schtasksCommands(cfg: ScheduleConfig): string[][] {
-	const tr = `curl.exe -fsS -X POST ${RUN_URL}`;
+	const tr = `curl.exe -fsS -H "${TRIGGER_HEADER}" -X POST ${RUN_URL}`;
 	if (cfg.cadence === "interval") {
 		return [
 			[

@@ -8,6 +8,7 @@ import { Reflector } from "@nestjs/core";
 import { type AuthUser, DEFAULT_USER } from "@shared/current-user.decorator";
 import { logWarn } from "@shared/logging";
 import {
+	REQUIRE_AUTH_KEY,
 	REQUIRED_PERMISSIONS_KEY,
 	REQUIRED_ROLES_KEY,
 } from "./roles.decorator";
@@ -34,6 +35,7 @@ export class RolesGuard implements CanActivate {
 
 		let requiredRoles: string[] | undefined;
 		let requiredPermissions: string[] | undefined;
+		let requireAuth: boolean | undefined;
 		try {
 			requiredRoles = this.reflector.getAllAndOverride<string[]>(
 				REQUIRED_ROLES_KEY,
@@ -41,6 +43,10 @@ export class RolesGuard implements CanActivate {
 			);
 			requiredPermissions = this.reflector.getAllAndOverride<string[]>(
 				REQUIRED_PERMISSIONS_KEY,
+				targets,
+			);
+			requireAuth = this.reflector.getAllAndOverride<boolean>(
+				REQUIRE_AUTH_KEY,
 				targets,
 			);
 		} catch (err) {
@@ -56,11 +62,16 @@ export class RolesGuard implements CanActivate {
 		const needsRole = Array.isArray(requiredRoles) && requiredRoles.length > 0;
 		const needsPermission =
 			Array.isArray(requiredPermissions) && requiredPermissions.length > 0;
-		if (!needsRole && !needsPermission) return true; // ungated route — open to all users
+		const needsAuth = requireAuth === true;
+		if (!needsRole && !needsPermission && !needsAuth) return true; // ungated route — open to all
 
 		const request = context.switchToHttp().getRequest<{ user?: AuthUser }>();
 		const user = request.user ?? DEFAULT_USER;
 
+		// @RequireAuth() — any verified company identity; the logged-out `default` user is refused.
+		if (needsAuth && !user.authenticated) {
+			this.deny(user, "an authenticated company sign-in");
+		}
 		if (needsRole && !requiredRoles?.some((r) => user.roles.includes(r))) {
 			this.deny(user, `role in [${requiredRoles?.join(", ")}]`);
 		}

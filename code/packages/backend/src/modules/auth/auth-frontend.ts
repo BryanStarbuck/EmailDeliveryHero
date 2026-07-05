@@ -47,6 +47,12 @@ const SESSION_SECRET_FILE = ".auth_session_secret";
 const APP_TOKEN_ISSUER = "email-delivery-hero";
 
 /**
+ * Per-app token audience (`aud`) — enforced on verify by the embedded library (security audit
+ * finding #6). A distinct, stable in-code value so a token minted for another app is rejected here.
+ */
+const APP_TOKEN_AUDIENCE = "email-delivery-hero";
+
+/**
  * Resolve the HS256 signing secret from a STABLE on-disk file (never from `.env`). `loadOrCreateSecret`
  * generates a strong random value on first run, persists it 0600 under the state dir, and returns
  * the same value on every boot — so sessions survive restarts with zero configuration.
@@ -124,9 +130,23 @@ export function buildAuthFrontend(config: ConfigService) {
 		},
 	];
 
-	// Session lifetime policy, decided here and passed to the library by API. A signed-in user stays
-	// signed in for 10 months across server/browser/OS restarts; access tokens stay short-lived.
-	const TEN_MONTHS_SECONDS = 10 * 30 * 24 * 60 * 60;
+	// Session lifetime policy, decided here and passed to the library by API (security audit finding
+	// #4). Access tokens are short-lived (15 min); the rotating refresh session — which mints new
+	// access tokens — has a bounded ABSOLUTE cap AND a genuinely shorter IDLE timeout so a
+	// stolen/copied refresh cookie stops working within hours of inactivity instead of ~10 months.
+	// "Stay signed in" is delivered by the rotating cookie under active use, not by a huge absolute
+	// lifetime. Both are env-overridable for ops, but default to safe values.
+	const DAY_SECONDS = 24 * 60 * 60;
+	const positiveIntEnv = (key: string, fallback: number): number => {
+		const n = Number(config.get<string>(key));
+		return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+	};
+	// Absolute cap: 14 days (was ~10 months). Idle cutoff: 12 hours (was disabled — equal to the cap).
+	const sessionTtlSeconds = positiveIntEnv("AUTH_SESSION_TTL_SECONDS", 14 * DAY_SECONDS);
+	const inactivityTimeoutSeconds = positiveIntEnv(
+		"AUTH_INACTIVITY_TIMEOUT_SECONDS",
+		12 * 60 * 60,
+	);
 	const cookiePrefix = config.get<string>("AUTH_COOKIE_PREFIX") ?? "oaf_edh";
 	const cookieSecure = resolveCookieSecure(isProd, webappOrigin);
 
@@ -150,10 +170,20 @@ export function buildAuthFrontend(config: ConfigService) {
 		allowedDomains,
 		sessionSecret,
 		issuer: APP_TOKEN_ISSUER,
+		// Per-app audience (`aud`), bridged into the embedded verifier so `verifyToken` REQUIRES it —
+		// a token minted for another app (different `aud`) is rejected here even if a secret ever leaks
+		// (security audit finding #6). The distinct per-app `sessionSecret` remains the primary control;
+		// this is defense-in-depth. Set alongside a distinct `issuer` (above) so no warning fires.
+		audience: APP_TOKEN_AUDIENCE,
 		cookiePrefix,
-		sessionTtlSeconds: TEN_MONTHS_SECONDS,
+		sessionTtlSeconds,
 		accessTokenTtlSeconds: 15 * 60,
-		inactivityTimeoutSeconds: TEN_MONTHS_SECONDS,
+		inactivityTimeoutSeconds,
+		// Require a present, allowlisted Google Workspace hosted-domain (`hd`) claim (security audit
+		// finding #7): a consumer Google account whose email merely matches an allowed domain — but
+		// which carries no Workspace `hd` — is rejected, so domain trust rests on the verified
+		// Workspace assertion rather than the email string alone.
+		requireHostedDomain: true,
 		sessionStore: getAppSessionStore(),
 		cookieSecure,
 		logger: (level, message, meta) => {
