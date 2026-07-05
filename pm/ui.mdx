@@ -61,6 +61,9 @@ first-segment lookup so they land in their own column instead of the DNS one:
 > `infra`, `infra.dnssec`, `content`. The rollup in `src/lib/categories.ts` maps the latter to the
 > former (DNSSEC's `infra.dnssec` prefix is tested first in `categoryOf`).
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/lib/categories.ts` — `CATEGORIES` + function `categoryOf` (and `rollupCategories`).
+
 ### 1.2 The four status colors
 
 A category's color is the **worst finding severity** it contains for the latest audit. Severity is
@@ -96,6 +99,9 @@ The cell's `title`/tooltip carries the top open problem in words (e.g. "DKIM: se
 missing"). The richer per-category read-outs (DMARC policy level, DKIM working-selector count + key
 strength, Spam & Content placement percentage) live on each check's drill-in page, **not** the cell.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/StatusCell.tsx` — component `StatusCell`.
+
 ### 1.4 The common finding-presentation pattern
 
 Wherever a finding is shown (the run detail page, the Audits view, the Blacklists view), it uses the
@@ -116,6 +122,10 @@ Wherever a finding is shown (the run detail page, the Audits view, the Blacklist
 Problems sort to the top (critical → warning → info → ok). Healthy findings render as quiet green
 rows with no fix.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/FindingsList.tsx` — components `FindingsList` + `RemediationText`, with
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/CopyFixButton.tsx` — component `CopyFixButton`.
+
 ### 1.5 The account slot (optional login)
 
 At the **bottom of the left bar**, always visible:
@@ -125,6 +135,9 @@ At the **bottom of the left bar**, always visible:
 * **Signed in** → avatar + name + email; clicking opens an **upward** popup with **Settings**,
   **Admin** (only if the token carries `role:admin`), and **Log out**. Log out returns to the
   `default` user — it never ejects the person from the app.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/layout/AccountMenu.tsx` — component `AccountMenu`.
 
 ---
 
@@ -149,6 +162,10 @@ The left-bar **variant** is chosen by route: the **settings** bar renders under 
 brief spinner while the auth SDK loads and a "Reconnecting…" state if the auth backend blips, so a
 signed-in user is never bounced (see [Security §3.4](./security.mdx)).
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/app/AppShell.tsx` — component `AppShell` (chooses the settings vs app bar by route); readiness in
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/router/guards.tsx` — component `AppReady`.
+
 ---
 
 ## 3. Left navigation (source of truth: `pm/left_bar.yaml`)
@@ -157,6 +174,11 @@ There are **two** left bars. Both are **data-driven** from `pm/left_bar.yaml`, i
 parsed by `src/config/left_bar.ts` — there is no second copy. Icons are lucide-react names resolved
 in `NavIcon.tsx`. Styling and behavior are specified in [Left bar](./leftbar.mdx) — notably the
 LOCKED color rule: **all left-bar text is black; green stays green; medium grey becomes black.**
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/layout/Sidebar.tsx` — component `Sidebar`;
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/layout/NavIcon.tsx` — component `NavIcon`;
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/config/left_bar.ts` — `appNavItems` / `settingsGroups` / `accountMenuItems`.
 
 ### 3.1 The app bar (main navigation)
 

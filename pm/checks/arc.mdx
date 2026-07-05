@@ -68,6 +68,9 @@ and — because the forwarder does **not** apply ARC (or applies a broken chain)
 is rejected. The symptom is "some recipients never get our mail, but only when it goes through
 list X." ARC applied correctly by that forwarder fixes it.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/arc/arc.check.ts` — the `arcCheck` checker, method `run()` (also builds the `arc.selector_dns` / `arc.applicable` / `arc.forwarding_risk` findings)
+
 **How a failure degrades inbox placement.** Without ARC on a forwarding path, DMARC-failing forwarded
 mail is quarantined or rejected at strict receivers; with a broken ARC chain (`cv=fail`, out-of-order
 instances, an unresolvable signing selector) the receiver discards the ARC evidence and falls back to
@@ -100,6 +103,9 @@ forwarded message — see §3).
 ---
 
 ## 3. How it is measured
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/arc/arc.check.ts` — the `arcCheck` checker, method `run()`
 
 **Advisory / first-round path (deterministic).** Two things are answerable without a message sample:
 

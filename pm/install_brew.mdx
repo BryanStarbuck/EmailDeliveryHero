@@ -85,6 +85,10 @@ scattered "Testing toolbox" install lines in the check specs are downstream of t
 they disagree, **this table wins**, and §3.4 records the drift to fix.
 
 The catalog lives in the repo as data (§9): `code/packages/backend/src/modules/install/catalog/brew.ts`.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/install/catalog/brew.ts` — the `BREW_CATALOG` array (the `ToolCatalogEntry[]` this section defines as data).
+
 Each entry is:
 
 ```ts
@@ -312,6 +316,9 @@ when done.
 Detection answers two questions: *is the package manager itself present?* and *for each catalog
 entry, is its tool on this machine?*
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/install/install.detect.ts` — functions `detectEntry()` / `detectAll()`, `brewPresent()` (§5.1), and `pnpmEnablePath()`; the per-tool binary probe reuses `locateTool()` from `shared/tool-runner.ts`.
+
 ### 5.1 Is Homebrew present?
 
 `locateTool('brew')` ([run_checks.mdx §5.2](./run_checks.mdx)) — an in-process PATH search plus the
@@ -351,6 +358,9 @@ are shown as rows, and the page **pre-checks every auto-installable row across b
 tier split only decides which absences **divert a run** (a missing `missing` entry does; a missing
 `optional` entry does not), never which boxes start checked.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/install/install.service.ts` — class `InstallService`, method `preflight()` (scope→category filtering via `scopeCategories()` in `catalog/index.ts`).
+
 ---
 
 ## 6. How we install them
@@ -368,6 +378,9 @@ UI shows). For each id:
 * **`special` / pipx** (`dkimpy`…) → if `locateTool('pipx')`, `runTool('pipx', ['install', pkg])`;
   else the row is copy-only.
 * **`special` / docker · os · root** → **not auto-run.** The row is copy-only (§6.4).
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/install/install.service.ts` — class `InstallService`, methods `start()` (queues the job), `runJob()` (serial loop; one failure never sinks the batch, §6.3), `resolveSpawns()` (pnpm/pipx fallbacks), and `runOne()` (the per-tool spawn).
 
 ### 6.2 Streaming per-row status
 
@@ -418,6 +431,9 @@ Linuxbrew.
 | `GET /api/install/run/:jobId/stream` | SSE stream of `{ id, phase, line }` events for the live per-row tail (§7.3). | signed-in |
 | `POST /api/install/detect` | Force a fresh detection (Re-detect, §4.5) — returns the recomputed catalog+status. | signed-in |
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/install/install.controller.ts` — class `InstallController`, methods `catalog()`, `preflight()`, `detect()`, `run()`, `jobStatus()`, `jobStream()` (the SSE endpoint).
+
 All are **signed-in** (usable by the `default` user — the app is optional-login,
 [security.mdx](./security.mdx)); none are admin-gated, because installing local CLI tools on your
 own machine is the app's core job, not a privileged config change. *(If a deployment wants to lock
@@ -432,6 +448,9 @@ no shell**; a hard timeout (installs get a **generous budget — 10 min** defaul
 and a **structured result** (`{ code, stdout, stderr, timedOut }`) where a non-zero exit is *data*
 (the row failed) not an exception. `brew`/`cpanm` resolve through `locateTool` (§5.1) so the absolute
 path is used even under a minimal PATH.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/tool-runner.ts` — `runTool()` (execFile, hard timeout + SIGKILL grace, `maxBuffer`, structured `ToolResult`) and `locateTool()` (override → PATH → conventional-dir resolution). Installs stream via `install.service.ts` `InstallService.runOne()`, which spawns directly for the live line reader.
 
 ### 7.3 Streaming
 

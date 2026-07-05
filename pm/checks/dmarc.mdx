@@ -40,6 +40,9 @@ tests (categories) inside every run, and the §2 sub-checks are its **sub-tests*
 
 ## 1. What it checks
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dmarc/dmarc.check.ts` — the `dmarcCheck` checker, method `run()`
+
 **The standard.** DMARC was defined in **RFC 7489** (informational, 2015) and was **obsoleted in
 May 2026** by the **DMARCbis** set: **RFC 9989** (core), **RFC 9990** (aggregate reporting), and
 **RFC 9991** (failure reporting). `v=DMARC1` records are unchanged on the wire, but the rules this
@@ -71,6 +74,9 @@ own heuristics; spoofed and even legitimate mail rides on weaker signals and is 
 in spam. Under the 2024 Gmail/Yahoo rules, bulk senders **without** any DMARC record can be
 rate-limited or rejected outright. Conversely, a broken/malformed record is treated as **no
 policy** — a silent regression that removes protection the owner believes they still have.
+
+The 2024 Gmail/Yahoo bulk-sender requirements are evaluated in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dmarc/dmarc-extras.ts` — `bulkSenderFinding()`
 
 ---
 
@@ -193,6 +199,9 @@ Rows 1–3 run on every DMARC run; row 4 is conditional; rows 5–6 are optional
 
 ## 4. How it is measured
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dmarc/dmarc.check.ts` — the `dmarcCheck` checker, method `run()` (core `_dmarc` TXT lookup, syntax, policy, subdomain, and alignment findings)
+
 **First-round detection (pure `node:dns/promises`).**
 
 1. **Lookup.** `resolveTxt('_dmarc.<domain>')`. `resolveTxt` returns `string[][]` (an array of
@@ -218,6 +227,9 @@ Rows 1–3 run on every DMARC run; row 4 is conditional; rows 5–6 are optional
    `resolveTxt('<audited-domain>._report._dmarc.<report-domain>')` and require a `v=DMARC1` value.
    Missing → **critical** (reports silently discarded); resolver error → info "re-run to confirm".
 
+Alignment basis (step 6), rua/ruf report-destination probing (step 8), and record-hygiene analysis are implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dmarc/dmarc-extras.ts` — `deriveAlignmentBasis()` (alignment), `probeReportDestinations()` (rua/ruf destination probing), `analyzeRecordHygiene()` (record hygiene)
+
 **Edge cases.**
 - **CNAME'd `_dmarc`.** Resolvers follow the CNAME transparently; record it in `detail` for clarity.
 - **Multi-string TXT (>255 bytes).** Always join character-strings before prefix-matching.
@@ -228,6 +240,9 @@ Rows 1–3 run on every DMARC run; row 4 is conditional; rows 5–6 are optional
 - **Wildcard junk.** TXT strings at `_dmarc` that don't start `v=DMARC1` are ignored (receivers do
   the same), but a valid-looking DMARC string at the apex or `dmarc.<domain>` is the misplaced-
   record problem state (PS-03).
+
+The CNAME'd-`_dmarc` and misplaced-record edge findings are produced in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dmarc/dmarc-extras.ts` — `cnameFinding()`, `misplacedFinding()`
 
 **Caching / rate limits.** Pure DNS; negligible cost. `_report._dmarc` probes are one lookup per
 distinct external report domain, deduped. No third-party quotas in the first round.

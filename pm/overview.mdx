@@ -206,6 +206,13 @@ The full engine design (each checker is a pluggable module returning findings) i
 
 See [Engineering](./engineering.mdx) for the full, buildable architecture.
 
+The frontend app shell + route tree that mount every screen, and the backend bootstrap that wires the
+global logger, exception filter, and process handlers, live in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/pages/app/AppShell.tsx` — component `AppShell`;
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/router.tsx` — `router` (createRouter);
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/main.ts` — function `bootstrap`, and
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/app.module.ts` — class `AppModule`.
+
 ## Ports
 
 | Port | Surface | Browser URL |
@@ -229,6 +236,10 @@ The app's primary navigation is a left bar with these sections (the data source 
 * **Settings** — app and per-user settings.
 * **Account block (bottom):** avatar / name / email → menu with **Settings**, **Admin** (gated by
   the `role:admin` claim), and **Log out**.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/layout/Sidebar.tsx` — component `Sidebar`,
+driven by `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/config/left_bar.ts` (parses `pm/left_bar.yaml`).
 
 ## Relationship to OpenAuthFederated
 

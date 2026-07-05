@@ -67,6 +67,9 @@ registry and download API for the week of **2026-06-22…28**. It lives in the r
 as the brew catalog ([install_brew.mdx §3](./install_brew.mdx)) with `manager: 'npm'` and, for L2,
 `installArgs` = the `pnpm add` target.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/install/catalog/npm.ts` — the `NPM_CATALOG` array (this section's L0/L1/L2 packages + node-builtins as data); `catalog/index.ts` merges it with `BREW_CATALOG`.
+
 ### 3.1 The email-authentication core — one library does most of it
 
 **`mailauth`** (MIT, ~68.5k downloads/wk, by the Nodemailer/Postal author; requires Node ≥ 20.18.1)
@@ -163,6 +166,9 @@ preferring the **least-privilege, no-network-trust** path:
    disabled. On systems where the global prefix needs root, this becomes a **copy-only** row
    (`sudo npm i -g pnpm`), honoring the no-privilege-escalation rule ([install_brew.mdx §6.4](./install_brew.mdx)).
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/install/install.service.ts` — class `InstallService`, method `resolveSpawns()` (the `pnpm` entry → corepack-then-npm choice via `pnpmEnablePath()` in `install.detect.ts`).
+
 The exact repo pin (via the root `package.json` `packageManager` field) is respected — corepack reads
 it, so we enable *the version the repo expects*.
 
@@ -198,6 +204,9 @@ Reuses the shared detector ([install_brew.mdx §5](./install_brew.mdx)); the npm
   unchecked missing row, not an error.
 * **Built-ins (§3.3)** — always satisfied; listed green, never missing.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/install/install.detect.ts` — function `detectEntry()` (the `pnpm` / `workspace` / `node-module` / `builtin` cases via `locateTool()` and in-process `require.resolve`).
+
 Scoped preflight (§5.3 of the brew spec) applies unchanged: `usedBy` on each catalog entry maps the
 package to the checks that import it, so a `run-check:dmarc` preflight only considers `mailauth`/
 `fast-xml-parser`, never `@peculiar/x509`.
@@ -229,6 +238,9 @@ Reached from Settings (no `manager` param), the page shows **one list spanning b
 routes each id to `brew install` or `pnpm add`/`pnpm install`/`corepack enable` accordingly. From a
 diverted run, `manager=<one>` narrows it to just that side. There is **one** Install page, one flow;
 the manager is data on the row.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/install/catalog/index.ts` — the merged `CATALOG` and `catalogFor()` (filters by `manager`) / `catalogEntry()` (per-id lookup used to route each install to its manager).
 
 ---
 

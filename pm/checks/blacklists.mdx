@@ -37,6 +37,9 @@ DNSBLs have no single RFC that defines the *lists* themselves, but the query mec
 
 Why receivers care: DNSBL lookups are cheap (one cached DNS round-trip) and catch the majority of botnet and snowshoe spam at connection time, so nearly every MTA and spam engine (Postfix `reject_rbl_client`, SpamAssassin `RCVD_IN_*`, Rspamd, commercial gateways) consults several. The common real-world failure mode is a **shared-IP or ASN-wide listing you did not cause** — a neighbor on your hosting provider's IP block, a compromised mailbox on your subnet, or a provider whose whole ASN got swept into UCEPROTECT L3. A single listing on a high-trust zone (Spamhaus SBL/XBL/Zen) can drop inbox placement to near zero at the large mailbox providers; a listing on a low-trust or ASN-wide zone (UCEPROTECT L2/L3, some SORBS sub-zones) may cost only a few percent, which is exactly why per-zone **weighting** is essential — a naive "you're on a list!" alarm produces false panic.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/blacklist/blacklist.check.ts` — the `blacklistCheck` checker, method `run()` (core DNSBL/RHSBL querying, targets, severity roll-up)
+
 ## 2. Sub-checks
 
 Each row is a distinct zone or roll-up, tested per sending IP (IP zones) or per sending domain (RHSBL zones). "How measured" states the query; every remediation hands the user the concrete per-zone delisting path. `is_paid`/`requires_registration` flags are noted where they gate first-round use.
@@ -71,6 +74,12 @@ Notes: `dnsbl.spamhaus_zen` supersedes running SBL/XBL/PBL individually against 
 The table above is the **default-enabled** set. The **complete catalog** — every zone we know, tiered by real-world impact, with lookup and delisting URLs, plus the dead-zone do-not-check registry (SORBS died 2024-06, NiX Spam died 2025-01, and dead zones sometimes wildcard and "list the world") — is in [§9](#9-the-complete-blocklist-catalog--where-every-list-is-and-how-to-reach-it). Any zone in the catalog can be enabled from the Blocklist Zones admin panel without a code change.
 
 ## 3. How it is measured
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/blacklist/blacklist.check.ts` — the `blacklistCheck` checker, method `run()` (core DNSBL/RHSBL querying, targets, severity roll-up)
+
+Query construction, return-code decode, and zone-liveness handling live in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/blacklist/engine.ts` — functions `reverseIpv4()`, `buildQueryName()`, `classifyAnswer()` (127.0.0.x decode), `classifyZoneHealth()` (RFC 5782 liveness), `detectProblemStates()`
 
 **Targets.** For IP zones the checker iterates `ctx.sendingIps` (from `sending_ips`); if empty, it derives candidate IPs by resolving the domain's MX hosts and SPF `a`/`mx`/`ip4`/`ip6` mechanisms and testing those (an unexpected listing on an SPF-authorized IP is still your deliverability problem). For RHSBL/domain zones the target is `ctx.domain` and any additional envelope domains (Return-Path, DKIM `d=`). A fourth IP source is the **email-report pipeline** ([§19](#19-email-derived-targets--ips-and-domains-mined-from-ingested-report-emails)): source IPs mined from ingested DMARC aggregate reports in `emails/` that authenticated as this domain join the target set with `source: email_report` — these are IPs *actually observed sending your mail* that no static config listed.
 
@@ -179,6 +188,9 @@ CREATE INDEX idx_dnsbl_results_run           ON dnsbl_check_results (audit_run_i
 **On-demand.** Runs on every manual audit (`POST /api/domains/:id/audit`) and category-scoped run. Because listings appear and clear on their own (SpamCop expires in ~24h, XBL clears minutes after cleanup), a fresh manual run is the primary "am I delisted yet?" tool after the user submits a removal request.
 
 **Periodic.** The in-process scheduler re-runs per domain at the `config.yaml` cadence (default every 6h for the Blacklists category — more frequent than static DNS checks because reputation is volatile). Each run **diffs against the previous audit**: a zone flipping `listed:false → true`, or a `warning → critical` sub-list escalation, is a **new problem** surfaced by regression detection and (per [../scheduled_checks.mdx](../scheduled_checks.mdx)) eligible for alerting; a `listed:true → false` transition is reported as a resolved/improved item. Inconclusive→listed and listed→inconclusive transitions are *not* treated as regressions to avoid resolver-blockage false alarms.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/blacklist/engine.ts` — function `diffRuns()` (regression diff against the previous run)
 
 **Cost / rate-limit / back-off.** Total queries per audit = (IP zones × sending IPs) + (domain zones × domains); with ~15 zones and a handful of IPs this is well under 100 DNS lookups. To stay inside free-tier limits: cap concurrency (~8), reuse a dedicated non-public resolver where zones block open resolvers, honor TTL caching within a run, apply exponential back-off with jitter on `SERVFAIL`/timeout, and **auto-disable** a zone for the run if its RFC 5782 test point indicates blocking (record `inconclusive=true`). Paid/registration-gated zones (`is_paid`/`requires_registration` without configured credentials) are skipped, not errored.
 
@@ -442,6 +454,9 @@ The Blacklists audit is a fixed sequence; every numbered test emits rows into th
 10. **Oracle cross-check (CI only, not in the product runtime)** — the Jest suite validates our checker against `dig +noall +comments` output and, for the auth-adjacent checks, against `checkdmarc` JSON, using recorded fixtures so tests run offline.
 
 ## 12. Test results (YAML) — the `blacklists` section of the run file
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/blacklist/store.ts` — functions `saveBlacklistRun()`, `readBlacklistHistory()`, `readLatestBlacklistRun()` (per-run YAML persistence and history)
 
 Every run persists as **one YAML file** at
 `~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml` — for example
@@ -1052,6 +1067,9 @@ Field rules: `name`, `url`, `type`, `description` are required on every entry �
 
 ### 18.2 Loader contract & serving
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/blacklist/zones.ts` — the registry loader: `loadRegistry()`, `loadZones()`, `isDeadZone()` (reads the checked-in blacklists.yaml; dead-zone enforcement)
+
 - **Load once at boot** (sync read + YAML parse via the shared yaml-store), validate every entry (unique `zone`, valid `type`/`tier`/`severity`, parseable return codes, required fields present, no entry whose `zone` also appears in `dead_zones`), then freeze.
 - **Merge order:** registry defaults ← `<stateDir>/blacklist_zones.yaml` operator overrides (same row shape, matched by `zone`; `enabled: false` disables a default; unknown zones append — but a zone on `dead_zones` can never be enabled from anywhere).
 - **Serve it:** `GET /api/blacklists/zones` returns the effective merged registry (entries + dead-zone count + per-zone last liveness) — this feeds the §17 registry-health panel and the §4 Blocklist Zones admin panel; the panel writes overrides to the state-dir file, never to the checked-in registry.
@@ -1062,6 +1080,9 @@ Field rules: `name`, `url`, `type`, `description` are required on every entry �
 ## 19. Email-derived targets — IPs and domains mined from ingested report emails
 
 The `emails/` directory at the repo root (and the [../emails.mdx](../emails.mdx) ingestion pipeline behind it) receives DMARC aggregate (rua) and TLS-RPT report messages — Google, Microsoft, and Outlook.com routinely deliver these today. Every DMARC rua row names a **`source_ip` that actually transmitted mail claiming to be your domain**. That is exactly the population the blacklist check exists to protect, and it routinely contains IPs *no static config knows about* — an ESP's rotating pool, a forgotten marketing tool, a misconfigured relay. This section closes that loop.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/blacklist/email-targets.ts` — functions `collectEmailReportIps()`, `parseRuaXml()` (email-derived IP/domain targets mined from ingested DMARC aggregate reports)
 
 ### 19.1 What we extract
 

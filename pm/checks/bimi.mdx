@@ -61,6 +61,9 @@ visible trust signal, so recipients see a generic monogram/avatar instead of the
 weakens recognition and engagement. Because BIMI presence is a signal some filters weakly reward,
 its absence is a soft negative for well-known brands.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/bimi/bimi.check.ts` — the `bimiCheck` checker, method `run()` (also contains the `content.bimi_dns_health` DNS-health finding logic)
+
 ## 2. Sub-checks
 
 `content.bimi.*` — comprehensive. Each remediation hands the user the exact record or step. The
@@ -85,6 +88,9 @@ rows are **future** (need an HTTPS fetch plus SVG/certificate validation) and ar
 | `content.bimi_dns_health` | The `_bimi` name resolves cleanly (no NXDOMAIN chain, no dangling CNAME to a dead host). | Resolve the name and any CNAME target. | **warning:** `_bimi` is a CNAME to an unclaimed target. | Point `_bimi` directly at the TXT record or a claimed host; remove dangling CNAMEs. |
 
 ## 3. How it is measured
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/bimi/bimi.check.ts` — the `bimiCheck` checker, method `run()`
 
 **First round (pure `node:dns/promises`).** The checker runs
 `resolveTxt('default._bimi.<domain>')` (and, for each entry in `CheckContext.selectors` that is

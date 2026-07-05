@@ -24,6 +24,9 @@ different transports:
 This check belongs to the **DNS & Infrastructure** dashboard category; its sub-check ids use the
 **`infra`** prefix, MTA-STS sub-family (`infra.mta_sts_*`).
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/mta-sts/mta-sts.check.ts` — `mtaStsCheck` (the `Checker` object), `run()` method; the policy `mx:` pattern-vs-MX-host consistency test uses the `mxPatternMatches()` function in the same file.
+
 **Read alongside:**
 * [Overview](../overview.mdx) — product charter, personas, port list.
 * [Engineering](../engineering.mdx) — the `Checker`/`Finding` contract, the file store, the scheduler.

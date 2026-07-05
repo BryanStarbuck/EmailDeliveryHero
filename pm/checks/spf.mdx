@@ -17,6 +17,9 @@ counts as an SPF *fail* for every message the domain sends.
 This check belongs to the **SPF** dashboard category; all sub-check ids use the **`spf`** checkId
 prefix. It is implemented as `spf.check.ts`.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/spf/spf.check.ts` — `spfCheck` (the `Checker` object, id `"spf"`), `run()` method.
+
 **Read alongside**
 - [../overview.mdx](../overview.mdx) — product charter, personas, port list (4444 UI / 9312 API).
 - [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
@@ -215,6 +218,9 @@ confirmation. The UI's tool-run panel (§6.2) renders the list verbatim.
 ## 4. How it is measured
 
 **First-round detection (pure `node:dns/promises`; `dig` only for the optional type-99 probe).**
+
+The record string is tokenized/parsed and the macro grammar validated in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/spf/spf.check.ts` — functions `parseSpfRecord()` and `findMacroError()`; the recursive lookup/void/pass-set expansion and per-term severity mapping is in `analyzeSpfTerms()`, and sending-IP coverage matching is in `ipInCidr()`.
 
 1. **Fetch.** `resolveTxt(domain)` returns each record's 255-byte string chunks; join them without
    a separator, then filter to strings starting `v=spf1` (case-insensitive; `v=spf10` does not

@@ -50,6 +50,9 @@ tracking link on a shortener. Each of those is individually survivable; together
 past 5 and the message is filtered even though the domain authenticates perfectly — which is why this
 check reports **each rule that fired with its individual score**, not just the total.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/content-scoring/content-scoring.check.ts` — the `contentScoringCheck` checker, method `run()`
+
 ## 2. Sub-checks
 
 Each sub-check maps to a SpamAssassin rule family where possible; scores below use SpamAssassin's
@@ -76,10 +79,17 @@ default-ruleset ballpark and are illustrative (the runner reports the actual fir
 The checker is a `Checker` implementation whose `run(ctx)` is a no-op unless a **sample message**
 exists for `ctx.domain` (see §5). When one does:
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/content-scoring/content-scoring.check.ts` — the `contentScoringCheck` checker, method `run()` (locates the sample, invokes the engine, derives findings)
+
 1. **Locate the sample.** Read the stored raw message (`.eml`) for the domain from the file store
    (`content_sample_messages`). If none exists, emit a single `info` finding "No sample message
    uploaded" with remediation "Upload a representative `.eml` for this domain" and return — the
    category cell shows an advisory, not a failure.
+
+   Implemented in code:
+   `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/content-scoring/sample-store.ts` — `getActiveSample()`, `readSampleRaw()`, `listSamples()` (the `.eml` sample store under `~/.email_delivery_hero/`)
+
 2. **Invoke the engine.** Shell to Homebrew SpamAssassin. Preferred: pipe the raw message to
    `spamc -R` (the client, talking to a running `spamd`) for speed; fallback: `spamassassin -t -R`
    (test mode, standalone). `-t` prevents any network side-effects on the real message and disables
@@ -97,6 +107,9 @@ exists for `ctx.domain` (see §5). When one does:
 5. **Score → severity.** Total < 2.0 → `ok`; 2.0–4.99 → `warning`; ≥ 5.0 → `critical`. Individual
    sub-checks inherit severity from the weight of their fired rules (a single high-weight rule such as
    a forged header or hidden text is `critical` even if the total is moderate).
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/content-scoring/spamassassin.ts` — `scoreSample()`, `parseSaOutput()` (parses `X-Spam-Status`/report), `locateSpamAssassin()` (binary detection), `subCheckForRule()` (maps a fired rule → sub-check), `isHighWeightRule()`; constants `SA_THRESHOLD` (5.0) and `SA_SAFE_TARGET` (2.0)
 
 **Edge cases & operational concerns.** A missing/stopped `spamd` → fall back to standalone
 `spamassassin` and, if the binary is absent, emit an `info` finding "SpamAssassin not installed
@@ -139,7 +152,10 @@ Spam & Content ▸ Content scoring          Score  3.2 / 5.0  [AMBER]
 **Per-domain config / sample upload.** A dedicated **"Sample message"** panel on the domain-detail
 page lets the user upload or paste the raw `.eml` (drag-drop `.eml`, or a textarea for pasted
 source). It records `from_header` and `subject` parsed from the sample and shows the store path. Only
-one active sample per domain is scored (history retained). Empty state: "No sample message — upload a
+one active sample per domain is scored (history retained).
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/content-scoring/sample-store.ts` — `saveSample()`, `getActiveSample()`, `listSamples()` (the `.eml` sample store under `~/.email_delivery_hero/`); constant `MAX_SAMPLE_BYTES` (10 MB cap) Empty state: "No sample message — upload a
 representative email to enable content scoring." Loading state: a spinner on "Re-score" while `spamc`
 runs. Never-run: the row group shows "Not scored yet." Admin-only settings (Settings page): the spam
 threshold override (default 5.0), inbox-safe target (default 2.0), whether to enable network content

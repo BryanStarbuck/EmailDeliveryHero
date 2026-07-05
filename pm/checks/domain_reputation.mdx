@@ -9,6 +9,9 @@ Email receivers and reputation systems increasingly weigh *who registered the do
 
 **Category:** DNS & Infrastructure. **checkId prefix:** `infra` (sub-family `domain-reputation`, e.g. `infra.domain_expiry`).
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/domain-reputation/domain-reputation.check.ts` — the `domainReputationCheck` checker, method `run()` (domain expiry, domain age, registrar lock, and related WHOIS/reputation findings).
+
 **Read alongside:**
 - [../overview.mdx](../overview.mdx) — product charter, personas, port list.
 - [../engineering.mdx](../engineering.mdx) — Checker/Finding contract, file store, scheduler.
@@ -59,6 +62,9 @@ Prefix every checkId with `infra.`. Comprehensive set:
 | `infra.record_available` | A registration record was actually retrievable | RDAP HTTP 200 with parseable body, or WHOIS parse success | **warning:** no RDAP/WHOIS data obtainable | "Could not read registration data for example.com (RDAP/WHOIS unavailable). Verify the domain exists and is registered; some ccTLDs restrict lookups." |
 
 ## 3. How it is measured
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/domain-reputation/domain-reputation.check.ts` — the `domainReputationCheck` checker, method `run()`.
 
 **Primary path — RDAP over HTTPS.**
 1. Determine the apex/registrable domain from `ctx.domain` (strip subdomains using the Public Suffix List).

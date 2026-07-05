@@ -26,6 +26,17 @@ Read these alongside the specs that define the shared machinery — do not dupli
 * [../overview.mdx](../overview.mdx) — product charter, personas, ports.
 * [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, the registry + runner,
   the on-disk store, and the scheduler that every check below plugs into.
+
+The shared machinery these specs plug into is implemented in code:
+
+* The check **registry** (the ordered `CHECKERS` array every checker registers in) is in
+  `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/index.ts` — `CHECKERS`.
+* The **orchestrator** that runs every registered checker per domain and assembles a run is in
+  `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/audit.service.ts` — class `AuditService`, method `auditDomain()` (with `runForAll()` / `rerunChecker()` entry points), the per-check dependency graph in
+  `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/run-graph.ts` — `CHECK_DEPENDENCIES`, and the on-disk run store in
+  `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/runs-store.ts` — `saveRun()` / `listRuns()` / `getRun()`.
+* The `Checker`/`Finding` contract every check below implements is defined in
+  `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/types.ts` — interface `Checker`.
 * [../spam_checks.mdx](../spam_checks.mdx) — the master catalog: every sub-check in one table,
   grouped into the six categories.
 * [../dashboard.mdx](../dashboard.mdx) — how each category rolls up into one color-coded cell.

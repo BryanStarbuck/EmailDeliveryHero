@@ -54,6 +54,9 @@ domain, never a blend of runs.
 | 9 | Domain registration reputation | [./domain_reputation.mdx](./domain_reputation.mdx) | `infra.domain_reputation` |
 | 10 | SMTP server security | [./smtp_security.mdx](./smtp_security.mdx) | `infra.smtp_security` |
 
+Each family plugs into the run pipeline by implementing the `Checker` interface and registering in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/index.ts` — the `CHECKERS` registry array that registers every Checker.
+
 ---
 
 ## 1. What it checks
@@ -295,6 +298,12 @@ Category-level rules that bind all ten:
    The other six are findings-only in the first round (payloads listed as future in §12).
 6. **Cost.** All first-round work is DNS + one HTTPS fetch + optional short SMTP probes; no paid
    feeds. RDAP queries are rate-limited per registry — cache per domain per day.
+
+The shared DNS-query layer every family lookup (point 1) goes through is implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dns-util.ts` — the shared DNS query helpers: `resolveTxt()`, `resolveMx()`, `resolveCname()`, `resolveNs()`, `resolveSoa()`, `resolveCaa()`, `resolve4()`/`resolve6()`, `reverse()`, and the `dig()` / `digDnssec()` / `digAnswer()` shell-out fallbacks; also `withToolRunLog()` (tool_runs capture) and `withDnsMemo()` (per-run caching).
+
+The zone & nameserver-health snapshot (`infra.dns_health`, point 5) is implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dns-health/dns-health.check.ts` — the `dnsHealthCheck` checker, method `run()`.
 
 ---
 

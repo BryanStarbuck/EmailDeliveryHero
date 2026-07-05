@@ -74,6 +74,9 @@ spam-score failures — but a broken DANE pin causes DANE-aware senders (includi
 delivering to you*, which is a far more severe outcome than a spam-folder placement. Absent DANE (and
 absent MTA-STS), your inbound mail is deliverable but downgradeable to cleartext.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dane-tlsa/dane-tlsa.check.ts` — the `daneTlsaCheck` checker, method `run()`
+
 ## 2. Sub-checks
 
 All ids use the `infra.` prefix (DANE sub-family). "Probe" = requires a live TLS/SMTP connection;
@@ -95,6 +98,9 @@ All ids use the `infra.` prefix (DANE sub-family). "Probe" = requires a live TLS
 | `infra.dane_starttls_offered` | The MX actually offers STARTTLS on :25 (DANE is meaningless if TLS is never offered). | Probe SMTP banner + `EHLO` for `STARTTLS` (FUTURE; overlaps `./tls_transport.mdx`). | **critical** if TLSA published but MX doesn't offer STARTTLS. | Enable STARTTLS on the MX; a TLSA record with no TLS is a guaranteed delivery failure for DANE senders. |
 
 ## 3. How it is measured
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dane-tlsa/dane-tlsa.check.ts` — the `daneTlsaCheck` checker, method `run()` (per-MX TLSA lookup, params/digest validation, DNSSEC-prerequisite, coverage, and rollover)
 
 **First-round (pure `node:dns/promises` + parsing), deterministic:**
 
@@ -173,6 +179,10 @@ optionally an admin can pin an **expected next-cert SPKI digest** so the app can
 a rollover record is missing. **Empty/never-run:** light-gray cell, "DANE not yet checked." **Loading:**
 skeleton rows. **No DANE published:** a single `warning` row "No TLSA records on any MX" with a
 one-click generator that, given a probed cert (future) or a pasted PEM, emits the `3 1 1` record.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dane-tlsa/tlsa-generator.ts` — `generateTlsa311()` (the "3 1 1" TLSA record generator: SPKI SHA-256 from a pasted PEM)
+
 **Admin-only settings:** toggle whether the cert-match probe is enabled (it opens outbound :25),
 probe timeout, and whether to require the DNSSEC AD bit from a validating resolver.
 
@@ -470,6 +480,9 @@ button, plus the cert **subject** and **notAfter** so the user confirms they pas
 /api/audit/tools/tlsa-generate` `{ pem, mxHost, ttl? }` → the `GeneratedTlsaRecord` JSON; a PEM
 parse failure returns the generator's user-readable message as a 400, rendered inline. Also
 offered pre-filled from the "No TLSA records on any MX" state (§4's one-click generator).
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dane-tlsa/tlsa-generator.ts` — `generateTlsa311()` (the "3 1 1" TLSA record generator: SPKI SHA-256 from a pasted PEM)
 
 ### 9.6 Block 5 — Run this check now
 

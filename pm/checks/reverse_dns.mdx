@@ -9,6 +9,9 @@ Reverse DNS is the mirror image of forward DNS: given a sending IP address, a PT
 
 **Category:** DNS & Infrastructure. **checkId prefix:** `infra` (PTR sub-family).
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/reverse-dns/reverse-dns.check.ts` — `reverseDnsCheck` (the `Checker` object, id `"infra.reverse_dns"`), `run()` method.
+
 **Read alongside:**
 - [../overview.mdx](../overview.mdx) — product charter, personas, port list.
 - [../engineering.mdx](../engineering.mdx) — the Checker/Finding contract, file store, scheduler.

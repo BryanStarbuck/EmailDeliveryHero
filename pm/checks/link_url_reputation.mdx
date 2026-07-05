@@ -19,6 +19,10 @@ Receiving mail systems do not only judge *who* sent a message — they judge *wh
 
 This check belongs to exactly one of the six dashboard categories: **Spam & Content** (`content`), URL-reputation sub-family.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/link-url-reputation/link-url-reputation.check.ts` — `linkUrlReputationCheck` (the `Checker` object, id `"content.url"`), `run()` method. Link extraction from the sample message, PSL registrable-domain reduction, and homograph/shortener detection are in the sibling
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/link-url-reputation/url-extract.ts` — functions `extractLinks()`, `parseLink()`, `registrableDomain()`, and `homographBrandFor()`.
+
 ## 1. What it checks
 
 There is no RFC that defines the URI blocklists themselves, but the query mechanism is the RHSBL half of **RFC 5782 (DNS Blacklists and Whitelists)**: the *registrable* domain of a link is queried **directly, with no reversal** — `<linkdomain>.<zone>`, `A`/`TXT` lookup, `127.0.0.x` return codes decode the reason. The registrable domain is derived with the **Public Suffix List** (PSL, publicsuffix.org) so that `foo.bar.co.uk` reduces to `bar.co.uk`, not `co.uk`; SURBL and DBL are queried on that reduced domain (SURBL additionally tests a couple of nested labels for wildcard abuse). URLs themselves are structured by **RFC 3986**; internationalized hosts by **IDNA2008 / RFC 5890-5891** (punycode `xn--`).

@@ -21,6 +21,11 @@ section (`spam_content` in the run YAML), the full-page Spam & Content run view,
 execution contract, and the problem-state catalog. The seven per-topic specs below own the
 per-sub-check detail; this file never contradicts them.
 
+Implemented in code: the category is not a single checker but the set of `content.*` `Checker`
+objects registered in
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/index.ts` — `CHECKERS` (the Spam & Content group: `bimiCheck`, `reportEmailsCheck`, `contentScoringCheck`, `listUnsubscribeCheck`, `linkUrlReputationCheck`, `reputationMetricsCheck`, `inboxPlacementCheck`), each with its own `run()` method; they are run and rolled up by class `AuditService.auditDomain()` in
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/audit.service.ts`.
+
 **Read alongside**
 - [../overview.mdx](../overview.mdx) — product charter, personas, port list.
 - [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.
@@ -315,6 +320,10 @@ npm install mailauth mailparser nodemailer tldts     # same TS/Node stack as the
 | Tool | Install | What we use it for | Example |
 | --- | --- | --- | --- |
 | **SpamAssassin** (`spamassassin`, `spamc`) | `brew install perl cpanminus && cpanm --notest Mail::SpamAssassin` | The scoring engine for [content_scoring.mdx](./content_scoring.mdx): total score + every fired rule with its points. Local-only (`-L`) so results are deterministic and don't double-count the URI zones. | `spamassassin --test-mode --local sample.eml` |
+
+Shelling out to SpamAssassin and parsing its score/rule report is implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/content-scoring/spamassassin.ts` — functions `scoreSample()` and `parseSaOutput()` (binary located by `locateSpamAssassin()`); the stored sample `.eml` it scores is read via `getActiveSample()` / `readSampleRaw()` in
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/content-scoring/sample-store.ts`.
 | **mailparser** (npm 3.9.x) | `npm i mailparser` | In-process MIME parse of the sample `.eml`: headers multimap, part tree, text/html bodies, attachments — feeds the header, MIME-structure, and link-extraction sub-checks without shelling out. | `simpleParser(rawEml)` |
 | **tidy-html5** | `brew install tidy-html5` | HTML well-formedness lint on the HTML part (advisory input to `content.html_hygiene`). | `tidy -quiet -errors part.html` |
 

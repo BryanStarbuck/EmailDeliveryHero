@@ -24,6 +24,9 @@ third-party telemetry, **almost every sub-check is FUTURE-round, gated behind an
 Postmaster Tools API, provider FBLs, ESP metrics) — the first round ships only the config/enrollment
 advisories and the DNSBL cross-reference.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/reputation-metrics/reputation-metrics.check.ts` — `reputationMetricsCheck` (the `Checker` object), `run()` method.
+
 **Read alongside**
 - [Overview](../overview.mdx) — product charter, personas, port list (4444 UI / 9312 API).
 - [Engineering](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler, and the

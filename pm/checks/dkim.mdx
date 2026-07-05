@@ -101,6 +101,9 @@ and is quarantined/rejected under an enforcing policy. Even under `p=none`, rece
 pass/fail as a reputation input, so unsigned or unverifiable mail lands in spam more often, and a
 weak (1024-bit) or SHA-1 key is a negative trust signal in its own right.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dkim/dkim.check.ts` — the `dkimCheck` checker, method `run()`
+
 ---
 
 ## 2. Tests we perform
@@ -122,6 +125,9 @@ Every way DKIM can be tested falls into one of four layers. This spec ships laye
 Every sub-check runs **per selector** unless noted as domain-scoped. Selectors come from
 `CheckContext.dkimSelectors` (the per-domain selector list); when that list is empty,
 `dkim.selector_discovery` probes the common-selector wordlist to find any that exist.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dkim/dkim.check.ts` — the `dkimCheck` checker, method `run()` (the DNS-layer key audit that emits every `dkim.*` sub-check below: presence, parse, key length, test flag, algorithm, selector discovery, CNAME delegation, resolver agreement, ADSP legacy)
 
 | Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
 | --- | --- | --- | --- | --- |
@@ -226,6 +232,9 @@ it, every run shells out to the bench tools below for **evidence-grade captures 
 and records **one entry per invocation** in `dkim.tool_runs[]` inside the run's YAML file
 (`~/.email_delivery_hero/runs/<domain>/<timestamp>.yaml` — [../storage.mdx](../storage.mdx), §5):
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dkim/dkim-tools.ts` — the `DkimToolBench` class (shells out to the doggo/kdig/openssl/dnsx debug bench and captures each invocation into `dkim.tool_runs[]`)
+
 ```yaml
 tool_runs:
   - tool: doggo                    # binary name
@@ -278,6 +287,9 @@ drill-down "diagnose it yourself" blocks but are never invoked by a run, so they
 ---
 
 ## 4. How it is measured
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dkim/dkim.check.ts` — the `dkimCheck` checker, method `run()` (query construction, CNAME resolution, parsing, selector discovery, duplicate-key and multi-resolver agreement, ADSP/DomainKeys leftovers, and severity mapping)
 
 **Query construction.** For each selector `s` and domain `d`, the checker builds the FQDN
 `` `${s}._domainkey.${d}` `` and calls `resolveTxt(name)` from `node:dns/promises`. `resolveTxt`

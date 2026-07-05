@@ -21,6 +21,9 @@ This check belongs to the **Spam & Content** dashboard category; all sub-check i
 **sample bulk message's headers**, it is a **FUTURE-round** check: it needs a captured message sample
 (and, for the endpoint probe, network egress) — it cannot run from DNS alone.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/list-unsubscribe/list-unsubscribe.check.ts` — `listUnsubscribeCheck` (the `Checker` object, id `"content.list_unsubscribe"`), `run()` method; the header block and `List-Unsubscribe` value are parsed by the functions `parseHeaderBlock()` and `parseListUnsubscribe()` in the same file.
+
 **Read alongside**
 - [Overview](../overview.mdx) — product charter, personas, port list (4444 UI / 9312 API).
 - [Engineering](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.

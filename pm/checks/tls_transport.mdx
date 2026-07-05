@@ -37,6 +37,9 @@ active attacker unless MTA-STS `enforce` or DANE/TLSA is also published.
 **Category:** DNS & Infrastructure. **checkId prefix:** `infra` (TLS sub-family). Every sub-check id
 below is `infra.tls_*` / `infra.starttls_*`.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/tls-transport/tls-transport.check.ts` — `tlsTransportCheck` (the `Checker` object, id `"infra.tls_transport"`), `run()` method.
+
 ---
 
 ## 1. What it checks

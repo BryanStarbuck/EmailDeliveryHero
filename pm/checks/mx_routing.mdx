@@ -9,6 +9,9 @@ MX (Mail eXchanger) records are the DNS records that tell every sending mail ser
 
 This check belongs to the **DNS & Infrastructure** dashboard category. All sub-check ids use the **`infra`** prefix (MX sub-family, e.g. `infra.mx_present`).
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/mx-routing/mx-routing.check.ts` — `mxRoutingCheck` (the `Checker` object, id `"infra.mx_routing"`), `run()` method.
+
 **Read alongside:**
 - [../overview.mdx](../overview.mdx) — product charter, personas, port list.
 - [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.

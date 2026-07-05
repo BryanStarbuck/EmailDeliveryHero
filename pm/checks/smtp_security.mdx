@@ -9,6 +9,9 @@ Every deliverability problem this app audits assumes the domain's mail servers t
 
 **Category:** DNS & Infrastructure. **checkId prefix:** `infra` (SMTP-security sub-family, e.g. `infra.open_relay`).
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/smtp-security/smtp-security.check.ts` — `smtpSecurityCheck` (the `Checker` object, id `"infra.smtp_security"`), `run()` method.
+
 **Read alongside:**
 - [../overview.mdx](../overview.mdx) — product charter, personas, port list.
 - [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, file store, scheduler.

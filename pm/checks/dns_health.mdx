@@ -20,6 +20,9 @@ This check belongs to the **DNS & Infrastructure** dashboard category. All sub-c
 
 ## 1. What it checks
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dns-health/dns-health.check.ts` — the `dnsHealthCheck` checker, method `run()`
+
 A domain is *delegated* by its parent zone (e.g. `.com`) via a set of NS records, and served *authoritatively* by the nameservers named in that set. The zone's own apex carries a second NS RRset plus a single **SOA** (Start Of Authority) record. This check enforces the correctness rules from **RFC 1034/1035** (zone structure, delegation, glue), **RFC 1912** (common operational errors — lame delegation, SOA sanity, multiple diverse NS), **RFC 2181** (name-server authority, TTL rules, MX/CNAME target rules), **RFC 2182** ("Selection and Operation of Secondary DNS Servers" — ≥2 NS, topological/geographic diversity), **RFC 1035 §3.3.11 / RFC 2181** (CNAME must not coexist with other data — hence no CNAME at a zone apex), and treats **open AXFR** (RFC 5936 zone transfer offered to the public) as an information-leak finding.
 
 Why receivers care: authentication records (SPF TXT, DKIM TXT, DMARC TXT, MX, MTA-STS) are only as reliable as the delegation serving them. If half the NS set is **lame** (listed but not answering authoritatively), a receiver's resolver that happens to query the lame server gets `SERVFAIL`/`REFUSED` and may treat SPF/DMARC as *temperror* — which many receivers score as "no policy," softening enforcement and letting spoofed mail through, or deferring legitimate mail. A **single nameserver** (or two on the same host/ASN/network) means one outage takes the whole domain — and all its mail auth — dark. A stale **SOA serial** that never advances can leave secondaries serving old records after a legitimate SPF/DKIM rotation, causing intermittent auth failures. An **apex CNAME** silently masks or breaks the apex MX/TXT/SOA, a classic "why did all my mail stop" incident.
@@ -56,6 +59,9 @@ Every remediation is a concrete record or step. `example.com` is the audited dom
 | `infra.recursion_open` | Authoritative NS is not also an **open recursive resolver** *(FUTURE — probe)* | Query the NS for an unrelated external name with RD set | **warning** if the NS recurses for arbitrary names (amplification/abuse risk) | Disable recursion on authoritative-only servers |
 
 ## 3. How it is measured
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dns-health/dns-health.check.ts` — the `dnsHealthCheck` checker, method `run()` (NS lameness, parent/child NS consistency, glue records, TTL sanity, zone-transfer exposure, open recursion, apex-CNAME)
 
 **First-round (pure `node:dns/promises`), deterministic:**
 

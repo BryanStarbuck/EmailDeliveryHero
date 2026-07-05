@@ -81,6 +81,9 @@ the body, or SPF fails because the Return-Path isn't aligned, so the seed's own
 decay** — a domain that inboxed last week starts sliding to Spam as reputation erodes; only a
 **trend** over repeated tests reveals it.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/inbox-placement/inbox-placement.check.ts` — the `inboxPlacementCheck` checker, method `run()` (seed-list overall + per-provider placement findings).
+
 ---
 
 ## 2. Sub-checks
@@ -118,6 +121,9 @@ for self-hosted) and parse folder + `Authentication-Results`. **Every sub-check 
 
 ## 3. How it is measured
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/inbox-placement/inbox-placement.check.ts` — the `inboxPlacementCheck` checker, method `run()`.
+
 **Send the probe.** The checker builds one test message tagged with a unique **test token** (unique
 per-seed plus-address, an `X-EDH-Test-Id` header, and a subject suffix — belt-and-suspenders because
 some providers strip custom headers and some rewrite subjects). Two send paths:
@@ -150,6 +156,9 @@ severity: overall inbox rate ≥ 80% → **ok**, 50–79% → **warning**, < 50%
 with majority Spam/Missing → that provider's row **critical**; Gmail majority Promotions →
 `seed_tab_placement` **warning**; any receiver-observed DMARC `fail` → `seed_auth_pass` **critical**.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/inbox-placement/placement.ts` — `scorePlacementTest()`, `aggregateByProvider()`, `aggregateOverall()`, `trendSeries()`, `placementPayload()`, `normalizeProvider()`; thresholds in constant `DEFAULT_PLACEMENT_THRESHOLDS`.
+
 **Edge cases.** Providers are **eventually consistent** — poll with backoff (e.g. 2, 5, 10, 15 min)
 before declaring Missing. Some providers **rewrite** the subject or **strip** custom headers → rely on
 the per-seed plus-address token, not the header, as the primary matcher. **Bounces** (5xx) are
@@ -164,6 +173,9 @@ credit (or self-hosted mailbox capacity) **and sends real email** every run. It 
 **much slower cadence** than DNS checks (daily/weekly, not every 6h), is **debounced** so a burst of
 manual audits does not fire many probe sends, and honors the seed service's API rate limits with
 backoff. Results are cached per test; re-reading a mailbox is idempotent on the test token.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/inbox-placement/placement-store.ts` — `recordPlacementTest()`, `listPlacementTests()`, `canSendSeedTest()`, `seedListConfigured()`, `testsSentInMonth()`; debounce window in constant `SEND_DEBOUNCE_MINUTES`.
 
 ---
 
@@ -303,6 +315,9 @@ The `store` module is the only code that reads/writes this shape, so promoting
 `results.inbox_placement` into `inbox_placement_tests` + `inbox_placement_results` is a single-module
 change; `seedList:` in `config.yaml` promotes to `seed_list_config`.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/inbox-placement/placement-store.ts` — `recordPlacementTest()`, `listPlacementTests()`, `seedListConfigured()` (persisting each test and reading the seed-list config).
+
 ---
 
 ## 6. When we run the check
@@ -321,6 +336,9 @@ change; `seedList:` in `config.yaml` promotes to `seed_list_config`.
   **and** emits real email; runs are **debounced/rate-limited**, respect a configurable **monthly
   budget cap**, honor the service's API limits, and poll seeds with backoff (2/5/10/15 min) before
   declaring Missing. Because it sends mail, it must never be triggered in a tight loop.
+
+  Implemented in code:
+  `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/inbox-placement/placement-store.ts` — `canSendSeedTest()`, `testsSentInMonth()` (monthly-quota / budget gating); debounce window in constant `SEND_DEBOUNCE_MINUTES`.
 - **Regression detection:** each test's per-provider and overall rates are diffed against the previous
   test (Engineering §8). A newly-appearing or worsened result — overall inbox rate dropping a
   threshold band, a provider flipping Inbox→Spam or Inbox→Missing, or a receiver-observed auth verdict

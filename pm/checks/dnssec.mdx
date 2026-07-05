@@ -61,6 +61,9 @@ every deliverability record forgeable and blocks DANE. A *broken* DNSSEC chain i
 to and from the domain stops because validating resolvers (including ~⅓ of the internet and most
 large mailbox providers' resolver paths) return SERVFAIL rather than the record.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dnssec/dnssec.check.ts` — the `dnssecCheck` checker, method `run()` (DNSKEY/DS chain, RRSIG expiry, NSEC3, chain-complete, SOA-signed, validates/bogus/no-AD, DANE-ready sub-checks).
+
 ---
 
 ## 2. Sub-checks
@@ -86,6 +89,9 @@ down. Weak-but-working (deprecated algorithm, near-expiry, missing DS on a signe
 ---
 
 ## 3. How it is measured
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dnssec/dnssec.check.ts` — the `dnssecCheck` checker, method `run()`.
 
 **First round (presence only, via the `dig` helper — not `node:dns/promises`).** Node's stock
 resolver **cannot query the DNSSEC record types at all**: `dns.resolve` supports only

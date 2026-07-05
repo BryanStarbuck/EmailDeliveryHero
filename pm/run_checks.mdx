@@ -54,6 +54,9 @@ manual-only path, no CLI-only path — the trigger changes **who calls**, never 
 only trigger-specific data is a `trigger` tag recorded on the audit record and in the log lines
 (§9): `manual` · `scheduled-inprocess` · `scheduled-os` · `api`.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/audit.service.ts` — class `AuditService`, methods `runForDomain()` (the single per-domain entry with the in-flight guard) and `runForAll()` (bounded `mapLimit` loop with settled semantics).
+
 ---
 
 ## 2. The run pipeline — stages of one domain's run
@@ -61,6 +64,9 @@ only trigger-specific data is a `trigger` tag recorded on the audit record and i
 A single domain's run moves through five stages. Stages 0 and 4 are strictly serial bookends;
 everything between is a **dependency-ordered graph**, not a lockstep sequence — a check starts the
 moment *its own* prerequisites are ready, regardless of what else is still in flight.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/run-graph.ts` — the `CHECK_DEPENDENCIES` edge map and `runCheckerGraph()` (each check's `run()` is `Promise.allSettled(itsDeps).then(runOne)`). Stage 0/4 bookends live in `audit.service.ts` (the `auditDomain` path); the per-run DNS memo is `withDnsMemo()` in `checks/dns-util.ts`.
 
 ```
 Stage 0            Stage 1                  Stage 2               Stage 3          Stage 4
@@ -190,6 +196,9 @@ already made, extended one notch:
 * `Semaphore` — `acquire(): Promise<Release>` over a FIFO wait queue; ~30 lines in the same file.
   `mapLimit` is expressible on top of it.
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/concurrency.ts` — `mapLimit()`, class `Semaphore`, the process-global `RESOURCE_SEMAPHORES` (dnsbl/smtp25/http/cpu), and `withResource()`.
+
 **Explicitly rejected**, with the reason on record:
 
 | Alternative | Why not |
@@ -254,6 +263,9 @@ Many checks eventually shell out to installed tools (the per-check specs name th
   exit is data (e.g. `dig` NXDOMAIN), not an exception.
 * Spawns of the same CPU-heavy tool go through the **`cpu` semaphore** (§3.1).
 
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/tool-runner.ts` — `runTool()` (execFile, args array, hard timeout + SIGKILL grace, `maxBuffer`, stdin data plane, structured `ToolResult`; optional `resource` slot via `withResource`).
+
 ### 5.2 The `ToolLocator` — discovery, once per run
 
 At Stage 0 the runner resolves each needed tool to an absolute path, in order:
@@ -266,6 +278,9 @@ At Stage 0 the runner resolves each needed tool to an absolute path, in order:
 
 The resolved map is cached in the RunContext and reported by `GET /api/health` style diagnostics
 so Settings can show "dig ✓ /opt/homebrew/bin/dig · spamassassin ✗ not installed".
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/tool-runner.ts` — `locateTool()` (override → PATH search → per-platform `fallbackDirs()`) and `locateTools()` (the once-per-run map); the config override is read via `configuredToolPath()` from `config.yaml → tools.paths`.
 
 ### 5.3 Graceful degradation is mandatory
 
