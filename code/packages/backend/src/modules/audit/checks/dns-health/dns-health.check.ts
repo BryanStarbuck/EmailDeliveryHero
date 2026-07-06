@@ -1123,20 +1123,17 @@ async function checkDanglingNs(
 }
 
 function detectTxtDuplicates(records: string[]): string[] {
-	const dups: string[] = [];
+	// Multiple distinct verification tokens (google-site-verification, MS=, …) are
+	// legitimate — one per verified account — so only exact duplicates are flagged.
 	const counts = new Map<string, number>();
 	for (const r of records)
 		counts.set(r.toLowerCase(), (counts.get(r.toLowerCase()) ?? 0) + 1);
-	for (const [, c] of counts) if (c > 1) dups.push("exact-duplicate TXT");
-	for (const p of [
-		"google-site-verification",
-		"ms=",
-		"facebook-domain-verification",
-	]) {
-		const c = records.filter((r) => r.toLowerCase().startsWith(p)).length;
-		if (c > 1) dups.push(`${c}× "${p}"`);
-	}
-	return unique(dups);
+	const extras = [...counts.values()]
+		.filter((c) => c > 1)
+		.reduce((n, c) => n + c - 1, 0);
+	return extras > 0
+		? [`${extras} exact-duplicate TXT record${extras === 1 ? "" : "s"}`]
+		: [];
 }
 
 /** infra.multi_txt_spf + infra.txt_bloat. */
@@ -1193,8 +1190,7 @@ async function checkTxt(
 		bloat.push(
 			`TXT set totals ${totalOctets} octets (approaching UDP fragmentation / forcing TCP-only responses)`,
 		);
-	if (dups.length > 0)
-		bloat.push(`duplicate verification strings: ${dups.join(", ")}`);
+	if (dups.length > 0) bloat.push(dups.join(", "));
 	if (bloat.length > 0) {
 		findings.push({
 			id: "infra.txt_bloat",
@@ -1234,8 +1230,7 @@ async function checkTxt(
 			issues.push(
 				`TXT set totals ${octets} octets (risks UDP fragmentation / TCP-only responses)`,
 			);
-		if (nameDups.length > 0)
-			issues.push(`duplicate records: ${nameDups.join(", ")}`);
+		if (nameDups.length > 0) issues.push(nameDups.join(", "));
 		if (issues.length > 0) {
 			findings.push({
 				id: `infra.txt_bloat.${name}`,
