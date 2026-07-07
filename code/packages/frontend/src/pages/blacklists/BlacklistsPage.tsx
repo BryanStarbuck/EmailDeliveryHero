@@ -13,6 +13,7 @@ import type {
 	BlacklistZoneResult,
 	Severity,
 } from "@/api/types";
+import { ActionLinksRow } from "@/components/ActionLinksRow";
 import { cn } from "@/lib/utils";
 import { useScanProgress, useScanRunner } from "@/scan/ScanProgressContext";
 
@@ -172,20 +173,25 @@ export function BlacklistsPage() {
 
 	return (
 		<div className="mx-auto max-w-5xl">
-			<div className="mb-1 flex items-center justify-between">
-				<h1 className="text-2xl font-bold">Blacklists</h1>
-				<button
-					type="button"
-					onClick={() =>
-						runDomains((domains ?? []).map((d) => ({ id: d.id, name: d.name })))
-					}
-					disabled={scanning || (domains ?? []).length === 0}
-					className="flex items-center gap-2 rounded-md bg-green-700 px-3 py-1.5 text-sm font-semibold text-white hover:bg-green-800 disabled:opacity-50"
-				>
-					<RefreshCw className={cn("h-4 w-4", scanning && "animate-spin")} />
-					Re-check all
-				</button>
-			</div>
+			<h1 className="text-2xl font-bold">Blacklists</h1>
+			{/* Page action in the house action-links row directly under the title (pm/page_actions.mdx)
+			    — "Re-check all" is an operational re-run, not a create CTA, so it belongs here as a link. */}
+			<ActionLinksRow
+				className="mb-2 mt-1"
+				actions={[
+					{
+						label: scanning ? "Re-checking…" : "Re-check all",
+						icon: RefreshCw,
+						busy: scanning,
+						disabled: scanning || (domains ?? []).length === 0,
+						title: "Re-run blocklist checks for every monitored domain",
+						onClick: () =>
+							runDomains(
+								(domains ?? []).map((d) => ({ id: d.id, name: d.name })),
+							),
+					},
+				]}
+			/>
 			<p className="mb-6 text-sm text-[var(--edh-muted)]">
 				Fleet-wide blocklist status: every listing across every monitored
 				domain, the fix for each, and what the registry could and couldn't

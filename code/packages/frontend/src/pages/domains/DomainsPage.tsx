@@ -31,6 +31,7 @@ import {
 	useUpdateDomain,
 } from "@/api/domains";
 import type { ArcForwarderConfig, MonitoredDomain } from "@/api/types";
+import { ActionLinksRow } from "@/components/ActionLinksRow";
 import { StatusCell } from "@/components/StatusCell";
 import {
 	CATEGORIES,
@@ -231,37 +232,38 @@ export function DomainsPage() {
 
 	return (
 		<div className="mx-auto max-w-6xl">
-			<header className="mb-6 flex items-center justify-between">
+			{/* Header: the title/description block, with the single primary CREATE CTA ("Add domain")
+			    kept as a filled header button. Every other page action lives in the house action-links
+			    row directly under the title (pm/page_actions.mdx). */}
+			<header className="mb-2 flex items-center justify-between">
 				<div>
 					<h1 className="text-2xl font-bold">Domains</h1>
 					<p className="text-sm text-[var(--edh-muted)]">
 						The email-sending domains you monitor for deliverability.
 					</p>
 				</div>
-				<div className="flex items-center gap-2">
-					<button
-						type="button"
-						onClick={() =>
-							runDomains(list.map((d) => ({ id: d.id, name: d.name })))
-						}
-						disabled={scanning || list.length === 0}
-						title="Run a fresh audit for every domain"
-						className="inline-flex items-center gap-2 rounded-md border border-[var(--edh-border)] px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"
-					>
-						<RefreshCw
-							className={scanning ? "h-4 w-4 animate-spin" : "h-4 w-4"}
-						/>
-						{scanning ? "Running…" : "Run all"}
-					</button>
-					<button
-						type="button"
-						onClick={() => setDialog({ mode: "add" })}
-						className="inline-flex items-center gap-2 rounded-md bg-[var(--edh-primary)] px-3 py-2 text-sm font-medium text-white"
-					>
-						<Plus className="h-4 w-4" /> Add domain
-					</button>
-				</div>
+				<button
+					type="button"
+					onClick={() => setDialog({ mode: "add" })}
+					className="inline-flex items-center gap-2 rounded-md bg-[var(--edh-primary)] px-3 py-2 text-sm font-medium text-white"
+				>
+					<Plus className="h-4 w-4" /> Add domain
+				</button>
 			</header>
+			<ActionLinksRow
+				className="mb-6"
+				actions={[
+					{
+						label: scanning ? "Running…" : "Run all",
+						icon: RefreshCw,
+						busy: scanning,
+						disabled: scanning || list.length === 0,
+						title: "Run a fresh audit for every domain",
+						onClick: () =>
+							runDomains(list.map((d) => ({ id: d.id, name: d.name }))),
+					},
+				]}
+			/>
 
 			{/* The table scrolls independently below the header; its header row is sticky (§2). */}
 			<div className="max-h-[calc(100vh-12rem)] overflow-auto rounded-lg border border-[var(--edh-border)] bg-white">

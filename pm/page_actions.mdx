@@ -1,0 +1,158 @@
+---
+title: EmailDeliveryHero — Page Actions (the action-links row)
+description: The house standard for how page-level actions render across EmailDeliveryHero — a horizontal row of action HYPERLINKS placed directly under the page title, never a dropdown. Defines the visual spec, the reusable ActionLinksRow component and its API, the destructive-action confirm modal, the "More ▾" overflow rule, and a per-page catalog of which pages carry the row (and which keep a single primary CTA as a header button and why).
+---
+
+# EmailDeliveryHero — Page Actions
+
+This spec fixes **one** thing: how **page-level actions** render. A page-level action is a verb that
+applies to the **whole page** — "Run all", "Re-check all", "Export backup", "Delete all" — as opposed
+to a **row** action (those live in the `⋮` [RowMenu](../code/packages/frontend/src/components/RowMenu.tsx),
+per [Dashboard](./dashboard.mdx) §4.3) or a control **inside** a card or panel.
+
+The house standard, borrowed from the sister app's processing-queue page, is a **row of hyperlinks
+directly under the page title** — **not** a dropdown, **not** a cluster of filled buttons.
+
+---
+
+## 1. The rule (LOCKED)
+
+* **Page-level actions render as a horizontal row of hyperlinks placed directly UNDER the page
+  title.** Not a dropdown. Not a button cluster in the top-right.
+* **Links, not buttons.** Each action is link-colored text (the `--edh-primary` token), no border or
+  fill, underline on **hover only**, pointer cursor, with a small (~14px) leading icon.
+* **One carve-out — the primary CTA.** A page's single primary **create / save** CTA (e.g.
+  "Add domain", "Save") **MAY** stay a filled header button in the top-right. **Everything else** —
+  re-runs, refreshes, exports, ingests, deletes — becomes a link in the row.
+* **Operational actions are always links.** "Re-run", "Re-check all", "Ingest now", "Refresh" are
+  operational, never create CTAs, so they belong in the row even when they are the page's only action.
+* **Never fabricate actions.** The row only ever surfaces actions already wired to a real handler or
+  endpoint. An action-less page gets no row.
+
+Implemented in code: `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/ActionLinksRow.tsx`,
+component `ActionLinksRow`.
+
+---
+
+## 2. Visual spec
+
+Modeled on the sister app's `.q-actions` row (`~/BGit/all/marketing/ai/code/ui/Q/page_processing_queue.js`,
+`setupActions()`), re-implemented in this app's Tailwind tokens — the reference CSS is **not** imported.
+
+| Property | Value |
+| --- | --- |
+| Layout | `flex flex-wrap items-center`, **14px gap** (`gap-3.5`), `text-sm` |
+| Position | directly under the page `<h1>` (below a one-line description if the title has one) |
+| Item | borderless hyperlink: leading icon (`h-3.5 w-3.5` ≈ 14px) + `gap-1.5` + label |
+| Item color | `text-[var(--edh-primary)]`; **no** underline at rest, `hover:underline` |
+| Separator | a thin `·` in `text-[var(--edh-border)]` **between** items |
+| Busy | the leading icon spins (`animate-spin`); the item is disabled while in-flight |
+| Disabled | `opacity-40`, no underline, clicks blocked |
+| Destructive | tinted `text-red-600`; fires through the web confirm modal (§4) |
+| Overflow | all items inline by default; a trailing **"More ▾"** menu holds only items flagged `overflow` |
+
+The row uses `role="toolbar"` with an `aria-label` ("Page actions" by default).
+
+---
+
+## 3. The component API
+
+`ActionLinksRow` takes an array of `ActionLink` and renders the row. Defined in
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/ActionLinksRow.tsx`.
+
+```ts
+interface ActionLink {
+  label: string;              // visible label
+  icon?: LucideIcon;          // ~14px leading icon
+  onClick?: () => void;       // handler (reuse the page's existing one)
+  disabled?: boolean;         // grey out + block
+  busy?: boolean;             // spin the icon + block (in-flight)
+  danger?: boolean;           // red tint; with `confirm`, gate behind the modal
+  confirm?: { title: string; body?: React.ReactNode; confirmLabel?: string };
+  overflow?: boolean;         // push into the "More ▾" menu
+  title?: string;             // tooltip / accessible title
+}
+
+function ActionLinksRow(props: {
+  actions: ActionLink[];
+  className?: string;         // e.g. spacing under the title
+  ariaLabel?: string;         // toolbar label (default "Page actions")
+}): JSX.Element;
+```
+
+* The row owns nothing but presentation and the confirm-modal state — **handlers stay on the page**
+  and are passed straight through, so an action reuses the exact mutation/endpoint it always used.
+* The trailing overflow menu is only rendered when at least one action sets `overflow: true`
+  (component-internal `MoreMenu`, portalled so it can never be clipped — same approach as `RowMenu`).
+
+---
+
+## 4. Destructive actions — web confirm modal (never `window.confirm`)
+
+A `danger` action with a `confirm` block routes through a small **web** confirm dialog (an
+`alertdialog`, Cancel focused by default, Escape/backdrop cancels) — never the native
+`window.confirm`. This mirrors the [Domains](./domains.mdx) remove dialog and the reference's
+`openDeleteAllContentModal`.
+
+Handled in code: `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/components/ActionLinksRow.tsx`,
+internal component `ConfirmDialog` (invoked from `ActionLinksRow` via the `confirming` state).
+
+Example:
+
+```tsx
+<ActionLinksRow
+  actions={[
+    { label: "Re-run", icon: RefreshCw, busy: scanning, onClick: onRunAgain },
+    {
+      label: "Delete report",
+      icon: Trash2,
+      danger: true,
+      confirm: {
+        title: "Delete this report?",
+        body: "The domain itself is unaffected.",
+        confirmLabel: "Delete report",
+      },
+      onClick: onDelete,
+    },
+  ]}
+/>
+```
+
+---
+
+## 5. Per-page catalog
+
+Which pages carry the row, and which keep a single primary CTA as a header button (the §1 carve-out).
+
+| Page | Source file | Page actions | Rendering |
+| --- | --- | --- | --- |
+| **Domains** | `pages/domains/DomainsPage.tsx` | Run all · (Add domain) | **Row** = "Run all"; **primary CTA** "Add domain" stays a filled header button |
+| **Blacklists** | `pages/blacklists/BlacklistsPage.tsx` | Re-check all | **Row** = "Re-check all" (operational re-run → link) |
+| Dashboard | `pages/app/DashboardPage.tsx` | Run checks | Single primary run CTA kept as header button; the "Scheduled" toggle is a control widget, not an action |
+| Run detail | `pages/domains/RunDetailPage.tsx` | Run checks again | Single CTA + "Back" nav chrome — CTA kept as button |
+| DKIM / DMARC / SPF / DNS run pages | `pages/domains/{Dkim,Dmarc,Spf,Dns}Page.tsx` | Re-run | Single CTA inside the run chrome (back ‹ · prev/next › · Re-run) — kept as button |
+| Content scoring | `pages/domains/ContentScoringPage.tsx` | Re-run | Single CTA + back chrome — kept as button |
+| Blacklists (per domain) | `pages/blacklists/BlacklistDomainPage.tsx` | Re-run | Single CTA inside the run chrome — kept as button |
+| Domain reports | `pages/domains/DomainReportsPage.tsx` | Ingest now | Single CTA + back chrome — kept as button |
+| DNSSEC fleet / expiry | `pages/dnssec/{DnssecPage,DnssecExpiryPage}.tsx` | Re-check all / Re-check expiring | Single action, part of the filter/summary toolbar row — left in place |
+| Scheduled checks | `pages/scheduler/ScheduledChecksPage.tsx` | Save | Single **save** CTA — kept as button (the §1 carve-out) |
+| Reports | `pages/reports/ReportsPage.tsx` | — | No page-level action (row-scoped `⋮` menu only) — no row |
+| Audits | `pages/audits/AuditsPage.tsx` | — | Only per-card "Run audit" actions — no page-level row |
+| Settings (General / Admin / Scheduling) | `pages/settings/*.tsx` | — | Actions are section-scoped inside cards (Export, Re-detect, Import) — not page-title-level |
+
+> All source paths are relative to
+> `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/frontend/src/`.
+
+When a "kept as button" page grows a **second** action, fold both into the row (primary create/save
+CTA may stay a button; the rest become links) so the standard holds.
+
+---
+
+## 6. Adding the row to a new page
+
+1. Import `ActionLinksRow` from `@/components/ActionLinksRow`.
+2. Render it **directly under the page `<h1>`** (below the description if there is one).
+3. Pass each **already-wired** handler as an `ActionLink`; mark in-flight state with `busy`, and any
+   destructive action with `danger` + a `confirm` block.
+4. Keep **at most one** primary create/save CTA as a filled header button; move everything else into
+   the row.
