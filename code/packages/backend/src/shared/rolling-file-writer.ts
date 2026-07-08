@@ -11,13 +11,20 @@ import { dirname } from "node:path";
 /**
  * Dependency-free, size-bounded rolling file writer (see pm/errors.mdx §2, §6).
  *
- * Why not winston/pino? We want a strict per-stream cap with no extra deps and, above all,
- * synchronous writes so a crash immediately after an error is logged still leaves that error on
- * disk. This writer keeps one active file plus at most `maxBackups` rotated files (default 5), each
- * ≤ `maxBytes` (default 5 MiB). Set `maxBackups: 0` for a single file that is truncated on overflow.
+ * Why not winston/pino? We want a strict per-stream cap with no extra deps and, above all, a
+ * synchronous durable path so a crash immediately after an error is logged still leaves that error
+ * on disk. This writer keeps one active file plus at most `maxBackups` rotated files (default 5),
+ * each ≤ `maxBytes` (default 5 MiB). Set `maxBackups: 0` for a single file truncated on overflow.
  *
- * Writes are synchronous (appendFileSync) and best-effort: a logger must never be able to crash the
- * process it is instrumenting, so every path is guarded and degrades to stderr.
+ * Two write paths (modeled on the Philosophers_Stone gold-standard writer):
+ *   • write()      — SYNCHRONOUS + durable. Used for WARN/ERROR/FATAL so the fault trail is on disk
+ *                    immediately, even before a process.exit(1) after an uncaughtException.
+ *   • writeAsync() — BATCHED + non-blocking. The hot path (INFO/DEBUG/VERBOSE) enqueues and flushes
+ *                    on the next tick (setImmediate) in a single appendFileSync, so request handlers
+ *                    never block on log I/O. flush()/close() drain it durably on shutdown.
+ *
+ * All paths are best-effort and guarded: a logger must never be able to crash the process it is
+ * instrumenting, so every path degrades to stderr rather than throwing.
  */
 export interface RollingFileWriterOptions {
 	/** Absolute path to the active log file. */
@@ -38,6 +45,9 @@ export class RollingFileWriter {
 	/** Cached size of the active file so we avoid a statSync on every single write. */
 	private size = 0;
 	private ready = false;
+	/** Pending lines for the async batched path, drained on the next tick or synchronously on exit. */
+	private queue: string[] = [];
+	private scheduled = false;
 
 	constructor(opts: RollingFileWriterOptions) {
 		this.filePath = opts.filePath;
@@ -60,11 +70,47 @@ export class RollingFileWriter {
 	}
 
 	/**
-	 * Append one already-formatted line. Best-effort and non-throwing: a logger must never be able to
-	 * crash the process it is trying to instrument.
+	 * Append one already-formatted line SYNCHRONOUSLY (durable). Best-effort and non-throwing: a
+	 * logger must never be able to crash the process it is trying to instrument. Use this for the
+	 * fault trail (WARN/ERROR/FATAL) so the line is on disk before a possible crash-exit.
+	 *
+	 * Ordering note: this flushes any queued async lines first, so a synchronous error line never
+	 * jumps ahead of the batched INFO/DEBUG lines that preceded it in the same file.
 	 */
 	write(line: string): void {
-		const data = line.endsWith("\n") ? line : `${line}\n`;
+		if (this.queue.length) this.flush();
+		this.writeNow(line.endsWith("\n") ? line : `${line}\n`);
+	}
+
+	/**
+	 * Append one already-formatted line on the BATCHED, non-blocking path. Lines are enqueued and
+	 * drained together on the next tick (setImmediate) in a single appendFileSync, so the hot path
+	 * (INFO/DEBUG/VERBOSE) never blocks a request on disk I/O. Drained durably by flush()/close().
+	 */
+	writeAsync(line: string): void {
+		this.queue.push(line.endsWith("\n") ? line : `${line}\n`);
+		if (!this.scheduled) {
+			this.scheduled = true;
+			setImmediate(() => this.flush());
+		}
+	}
+
+	/** Drain the queued async lines in one batched write. Called on the next tick and on shutdown. */
+	flush(): void {
+		this.scheduled = false;
+		if (this.queue.length === 0) return;
+		const batch = this.queue.join("");
+		this.queue.length = 0;
+		this.writeNow(batch);
+	}
+
+	/** Flush everything pending — the durable drain to call on process shutdown. */
+	close(): void {
+		this.flush();
+	}
+
+	/** The single shared write path used by both write() and flush(): size-check, roll, append. */
+	private writeNow(data: string): void {
 		try {
 			this.ensureReady();
 			const incoming = Buffer.byteLength(data);

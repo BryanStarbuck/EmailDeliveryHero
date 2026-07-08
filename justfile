@@ -23,6 +23,10 @@ label   := "com.emaildeliveryhero.scheduler"
 plist   := agents / label + ".plist"
 tmpl    := code / "deploy/launchd/com.emaildeliveryhero.scheduler.plist.tmpl"
 trigger := code / "deploy/launchd/trigger-scheduler.mjs"
+# Dependency-free rotating stdout sink (5 MiB / 5 generations; EDH_LOG_MAX_BYTES / EDH_LOG_GENERATIONS
+# override). Both the background `run` launcher and the launchd scheduler pipe through this so their
+# /tmp logs are size-bounded instead of growing forever. Mirrors the in-app RollingFileWriter policy.
+rotator := repo / "scripts/log_rotate_pipe.mjs"
 
 # App ports (keep in sync with pm/overview.mdx, code/packages/frontend/vite.config.ts and backend .env).
 # web_port is the UI WebApp — localhost:4444 by default (per pm/overview.mdx "Key facts").
@@ -120,6 +124,7 @@ install-agent:
     sed \
       -e "s#__NODE_BIN__#${node_bin}#g" \
       -e "s#__TRIGGER_SCRIPT__#{{trigger}}#g" \
+      -e "s#__ROTATOR__#{{rotator}}#g" \
       -e "s#__API_PORT__#{{api_port}}#g" \
       -e "s#__LOG_OUT__#/tmp/edh.scheduler.out.log#g" \
       -e "s#__LOG_ERR__#/tmp/edh.scheduler.err.log#g" \
@@ -186,7 +191,10 @@ run mode="app": _preflight-tools _preflight-openauth stop
       launch="start"
     fi
     echo "▶ Starting EmailDeliveryHero in the background — web :{{web_port}} + API :{{api_port}}…"
-    nohup pnpm -C "{{code}}" "$launch" >"{{webapp_log}}" 2>&1 &
+    # Pipe combined stdout+stderr through the rotating sink so {{webapp_log}} stays size-bounded
+    # (5 MiB / 5 generations) instead of growing forever. Process substitution — NOT a `| pipe` —
+    # so `$!` remains the pnpm launcher pid (a pipe would make it the sink's pid, breaking stop/wait).
+    nohup pnpm -C "{{code}}" "$launch" > >(exec node "{{rotator}}" "{{webapp_log}}") 2>&1 &
     pid=$!
     echo "$pid" >"{{pid_file}}"
 

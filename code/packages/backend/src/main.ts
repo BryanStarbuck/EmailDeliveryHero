@@ -5,7 +5,7 @@ import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import { AllExceptionsFilter } from "@shared/all-exceptions.filter";
-import { appLogger, LOG_DIR } from "@shared/logging";
+import { appLogger, flushLogs, LOG_DIR } from "@shared/logging";
 import helmet from "helmet";
 import { AppModule } from "./app.module";
 import { buildAuthFrontend } from "./modules/auth/auth-frontend";

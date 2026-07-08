@@ -4,24 +4,33 @@
 <!--
   EmailDeliveryHero — launchd LaunchAgent template.
 
-  `just build` renders this template (substituting __NODE_BIN__, __TRIGGER_SCRIPT__, __API_PORT__,
-  __LOG_OUT__, __LOG_ERR__) and installs the result to
+  `just build` renders this template (substituting __NODE_BIN__, __TRIGGER_SCRIPT__, __ROTATOR__,
+  __API_PORT__, __LOG_OUT__, __LOG_ERR__) and installs the result to
   ~/Library/LaunchAgents/com.emaildeliveryhero.scheduler.plist.
 
   It runs our own Node trigger script on a calendar schedule, which POSTs to the local backend to
   run every due deliverability audit. Edit the StartCalendarInterval entries to change the times /
   add more runs per day (one <dict> per time of day).
+
+  Logging: rather than launchd's StandardOut/StandardErrorPath (raw, UNBOUNDED files), the trigger is
+  run under `bash -c` with its stdout/stderr piped through scripts/log_rotate_pipe.mjs via process
+  substitution, so /tmp/edh.scheduler.out.log and .err.log are size-bounded (5 MiB / 5 generations)
+  exactly like the app's own log.log / error.err. `exec` keeps the trigger's own exit code as the
+  job's exit code, so launchctl still surfaces failures.
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
     <string>com.emaildeliveryhero.scheduler</string>
 
-    <!-- Run our TypeScript-on-Node trigger (not a raw curl) so background work stays in-stack. -->
+    <!-- Run our TypeScript-on-Node trigger (not a raw curl) so background work stays in-stack.
+         Wrapped in `bash -c` so stdout/stderr can be piped through the rotating log sink (process
+         substitution, not a pipe, so `exec` preserves the trigger's exit code for launchctl). -->
     <key>ProgramArguments</key>
     <array>
-        <string>__NODE_BIN__</string>
-        <string>__TRIGGER_SCRIPT__</string>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>exec "__NODE_BIN__" "__TRIGGER_SCRIPT__" &gt; &gt;(exec "__NODE_BIN__" "__ROTATOR__" "__LOG_OUT__") 2&gt; &gt;(exec "__NODE_BIN__" "__ROTATOR__" "__LOG_ERR__")</string>
     </array>
 
     <key>EnvironmentVariables</key>
@@ -47,9 +56,8 @@
     <key>RunAtLoad</key>
     <false/>
 
-    <key>StandardOutPath</key>
-    <string>__LOG_OUT__</string>
-    <key>StandardErrorPath</key>
-    <string>__LOG_ERR__</string>
+    <!-- No StandardOut/StandardErrorPath: the ProgramArguments command redirects stdout/stderr
+         through the rotating sink itself (see __LOG_OUT__ / __LOG_ERR__ above), so launchd must NOT
+         also open those paths as raw unbounded files. -->
 </dict>
 </plist>

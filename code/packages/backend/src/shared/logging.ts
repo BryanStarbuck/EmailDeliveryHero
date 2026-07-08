@@ -104,9 +104,15 @@ class AppLogger implements LoggerService {
 		const isError = level === "ERROR" || level === "WARN" || level === "FATAL";
 		const isQuietDebug =
 			(level === "DEBUG" || level === "VERBOSE") && !DEBUG_CONSOLE;
-		if (isError) this.err.write(line);
-		// Keep a single chronological stream in log.log too (incl. errors, for context).
-		this.out.write(line);
+		if (isError) {
+			// Fault trail: SYNCHRONOUS to both files so the line is durable even across a crash/exit.
+			// (out.write() flushes any queued async lines first, so ordering stays chronological.)
+			this.err.write(line);
+			this.out.write(line);
+		} else {
+			// Hot path: BATCHED + async so callers never block on disk I/O. Drained on shutdown.
+			this.out.writeAsync(line);
+		}
 		if (ECHO_CONSOLE && !isQuietDebug) {
 			const sink = isError ? process.stderr : process.stdout;
 			try {
@@ -144,6 +150,15 @@ class AppLogger implements LoggerService {
 		// Single configurable knob is the console echo; file levels are always captured.
 	}
 
+	/**
+	 * Synchronously drain both writers' async batch buffers. Call on process shutdown (SIGINT/SIGTERM/
+	 * beforeExit) and before a crash-exit so nothing enqueued on the hot path is lost. See main.ts.
+	 */
+	flush(): void {
+		this.out.close();
+		this.err.close();
+	}
+
 	// --- Convenience helpers for non-Nest call sites ------------------------------------
 	logError(message: string, cause?: unknown, context?: string): void {
 		this.emit("ERROR", message, context, cause);
@@ -164,6 +179,13 @@ class AppLogger implements LoggerService {
 
 /** Process-wide singleton. Import this anywhere that needs to log. */
 export const appLogger = new AppLogger();
+
+/**
+ * Flush the logger's async batch buffers to disk synchronously. Wired into the process shutdown /
+ * crash handlers in main.ts (SIGINT, SIGTERM, beforeExit, uncaughtException) so no queued hot-path
+ * line is lost when the process goes down.
+ */
+export const flushLogs = (): void => appLogger.flush();
 
 /** Standalone helpers so non-Nest modules don't need to touch the class. */
 export const logError = (
