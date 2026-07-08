@@ -109,7 +109,20 @@ async function bootstrap() {
 	process.on("uncaughtException", (err) => {
 		// The write is synchronous, so the FATAL line is on disk before we exit (pm/errors.mdx §3, §6).
 		appLogger.logFatal("Uncaught exception", err, "Process");
+		// Drain the async hot-path buffer too, so nothing queued is lost on the way down.
+		flushLogs();
 		process.exit(1);
+	});
+	// Flush the batched async log buffer to disk on every clean shutdown path so no queued INFO/DEBUG
+	// line is lost when the process exits (SIGINT from Ctrl-C / `just stop`, SIGTERM, or beforeExit).
+	process.on("beforeExit", () => flushLogs());
+	process.on("SIGINT", () => {
+		flushLogs();
+		process.exit(130);
+	});
+	process.on("SIGTERM", () => {
+		flushLogs();
+		process.exit(143);
 	});
 
 	const raw = config.get<string>("PORT") ?? "9312";
