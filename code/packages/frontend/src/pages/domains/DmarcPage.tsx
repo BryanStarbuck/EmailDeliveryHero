@@ -35,6 +35,7 @@ import {
 } from "@/lib/dmarc-checks";
 import {
 	matchArcProblemStates,
+	matchDmarcbisProblemStates,
 	matchProblemStates,
 	problemStateById,
 } from "@/lib/dmarc-problems";
@@ -104,12 +105,13 @@ const RESULT_RANK: Record<UnitResult, number> = {
 	fail: 3,
 };
 
-/** The DMARC (+ARC companion) findings of one run — the band/history data source. */
+/** The DMARC (+ARC + DMARCbis companions) findings of one run — the band/history data source. */
 function dmarcCategoryFindings(run: AuditResult): Finding[] {
 	return (run.findings ?? []).filter(
 		(f) =>
 			f.checkId === "dmarc" ||
 			f.checkId === "arc" ||
+			f.checkId === "dmarcbis" ||
 			f.checkId === "dmarc.reports",
 	);
 }
@@ -365,6 +367,9 @@ export function DmarcPage() {
 		...matchArcProblemStates(
 			(result?.findings ?? []).filter((f) => f.checkId === "arc"),
 		),
+		// DMARCbis-nn conformance cards (pm/checks/dmarcbis.mdx §10) append after ARC-nn, same
+		// anatomy + drill-down route; matched from this run's dmarcbis.* findings.
+		...matchDmarcbisProblemStates(result?.findings ?? []),
 	];
 
 	// Re-run (pm/checks/dmarc.mdx §6.2): starts a NEW run for just this domain; the alias route then

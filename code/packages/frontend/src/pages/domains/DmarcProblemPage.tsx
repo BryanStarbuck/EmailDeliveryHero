@@ -159,6 +159,31 @@ export function DmarcProblemPage() {
 							</button>
 						</p>
 					)}
+					{ps.id.startsWith("DMARCbis-") && (
+						<p className="mt-4 text-sm">
+							<button
+								type="button"
+								onClick={() =>
+									runId && result?.runId
+										? navigate({
+												to: "/domains/$id/runs/$runId/dmarc/check/$checkKey",
+												params: {
+													id,
+													runId: result.runId,
+													checkKey: "dmarcbis",
+												},
+											})
+										: navigate({
+												to: "/domains/$id/dmarc/check/$checkKey",
+												params: { id, checkKey: "dmarcbis" },
+											})
+								}
+								className="text-[var(--edh-primary)] underline"
+							>
+								Full DMARCbis conformance explainer ›
+							</button>
+						</p>
+					)}
 				</>
 			)}
 		</div>

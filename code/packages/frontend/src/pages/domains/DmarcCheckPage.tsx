@@ -164,6 +164,7 @@ export function DmarcCheckPage() {
 		(f) =>
 			f.checkId === "dmarc" ||
 			f.checkId === "arc" ||
+			f.checkId === "dmarcbis" ||
 			f.checkId === "dmarc.reports",
 	);
 	const result = run ? dmarcUnitResult(unit, tests, findings) : null;
@@ -268,7 +269,9 @@ export function DmarcCheckPage() {
 							? " (no aggregate reports have been ingested for this domain yet)"
 							: unit.sibling === "arc"
 								? " (the ARC checker produced no rows in this run)"
-								: record && !record.record_found
+								: unit.sibling === "dmarcbis"
+									? " (the DMARCbis conformance checker produced no rows in this run)"
+									: record && !record.record_found
 									? " (there is no DMARC record to evaluate — fix record presence first)"
 									: ""}
 						.
@@ -501,6 +504,7 @@ function UnitHistoryStrip({
 			(f) =>
 				f.checkId === "dmarc" ||
 				f.checkId === "arc" ||
+				f.checkId === "dmarcbis" ||
 				f.checkId === "dmarc.reports",
 		);
 		return dmarcUnitResult(unit, tests, fs);

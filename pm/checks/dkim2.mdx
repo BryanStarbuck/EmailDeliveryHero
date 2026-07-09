@@ -1,0 +1,964 @@
+---
+title: EmailDeliveryHero — DKIM2 (DomainKeys Identified Mail version 2)
+description: The DKIM2 check spec — how EmailDeliveryHero advises on and (in a future round) verifies the draft-04 successor to DKIM, "DomainKeys Identified Mail version 2" (draft-ietf-dkim-dkim2-spec / draft-clayton-dkim2-spec-04), which splits the single DKIM-Signature into a Message-Instance header (revision m=, per-revision fingerprints, and a base64 reversible recipe r=) and a DKIM2-Signature header (the signed envelope with SMTP mf= MAIL FROM / rt= RCPT TO, an ordered sequence i=, and donotexplode/exploded/feedback/feedhere flags) so that replay, forwarding breakage, missing chain-of-custody, and untrustworthy bounces are all fixed at the protocol layer; covers the fourteen dkim2.* sub-checks, why most of it is FUTURE and message-sample-dependent, the swaks-capture + mail-auth/Stalwart validation method, the dkim2_check_results table, the first-round-vs-future split, the DKIM2 sub-test explainer page (/domains/:domainId/runs/:runId/dkim/check/dkim2 — the five-block what/state/meaning/fix/re-run contract with signer-key raw-record cards, the scoped parsed-field table, the future per-hop instances table, the unit-scoped run-history strip, the draft/RFC/provider references footer, and every loading/not-applicable/not-measured/error state), the clickable sub-concept navigation map, and the DKIM2-nn problem-state drill-down pages under /domains/:domainId/runs/:runId/dkim/:problemId.
+---
+
+# EmailDeliveryHero — DKIM2 (DomainKeys Identified Mail version 2)
+
+DKIM2 (**DomainKeys Identified Mail version 2**, IETF **draft-ietf-dkim-dkim2-spec** — the individual
+draft **draft-clayton-dkim2-spec-04** that shipping implementations track, referred to throughout as
+**"DKIM2 draft-04"**) is the redesigned successor to DKIM. Where DKIM1 attaches **one**
+`DKIM-Signature` per signer and quietly falls apart the moment a forwarder rewrites a `Subject:` or a
+mailing list appends a footer, DKIM2 turns authentication into an **ordered, tamper-evident chain of
+custody**: every hop that touches the message appends its own signature over the current snapshot
+**plus every prior signature**, records the SMTP envelope it travelled with **inside** that signature,
+and — when it changed the message — leaves behind a **reversible recipe** so a downstream verifier can
+undo the change and re-verify the *originator's* signature. The result fixes the four chronic DKIM1
+failures at once: **replay** (the envelope is signed, so a message cannot be re-broadcast to new
+recipients), **forwarding breakage** (recipes let a list subject-tag + footer be undone rather than
+break auth), **missing chain of custody** (the appended-signature sequence is auditable end to end),
+and **untrustworthy bounces** (a DSN must be addressed to the signed `mf=`, killing backscatter).
+
+The crucial architectural fact for this app: **DKIM2 is not a new DNS record type.** Like DKIM1 it
+still publishes the public key at the same `<selector>._domainkey.<domain>` location, so DNS gives you
+the *key* but not the *mechanism* — the DKIM2 mechanism lives in **two message headers added in
+transit**:
+
+* **`Message-Instance`** — a revision counter `m=` for the message body/headers at that point, the
+  cryptographic **fingerprints** over the headers and body at that revision, and — only when a hop
+  changed the message — a base64 **reversible recipe** in `r=` describing exactly what changed so it
+  can be undone.
+* **`DKIM2-Signature`** — the signed envelope the message actually travelled with: `d=`/`s=`/signature/
+  timestamp `t=` **plus** the SMTP **`mf=`** (MAIL FROM) and **`rt=`** (RCPT TO) of that hop, a
+  sequence number **`i=`** so the signatures form an ordered chain, and flags
+  **`donotexplode`**/**`exploded`**/**`feedback`**/**`feedhere`** governing fan-out and reporting.
+
+You therefore **cannot fully audit DKIM2 from DNS alone** — you need a **captured message sample** to
+see whether a chain was applied and whether it validates. Consequently **most of this check is FUTURE**
+(message-sample-dependent), and the parts that ship first round are **advisory / DNS-answerable
+readiness checks**. Be honest with the user: DKIM2 is **brand-new** — a July-2026 draft with almost no
+ecosystem support yet. **Stalwart v0.16.12 is the *first* mail server to implement it** (DKIM2 draft-04
++ DMARCbis together); virtually every mainstream provider does **not** speak DKIM2 today. So for the
+overwhelming majority of domains, DKIM2 is simply **"not yet applicable / your provider does not speak
+it yet,"** and this check says exactly that rather than manufacturing a false problem.
+
+**Read alongside** (do not duplicate these):
+
+* [DKIM](./dkim.mdx) — the DKIM1 check DKIM2 succeeds; the two **coexist during migration** and share
+  the same `<selector>._domainkey` key location, so DKIM2 reuses DKIM's selector/key machinery and
+  **rolls up into the same DKIM dashboard cell**. Read DKIM's §2 sub-checks and §4 measurement rather
+  than repeating them here.
+* [ARC](./arc.mdx) — the header-based, sample-dependent, advisory companion whose architecture DKIM2
+  mirrors almost exactly (this file is modelled on arc.mdx). DKIM2's appended-signature chain does
+  **natively** what ARC attempts with a separate reputation fabric; DKIM2 explicitly **ignores** legacy
+  `DKIM-Signature` and `ARC-*` headers, so the two coexist without interfering.
+* [DMARCbis](./dmarcbis.mdx) — the companion policy modernization (RFC 9989) shipped by the same
+  Stalwart release; DKIM2 supplies the durable, forwarding-surviving authentication DMARCbis aligns
+  against.
+* [DMARC](./dmarc.mdx) — the enforcement policy DKIM2's chain exists to keep passing across hops.
+* [Overview](../overview.mdx) — product charter, personas, port list, the seven dashboard categories.
+* [Engineering](../engineering.mdx) — the `Checker`/`Finding` contract, the file store, and the
+  scheduler this check plugs into.
+
+**Category & prefix.** DKIM2 belongs to the **DKIM** dashboard category (column 2). Its sub-check ids
+use the **`dkim2.`** prefix (e.g. `dkim2.chain_present`) — a distinct, advisory companion namespace
+whose findings **roll into the DKIM category cell**. DKIM2 has **no column of its own**; there are
+exactly seven categories (SPF, DKIM, DMARC, Blacklists, DNS, DNSSEC, Spam & Content), and DKIM2 is a
+companion to DKIM exactly as ARC is a companion to DMARC.
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dkim2/dkim2.check.ts` — the `dkim2Check` checker, method `run()`
+
+---
+
+## 1. What it checks
+
+**Background & standard.** DKIM2 (draft-04) keeps DKIM1's public-key-in-DNS foundation but replaces the
+single `DKIM-Signature` header with **two cooperating headers stamped by every hop** that handles the
+message:
+
+* **`Message-Instance`** captures *what the message looks like now*: a revision number `m=` that
+  starts at the originator and increments **only when a hop changes content**, cryptographic
+  fingerprints over the headers and body at that revision, and — for a modifying hop — a base64
+  **reversible recipe** `r=` that a verifier can apply to rebuild the previous revision.
+* **`DKIM2-Signature`** captures *what the message travelled as*: `d=` (signing domain), `s=`
+  (selector), the signature and timestamp `t=`, and — the DKIM2 innovation — the **SMTP envelope**
+  `mf=` (MAIL FROM / reverse path) and `rt=` (RCPT TO / forward path), a **sequence number `i=`** so
+  signatures form an ordered chain (`i=1`, `i=2`, …), and the flags `donotexplode`, `exploded`,
+  `feedback`, `feedhere`.
+
+**What DKIM2 fixes over DKIM1.** Each fix maps to a sub-check in §2:
+
+* **Replay.** The envelope (`mf=`/`rt=`) is *inside* the signature, and consecutive hops must line up
+  (hop N's `mf=` must match an `rt=` entry of hop N−1), with `donotexplode`/`exploded` governing
+  legitimate fan-out. A message re-broadcast to a different recipient breaks the chain — killing the
+  DKIM1 replay attack (the April-2025 `d=google.com` phishing wave is the canonical DKIM1 case).
+* **Forwarding breakage.** A modifying hop leaves a **reversible recipe**, so a downstream verifier can
+  **undo** the change (a mailing-list `[list]` subject tag + footer) and re-verify the *originator's*
+  signature. Auth no longer breaks on legitimate list traffic — and, crucially, a benign footer tweak
+  becomes **distinguishable** from a malicious body swap (a malicious change has no valid recipe).
+* **Missing chain of custody.** Because each hop signs over the current snapshot **plus all prior
+  signatures**, the sequence is **tamper-evident hop to hop** — you can audit exactly who handled the
+  message and in what order.
+* **ARC absorbed natively.** DKIM2's chain does what [ARC](./arc.mdx) attempted **without** a separate
+  reputation fabric; DKIM2 explicitly **ignores** `DKIM-Signature` and `ARC-*` headers, so the legacy
+  and DKIM2 worlds coexist during migration.
+* **Consistent header signing.** A **single fixed canonicalization** and a defined hashing scheme
+  replace DKIM1's per-signer `c=`/`h=` guesswork, so there is nothing for a signer to get subtly wrong.
+* **Trustworthy bounces.** A DSN **must** be addressed to the `mf=` of the **highest-numbered**
+  `DKIM2-Signature` (never the visible envelope sender); a null reverse path `mf=<>` means **no DSN**
+  is allowed → backscatter is impossible. A DKIM2 bounce is itself a **signed DKIM2 message** carrying
+  the original chain, so it can *prove* it is a genuine bounce — enabling safe **deferred** bounces.
+* **Standardized feedback.** The `feedback`/`feedhere` flags define where FBL/complaint reports go,
+  replacing today's ad-hoc arrangements.
+
+**Why receivers will care.** A DKIM2 chain gives a receiver a cryptographically ordered, envelope-bound
+record of every hop — forwarding-surviving authentication *plus* replay and bounce guarantees DKIM1 and
+ARC never delivered together. Once big receivers speak DKIM2, a valid chain becomes the strongest
+positive signal a sender can carry; until then it is advisory.
+
+**Common real-world state today.** For almost every audited domain the honest finding is **"DKIM2 not
+applicable yet"**: the domain's ESP/MTA does not emit `Message-Instance`/`DKIM2-Signature`, no receiver
+in its path validates them, and there is no sample to inspect. The one thing worth doing *now* is
+**readiness** — publish a modern key (ed25519 preferred) so that when the sending stack gains DKIM2, the
+DNS side is already correct.
+
+**How a failure degrades inbox placement.** DKIM2 never *hurts* a directly-sent message; its absence
+only matters once a domain relies on it. A **present** chain that fails cryptographically or
+structurally (bad signature, envelope mismatch, non-reversible recipe on a modifying hop, out-of-order
+`i=`) is worse than no DKIM2 — a DKIM2-aware receiver will reject or distrust it — so those are
+critical. "No DKIM2 at all / provider does not speak it" is **info** (not applicable), never a false
+critical.
+
+---
+
+## 2. Sub-checks
+
+Expanded from the seed set. Advisory sub-checks (marked *advisory*) ship first round from
+configuration/DNS by **reusing the DKIM checker's `_domainkey` selector machinery**; the message-sample
+sub-checks are FUTURE (need a captured DKIM2 message + a DKIM2 validator — see §3).
+
+| Sub-check (`checkId`) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `dkim2.applicability` *(advisory / first-round)* | Whether DKIM2 is even relevant: does the domain enforce DMARC / forward mail / want replay + forwarding protection, **and** does its sending infrastructure claim DKIM2 support? If not, DKIM2 is N/A. | DMARC policy (from the DMARC checker) + `usesForwarding` flag + the per-domain `dkim2Supported` config flag. | **info:** not applicable / provider does not yet speak DKIM2. | None needed; revisit when your MTA/ESP adds DKIM2 (today essentially only Stalwart ≥ v0.16.12) or when you adopt enforcing DMARC + forwarding. |
+| `dkim2.key_readiness` *(advisory / first-round)* | The signing selector at `<selector>._domainkey.<domain>` publishes a **modern key** suitable for DKIM2's fixed hashing — **ed25519 recommended, RSA-2048 acceptable**. Reuses DKIM key-strength logic. | Reuse [DKIM](./dkim.mdx) `dkim.keylength`/`dkim.algorithm`: decode `p=`, read modulus / detect `k=ed25519`. | **warning:** weak/legacy key (< 2048-bit RSA, SHA-1) not fit for DKIM2. **info:** RSA-only — recommend adding an ed25519 selector for DKIM2 readiness. | Publish an **ed25519** selector alongside RSA-2048 so the stack is DKIM2-ready the moment signing is enabled. |
+| `dkim2.selector_dns` *(advisory / first-round)* | The DKIM2 signing selector resolves in DNS with a non-empty `p=` (same location as DKIM1). | `resolveTxt('<selector>._domainkey.<domain>')` via `node:dns/promises`; CNAME fallback like DKIM. | **critical:** NXDOMAIN / empty (revoked) `p=` on a selector expected to sign DKIM2. | Publish/repair the public key at `<selector>._domainkey.<domain>` (or the CNAME your ESP specifies). |
+| `dkim2.server_support` *(advisory / first-round)* | Whether the domain's MTA/provider advertises or is known to support DKIM2 — a config flag the operator sets, or observed from a captured sample carrying a `DKIM2-Signature`. | `dkim2Supported` config flag; or presence of `DKIM2-Signature` in a prior sample. | **info:** support unknown / not yet (the near-universal case in 2026). | Track your provider's roadmap; today only Stalwart ≥ v0.16.12 signs/verifies DKIM2. Set the flag once your stack speaks it. |
+| `dkim2.chain_present` *(FUTURE)* | `Message-Instance` **and** `DKIM2-Signature` headers are present on a captured sample. | Parse headers from a captured `.eml` (§3). | **warning:** sample carries no DKIM2 headers (sender does not sign DKIM2). | Enable DKIM2 signing on the sending MTA (Stalwart), or route through an intermediary that signs. |
+| `dkim2.chain_valid` *(FUTURE)* | Every signature in the chain verifies over its reconstructed input; a verifier may check the **most-recent** signature first and stop at the first failure. | DKIM2 validator over the sample (mail-auth / Stalwart). | **critical:** any signature in the chain fails to verify → the chain is worthless. | Fix the signer at the failing hop (clock skew, post-signing mutation, wrong key); re-test until the chain verifies. |
+| `dkim2.envelope_consistency` *(FUTURE)* | Consecutive hops line up: hop N's `mf=` domain matches an `rt=` entry of hop N−1, and `d=` matches the rightmost labels of `mf=` (replay protection). | Walk the ordered `DKIM2-Signature` set; compare `mf=`/`rt=`/`d=`. | **critical:** envelope discontinuity → replay / spoofed relay. | Ensure each relay signs with the envelope it actually received/sent; do not rewrite `mf=`/`rt=` outside a signed hop. |
+| `dkim2.recipe_reversible` *(FUTURE)* | Each **modifying** hop carries a valid reversible `r=` recipe; applying it rebuilds the previous revision so the earlier `m=` fingerprint re-verifies. | Decode the base64 recipe, apply it, re-hash, compare to the prior `Message-Instance` fingerprint. | **critical:** a content change with no valid recipe (indistinguishable from tampering). | Configure the modifying hop (mailing list / gateway) to emit a correct DKIM2 recipe for every change it makes. |
+| `dkim2.counters_ordered` *(FUTURE)* | The two counters are consistent: `i=` sequence contiguous & ordered (one per hop), and `m=` revision incremented **only** when a hop changed content. | Collect all `i=`/`m=`; assert gapless `i=` and monotone `m=` tied to recipe presence. | **critical:** missing/duplicate/out-of-order `i=`, or `m=` bumped with no recipe. | Fix the offending hop's signer so it increments `i=` per hop and `m=` only on real changes. |
+| `dkim2.canonicalization` *(FUTURE)* | The single fixed DKIM2 canonicalization / hashing scheme is used (no legacy relaxed/simple choice). | Inspect the sample's signature parameters. | **warning:** a non-conformant canonicalization/hash. | Update the signer to the DKIM2-mandated fixed canonicalization (draft-04). |
+| `dkim2.replay_flags` *(FUTURE)* | `donotexplode` forbids fan-out; legitimate list fan-out is marked `exploded`; a message replayed to a different recipient breaks the chain. | Read the flags on each `DKIM2-Signature`; correlate with recipient fan-out. | **warning/critical:** `donotexplode` violated, or fan-out not marked `exploded`. | Mark list explosions `exploded`; set `donotexplode` on transactional mail that must never be re-sent. |
+| `dkim2.bounce_validity` *(FUTURE)* | A returned DSN is addressed to the **highest-numbered** `mf=` (never the visible envelope sender), `mf=<>` suppresses DSNs (no backscatter), and a DKIM2 bounce re-verifies against the embedded original chain. | Parse the DSN (`multipart/report`, MAIL FROM `<>`, its own `Message-Instance`/`DKIM2-Signature`); validate against the embedded chain. | **critical:** a bounce cannot be validated / would mailbomb a third party (backscatter). | Ensure your bounce generator addresses DSNs to the signed `mf=`, honors `mf=<>`, and signs the bounce as a DKIM2 message. |
+| `dkim2.legacy_coexistence` *(advisory / FUTURE)* | During migration the message carries **both** a legacy `DKIM-Signature`/`ARC-*` set and DKIM2; a DKIM2 verifier ignores the legacy ones. Confirm the **DKIM1 path still passes** so nothing breaks before receivers speak DKIM2. | Cross-read the DKIM1 checker result for the same run; on a sample, confirm both header sets present. | **warning:** DKIM1 path already failing while DKIM2 not yet honored (mail unprotected in the gap). | Keep DKIM1 healthy (see [DKIM](./dkim.mdx)) until receivers validate DKIM2 — DKIM2 does not rescue a broken DKIM1 today. |
+
+---
+
+## 3. How it is measured
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dkim2/dkim2.check.ts` — the `dkim2Check` checker, method `run()`
+
+**Advisory / first-round path (deterministic).** Three things are answerable without a message sample:
+
+1. **Applicability & server support** (`dkim2.applicability`, `dkim2.server_support`): read the DMARC
+   policy the DMARC checker already parsed (enforcing vs `p=none`), the per-domain **`usesForwarding`**
+   flag, and the per-domain **`dkim2Supported`** flag. If the domain declares no DKIM2 support **and**
+   no sample has ever shown a `DKIM2-Signature`, emit a single `info` "DKIM2 not applicable / not yet
+   supported" and stop — this is the near-universal 2026 outcome and must **never** read as a problem.
+2. **Key readiness** (`dkim2.key_readiness`, `dkim2.selector_dns`): for each signing selector, run
+   `resolveTxt('<selector>._domainkey.<domain>')` via `node:dns/promises`, parse the DKIM key record,
+   base64-decode `p=`, and read the modulus / detect `k=ed25519`. This **reuses the exact machinery of
+   the [DKIM](./dkim.mdx) checker** (`dkim.present`/`dkim.parses`/`dkim.keylength`/`dkim.algorithm`) —
+   DKIM2 adds only the *interpretation* ("is this key fit for DKIM2's fixed hashing?"), preferring
+   ed25519 and warning on weak/legacy keys.
+
+**Message-sample path (FUTURE).** Everything about an actual chain (`dkim2.chain_present`,
+`dkim2.chain_valid`, `dkim2.envelope_consistency`, `dkim2.recipe_reversible`, `dkim2.counters_ordered`,
+`dkim2.canonicalization`, `dkim2.replay_flags`, `dkim2.bounce_validity`) requires a **captured DKIM2
+message**. Obtaining and validating the sample:
+
+* **Probe a send.** Use Homebrew **`swaks`** to send a known test message **from the monitored domain**
+  through its own MTA to a mailbox we control, then retrieve the delivered copy (IMAP fetch or a
+  maildrop the audit watches). To exercise recipes/forwarding, route it through a list/forwarder as in
+  [ARC §3](./arc.mdx).
+* **Parse the headers.** Extract the full header block and parse the `Message-Instance` (`m=`,
+  fingerprints, `r=` recipe) and every `DKIM2-Signature` (`i=`, `d=`, `s=`, `t=`, `mf=`, `rt=`, flags)
+  in order.
+* **Validate with a DKIM2 verifier.** There is **no stable brew formula** for DKIM2 (draft-stage), so
+  the validator is a **future/optional dependency**. Reference implementations to shell out to or link:
+  **Stalwart** (`v0.16.12` — the first server to ship DKIM2 draft-04 + DMARCbis), the **`mail-auth`**
+  Rust crate (which compiles to **WASM**), and the browser **mail-auth playground** (WASM, no install).
+  When no validator is installed, degrade gracefully — emit `info` "DKIM2 validator not installed" and
+  the install/link hint — and **never fabricate a verdict**.
+
+**The recipe shape (for `dkim2.recipe_reversible`).** The reversible recipe in `r=` is a base64 JSON
+object of the form:
+
+```json
+{ "h": { "...": "..." }, "b": [ { "c": [ 12, 40 ] }, { "d": [ 3, 4, 5 ] } ] }
+```
+
+— `h` holds header edits, `b` holds body edits, with **bottom-up header numbering** and **top-down body
+line numbering**; a `{ "c": [start, end] }` element copies an original span, a `{ "d": [...] }` element
+deletes/replaces lines, and **`{ "b": null }`** marks the change as **unreconstructable** (a trusted
+redaction the verifier must accept on trust rather than reverse). Applying the recipe to the current
+revision must rebuild the previous revision so its `m=` fingerprint re-verifies.
+
+**Severity mapping** (mirrors [arc.mdx §3](./arc.mdx)):
+
+* **critical** — crypto/structural failures on a **present** chain: `dkim2.chain_valid` fail,
+  `dkim2.envelope_consistency` discontinuity, `dkim2.recipe_reversible` (change with no valid recipe),
+  `dkim2.counters_ordered` gap/dup, `dkim2.bounce_validity` (backscatter/unvalidatable bounce), and an
+  unresolved `dkim2.selector_dns`.
+* **warning** — "sender applies no DKIM2 at all" on a sampled path (`dkim2.chain_present`), a weak
+  readiness key (`dkim2.key_readiness`), non-conformant `dkim2.canonicalization`, flag misuse
+  (`dkim2.replay_flags`), and a failing DKIM1 path during coexistence (`dkim2.legacy_coexistence`).
+* **info** — **"no DKIM2 at all / provider does not speak it"** (`dkim2.applicability`,
+  `dkim2.server_support`) is **not-applicable**, never a false critical; RSA-only readiness advice; and
+  "validator not installed."
+
+**Edge cases & rate limits.** The draft may still change — **pin parsing to draft-04** and record the
+observed `draft_version`, treating a newer/unknown version as `info` "draft drift, re-verify." Probe
+sends are **throttled** (one per domain per audit at most) with the last probe timestamp stored, so we
+never damage the domain's reputation. **A single sample is inconclusive** — a sender that signs DKIM2
+only on some paths still yields "no headers" on others; `dkim2.chain_present` is therefore `warning`,
+never `critical`. DKIM2 selectors share DKIM's DNS caching (respect TTL).
+
+---
+
+## 4. User interface
+
+**Dashboard contribution.** DKIM2 has **no cell of its own**; its findings feed the **DKIM** category
+cell (column 2). Because DKIM2 is advisory-heavy today, an `info`-only DKIM2 result (the common
+"not applicable") does **not** turn the DKIM cell amber; a `dkim2.chain_valid` `critical` on a captured
+sample *does* contribute red, and a `dkim2.key_readiness` warning contributes amber. When DKIM2 has
+never been evaluated for a domain it contributes nothing and surfaces as a "Not yet applicable"
+advisory in detail.
+
+**Audit-detail view (React 19, plain Tailwind + lucide — the frontend has no shadcn).** Inside the
+expanded DKIM group, DKIM2 findings render as their own labelled sub-group ("DKIM2 — chain of custody
+(advisory / future)"). Each row uses the standard finding layout shared with the other checks:
+
+```
+DKIM ▸ DKIM2 (DomainKeys Identified Mail v2)                    [advisory · draft-04]
+────────────────────────────────────────────────────────────────────────────
+● info      dkim2.applicability   No DKIM2 support declared → not applicable yet
+▲ warning   dkim2.key_readiness   RSA-2048 only; add an ed25519 selector for readiness  [Copy fix]
+✕ critical  dkim2.selector_dns    ed25519 selector "d2" → NXDOMAIN                        [Copy fix]
+◻ n/a       dkim2.chain_present   No message sample captured yet             [Capture sample…]
+```
+
+* Severity badge (`ok`/`info`/`warning`/`critical`), the observed **detail** (parsed key type/bits,
+  and — future — the `i=` range, signer `d=`/`s=`, envelope `mf=`/`rt=`, chain verdict), the
+  **remediation** string, and a **Copy** button that copies the exact fix (the selector TXT to publish,
+  or the signer setting to change).
+* A **"Capture sample…"** action on FUTURE sub-checks opens a small panel to configure the swaks probe
+  (destination mailbox, optional forwarder) and shows the last capture's parsed chain in a compact
+  table: `i= | signer d= | mf= | rt= | recipe | sig`.
+
+**Per-domain config inputs.** On the domain's settings, a **DKIM2 / readiness** section: a
+`dkim2Supported` toggle (does your stack sign DKIM2?), the DKIM2 signing selector(s), and the probe
+destination mailbox. These drive `dkim2.applicability`, `dkim2.server_support`, `dkim2.selector_dns`,
+and `dkim2.key_readiness` today and the capture probe later.
+
+**States.** *Empty/never-run:* "DKIM2 not yet evaluated." *Not applicable:* a muted "DKIM2 N/A — your
+sending stack does not yet speak DKIM2" note. *Loading:* skeleton rows. *Sampled (future):* the parsed
+chain table. **Admin-only:** enabling the live swaks probe (which sends real mail) is gated behind
+`role:admin`; non-admins see advisory + DNS results only.
+
+**Where every DKIM2 row leads.** The rows above are not terminal: the DKIM2 sub-group heading and every
+`dkim2.*` finding row (on the run report's DKIM section and on the DKIM category page's sub-tests band)
+deep-link into the **DKIM2 explainer page** at `/domains/:domainId/runs/:runId/dkim/check/dkim2` (§9),
+and each finding also maps to one **DKIM2-nn problem drill-down** at
+`/domains/:domainId/runs/:runId/dkim/:problemId` (§10). The DKIM category page currently filters its
+test-results table to `checkId === "dkim"` (DkimPage.tsx); the DKIM2 band row specified in
+[dkim.mdx §7.2](./dkim.mdx) is the surface that reads `checkId startsWith "dkim2"` findings and carries
+the user here.
+
+---
+
+## 5. Information schema (database schema)
+
+DKIM2 reuses the **shared core tables** owned by [Engineering](../engineering.mdx) — `domains`,
+`audit_runs`, and `findings` (each `dkim2.*` finding is one `findings` row with `category = 'dkim'` and
+`check_id` like `dkim2.chain_valid`). It also reuses `dkim_selectors` for the signer selector. DKIM2
+adds **one result table**. Because first round is advisory-only, **almost every column is nullable** —
+they populate only once a message sample exists.
+
+```sql
+-- Per-audit structured DKIM2 observation. Nearly everything is nullable: first-round runs record
+-- only applicability + key readiness + selector-DNS; the sample-derived columns fill in later.
+CREATE TABLE dkim2_check_results (
+    id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    audit_run_id       BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id          BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    -- ---- advisory / first-round (populated every run) ----
+    applicable         BOOLEAN,          -- DMARC/forwarding relevance AND server support declared
+    server_supported   BOOLEAN,          -- dkim2Supported flag or observed DKIM2-Signature
+    signer_domain      TEXT,             -- d= of the DKIM2 signing selector (readiness)
+    signer_selector    TEXT,             -- s= of the DKIM2 signing selector
+    selector_resolves  BOOLEAN,          -- <selector>._domainkey.<signer_domain> resolved
+    key_type           TEXT,             -- rsa | ed25519 | null
+    key_bits           INT,              -- RSA modulus bits; null for ed25519/absent
+    -- ---- message-sample derived (NULL until a sample exists) ----
+    message_sample_id  TEXT,             -- id/hash of the captured DKIM2 message; NULL if none
+    chain_present      BOOLEAN,          -- Message-Instance + DKIM2-Signature found on the sample
+    chain_length       INT,              -- highest i= observed (hop count)
+    signature_count    INT,              -- number of DKIM2-Signature headers
+    revision_count     INT,              -- highest m= observed (content revisions)
+    chain_valid        BOOLEAN,          -- every signature verified
+    envelope_consistent BOOLEAN,         -- mf=/rt= line up hop-to-hop; d= within mf=
+    recipes_reversible BOOLEAN,          -- every modifying hop's r= recipe rebuilds prior revision
+    counters_ordered   BOOLEAN,          -- i= contiguous/ordered; m= incremented only on change
+    canonicalization_ok BOOLEAN,         -- fixed DKIM2 canonicalization/hashing used
+    replay_flags_ok    BOOLEAN,          -- donotexplode/exploded consistent with fan-out
+    bounce_valid       BOOLEAN,          -- DSN addressed to signed mf=; mf=<> honored; bounce re-verifies
+    instances          JSONB,            -- per-hop: [{i, m, d, s, mf, rt, recipe_present, sig_valid}]
+    draft_version      TEXT,             -- parsed draft version (pin "draft-04")
+    probe_sent_at      TIMESTAMPTZ,      -- when the swaks probe last ran
+    notes              TEXT,             -- freeform (e.g. "signs DKIM2 only on the list path")
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (audit_run_id, domain_id)
+);
+CREATE INDEX dkim2_results_domain_idx     ON dkim2_check_results (domain_id, created_at DESC);
+CREATE INDEX dkim2_results_valid_idx      ON dkim2_check_results (chain_valid);
+CREATE INDEX dkim2_results_instances_gin  ON dkim2_check_results USING GIN (instances);
+```
+
+**Mapping to today's JSON file store.** No database exists first round; this maps onto the per-run
+audit file under `~/.email_delivery_hero/` ([Engineering §store](../engineering.mdx)):
+
+* `dkim2_check_results` → a **`dkim2`** object inside the per-run audit file (alongside the run's
+  `findings[]` and the DKIM category's own section), holding the same fields (`applicable`,
+  `serverSupported`, `signerDomain`, `signerSelector`, `selectorResolves`, `keyType`, `keyBits`,
+  `chainPresent`, `chainLength`, `signatureCount`, `revisionCount`, `chainValid`, `envelopeConsistent`,
+  `recipesReversible`, `countersOrdered`, `canonicalizationOk`, `replayFlagsOk`, `bounceValid`,
+  `instances[]`, `draftVersion`, `messageSampleId`, `probeSentAt`, `notes`). One audit file = one
+  `dkim2_check_results` row. First round this object is mostly `null`/absent **except** `applicable`,
+  `serverSupported`, `keyType`/`keyBits`/`selectorResolves` (readiness) and the `dkim2.selector_dns`
+  result.
+* Per-domain config (`dkim2Supported`, DKIM2 selectors, probe mailbox) → the domain record in the
+  domains store, plus a global **`dkim2`** block in `config.yaml` for probe-throttle and
+  draft-version defaults.
+* Captured raw messages (future) live as opaque `.eml` blobs under
+  `audits/<domainId>/samples/<sampleId>.eml`; `message_sample_id` is the filename stem. The store
+  module hides this so the DB migration is a single-module change.
+
+---
+
+## 6. When we run the check
+
+**On-demand.** A manual audit (`POST /api/domains/:id/audit`) always runs the **advisory + DNS** DKIM2
+sub-checks (`dkim2.applicability`, `dkim2.key_readiness`, `dkim2.selector_dns`, `dkim2.server_support`)
+— they are cheap, deterministic, and reuse the DKIM lookups already performed in the same run. The
+**live capture probe** (swaks) is **not** part of the routine audit: it sends real mail and is
+triggered explicitly from the "Capture sample…" action (admin-only), or on an opt-in slow cadence.
+
+**Periodic scheduler.** The in-process scheduler ([Scheduled checks](../scheduled_checks.mdx)) re-runs
+the advisory/DNS DKIM2 sub-checks on the normal domain cadence (e.g. every 6 h) — a selector that stops
+resolving or a newly-published ed25519 readiness key is caught here. Capture probes, if enabled, run on
+a **much slower** cadence (e.g. weekly per domain) with a per-domain back-off recorded in
+`probe_sent_at`.
+
+**First-round vs gated.** Only the advisory + selector-DNS/readiness sub-checks are first round;
+everything sample-derived is gated behind the swaks-probe + DKIM2-validator dependency (§7). Because
+almost no provider signs DKIM2 in 2026, the routine result is a single `info` "not applicable" — that
+is the correct, non-alarming default.
+
+**Cost / rate-limit / back-off.** DNS selector lookups are free and cached (respect TTL). Probe sends
+cost real mail volume and reputation, so they are strictly throttled and admin-gated.
+
+**Regression detection.** The scheduler diffs each run against the previous: a readiness selector that
+**stops resolving** (`dkim2.selector_dns` ok→critical), a chain that **starts failing**
+(`dkim2.chain_valid` pass→fail on the next captured sample), or a provider that **begins signing DKIM2**
+(applicability flips to applicable) all register as a new event; an `info`-only applicability flip is
+logged but does not by itself worsen the DKIM cell.
+
+---
+
+## 7. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises` / config, deterministic) | Future (probe / DKIM2 validator / provider API) |
+| --- | --- | --- |
+| `dkim2.applicability` | ✅ DMARC policy + `usesForwarding` + `dkim2Supported` config | flip to applicable when a sample shows `DKIM2-Signature` |
+| `dkim2.key_readiness` | ✅ reuse DKIM key decode (ed25519 preferred, RSA-2048 floor) | confirm against the key actually used on a sample |
+| `dkim2.selector_dns` | ✅ `resolveTxt('<selector>._domainkey.<domain>')` (+ CNAME) | selector auto-discovery from observed samples |
+| `dkim2.server_support` | ✅ config flag | observed from a captured `DKIM2-Signature` |
+| `dkim2.chain_present` | | swaks capture + header parse |
+| `dkim2.chain_valid` | | mail-auth / Stalwart validation over the chain |
+| `dkim2.envelope_consistency` | | parse/compare `mf=`/`rt=`/`d=` across hops |
+| `dkim2.recipe_reversible` | | decode + apply each `r=` recipe, re-hash |
+| `dkim2.counters_ordered` | | parse `i=`/`m=` from the sample |
+| `dkim2.canonicalization` | | inspect signature params on the sample |
+| `dkim2.replay_flags` | | read flags + correlate fan-out |
+| `dkim2.bounce_validity` | | validate a captured DSN against the embedded chain |
+| `dkim2.legacy_coexistence` | ✅ cross-read the DKIM1 result | confirm both header sets on a sample |
+
+Rule of thumb: **anything answerable from DNS/config ships first (all advisory-only)**; anything that
+needs to capture and cryptographically validate a **real DKIM2 message** is a later round. The
+`Checker`/`Finding` contract is unchanged across rounds — only the checker's internals grow — so the
+Dashboard, store, and scheduler never change as DKIM2 matures. Because DKIM2 is a **July-2026 draft**,
+the future round also depends on the ecosystem catching up (validator availability, provider signing).
+
+---
+
+## 8. Acceptance criteria
+
+A developer can verify the DKIM2 check is correct when **all** of the following hold:
+
+1. The checker registers under **`id: 'dkim2'`**, emits `Finding`s whose `category` rolls into the
+   **DKIM** dashboard cell, uses the **`dkim2.`** id prefix, and every non-`ok` finding carries a
+   **concrete** remediation (a selector TXT to publish, or the exact signer setting) — never a generic
+   "check your DNS."
+2. For a domain that does not declare DKIM2 support **and** has no sample showing a `DKIM2-Signature`,
+   the check emits a single `info` `dkim2.applicability` "not applicable / not yet supported" and does
+   **not** turn the DKIM cell amber.
+3. `dkim2.key_readiness` and `dkim2.selector_dns` **reuse the DKIM checker's** `_domainkey` decode:
+   they resolve each signing selector via `node:dns/promises`, return `critical` on NXDOMAIN/empty
+   `p=`, `warning` on a weak/legacy key, and `info` recommending an ed25519 selector when only RSA is
+   present.
+4. Given a captured DKIM2 sample, the checker parses `Message-Instance` (`m=`, fingerprints, `r=`) and
+   every `DKIM2-Signature` (`i=`, `d=`, `s=`, `t=`, `mf=`, `rt=`, flags), and populates `chain_length`,
+   `signature_count`, `revision_count`, `chain_valid`, `envelope_consistent`, `recipes_reversible`,
+   `counters_ordered`, and per-hop detail in `instances` JSONB.
+5. A chain that fails cryptographically or structurally (`dkim2.chain_valid`,
+   `dkim2.envelope_consistency`, `dkim2.recipe_reversible` with no recipe, `dkim2.counters_ordered`
+   gap, `dkim2.bounce_validity` backscatter) yields a **critical**; a sample with **no** DKIM2 headers
+   yields a **warning** (`dkim2.chain_present`), never a false `critical`.
+6. `dkim2.recipe_reversible` decodes the base64 JSON recipe (`{"h":…,"b":[{"c":[…]},{"d":[…]}]}`,
+   bottom-up header / top-down body numbering, `{"b":null}` = unreconstructable), applies it, and
+   re-verifies the prior `m=` fingerprint; a content change with no valid recipe is flagged.
+7. When no DKIM2 validator is installed, the sample sub-checks degrade to `info` "DKIM2 validator not
+   installed" (with the mail-auth / Stalwart / playground hint) and **never fabricate a verdict**; the
+   parser pins to **draft-04** and records `draft_version`, downgrading an unknown version to `info`.
+8. The advisory/DNS sub-checks run in every manual and scheduled audit; the **live swaks capture probe**
+   runs only on explicit admin-gated trigger (or a slow opt-in cadence) and records `probe_sent_at`
+   with per-domain back-off.
+9. Results persist to the audit run's **`dkim2`** JSON object today and map cleanly onto
+   `dkim2_check_results` (with the nullable columns above) when the store moves to PostgreSQL — a single
+   store-module change, no checker change.
+10. The scheduler's diff flags a readiness selector that stops resolving or a chain that starts failing
+    as a **new event** between runs; `info`-only applicability flips are logged but do not worsen the
+    cell.
+11. The UI renders DKIM2 as an advisory/future sub-group inside the DKIM audit-detail group, with
+    severity badges, parsed detail, copy-to-clipboard remediation, a "Capture sample…" action, and
+    clear empty / not-applicable / never-sampled states, built on React 19 + plain Tailwind (no
+    shadcn).
+12. The **DKIM2 explainer page** (§9) renders at the canonical run-scoped route
+    `/domains/:domainId/runs/:runId/dkim/check/dkim2` **and** the newest-run alias
+    `/domains/:domainId/dkim/check/dkim2`, using the DKIM category-page header row + run context strip
+    ([dkim.mdx §7.1–§7.2](./dkim.mdx)), the five locked blocks in order, and a status chip derived as
+    the **worst severity among this run's `checkId` starting `dkim2.` findings** (gray "not measured"
+    when the run has none).
+13. Block 2 renders **only this run's data**: the applicability panel (DMARC policy + `usesForwarding` +
+    `dkim2Supported`), the finding rows sorted fail → warn → info → pass with monospace evidence, one
+    **signer-key raw-record card** per DKIM2 selector (query name + raw TXT with `p=`/`k=` highlighted;
+    "signer unknown" placeholder), and the **scoped parsed-field table** over `results.dkim2` in which
+    every sample-derived field renders grayed as "— not yet sampled" while null (§9.3).
+14. Block 4's fixes are **keyed to the current state** (§9.5): each fix step's copy button carries a
+    **publishable value** (the exact TXT record, the `openssl`/ed25519 key-generation commands, the
+    Stalwart DKIM2 signing config block, or the verify command) — never prose — and the healthy/N-A
+    state collapses to the single "nothing to do" line plus the standing readiness recommendation.
+15. Block 5's **Run this check now** wires v1 to the existing `POST /api/audit/run/:domainId`
+    (navigating to the newest alias on completion, toast + stay on error), upgrades later to
+    `POST /api/audit/run/:domainId/check/dkim` (which runs `dkim` **and** `dkim2` per the run graph),
+    honors keyboard `r`, and keeps the admin-gated **Capture sample…** probe as a visually distinct
+    secondary action never triggered by the re-run button (§9.6).
+16. The **unit-scoped history strip** colors each of the last 10 runs by that run's worst `dkim2.*`
+    severity, renders gray for runs where the DKIM2 checker did not run, outlines the viewed run, and
+    clicking a chip swaps `:runId` on the explainer route (§9.7).
+17. Every `dkim2.*` finding id maps to **exactly one** `DKIM2-nn` problem state (§10 table); the
+    drill-downs render at `/domains/:domainId/runs/:runId/dkim/:problemId` (alias without
+    `/runs/:runId`) with ids **disjoint from the DKIM spec's `PS-nn` namespace** and from the literal
+    `check/` segment, and each uses the five-band drill-down chrome of [dkim.mdx §9](./dkim.mdx).
+18. Every clickable element on the explainer navigates per the §9.9 map — DMARC policy chip → the DMARC
+    category page, DKIM key concept → the run's DKIM category page, ARC mention → [arc.mdx](./arc.mdx)'s
+    explainer, selector card edit → the domain's DKIM2 / readiness settings, finding rows → their
+    `DKIM2-nn` drill-down, references → external links in a new tab — and nothing clickable is a dead
+    end.
+
+---
+
+## 9. The DKIM2 explainer page — `/dkim/check/dkim2`
+
+The DKIM category spec ([dkim.mdx §7.1–§7.2](./dkim.mdx)) locks a shared route pattern and a five-band
+sub-test explainer contract for every unit in the category, and registers **`dkim2`** as a
+sibling-owned `checkKey`. **This spec owns the content of that page.** The chrome (header row, run
+context strip, back link, pager, skeletons, unknown-key panel) is the category's; everything inside the
+blocks is defined here. The five bands are presented in the arc.mdx block order: **What this is / Your
+current state / What it means / What you can do / Run this check now.**
+
+```
+/domains/:domainId/runs/:runId/dkim/check/dkim2    (canonical, run-scoped)
+/domains/:domainId/dkim/check/dkim2                (newest-run alias)
+```
+
+### 9.1 Entry points & status-chip derivation
+
+The page is reachable from every surface that mentions DKIM2:
+
+| Entry point | Surface | Link |
+| --- | --- | --- |
+| Sub-tests band row "DKIM2 chain" | DKIM category page ([dkim.mdx §7.2](./dkim.mdx)) | whole-row → run-scoped explainer |
+| DKIM2 sub-group heading + finding-row chevrons | Run report's DKIM section (RunDetailPage) | `…/runs/:runId/dkim/check/dkim2` |
+| DKIM2 mini-row in the per-unit mini-list | Run report's DKIM section | same |
+| "DKIM2" mentions in DKIM/ARC explainer copy (migration/coexistence notes) | sibling explainers | newest alias |
+| History-strip chips on this page | the explainer itself | same route, other `:runId` |
+
+**Status chip (block 2 headline + band row + mini-row).** One rule, shared by all three surfaces: the
+**worst severity among the viewed run's findings whose `checkId` starts `dkim2.`** — `critical` → ✗
+red, `warning` → ⚠ amber, `info` → ⓘ slate, all-`ok` → ✓ green; **no `dkim2.*` findings in the run** →
+gray "not measured." Because first round is advisory-heavy and DKIM2 is nascent, the common healthy-ish
+states are slate (`dkim2.applicability` N/A) and amber (`dkim2.key_readiness` open) — the chip label
+spells it out: **`ⓘ not yet supported`**, **`⚠ readiness`**, **`✗ chain`**, **`✓ verified`** (future,
+requires a validated sample).
+
+### 9.2 Block 1 — What this is
+
+Static concept copy (2–4 short paragraphs, per the category contract), independent of run data so it
+renders even for "not measured":
+
+1. **The mechanism.** DKIM2 (DomainKeys Identified Mail v2, IETF draft-04) is the successor to DKIM. It
+   keeps the DKIM public key at `<selector>._domainkey.<domain>` but replaces the single
+   `DKIM-Signature` with two headers added by every hop: **`Message-Instance`** (revision `m=`,
+   fingerprints, and a reversible **recipe** `r=` when the hop changed the message) and
+   **`DKIM2-Signature`** (the signed SMTP envelope `mf=`/`rt=`, an ordered sequence `i=`, and the
+   `donotexplode`/`exploded`/`feedback`/`feedhere` flags).
+2. **Why it exists.** DKIM1 breaks on forwarding and is replayable, and email bounces are untrustworthy.
+   DKIM2 signs the envelope (replay protection), lets a forwarder's change be **undone** via a recipe
+   (forwarding survives), builds an auditable **chain of custody**, and makes bounces provable
+   (backscatter dies). It absorbs what [ARC](./arc.mdx) attempted, **natively** and without a separate
+   reputation fabric — and it ignores legacy `DKIM-Signature`/`ARC-*` headers so both can coexist during
+   migration.
+3. **The crucial caveat.** DKIM2 is a **brand-new July-2026 draft** with almost no ecosystem support —
+   **Stalwart v0.16.12** is the first mail server to implement it. It is **not a DNS record you publish**
+   and, for almost every domain today, **not yet applicable**. EmailDeliveryHero can check the pieces
+   that live in DNS/config now (readiness: a modern key at the selector) and the chain itself only from
+   a captured DKIM2 message (§3).
+
+### 9.3 Block 2 — Your current state
+
+Everything renders from the **viewed run's** persisted data — `results.dkim2` (§5) plus the run's
+`dkim2.*` findings — never from a live lookup; an older run stays a snapshot. Top to bottom:
+
+1. **Status chip** (large, per §9.1) with a one-line verdict sentence, e.g. *"DKIM2 is not yet
+   applicable — your sending stack does not advertise DKIM2 support."* or *"DKIM2-ready key present, but
+   no chain has been sampled yet."*
+2. **Applicability panel** — labeled rows that explain how the verdict was reached, each with observed
+   value and provenance:
+   * *DMARC policy*: `p=<policy>` → enforcing yes/no, sourced from the run's `dmarc` section; the value
+     chip links to the DMARC policy explainer (§9.9).
+   * *Forwarding declared*: the `usesForwarding` flag, from the domain settings at run time.
+   * *DKIM2 server support*: the `dkim2Supported` flag / observed `DKIM2-Signature`.
+   * *Verdict*: `applicable` from `results.dkim2`.
+3. **Finding rows** — the run's `dkim2.*` findings sorted fail → warn → info → pass (same row anatomy
+   as the category's test-results table): status icon, finding id in small caps, plain-language title,
+   chevron accordion expanding to *observed* (the `evidence` string, monospace), *why it matters* (one
+   sentence), and the remediation with a `[copy fix]` button. Each expanded row ends with a **"Full
+   drill-down ›"** link to its DKIM2-nn problem page (§10).
+4. **Raw record slot — signer-key cards.** DKIM2 has no DNS record of its own (it reuses the DKIM key
+   location), so the category contract's "raw record" slot renders **one card per DKIM2 signing
+   selector**:
+   * Selector known: the query name `<selector>._domainkey.<domain>` as the card title, the **raw TXT
+     answer** beneath it in monospace with `p=` and `k=` highlighted, a resolve badge (✓ resolves /
+     ✗ NXDOMAIN / ✗ revoked `p=` / ⓘ lookup failed), a key-type/bits chip (ed25519 preferred), and
+     `[copy]` for the raw value.
+   * Selector unknown: a muted placeholder card — *"No DKIM2 selector recorded — set it in settings, or
+     publish an ed25519 selector for DKIM2 readiness"* — linking to the settings editor.
+   * Future, when a sample exists: a final card shows the captured `Message-Instance` +
+     `DKIM2-Signature` header block (monospace, `i=`/`m=`/`mf=`/`rt=` highlighted) from
+     `messageSampleId`.
+5. **Scoped parsed-field table** — the fields this unit reads, exactly the `results.dkim2` shape (§5),
+   one row each with published value, meaning, and grayed rendering when null:
+
+   | field | value (example) | meaning |
+   | --- | --- | --- |
+   | `applicable` | `false` | server support not declared → DKIM2 not applicable yet |
+   | `serverSupported` | `false` | stack does not advertise DKIM2 (Stalwart-only today) |
+   | `signerSelector` / `keyType` / `keyBits` | `d2` · `ed25519` · — | the readiness key at the selector |
+   | `selectorResolves` | `true` | `<selector>._domainkey.<domain>` resolved |
+   | `messageSampleId` | — not yet sampled | the captured DKIM2 message the chain checks need |
+   | `chainPresent` / `chainLength` / `signatureCount` / `revisionCount` | — not yet sampled | headers found / highest `i=` / `DKIM2-Signature` count / highest `m=` |
+   | `chainValid` / `envelopeConsistent` / `recipesReversible` | — not yet sampled | signatures verify / `mf=`/`rt=` line up / recipes rebuild prior revision |
+   | `countersOrdered` / `canonicalizationOk` / `replayFlagsOk` / `bounceValid` | — not yet sampled | `i=`/`m=` consistent / fixed canonicalization / flags sane / bounce provable |
+   | `draftVersion` | `draft-04` | the DKIM2 draft parsed against |
+   | `probeSentAt` | — never | last swaks capture probe |
+
+   Grayed "— not yet sampled" rows are rendered (not hidden) so the user sees what a future capture will
+   add.
+6. **Per-hop instances table (future).** When `instances` is non-null: `i= | m= | signer d= | mf= |
+   rt= | recipe | sig`, one row per hop, the failing hop's row tinted red — the compact chain table
+   already specified in §4.
+
+### 9.4 Block 3 — What it means
+
+Impact copy keyed to the current state (one short paragraph shown per state, passing/N-A state first
+when healthy):
+
+* **N/A — provider does not speak DKIM2** (`dkim2.applicability` info, the near-universal case): nothing
+  in your path emits or validates DKIM2 yet, so there is nothing to fail. Deliverability impact today:
+  none from DKIM2 — the real work is keeping [DKIM](./dkim.mdx) and [DMARC](./dmarc.mdx) healthy.
+* **Readiness gap** (`dkim2.key_readiness` warning / `dkim2.selector_dns` critical): when your stack
+  *does* gain DKIM2, it will sign with whatever key is at the selector — a weak/legacy or missing key
+  means DKIM2 would start on a bad footing (and, if the selector does not resolve, cannot sign at all).
+* **Coexistence risk** (`dkim2.legacy_coexistence` warning): during migration receivers still rely on
+  DKIM1; if the DKIM1 path is already failing, mail is unprotected in the gap because DKIM2 is not yet
+  honored.
+* **Broken chain (future)** (`dkim2.chain_valid`/`envelope_consistency`/`recipe_reversible`/
+  `counters_ordered` critical): a DKIM2-aware receiver treats a present-but-invalid chain as *worse* than
+  no DKIM2 — the message is rejected or distrusted, and a bad envelope/unreversible recipe reads as
+  tampering or replay.
+* **Bounce/backscatter (future)** (`dkim2.bounce_validity` critical): a DSN that is not addressed to the
+  signed `mf=` (or ignores `mf=<>`) can mailbomb an innocent third party — exactly the backscatter DKIM2
+  was designed to eliminate.
+* **Healthy / verified (future)**: a valid chain was captured on every sampled path — the paragraph
+  explains what that protects (forwarding-surviving, replay-proof, provable-bounce mail) and the
+  residual caveat (receiver adoption is still early).
+
+Where a state maps to a §10 problem page, this block reuses that page's concept copy (single source).
+
+### 9.5 Block 4 — What you can do about it
+
+Numbered, copy-pasteable steps, keyed to the same states. Copy buttons always carry the publishable
+value / runnable command, never prose:
+
+* **N/A (provider does not speak DKIM2)** — the healthy collapse line: *"Nothing to do for DKIM2 right
+  now."* plus the standing **readiness** recommendation: publish an ed25519 selector so you are ready
+  the moment your stack signs DKIM2. Step 1 links to the domain's **DKIM2 / readiness settings**.
+* **Publish a readiness key** (`dkim2.selector_dns` critical / `dkim2.key_readiness` info):
+  1. Generate an ed25519 key — `[copy]` carries:
+     ```
+     openssl genpkey -algorithm ed25519 -out dkim2.ed25519.pem
+     openssl pkey -in dkim2.ed25519.pem -pubout -outform DER | tail -c 32 | openssl base64 -A
+     ```
+  2. Publish it — `[copy]` carries the exact TXT record
+     `d2._domainkey.example.com TXT "v=DKIM1; k=ed25519; p=<base64-from-step-1>"`.
+  3. Verify — `[copy]`: `doggo d2._domainkey.example.com TXT --json` (plus the TTL-propagation note).
+* **Weak/legacy readiness key** (`dkim2.key_readiness` warning): reissue at ed25519 or RSA-2048 — the
+  same snippets, plus the DKIM1 rotation caution from [dkim.mdx](./dkim.mdx).
+* **Enable DKIM2 signing** (when the operator wants to adopt it): configure the MTA — `[copy]` carries
+  the Stalwart DKIM2 signing block (the only server that signs it today):
+  ```toml
+  # stalwart config — enable DKIM2 signing
+  [auth.dkim2."example"]
+  domain = "example.com"
+  selector = "d2"
+  algorithm = "ed25519-sha256"
+  private-key = "%{file:/opt/stalwart/etc/dkim2.ed25519.pem}%"
+  ```
+* **Coexistence** (`dkim2.legacy_coexistence` warning): keep DKIM1 healthy — the step links to the
+  [DKIM](./dkim.mdx) fixes; do **not** retire DKIM1 until receivers validate DKIM2.
+* **Future chain failures** (`chain_valid`, `envelope_consistency`, `recipe_reversible`,
+  `counters_ordered`, `replay_flags`, `bounce_validity`): each carries the §2 remediation verbatim, with
+  the failing hop identified from the per-hop table; validate the captured `.eml` with `[copy]`
+  `npx @stalwart/mail-auth report <sample.eml>` or the browser mail-auth playground.
+
+### 9.6 Block 5 — Run this check now (and the Capture sample probe)
+
+Two affordances, deliberately distinct:
+
+* **Run this check now** — the category-standard re-run ([dkim.mdx §7.7](./dkim.mdx)). **v1:** calls the
+  existing `POST /api/audit/run/:domainId` (full run; tooltip "Re-runs all checks for <domain>"); the
+  button spins/disables in flight; on completion the page navigates to the **newest alias**
+  `/domains/:domainId/dkim/check/dkim2`; on failure a toast reports the error and the page stays on the
+  viewed run. **Target:** `POST /api/audit/run/:domainId/check/dkim` — the scoped endpoint runs the
+  `dkim` checker **and** this `dkim2` checker together (the run graph orders `dkim2 ← dkim`, since DKIM2
+  reuses DKIM's selector/key results), so the two are never re-run separately; sibling category sections
+  carry forward with the `carried_from` marker. Keyboard `r` triggers it. The caption states the scope:
+  *"Re-runs the DKIM + DKIM2 checks for example.com and refreshes this page."*
+* **Capture sample… (FUTURE, admin-only)** — a **secondary** button beside it, never triggered by the
+  re-run: opens the §4 probe panel (confirm the destination mailbox, optional forwarder, send the swaks
+  probe, then parse/validate the delivered copy with a DKIM2 validator). It sends **real mail**, so it
+  is gated `role:admin` (non-admins see it disabled with a tooltip saying why), throttled per §3/§6, and
+  records `probeSentAt`. Until the probe ships (and a DKIM2 validator is available), the button renders
+  in its disabled future state with a "coming soon — DKIM2 validation is draft-stage" tooltip.
+
+### 9.7 History strip & references footer
+
+* **History strip** — the category's reusable ten-chip element ([dkim.mdx §7.5](./dkim.mdx)) scoped to
+  this unit: each chip = one run, colored by that run's **worst `dkim2.*` severity**, gray for runs
+  where the DKIM2 checker did not run, the viewed run outlined, oldest → newest. Hover shows the run
+  timestamp plus a one-line delta versus the previous run — DKIM2-specific examples: *"DKIM2 became
+  applicable — provider began signing"*, *"ed25519 readiness selector d2 published"*, *"selector d2
+  stopped resolving"*, *"chain verified (cv sample)"* (future). Click swaps `:runId`.
+* **References footer** — external links, new tab, the only external navigation on the page:
+  the **DKIM2 draft** (draft-ietf-dkim-dkim2-spec / the individual **draft-clayton-dkim2-spec-04** that
+  ships today), **RFC 6376** (DKIM1), **RFC 8617** (ARC — superseded natively by DKIM2's chain),
+  **RFC 9989** (DMARCbis — the companion policy), the **Stalwart "DKIM2 and DMARCbis have landed" blog
+  post** (stalw.art/blog/dkim2-dmarcbis/), the **Stalwart `mail-auth` crate**
+  (github.com/stalwartlabs/mail-auth), and the **mail-auth playground** (browser WASM DKIM2 sign/verify,
+  no install).
+
+### 9.8 States
+
+* **Loading** — five skeleton bands (category chrome).
+* **Unknown `checkKey`** — owned by the category chrome ("No such sub-test" panel); not repeated here.
+* **Not applicable** (`dkim2.applicability` info fired) — this is a *real result*, not an empty state:
+  block 2 shows the ⓘ slate `not yet supported` chip with the applicability panel explaining which gate
+  is unmet (server support / policy / forwarding); blocks 1/3/4 render their N/A copy. Never rendered as
+  gray.
+* **Not measured** (no `dkim2.*` findings in the viewed run) — blocks 1 and 3 render normally (the
+  concept never disappears), block 2 shows the gray chip with one line ("The DKIM2 checker did not run
+  in this audit"), block 4 shows only the standing readiness recommendation, block 5 stays active.
+* **Readiness unknown** (transient-DNS `info` — "Could not determine the DKIM2 selector"): block 2 shows
+  the ⓘ chip with the lookup-failure evidence and block 4's first step is "Retry the audit" (block 5's
+  button).
+* **Validator missing (future)** (`info` "DKIM2 validator not installed") — block 2 shows the sample
+  fields grayed with a one-line "install a DKIM2 validator to check the chain" and block 4 links the
+  mail-auth playground; never a fabricated verdict.
+* **Run-fetch error** — error strip with Retry above block 1 (category chrome).
+
+### 9.9 Clickable sub-concepts — where every click goes
+
+Nothing on the page is a dead end. The full navigation map:
+
+| Clickable element | Destination |
+| --- | --- |
+| Back link (header) | the run's DKIM category page `/domains/:domainId/runs/:runId/dkim` |
+| ‹ prev / next › pager, history-strip chips | same explainer, other `:runId` |
+| DMARC policy value in the applicability panel (`p=…` chip) | the run's DMARC category page / policy explainer |
+| "reuses the DKIM key" / key-strength concept links in blocks 1/3 | the run's DKIM category page `/domains/:domainId/runs/:runId/dkim` |
+| "absorbs ARC" mention in blocks 1/3 | [arc.mdx](./arc.mdx)'s explainer `…/dmarc/check/arc` |
+| Selector card title / "edit" affordance / settings links in block 4 | the domain's DKIM2 / readiness settings editor ([../domains.mdx](../domains.mdx)) |
+| Finding row "Full drill-down ›" | that finding's DKIM2-nn problem page (§10) |
+| `[copy]` buttons | clipboard only (no navigation) — value confirmed by a toast |
+| Run this check now | re-run then the newest alias of this page (§9.6) |
+| Capture sample… (admin, future) | in-page probe panel (no route change) |
+| References footer links | external, new tab |
+| Sibling mentions of the origin problem ("fix DKIM1 first") | the run's DKIM category page |
+
+### 9.10 Wireframe
+
+The category's five-band skeleton ([dkim.mdx §7.1](./dkim.mdx)) filled in for DKIM2 in the common
+first-round state (no provider support yet, RSA-only readiness key):
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Back to DKIM   DKIM2 (DomainKeys Identified Mail v2)      [Re-run ⟳]     │  header row
+│ example.com  ·  DKIM › sub-test  ·  [advisory · draft-04]                  │
+│ Run 2026-07-08 09:14  ·  [‹ prev]  [next ›]  ·  ★ newest  ·  ▪▪▪▪▪▪▪▪▪▣    │  run context strip
+├────────────────────────────────────────────────────────────────────────────┤
+│  WHAT THIS IS                                                               │  band 1
+│  DKIM2 (IETF draft-04) succeeds DKIM: every hop appends a signature over    │
+│  the message + all prior signatures, records the SMTP envelope (mf=/rt=)    │
+│  inside it, and leaves a reversible recipe so a forwarder's change can be   │
+│  undone. It fixes replay, forwarding breakage, chain-of-custody, bounces…   │
+├────────────────────────────────────────────────────────────────────────────┤
+│  YOUR CURRENT STATE                          [ ⓘ NOT YET SUPPORTED ]        │  band 2
+│  DMARC policy      p=reject → enforcing          (from this run's DMARC)   │
+│  Forwarding        declared                       (domain settings)        │
+│  DKIM2 support     not declared (Stalwart-only)   (config flag)            │
+│  Verdict           DKIM2 not applicable yet — readiness only               │
+│  ⚠ dkim2.key_readiness   RSA-2048 only; add ed25519 for readiness   [v]    │
+│  ⓘ dkim2.applicability · ⓘ dkim2.server_support · ◻ dkim2.chain_present    │
+│  ┌ READINESS KEY — d2._domainkey.example.com ───────────── ⓘ no ed25519 ┐  │
+│  │ (no ed25519 selector published)               [copy expected TXT] │    │
+│  └──────────────────────────────────────────────────────────────────── ┘    │
+│  ┌ field ───────── value ───────────── meaning ──────────────────────┐    │
+│  │ applicable      false              provider does not speak DKIM2   │    │
+│  │ keyType         rsa (2048)         readiness key at the selector   │    │
+│  │ chainValid      — not yet sampled  every signature verifies        │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+├────────────────────────────────────────────────────────────────────────────┤
+│  WHAT IT MEANS                                                              │  band 3
+│  Nothing emits or validates DKIM2 in your path yet, so there is nothing    │
+│  to fail. The one useful step now is readiness: publish an ed25519 key so  │
+│  DKIM2 starts on solid footing the moment your stack signs it.             │
+├────────────────────────────────────────────────────────────────────────────┤
+│  WHAT YOU CAN DO ABOUT IT                                                   │  band 4
+│  1. Generate an ed25519 key:  openssl genpkey -algorithm ed25519 … [copy]  │
+│  2. Publish it:  d2._domainkey.example.com TXT "v=DKIM1; k=ed25519…"[copy]  │
+│  3. Verify:  doggo d2._domainkey.example.com TXT --json            [copy]  │
+├────────────────────────────────────────────────────────────────────────────┤
+│  RUN THIS CHECK NOW                     [ Run check ⟳ ]  [ Capture sample…]│  band 5
+│  Re-runs the DKIM + DKIM2 checks for example.com and refreshes this page.  │
+├────────────────────────────────────────────────────────────────────────────┤
+│  HISTORY   ▪▪▪▪▪▪▪▪▪▣   (DKIM2, last 10 runs — click to view)              │  history strip
+│  REFERENCES  DKIM2 draft-04 · RFC 6376 · RFC 8617 · RFC 9989 · Stalwart    │  references footer
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 9.11 Small additions to what the check records
+
+So block 2 renders entirely from persisted run data (never scraping prose out of finding strings), the
+checker records these small, nullable additions — same `Checker`/`Finding` contract, no schema break:
+
+* **Per-selector readiness observation** (`results.dkim2.signerSelector` / `keyType` / `keyBits` /
+  `selectorResolves`) gains `rawKeyRecord: string | null` — the raw TXT answer at
+  `<selector>._domainkey.<domain>` (the readiness card's body; the checker already holds it as `rec`).
+* **`results.dkim2`** gains `dmarcPolicy: string | null` (the `p=` the applicability verdict used) and
+  `policySource: "sibling" | "dns" | null` (whether it came from the sibling `dmarc` result or a
+  fallback lookup — the applicability panel's provenance line).
+
+Database mapping: `raw_key_record TEXT`, `dmarc_policy TEXT`, `policy_source TEXT` — all nullable,
+consistent with §5's advisory-first posture. Older persisted runs render the fallbacks (finding
+`evidence` for the card body, "—" for provenance), never errors.
+
+---
+
+## 10. Problem states & drill-down pages (DKIM2-nn)
+
+Each finding the checker emits maps to exactly **one** problem drill-down, rendered at the category's
+problem route with the same five-band chrome as the DKIM spec's PS-nn pages ([dkim.mdx §9](./dkim.mdx):
+**Concept → Your data → Diagnose it yourself → Path forward → further reading**, with header row + run
+context strip):
+
+```
+/domains/:domainId/runs/:runId/dkim/:problemId    (canonical, run-scoped)
+/domains/:domainId/dkim/:problemId                (newest-run alias)
+```
+
+**Id namespace.** DKIM2 problem ids use the **`DKIM2-nn`** prefix — **disjoint from the DKIM spec's
+`PS-nn` ids** (that spec's registry is untouched) and, like them, disjoint from the literal `check/`
+segment. The frontend problem-state registry gains the DKIM2 entries below, with this spec as their
+content source; matching stays "which ids fired in this run." Matched DKIM2-nn cards append to the DKIM
+category page's PROBLEM STATES band **after** the PS-nn cards, same card anatomy (title + one-line hook +
+chevron).
+
+**Finding → problem → explainer map** (every id the checker emits today, plus the future ids):
+
+| Finding id (pattern) | Severity | Problem page | Explainer state (§9) |
+| --- | --- | --- | --- |
+| `dkim2.applicability` ("not applicable / not yet supported") | info | DKIM2-04 | N/A |
+| `dkim2.applicability` ("could not determine") | info | DKIM2-04 | readiness unknown |
+| `dkim2.applicability` ("DKIM2 applies") | info | — (context row only) | applicable |
+| `dkim2.server_support` (unknown / not yet) | info | DKIM2-04 | N/A |
+| `dkim2.key_readiness` (weak/legacy key) | warning | DKIM2-02 | readiness gap |
+| `dkim2.key_readiness` (RSA-only, add ed25519) | info | DKIM2-02 (advice) | readiness gap |
+| `dkim2.selector_dns.<slug>` (NXDOMAIN / revoked `p=`) | critical | DKIM2-01 | readiness gap |
+| `dkim2.selector_dns.<slug>` (transient) | info | DKIM2-04 | readiness unknown |
+| `dkim2.selector_dns.<slug>` (resolves) | ok | — | healthy row |
+| `dkim2.legacy_coexistence` | warning | DKIM2-03 | coexistence risk |
+| `dkim2.chain_present` (stub: "not yet sampled") | info | DKIM2-05 | not sampled |
+| *(future)* `dkim2.chain_present` (sample, no headers) | warning | DKIM2-05 | chain absent |
+| *(future)* `dkim2.chain_valid`, `dkim2.canonicalization` | critical/warning | DKIM2-06 | broken chain |
+| *(future)* `dkim2.envelope_consistency`, `dkim2.counters_ordered`, `dkim2.replay_flags` | critical | DKIM2-07 | envelope/replay |
+| *(future)* `dkim2.recipe_reversible` | critical | DKIM2-08 | recipe |
+| *(future)* `dkim2.bounce_validity` | critical | DKIM2-09 | bounce/backscatter |
+
+### DKIM2-01 — Signing selector unresolvable
+
+* **Matches:** any `dkim2.selector_dns.<slug>` critical (NXDOMAIN/empty answer, or revoked/empty `p=`).
+  **Concept:** DKIM2 signs with a key at `<selector>._domainkey.<domain>` (the same place as DKIM1);
+  without it, DKIM2 cannot sign at all and receivers cannot verify. **Your data:** the failing
+  selector's readiness row (`signerSelector`, `keyType`, `selectorResolves=false`, `rawKeyRecord` when
+  revoked-not-missing) + the finding evidence. **Diagnose:** `doggo <selector>._domainkey.<domain> TXT
+  --json`, `dig +short TXT <name>`, `kdig @8.8.8.8 +short TXT <name>` (copyable). **Path forward:** the
+  §9.5 key-publication steps (ed25519 preferred). **Further reading:** RFC 6376 key records, the DKIM2
+  draft §DNS.
+
+### DKIM2-02 — Readiness key weak or missing ed25519
+
+* **Matches:** `dkim2.key_readiness` warning (weak/legacy key) and info (RSA-only). **Concept:** DKIM2's
+  fixed hashing pairs best with ed25519; a weak/legacy key would put DKIM2 on a bad footing when signing
+  is enabled. **Your data:** `keyType`/`keyBits` + raw record. **Diagnose:** the same TXT lookups plus
+  decoding the modulus (`… | openssl base64 -d -A | openssl pkey -pubin -inform der -noout -text`).
+  **Path forward:** publish an ed25519 selector (the §9.5 snippets) alongside RSA-2048. **Further
+  reading:** RFC 8463 (ed25519 DKIM), RFC 8301.
+
+### DKIM2-03 — Coexistence risk (DKIM1 failing during migration)
+
+* **Matches:** `dkim2.legacy_coexistence` warning. **Concept:** until receivers validate DKIM2 they rely
+  on DKIM1; a failing DKIM1 path leaves mail unprotected in the migration gap. DKIM2 ignores legacy
+  `DKIM-Signature`/`ARC-*`, so the two must both be healthy. **Your data:** the DKIM1 result summary for
+  the same run + the coexistence finding. **Diagnose:** open the [DKIM](./dkim.mdx) category page for the
+  run. **Path forward:** fix DKIM1 first; keep it until DKIM2 is honored. **Further reading:** RFC 6376,
+  the DKIM2 draft migration section.
+
+### DKIM2-04 — Not applicable / not yet determined
+
+* **Matches:** `dkim2.applicability` / `dkim2.server_support` info in their N/A and could-not-determine
+  variants, and transient selector-lookup infos. **Concept:** when DKIM2 does and does not matter (the
+  gates: server support, enforcing policy, forwarding) — and why "not yet supported" is the correct
+  default in 2026 (only Stalwart ≥ v0.16.12 signs it). **Your data:** the applicability panel rows.
+  **Diagnose:** `doggo _dmarc.<domain> TXT --json`; check your MTA/provider's DKIM2 roadmap. **Path
+  forward:** none today; revisit when your stack speaks DKIM2, plus the readiness recommendation.
+  **Further reading:** the Stalwart DKIM2 blog post, the DKIM2 draft §1.
+
+### DKIM2-05 — Chain not yet sampled / chain absent
+
+* **Matches:** the first-round `dkim2.chain_present` info stub; future: the warning when a captured
+  sample carries no DKIM2 headers. **Concept:** why the chain checks need a real DKIM2 message and what
+  the capture probe does (§3). **Your data:** `messageSampleId`/`probeSentAt` (null today), the probe
+  target. **Diagnose:** the manual send-and-inspect procedure; look for `Message-Instance` /
+  `DKIM2-Signature` headers in the delivered copy. **Path forward:** enable DKIM2 signing (§9.5 Stalwart
+  block) then run the admin Capture sample probe when available. **Further reading:** the DKIM2 draft
+  §headers, the mail-auth playground.
+
+### DKIM2-06 — Broken or invalid chain *(future)*
+
+* **Matches:** `dkim2.chain_valid` and `dkim2.canonicalization`. **Concept:** a present-but-invalid chain
+  is worse than none — a DKIM2-aware receiver rejects/distrusts it. **Your data:** the per-hop instances
+  table with the failing hop tinted; `chainValid`, `signatureCount`, `revisionCount`,
+  `canonicalizationOk`. **Diagnose:** re-verify the captured `.eml` with `npx @stalwart/mail-auth report
+  <sample.eml>` or the mail-auth playground (copyable). **Path forward:** fix the failing hop's signer
+  (clock skew, post-signing mutation, wrong key, non-conformant canonicalization). **Further reading:**
+  the DKIM2 draft §verification, Stalwart mail-auth.
+
+### DKIM2-07 — Envelope discontinuity / replay / flag misuse *(future)*
+
+* **Matches:** `dkim2.envelope_consistency`, `dkim2.counters_ordered`, `dkim2.replay_flags`. **Concept:**
+  DKIM2 binds the SMTP envelope into the signature and orders hops with `i=`; a break means the message
+  was replayed to new recipients or relayed without a signed hop, and fan-out must be marked `exploded`
+  (or forbidden with `donotexplode`). **Your data:** the per-hop `mf=`/`rt=`/`i=`/flags; the failing
+  discontinuity. **Diagnose:** walk the instances table; confirm hop N `mf=` matches hop N−1 `rt=` and
+  `d=` sits within `mf=`. **Path forward:** ensure each relay signs the envelope it handled, increments
+  `i=` per hop, and marks fan-out `exploded`. **Further reading:** the DKIM2 draft §envelope/chain.
+
+### DKIM2-08 — Non-reversible recipe (change looks like tampering) *(future)*
+
+* **Matches:** `dkim2.recipe_reversible` critical. **Concept:** a modifying hop must leave a reversible
+  `r=` recipe so a verifier can undo the change and re-verify the originator; a content change with no
+  valid recipe is indistinguishable from a malicious body swap. **Your data:** the failing hop's
+  `recipe_present`/decode result; the `m=` revision that will not rebuild. **Diagnose:** decode the
+  base64 `r=` JSON (`{"h":…,"b":[{"c":[…]},{"d":[…]}]}`), apply it, and compare the rebuilt revision's
+  fingerprint (mail-auth reports this). **Path forward:** configure the modifying hop (mailing list /
+  gateway) to emit a correct recipe for every edit. **Further reading:** the DKIM2 draft §recipes.
+
+### DKIM2-09 — Untrustworthy bounce / backscatter *(future)*
+
+* **Matches:** `dkim2.bounce_validity` critical. **Concept:** a DSN must be addressed to the signed
+  highest-numbered `mf=` (never the visible sender); `mf=<>` means no DSN; a genuine DKIM2 bounce is
+  itself a signed DKIM2 message carrying the original chain. A bounce that violates this can mailbomb a
+  third party. **Your data:** the captured DSN's envelope + embedded chain validity. **Diagnose:**
+  inspect the `multipart/report` DSN (MAIL FROM `<>`, its own `Message-Instance`/`DKIM2-Signature`) and
+  validate against the embedded chain. **Path forward:** fix the bounce generator to address DSNs to the
+  signed `mf=`, honor `mf=<>`, and sign the bounce. **Further reading:** the DKIM2 draft §bounces.
+
+**Drill-down ↔ explainer linking.** Every DKIM2-nn page's Concept block ends with *"Full DKIM2 sub-test
+explainer ›"* → `…/dkim/check/dkim2` (run-scoped), and the explainer's finding rows link back per §9.3
+item 3 — the two page kinds answer different questions (one problem deeply vs. the whole unit) and must
+cross-link both ways. Back chevron returns to the run's DKIM page anchor, exactly like PS-nn.
+
+<!--
+  Maintenance: DKIM2 is the IETF DKIM v2 draft (draft-ietf-dkim-dkim2-spec / individual
+  draft-clayton-dkim2-spec-04 — pin parsing to draft-04 and record draft_version; the draft is still
+  moving). Keep in sync with ./dkim.mdx (DKIM2 is the DKIM1 successor and rolls into the SAME DKIM
+  dashboard cell, category 2 — it has NO column of its own), ./arc.mdx (whose architecture this file
+  mirrors; DKIM2 absorbs ARC natively and ignores DKIM-Signature/ARC-* headers), ./dmarcbis.mdx (the
+  companion policy from the same Stalwart release), and ../engineering.mdx (Checker/Finding contract,
+  file store, scheduler). DKIM2 is an ADVISORY/FUTURE companion to DKIM: only dkim2.applicability /
+  dkim2.key_readiness / dkim2.selector_dns / dkim2.server_support (+ the dkim2.legacy_coexistence
+  cross-read) are first-round pure DNS/config (reusing dkim.check.ts's _domainkey machinery);
+  everything else needs a captured DKIM2 message (swaks probe + a DKIM2 validator — mail-auth /
+  Stalwart / the mail-auth playground; NO stable brew formula yet, degrade to info, never fabricate a
+  verdict). Keep dkim2_check_results columns nullable while first round stays advisory-only. Ecosystem
+  fact to keep current: Stalwart v0.16.12 is the FIRST mail server to implement DKIM2 (+ DMARCbis);
+  for almost every domain the honest result today is "not applicable / provider doesn't speak it."
+
+  Explainer & drill-downs: §9 owns the CONTENT of the dkim2 explainer at
+  /domains/:domainId/runs/:runId/dkim/check/dkim2 (newest alias without /runs/:runId); the ROUTE
+  pattern, page chrome, five-band contract, history strip, and scoped re-run endpoint are LOCKED by
+  pm/checks/dkim.mdx §7.1–§7.7 — never fork them here, and never renumber §1–§8 (dkim2.check.ts and
+  the frontend reference those section numbers). The status chip rule (worst checkId startsWith
+  "dkim2." finding in the viewed run; gray when none) must match the dkim band row and the
+  RunDetailPage mini-row. Problem drill-downs use the DKIM2-nn id namespace at the shared
+  /dkim/:problemId route — keep it disjoint from dkim.mdx's PS-nn registry and keep the §10
+  finding→problem map total over every id the checker emits. The §9.11 recorded-data additions
+  (rawKeyRecord per selector; dmarcPolicy/policySource on results.dkim2) stay nullable and
+  backward-compatible. The Capture sample probe stays admin-gated, throttled, and SEPARATE from the
+  Run-this-check-now button at every surface.
+-->

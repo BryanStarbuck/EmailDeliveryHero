@@ -31,7 +31,7 @@ export interface DmarcCheckUnit {
 	/** Record tags owned — the parsed-record tag rows that deep-link here (§6.3 mapping rules). */
 	tags: string[];
 	/** Sibling units render their band row here but their explainer content is owned elsewhere. */
-	sibling?: "arc" | "reports";
+	sibling?: "arc" | "reports" | "dmarcbis";
 	/** Block 1 — What this is (2–4 short plain-language paragraphs). */
 	whatItIs: string[];
 	/** Block 3 — What it means when the unit passes. */
@@ -361,6 +361,44 @@ export const DMARC_CHECK_UNITS: DmarcCheckUnit[] = [
 				href: "https://www.rfc-editor.org/rfc/rfc8617",
 			},
 			RFC_9989,
+			LEARNDMARC,
+		],
+	},
+	{
+		key: "dmarcbis",
+		title: "DMARCbis conformance",
+		oneLiner:
+			"Holds up under the 2026 standard: the DNS tree walk and the new tag set.",
+		findingIds: [],
+		prefixIds: ["dmarcbis."],
+		tags: ["np", "psd", "t", "sp"],
+		sibling: "dmarcbis",
+		whatItIs: [
+			"DMARCbis (RFC 9989/9990/9991, May 2026) is the successor to the original DMARC (RFC 7489). Your DMARC record keeps working unchanged — there is no flag day — but DMARCbis rewrites the plumbing underneath it: the biggest change is that receivers now find your Organizational Domain with a live DNS tree walk instead of the static Public Suffix List.",
+			"This unit is the standards-conformance and migration lens: it runs IN ADDITION to the DMARC check and asks whether your record is correctly set up for the new standard — is the record the tree walk resolves the one you enforce, is psd declared correctly, is the non-existent-subdomain policy (np) closed, and have the removed tags (pct/rf/ri) been cleaned up. Its findings roll into this DMARC category.",
+			"DMARCbis also softens p=reject from an unconditional bounce into a strong signal receivers weigh — so under p=reject it MUST be backed by aligned DKIM (which survives forwarding), not SPF alone. The dmarcbis.* rows below show where this domain stands against each rule.",
+		],
+		meaningPass:
+			"Your DMARC record is DMARCbis-conformant: the tree walk resolves the domain you enforce, the tag set is current, and p=reject is backed by aligned DKIM. Nothing changes for you as receivers migrate.",
+		meaningFail:
+			"One or more DMARCbis mechanisms are mis-set — the tree walk may resolve a different Organizational Domain than you enforce, psd/np may be wrong, removed tags may linger, or p=reject may be leaning on SPF alone. The dmarcbis.* rows name the exact gap and fix.",
+		fixSteps: [
+			"Publish your policy at the domain the tree walk resolves as the Organizational Domain (or confirm the parent's sp= is what you intend).",
+			"Add np=reject if you never send from non-existent subdomains; set psd=n (or remove it) on an ordinary org domain.",
+			"Delete the removed tags (pct/rf/ri) at the next DNS edit, and make sure every stream DKIM-signs with an aligned d= before relying on p=reject.",
+		],
+		references: [
+			RFC_9989,
+			RFC_9990,
+			RFC_9991,
+			{
+				label: "RFC 9091 — PSD DMARC (folded into 9989)",
+				href: "https://www.rfc-editor.org/rfc/rfc9091",
+			},
+			{
+				label: "Stalwart — DKIM2 and DMARCbis have landed",
+				href: "https://stalw.art/blog/dkim2-dmarcbis/",
+			},
 			LEARNDMARC,
 		],
 	},

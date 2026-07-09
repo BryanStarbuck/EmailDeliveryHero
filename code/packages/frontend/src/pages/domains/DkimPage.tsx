@@ -110,7 +110,11 @@ export function DkimPage() {
 		return () => window.removeEventListener("keydown", onKey);
 	}, [navigate, id, prevRun?.runId, nextRun?.runId]);
 
-	const findings = (result?.findings ?? []).filter((f) => f.checkId === "dkim");
+	// The DKIM category page lists both the DKIM sub-checks and its DKIM2 companion (pm/checks/dkim2.mdx):
+	// dkim2.* findings roll into the same DKIM cell, so they surface here in the test-results table.
+	const findings = (result?.findings ?? []).filter(
+		(f) => f.checkId === "dkim" || f.checkId === "dkim2",
+	);
 	const dkim = result?.results?.dkim;
 	const cell =
 		rollupCategories(result?.findings, result?.results).dkim ?? NEVER_CELL;

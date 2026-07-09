@@ -18,7 +18,14 @@ import type { Checker } from "./checks/types";
  */
 export const CHECK_DEPENDENCIES: Record<string, string[]> = {
 	dmarc: ["spf", "dkim"],
+	// dkim2 ← dkim: the DKIM2 companion reuses the DKIM selector observations and key-readiness
+	//   (pm/checks/dkim2.mdx §3); its applicability is also framed by the DMARC policy it reads
+	//   from the shared upstream, but the only hard prerequisite is the DKIM selector scan.
+	dkim2: ["dkim"],
 	arc: ["dmarc"],
+	// dmarcbis ← dmarc: the conformance lens reads the already-parsed DMARC record instead of
+	//   re-tokenizing it (pm/checks/dmarcbis.mdx §4 — "read the sibling dmarc result first").
+	dmarcbis: ["dmarc"],
 	"content.bimi": ["dmarc"],
 	"content.scoring": [
 		"dmarc",

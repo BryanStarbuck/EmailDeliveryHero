@@ -1,0 +1,1237 @@
+---
+title: EmailDeliveryHero — DMARCbis Conformance & Migration Check
+description: The DMARCbis check spec — the standards-conformance and RFC 7489 → DMARCbis migration lens that EmailDeliveryHero runs IN ADDITION TO the existing DMARC check. Covers the DNS tree walk that replaces the Public Suffix List (RFC 9989, 8-query cap, longest→shortest psd Organizational-Domain selection), the new/removed tag set (np/psd/t in, pct/rf/ri out), the p=reject reality-check rules, and the grown-up RFC 9990 aggregate / RFC 9991 failure reporting model; the ten dmarcbis.* sub-checks (first-round DNS-answerable today vs report-ingestion FUTURE), the checkdmarc/parsedmarc/doggo/kdig/Stalwart-mail-auth toolbox and the "How a test run executes the tools" table, the per-run dmarcbis: section in the run YAML (org-domain + tree-walk query path, tool_runs[], tests[], problem_states[]), the DMARCbis sub-test explainer page at /domains/:domainId/runs/:runId/dmarc/check/dmarcbis with the locked five-block what/state/meaning/fix/re-run contract and the org-domain / tree-walk panel, the DMARCbis-nn problem-state drill-downs at /domains/:domainId/runs/:runId/dmarc/:problemId (disjoint from the DMARC spec's PS-nn namespace), the dmarcbis_check_results schema and its JSON-file-store mapping, the first-round-vs-future split, and the acceptance criteria.
+---
+
+# EmailDeliveryHero — DMARCbis Conformance & Migration Check
+
+**DMARCbis** is the 2026 successor to DMARC. Published in **May 2026** as **RFC 9989** (core
+protocol), **RFC 9990** (aggregate reporting), and **RFC 9991** (failure reporting), it **obsoletes
+RFC 7489** (the 2015 informational DMARC spec) and folds in **RFC 9091** (the PSD — Public Suffix
+Domain — experiment). It keeps `v=DMARC1` records working on the wire but rewrites how receivers
+find the Organizational Domain, adds and removes tags, softens what `p=reject` actually commands,
+and modernizes the report formats. This check tests **whether a domain is correctly using the
+DMARCbis mechanisms** and **how well its existing record holds up under the new standard**.
+
+**Companion, not replacement.** This check does **not** re-audit the DMARC record from scratch — the
+existing **`dmarc`** checker ([./dmarc.mdx](./dmarc.mdx)) already does the full presence / syntax /
+policy / alignment / reporting audit, already parses the DMARCbis-era tags (`np`, `psd`, `t`), does
+an approximate org-domain walk-up, and already flags the removed tags (`pct`/`rf`/`ri`) and `t=y`.
+**DMARCbis is the dedicated CONFORMANCE + MIGRATION lens** layered on top: it evaluates whether the
+domain is correctly using the DMARCbis mechanisms — most importantly the **DNS tree walk** that
+replaces the static Public Suffix List — and whether the record is ready for the RFC 7489 →
+DMARCbis transition. Frame it to the user as: *"Your DMARC works today; here is how it holds up
+under the new standard."* The checker **reads the sibling `dmarc` result** (the run graph orders
+`dmarcbis ← dmarc`) rather than re-parsing the record, exactly as [ARC](./arc.mdx) consumes the
+DMARC policy it needs.
+
+**The one new standard we can fully test today.** Unlike [ARC](./arc.mdx) and [DKIM2](./dkim2.mdx) —
+whose conformance can only be verified from a captured message in transit — **DMARCbis is mostly
+answerable from DNS right now**: the tree walk, the tag set, the `psd`/`np`/`t` semantics, and the
+external-authorization model all live in records the owner controls. So first-round coverage is
+**high**; only the RFC 9990 / RFC 9991 **report-schema** pieces are FUTURE, because they depend on
+ingesting aggregate and failure report emails through the existing [../emails.mdx](../emails.mdx)
+pipeline.
+
+**Category & prefix.** DMARCbis belongs to the **DMARC** dashboard category (column 3). Its
+sub-check ids use the **`dmarcbis.`** prefix (e.g. `dmarcbis.tree_walk`) — a distinct
+standards-conformance companion namespace whose findings **roll into the DMARC category cell**.
+DMARCbis has **no column of its own**; it is a companion/standards-conformance lens over the same
+domain, exactly as ARC companions DMARC. There are still seven categories.
+
+**Read alongside** (do not duplicate these):
+
+- [./dmarc.mdx](./dmarc.mdx) — the operational DMARC audit DMARCbis layers on top of; owns the
+  DMARC dashboard cell, the category page, the sub-tests band, and the shared explainer/route
+  chrome DMARCbis plugs into. DMARCbis reads its parsed record (`results.dmarc`) via the run graph.
+- [./arc.mdx](./arc.mdx) — the other DMARC-category companion; the sibling framing, the five-block
+  explainer contract, and the "SQL then map to JSON file store" pattern used here mirror it.
+- [./dkim2.mdx](./dkim2.mdx) — the DKIM successor; like DMARCbis a next-generation standard, but
+  message-transit-dependent and therefore mostly FUTURE, where DMARCbis is DNS-answerable now.
+- [./spf.mdx](./spf.mdx) — SPF is one half of DMARC alignment (`aspf`); the `dmarcbis.reject_advisory`
+  sub-check cross-checks the SPF result (SPF-only authentication must not be relied on under
+  `p=reject`).
+- [./dkim.mdx](./dkim.mdx) — DKIM is the more robust half of alignment (`adkim`); DMARCbis requires
+  aligned DKIM under `p=reject` because DKIM survives forwarding.
+- [../overview.mdx](../overview.mdx) — product charter, personas, port list.
+- [../engineering.mdx](../engineering.mdx) — the `Checker`/`Finding` contract, the file store, the
+  scheduler this check plugs into.
+- [../emails.mdx](../emails.mdx) — the authoritative spec for ingesting the **aggregate (`rua`) and
+  failure (`ruf`) reports**; the RFC 9990 / RFC 9991 report-schema sub-checks are FUTURE and depend
+  entirely on that pipeline.
+
+---
+
+## 1. What it checks
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dmarcbis/dmarcbis.check.ts` — the `dmarcbisCheck` checker, method `run()`
+
+**Background & standard.** RFC 7489 defined DMARC in 2015 as an informational document. A decade of
+operational experience produced **DMARCbis**, standardized in May 2026 across three RFCs — **RFC
+9989** (the core protocol, obsoleting 7489 and folding in the RFC 9091 PSD experiment), **RFC 9990**
+(aggregate reporting), and **RFC 9991** (failure reporting, updating RFC 6591). Everything DMARC
+operators rely on is preserved — alignment (`adkim`/`aspf`, relaxed/strict), the three policies
+(`none`/`quarantine`/`reject`), evaluating **only** the `From:` header, and building on SPF + DKIM —
+so **there is no flag day**: existing RFC 7489 records keep working, and removed tags are **ignored,
+not rejected**. What changed is the machinery this checker audits for conformance.
+
+**The headline change — the DNS tree walk replaces the Public Suffix List.** To apply DMARC a
+receiver must find the **Organizational Domain**: the boundary of an organization's authority — e.g.
+`mail.example.com` and `example.com` share one owner, but `example.com` and `example.co.uk` do not.
+Under RFC 7489 receivers consulted **Mozilla's static Public Suffix List (PSL)** to find that
+boundary — a file that was frequently stale or wrong for a given domain. **RFC 9989 replaces the PSL
+with a live, ordered series of DNS queries** that climb from the Author Domain toward the root:
+
+1. Query `_dmarc.<author-domain>` first.
+2. If nothing definitive is found, **drop labels from the left** and query each parent, capped at
+   **8 queries total**. For a name of **7 or fewer labels**, strip **one** label at a time; for a
+   **longer** name, remove **several labels at once** so that only 7 remain, then continue one at a
+   time.
+3. Select the Organizational Domain from the records found, **longest → shortest**:
+   - a record declaring **`psd=n`** marks **its own domain** as the Org Domain — **stop**;
+   - a record declaring **`psd=y`** (and **not** the domain where the walk began) means the Org
+     Domain is **one label below it**;
+   - otherwise the record with the **fewest labels** wins.
+
+**The canonical 8-query example** for the Author Domain `a.b.c.d.e.f.g.h.i.j.mail.example.com`
+(13 labels — far more than 7, so several labels are removed at once after the first query):
+
+```
+1.  _dmarc.a.b.c.d.e.f.g.h.i.j.mail.example.com     (the full Author Domain)
+2.  _dmarc.g.h.i.j.mail.example.com                 (jump to 7 labels — remove several at once)
+3.  _dmarc.h.i.j.mail.example.com                   (6 labels — one at a time from here)
+4.  _dmarc.i.j.mail.example.com                     (5 labels)
+5.  _dmarc.j.mail.example.com                       (4 labels)
+6.  _dmarc.mail.example.com                          (3 labels)
+7.  _dmarc.example.com                               (2 labels)
+8.  _dmarc.com                                       (1 label — the query cap is reached here)
+```
+
+**The payoff:** the Org Domain is now defined by **DNS records the owner controls**, refreshing as
+fast as DNS itself — killing the entire "the PSL is wrong for my domain" class of problems, and
+letting registry / public-suffix operators publish a protective default via `psd=y`.
+
+**Tag changes.** The DMARCbis valid tag set is **`v, p, sp, np, adkim, aspf, fo, rua, ruf, psd,
+t`**.
+
+- **NEW `np`** — policy for **non-existent** subdomains (a subdomain whose lookup returns NXDOMAIN
+  per **RFC 8020**). It closes the **phantom-subdomain spoofing gap**: attackers spoof
+  `invoices.example.com` when no such host exists and SPF/DKIM can never be published for it.
+  Fallback order: `np` → `sp` → `p`.
+- **NEW `psd`** — declares whether the domain **is a public suffix**: `y` (yes, a registry/PSD
+  operator), `n` (no, an ordinary organization), or `u` (unknown — the **default**). It **anchors
+  the tree walk** (see the selection rules above) and lets registry operators publish a protective
+  default for everything beneath them.
+- **NEW `t`** — a **testing** flag replacing `pct`. `t=n` (**default**) applies the policy **as
+  written**; `t=y` **softens enforcement by one level** — `reject` → `quarantine`, `quarantine` →
+  `none` — **without** stopping report generation. It is the DMARCbis analogue of the old
+  `pct=0`/`pct=100` extremes: a way to publish an enforcing policy while still only monitoring.
+- **REMOVED `pct`** — only `0` and `100` ever worked interoperably, and `pct=0` had drifted into a
+  special "stealth none" meaning. Gone.
+- **REMOVED `rf`** — only `afrf` was ever deployed. Gone.
+- **REMOVED `ri`** — receivers converged on ~daily aggregate reports regardless. Gone.
+- **`sp` redefined via the tree walk.** `sp` keeps its meaning (policy for **existing** subdomains
+  of the Org Domain) but is now read **only from the record discovered AT the Organizational Domain**
+  by the tree walk — **not** from a record published on the subdomain itself. A stray `sp=` on a
+  non-org subdomain record is simply ineffective.
+
+**The `p=reject` reality check.** DMARCbis states that `p=reject` is **no longer an unconditional
+order to bounce**. Three rules the standard now spells out:
+
+- A **general-purpose sending domain SHOULD NOT** publish `p=reject` if its users might post to
+  **mailing lists** — it should ramp `none` → `quarantine` → `reject` first.
+- A sending domain publishing **any** `p=reject` **MUST NOT rely on SPF alone** and **MUST apply
+  valid DKIM signatures**, because **DKIM survives forwarding** while SPF does not.
+- A **receiver MUST NOT reject solely** because a policy says `reject` — it must **weigh other
+  evidence** (e.g. an ARC chain, reputation). The policy became a **strong signal to weigh**, not a
+  blind trigger.
+
+**Reporting grew up (RFC 9990 / RFC 9991) — mostly FUTURE.** Aggregate reports move to the XML
+namespace **`urn:ietf:params:xml:ns:dmarc-2.0`**, add an **extensibility slot**, carry a
+**`discovery_method`** field distinguishing the old **`psl`** from the new **`treewalk`**, reflect
+the **`t`** testing flag and the **`np`** policy, and **REQUIRE naming the DKIM selector**. They stay
+**privacy-safe** (domain-level counts, no message content), still **gzipped XML over email**, and
+external destinations still prove consent via `_report._dmarc`. **Failure reports** (RFC 9991,
+updating RFC 6591) add a **`dmarc`** failure type plus a **required `Identity-Alignment`** field,
+**must be rate-limited**, and **PSD operators MUST NOT act on a `ruf` request** without a specific
+agreement. Note that many large receivers disable failure reports entirely for privacy. These
+pieces can only be verified once reports are actually ingested, so they are **FUTURE** and owned by
+[../emails.mdx](../emails.mdx).
+
+**Why this matters to a domain owner today.** A record that works perfectly under RFC 7489 can still
+be **non-conformant or fragile** under DMARCbis: it may lean on the PSL boundary the tree walk now
+overrides, mis-declare `psd`, leave the phantom-subdomain gap open (`np` absent), silently disable
+enforcement with `t=y`, carry removed tags that add noise, or rely on SPF-only authentication that
+`p=reject` forbids. This check surfaces exactly those migration gaps — none of which the operational
+`dmarc` checker is responsible for judging as **conformance**.
+
+---
+
+## 2. Tests we perform (sub-checks)
+
+The first-round set for the `dmarcbis` companion. Every test emits a finding — **pass (`ok`)
+findings included** — so the DMARCbis explainer can render an explicit passed/failed row per test.
+Advisory sub-checks are marked *(advisory)*; FUTURE sub-checks need ingested reports
+([../emails.mdx](../emails.mdx)). Each remediation is the exact record/tag/step to apply. Because
+this is the **conformance** lens, several rows deliberately **cross-reference** the operational
+`dmarc` finding that observes the same tag — DMARCbis judges it against the new standard rather than
+re-detecting it.
+
+| Sub-check (finding id) | What it verifies | How measured | Typical critical / warning finding | Concrete remediation |
+| --- | --- | --- | --- | --- |
+| `dmarcbis.tree_walk` | The **Organizational Domain** resolved by the RFC 9989 DNS tree walk (8-query cap, longest→shortest `psd` selection) is the domain whose record we **act on** — and it matches. Flags when the tree-walk answer **differs** from the naive/PSL answer, or when coverage is found **only via a parent** (so `sp` governs, not `p`). | Run the ordered tree walk from the author domain via `node:dns/promises`; record the query path, label counts, and the selected Org Domain; compare to the sibling `dmarc` record's `found_at`. | **warning:** tree-walk Org Domain ≠ the record being enforced (PSL-era assumption no longer holds); **info:** domain covered only by a parent record via `sp`. | Publish a record at the tree-walk Org Domain (or confirm the parent's `sp` is what you intend); if a subdomain needs its own policy, publish `_dmarc.<subdomain>` explicitly. |
+| `dmarcbis.psd` | `psd` tag correctness against the tree-walk role. Ordinary org domains should be **`psd=n`** or **absent (`u`)**; public-suffix / registry operators declare **`psd=y`**. | Read `psd` from the sibling `dmarc` `parsed` map; compare to the domain's tree-walk position (is it actually a public suffix?). | **warning:** `psd=y` on an ordinary org domain (breaks the walk for everything beneath) or `psd=n`/absent on a genuine public suffix. | Set `psd=n` (or remove it → `u`) on an ordinary domain; registries set `psd=y`. |
+| `dmarcbis.np` | Non-existent-subdomain policy present and **at least as strict as `p`**; recommended `np=reject` when the domain never sends from subdomains (closes the phantom-subdomain gap, NXDOMAIN per RFC 8020). | Read `np` (fallback `np`→`sp`→`p`); compare rank to `p`. | **warning:** enforcing `p=` but `np` weaker than `p`; **info:** `np` absent while `p` enforcing → made-up subdomains not explicitly rejected. | Add `np=reject` if you never legitimately send from non-existent subdomains. |
+| `dmarcbis.testing_flag` | `t=` handling under the new semantics: `t=y` means the published policy is **advisory** (enforcement softened one level) — the domain is effectively **not enforcing** even though `p=reject` is printed. Complements the operational `dmarc.testing`. | Read `t` from the sibling `dmarc` `parsed` map. | **warning:** `t=y` — real enforcement is one level below the printed `p`. | Remove `t=y` (or set `t=n`) once you are ready to enforce as written. |
+| `dmarcbis.removed_tags` | `pct` / `rf` / `ri` are **removed in DMARCbis**. Receivers still ignore them (no breakage), but they are non-conformant noise. Framed as conformance, cross-referencing that the `dmarc` checker (`dmarc.pct`/`dmarc.deprecated_tags`) also notes them. | Diff the sibling `dmarc` `parsed` tag map against the DMARCbis valid set `{v,p,sp,np,adkim,aspf,fo,rua,ruf,psd,t}`. | **info:** one or more removed tags present. | Delete `pct`/`rf`/`ri` at the next DNS edit; keep the record to the DMARCbis tag set. |
+| `dmarcbis.sp_semantics` | `sp` is read **only from the Org-Domain record** the tree walk yields — not from a record on a subdomain. Flags an `sp` published on a **non-org subdomain** record (ineffective under DMARCbis) or a **subdomain gap** the tree walk exposes (existing subdomain governed by a weaker parent `sp`). | Combine the tree-walk result with the sibling `dmarc` `sp`; check where `sp` is published vs where it is read. | **warning:** `sp` on a subdomain record that DMARCbis ignores, or existing subdomains left weaker than `p` via `sp`. | Move the intended subdomain policy to `sp` on the **Org-Domain** record; set `sp=reject` if subdomains should match the apex. |
+| `dmarcbis.reject_advisory` *(advisory)* | Under `p=reject`: the domain **applies aligned DKIM** (MUST) and does **not rely on SPF-only** (MUST NOT), and — for list senders — has ramped rather than jumping to `reject`. | Cross-check the sibling **SPF** ([./spf.mdx](./spf.mdx)) and **DKIM** ([./dkim.mdx](./dkim.mdx)) category results for this run; read `p` from `dmarc`. | **warning:** `p=reject` but DKIM category unhealthy / absent → authentication leans on SPF, which fails through forwarders. | Ensure every stream DKIM-signs with an aligned `d=` before/at `p=reject`; ramp `none`→`quarantine`→`reject` if users post to lists. |
+| `dmarcbis.external_auth` | The `_report._dmarc` external-destination **consent** record for each foreign `rua`/`ruf` destination, framed under the **DMARCbis reporting model** (shared concept with `dmarc.external_report_auth`). | Reuse the sibling `dmarc` `external_report_auth[]` observations; judge them against the RFC 9990 consent requirement. | **info/warning:** external destination without the `<domain>._report._dmarc.<provider>` authorization (the operational `dmarc` check raises the critical; DMARCbis notes the conformance angle). | Have the destination publish `<domain>._report._dmarc.<provider>` = `v=DMARC1`, or report to an in-domain mailbox. |
+| `dmarcbis.report_schema` *(FUTURE — [../emails.mdx](../emails.mdx))* | Ingested **aggregate** reports use the `dmarc-2.0` namespace, carry `discovery_method` (**`treewalk`** vs `psl`), **name the DKIM selector**, and reflect `t`/`np`. | Parse ingested aggregate-report XML; inspect the namespace, `discovery_method`, per-record selector, `t`, and `np`. | **info:** reports still arriving in the legacy `dmarc-1.0` namespace, or omitting the selector / `discovery_method`. | None on your side — this reflects receiver conformance; use it to confirm receivers have adopted the new schema. |
+| `dmarcbis.failure_report_conformance` *(FUTURE — [../emails.mdx](../emails.mdx))* | Ingested **failure** reports (RFC 9991) carry the **`dmarc`** failure type + the required **`Identity-Alignment`** field, are **rate-limited**, and PSD operators honor the **no-act-without-agreement** rule. | Parse ingested failure reports (AFRF); inspect the failure type, `Identity-Alignment`, and arrival rate. | **info:** failure reports missing `Identity-Alignment` or not rate-limited; PSD `ruf` acted on without agreement. | Confirm your report tooling emits the RFC 9991 fields; PSD operators must not act on `ruf` without a specific agreement. |
+
+---
+
+## 3. Testing toolbox — Brew / npm tools
+
+First-round detection runs **in-process** on `node:dns/promises` (the tree walk is just an ordered
+series of TXT lookups; no binaries required). These tools are the **debug bench** we shell out to
+for deeper diagnosis, for cross-checking our own tree-walk implementation against a conformant
+oracle, and (future) for report parsing. Every shell-out during a run is captured in
+**`dmarcbis.tool_runs[]`** — see **"How a test run executes the tools"** below. The bench overlaps
+the DMARC check's; install with:
+
+```bash
+brew install bind doggo knot ldns checkdmarc parsedmarc
+npm install mailauth        # library + CLI, same TS/Node stack as the app
+```
+
+### DMARCbis-specific
+
+| Tool | Install | What we use it for | Example |
+| --- | --- | --- | --- |
+| **checkdmarc** (Python, brew formula) | `brew install checkdmarc` | The conformance oracle. As of its 2026-05 release it is **DMARCbis-aware**: it added the `np`, `psd`, and `t` tags, emits `"Support for the {tag} tag was removed in RFC 9989"` warnings for `pct`/`rf`/`ri`, **ignores unknown tags with a warning** instead of erroring (per RFC 9989), and its **tree walk continues to single-label parents** (TLDs). Its JSON maps closely onto our `dmarcbis.*` sub-checks — used in tests to cross-validate our tree walk and tag verdicts. | `checkdmarc example.com -f json` |
+| **parsedmarc** (Python, brew formula) *(future)* | `brew install parsedmarc` | Parses aggregate (`rua`) and failure (`ruf`) reports → normalized JSON; the path that feeds `dmarcbis.report_schema` and `dmarcbis.failure_report_conformance` once the DMARCbis `dmarc-2.0` namespace + `discovery_method`/selector fields land in the [../emails.mdx](../emails.mdx) pipeline. | `parsedmarc report.xml.gz` |
+| **mailauth** (npm) | `npm i mailauth` | Authenticates a raw `.eml` like a receiving MTA (SPF/DKIM/DMARC/ARC with alignment). Used as a **library** in our backend to confirm the `p=reject` DKIM-alignment reality-check on a supplied message. | `npx mailauth report message.eml` |
+| **Stalwart mail-auth playground** (WASM, reference oracle) | in-browser (no install) | Stalwart's **mail-auth** crate is the **first implementation to speak DMARCbis** (and DKIM2); its WASM **playground runs DMARCbis in-browser**, so we link it as a manual reference oracle to cross-check a tree-walk / `psd` verdict without a local tool. | paste a domain / message at the Stalwart mail-auth playground |
+
+> **Support-status note (verified 2026-07 against the checkdmarc CHANGELOG and the Stalwart
+> "DKIM2 and DMARCbis have landed" blog):** checkdmarc **has** shipped DMARCbis support (np/psd/t,
+> removed-tag warnings, tree walk to TLDs); Stalwart **mail-auth** (Rust) is the reference
+> implementation with a WASM playground. **parsedmarc** DMARCbis `dmarc-2.0`-namespace parsing is
+> tracked as maturing — treat its report-schema output as FUTURE and degrade gracefully.
+
+### DNS query & probe tools (issuing the tree-walk queries)
+
+The tree walk is a sequence of ordinary `_dmarc.<name>` TXT lookups; these tools issue them for
+manual reproduction of what the checker did in-process.
+
+| Tool | Install | What we use it for | Example tree-walk query |
+| --- | --- | --- | --- |
+| **doggo** | `brew install doggo` | Modern dig with native **JSON output**; the preferred CLI for reproducing one step of the walk. | `doggo _dmarc.mail.example.com TXT --json` |
+| **kdig** (knot) | `brew install knot` | dig-compatible with native DoH/DoT — "does Google's 8.8.8.8 see the same record at this parent?" | `kdig @8.8.8.8 +short TXT _dmarc.example.com` |
+| **dig** (bind; ships with macOS) | `brew install bind` | Baseline lookup / `dig()` fallback in `dns-util.ts`. | `dig +short TXT _dmarc.com` |
+| **drill** (ldns) | `brew install ldns` | DNSSEC-aware trace when a parent record looks present-but-invisible during the walk. | `drill -TD TXT _dmarc.example.com` |
+
+The full 8-query walk for `a.b.c.d.e.f.g.h.i.j.mail.example.com` (§1) as a copyable command
+sequence — the exact steps the checker performs in-process:
+
+```bash
+doggo _dmarc.a.b.c.d.e.f.g.h.i.j.mail.example.com TXT --json   # 1  full Author Domain
+doggo _dmarc.g.h.i.j.mail.example.com               TXT --json   # 2  jump to 7 labels
+doggo _dmarc.h.i.j.mail.example.com                 TXT --json   # 3  6 labels
+doggo _dmarc.i.j.mail.example.com                   TXT --json   # 4  5 labels
+doggo _dmarc.j.mail.example.com                     TXT --json   # 5  4 labels
+doggo _dmarc.mail.example.com                       TXT --json   # 6  3 labels
+doggo _dmarc.example.com                            TXT --json   # 7  2 labels
+doggo _dmarc.com                                    TXT --json   # 8  1 label — cap reached
+```
+
+### How a test run executes the tools
+
+First-round detection itself runs in-process on `node:dns/promises`; those tree-walk lookups
+populate `org_domain:` (the resolved Organizational Domain, the query path, label counts, and the
+`psd` verdict) directly and are **not** tool runs. Every **shell-out** to an external binary during
+a run is recorded as one entry in **`dmarcbis.tool_runs[]`** in the run YAML (§5,
+[../storage.mdx](../storage.mdx)), using the shape **LOCKED across all category specs**:
+`{tool, command, started_at, duration_ms, exit_code, output_format, parsed, error}`.
+
+Execution rules (identical to [dmarc.mdx §3](./dmarc.mdx), restated for this checker):
+
+- **Exact argv.** `command` holds the exact command line with **every** input argument substituted
+  (the domain, a specific parent name, the resolver IP) — copy-paste-reproducible from the UI.
+- **Prefer JSON.** Every tool that can emit JSON is invoked with its JSON flag
+  (`output_format: json`); only kdig is `text`. Stdout is captured whole, `JSON.parse`d when
+  `json`, stored under `parsed` (pruned to the fields we consume). Stderr lands in `error` on
+  failure.
+- **One entry per invocation**, retries included. Non-zero exit or timeout keeps the entry with
+  `exit_code` set (or `null` on timeout/kill), `parsed: null`, and `error` holding stderr or
+  `"timeout after <n>ms"`. `duration_ms` is wall-clock around the spawn.
+- **Missing binary** (preflight `command -v <tool>`) → the invocation is skipped entirely — no
+  fabricated entry — and surfaced once per run as an `info` finding naming the `brew install` line.
+- `started_at` is ISO-UTC; entries appear in invocation order.
+
+The tools a DMARCbis run shells out to, in order:
+
+| # | Tool | Exact command line (argv) | Output | Timeout | Captured → feeds |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **checkdmarc** | `checkdmarc <domain> -f json` — e.g. `checkdmarc example.com -f json` | json | 60 s (it also probes MX/DNSSEC) | The `dmarc` object (pruned to `record`, `valid`, `location`, `tags`, `warnings`) → `parsed`; the conformance oracle cross-validating our **tree-walk Org Domain** (`location`), the `np`/`psd`/`t` tag verdicts, and the removed-tag warnings. Any disagreement with our checker is appended to the affected `tests[].detail`. |
+| 2 | **doggo** (per tree-walk step actually queried, deduped) | `doggo _dmarc.<name> TXT --json` — e.g. `doggo _dmarc.example.com TXT --json` | json | 10 s | Full answer array → `parsed.answers`; the raw TXT evidence for each rung of the walk shown in the org-domain panel, cross-checking the in-process query path. One entry per distinct parent name queried. |
+| 3 | **kdig** (conditional) | `kdig @8.8.8.8 +short TXT _dmarc.<name>` | text | 10 s | Raw stdout lines → `parsed.lines`. Only invoked when the in-process walk and doggo disagree at a rung — "does a public resolver see the same record at this parent?" evidence for `dmarcbis.tree_walk`. |
+| 4 | **mailauth** (optional — only when the user supplies a message file) | `npx mailauth report <path-to-message.eml>` | json | 30 s | `dmarc`/`dkim`/`spf` alignment verdicts (pruned) → `parsed`; message-level evidence for the `dmarcbis.reject_advisory` DKIM-alignment MUST (DMARCbis-04/DMARCbis-05 drill-downs). |
+| 5 | **parsedmarc** *(future — report ingestion)* | `parsedmarc <report.xml.gz>` | json | 120 s | Normalized report JSON → the [../emails.mdx](../emails.mdx) pipeline; the `discovery_method`/namespace/selector/`t`/`np` fields feeding `dmarcbis.report_schema` and `dmarcbis.failure_report_conformance`. Runs inside the ingestion job, whose own `tool_runs` live on that job — **not** in a domain run. |
+
+Row 1 runs on every DMARCbis run; row 2 runs once per distinct parent name the walk queried; row 3
+is conditional; rows 4–5 are optional/future. Each entry's `parsed` payload is diagnostic
+**provenance**: the structured truth the checker asserts stays in `org_domain:` / `tests[]`, and
+`tool_runs[]` proves where it came from.
+
+---
+
+## 4. How it is measured
+
+Implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dmarcbis/dmarcbis.check.ts` — the `dmarcbisCheck` checker, method `run()` (the tree walk, `psd`/`np`/`t`/removed-tag conformance, and the `p=reject` reality-check cross-references)
+
+**Read the sibling `dmarc` result first (run graph `dmarcbis ← dmarc`).** DMARCbis does **not**
+re-resolve or re-tokenize the `_dmarc` record. The run graph guarantees the `dmarc` checker has
+already produced `results.dmarc` for this run; the DMARCbis checker consumes its `record.parsed` tag
+map, `record.found_at`, `policy`, `subdomain_policy`, `np_policy`, and `external_report_auth[]`.
+This is the same sibling-consumption pattern ARC uses for the DMARC policy. If the sibling result is
+absent (the `dmarc` checker errored), DMARCbis emits a single `info` "DMARCbis conformance could not
+be evaluated — the DMARC check did not complete" and stops.
+
+**The tree walk (pure `node:dns/promises`).**
+
+1. **Walk.** Starting at the Author Domain, issue `resolveTxt('_dmarc.<name>')` for each rung
+   following the §1 algorithm: query the full author domain first; if the name has **>7 labels**,
+   jump so only 7 remain; then strip **one** label at a time; **cap at 8 queries total**. Record
+   each rung — name, label count, whether a `v=DMARC1` record was found, and its `psd` value.
+2. **Select the Organizational Domain**, longest → shortest across the rungs that returned a
+   `v=DMARC1` record:
+   - the first record (longest name) with **`psd=n`** → its own domain is the Org Domain, **stop**;
+   - a record with **`psd=y`** that is **not** the walk's starting domain → the Org Domain is **one
+     label below** it;
+   - otherwise the record with the **fewest labels** is the Org Domain.
+3. **Conformance of the acted-on record.** Compare the selected Org Domain to the sibling `dmarc`
+   `found_at`. If they **differ**, the domain's protection rests on an assumption the PSL made that
+   the tree walk no longer honors → `dmarcbis.tree_walk` **warning**. If the domain is covered only
+   via a parent (the Org Domain is a strict ancestor), the effective policy is that parent's `sp` →
+   `info`, and `dmarcbis.sp_semantics` evaluates the subdomain gap.
+
+The tree-walk resolution and Org-Domain selection are implemented in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dmarcbis/tree-walk.ts` — `resolveOrgDomain()` (ordered walk + 8-query cap) and `selectOrgDomain()` (longest→shortest `psd` selection)
+
+**Tag conformance (from the sibling parsed map, no re-parse).**
+
+4. **`psd`.** Read `psd` ∈ {`y`,`n`,`u`}. Judge against the tree-walk position: `psd=y` on a domain
+   that is plainly not a public suffix → warning; a genuine public suffix without `psd=y` → warning.
+5. **`np`.** Read `np` (fallback `np`→`sp`→`p`). Enforcing `p` with `np` weaker than `p` → warning;
+   `np` absent while enforcing → info recommending `np=reject`.
+6. **`t`.** `t=y` → warning (real enforcement is one level below the printed `p`; DMARCbis softens
+   `reject`→`quarantine`, `quarantine`→`none`).
+7. **Removed tags.** Diff the parsed tag map against the DMARCbis valid set
+   `{v,p,sp,np,adkim,aspf,fo,rua,ruf,psd,t}`; any `pct`/`rf`/`ri` present → info (conformance
+   cleanup), cross-referencing the operational `dmarc` findings.
+8. **`sp` semantics.** Using the tree-walk result, confirm `sp` is being read from the Org-Domain
+   record. A stray `sp` on a subdomain record → warning (ineffective); existing subdomains left
+   weaker than `p` → warning.
+
+**The `p=reject` reality check (cross-category, advisory).**
+
+9. When `policy = reject`: read the sibling **DKIM** ([./dkim.mdx](./dkim.mdx)) and **SPF**
+   ([./spf.mdx](./spf.mdx)) category results for this run. If DKIM is unhealthy/absent so
+   authentication effectively leans on SPF, emit `dmarcbis.reject_advisory` **warning** (SPF fails
+   through forwarders; DMARCbis says `p=reject` MUST apply aligned DKIM). If a supplied `.eml` is
+   available, `mailauth` confirms aligned-DKIM presence at message level.
+
+The `p=reject` reality-check cross-references and the removed-tag / `psd` / `np` / `t` conformance
+findings are produced in code:
+`~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/audit/checks/dmarcbis/conformance.ts` — `rejectRealityCheck()` (SPF/DKIM cross-check) and `tagConformance()` (psd/np/t/removed-tag verdicts)
+
+**Report-schema conformance (FUTURE).** `dmarcbis.report_schema` and
+`dmarcbis.failure_report_conformance` are evaluated only once the [../emails.mdx](../emails.mdx)
+pipeline has ingested reports for the domain; they read the parsed report's namespace,
+`discovery_method`, selector, `t`, `np`, and (for failure reports) the `dmarc` type +
+`Identity-Alignment`.
+
+**Edge cases.**
+- **Fewer than 7 labels.** No "jump" step; strip one label at a time from the author domain, cap
+  at 8 (rarely reached for short names).
+- **A record found mid-walk with `psd=u`/absent** does not stop the walk; it is a candidate for the
+  fewest-labels tie-break only.
+- **The walk reaching a public suffix that publishes `psd=y`** (a registry protective default) is a
+  **valid, healthy** outcome — the Org Domain is one label below, and coverage is expected.
+- **CNAME'd `_dmarc` at any rung** is followed transparently by the resolver; noted in `detail`.
+- **Legacy record, fully RFC-7489-valid, zero DMARCbis gaps** → all `dmarcbis.*` pass (`ok`), the
+  DMARCbis explainer shows green, and the DMARC cell is unaffected. Conformance is a **healthy**
+  default, not a penalty.
+
+**Caching / rate limits.** Pure DNS; the walk is at most 8 lookups, deduped against the sibling
+`dmarc` lookups where names overlap. No third-party quotas in the first round.
+
+**Severity mapping.** Tree-walk mismatch that changes which record governs the domain, `sp`
+ineffective/subdomain gap, `np` weaker than `p`, `psd` misdeclared, `t=y`, and the `p=reject`
+DKIM-reliance warning → **warning**. Removed tags, parent-only coverage, external-auth conformance
+notes, and the FUTURE report-schema observations → **info**. There are no first-round **criticals**
+in this companion: the operational `dmarc` checker owns the criticals (missing/duplicate/malformed
+record, unauthorized external destination); DMARCbis judges **conformance and migration readiness**,
+which degrades placement gradually rather than turning protection fully off. `info`-only DMARCbis
+findings never turn the DMARC cell amber.
+
+---
+
+## 5. Test results (YAML)
+
+The information we extract from the tests. Every run persists as **one YAML file** — the full
+run-file spec (the `run:` block, category ordering, retention) is owned by
+[../storage.mdx](../storage.mdx), not redefined here — at:
+
+```
+~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml
+```
+
+e.g. `~/.email_delivery_hero/runs/whitehatengineering.com/2026_07_01_09_14AM.yaml` — `<domain>`
+lowercased; the filename is the run's **start** time in the local timezone, 12-hour clock,
+zero-padded, `AM`/`PM` suffix. The file opens with the `run:` block, then one top-level key per
+category. DMARCbis is a **companion within the DMARC category**, so its structured observation
+serializes as its own **`dmarcbis:`** top-level key (a sibling of `dmarc:` — same pattern as
+`arc:`), while its human-readable findings carry `category='dmarc'` so they roll into the DMARC
+cell. **This spec owns the `dmarcbis` key.** Its section holds the worst-severity `status`, the
+resolved Organizational Domain and how it was found (`org_domain:` — the tree-walk query path, label
+counts, `psd` verdict), the shell-out provenance (`tool_runs:`, §3), the per-sub-test rows
+(`tests:`), and the derived `problem_states`:
+
+```yaml
+# ~/.email_delivery_hero/runs/example.com/2026_07_01_09_14AM.yaml — ONE file per run
+run:                           # owned by ../storage.mdx — shown for context only
+  run_id: 9f1c2e7a
+  domain: example.com
+  started_at: 2026-07-01T16:14:03Z
+  finished_at: 2026-07-01T16:14:41Z
+  score: 71
+  status: warning
+# dmarc: … (the operational DMARC result this checker READS — owned by ./dmarc.mdx)
+dmarcbis:
+  status: warning              # worst severity across the tests below (no first-round criticals)
+  read_from: dmarc             # provenance: consumed results.dmarc via the run graph (dmarcbis ← dmarc)
+  # ---- the resolved Organizational Domain (results.dmarcbis) ----
+  org_domain:
+    author_domain: example.com
+    resolved_org_domain: example.com     # what the tree walk selected
+    found_via: treewalk                  # treewalk | parent | tld-cap
+    matches_enforced_record: true        # equals the sibling dmarc found_at?
+    query_path:                          # every rung actually queried, in order
+      - name: _dmarc.example.com
+        labels: 2
+        record_found: true
+        psd: n
+      # (short name: no >7-label jump; walk stopped at the first psd=n record)
+    selected_by: psd=n                   # psd=n | psd=y-below | fewest-labels
+    label_count: 2
+    psd_verdict: ok                      # ok | misdeclared_y | missing_y
+    covered_by_parent: false             # true => effective policy is the parent's sp
+  # ---- tag conformance snapshot (read from results.dmarc.parsed; NOT re-parsed) ----
+  tags:
+    valid_set_ok: false
+    np: null                             # non-existent-subdomain policy (RFC 9989)
+    psd: n
+    t: n                                 # testing flag (t=y softens enforcement one level)
+    removed_tags_present: ["pct"]        # pct/rf/ri observed → conformance cleanup
+    reject_reality:
+      policy: reject
+      dkim_aligned_ok: false             # from the sibling DKIM category result
+      spf_only_risk: true                # p=reject leaning on SPF alone → warning
+  # ---- the shell-out provenance (one entry per external tool invocation; §3) ----
+  tool_runs:
+    - tool: checkdmarc
+      command: "checkdmarc example.com -f json"
+      started_at: 2026-07-01T16:14:06Z
+      duration_ms: 5180
+      exit_code: 0
+      output_format: json
+      parsed:                            # pruned to the dmarc object we consume
+        dmarc:
+          valid: true
+          location: _dmarc.example.com
+          tags:
+            p: {value: reject}
+            np: {value: null}
+            psd: {value: n}
+            t: {value: n}
+          warnings:
+            - "Support for the pct tag was removed in RFC 9989"
+      error: null
+    - tool: doggo
+      command: "doggo _dmarc.example.com TXT --json"
+      started_at: 2026-07-01T16:14:07Z
+      duration_ms: 121
+      exit_code: 0
+      output_format: json
+      parsed:
+        answers:
+          - name: _dmarc.example.com.
+            type: TXT
+            answer: '"v=DMARC1; p=reject; sp=none; psd=n; pct=100; rua=mailto:dmarc@example.com"'
+      error: null
+  # ---- the per-test rows (the findings, pass and fail alike) ----
+  tests:
+    - id: dmarcbis.tree_walk
+      title: Tree-walk Organizational Domain matches the enforced record
+      result: pass
+      evidence: "org domain example.com selected by psd=n at 2 labels; matches _dmarc.example.com"
+    - id: dmarcbis.removed_tags
+      title: Removed tag present (pct)
+      result: info
+      detail: pct was removed in RFC 9989; receivers ignore it. Cross-ref dmarc.pct.
+      fix: Delete the pct tag at the next DNS edit.
+    - id: dmarcbis.np
+      title: Non-existent-subdomain policy not set
+      result: warn
+      detail: p=reject but no np=; made-up subdomains are not explicitly rejected.
+      fix: Add np=reject if you never send from non-existent subdomains.
+    - id: dmarcbis.sp_semantics
+      title: Existing subdomains weaker than the apex (sp=none)
+      result: warn
+      detail: sp=none on the Org-Domain record leaves existing subdomains spoofable under p=reject.
+      fix: Set sp=reject on the _dmarc.example.com record.
+    - id: dmarcbis.reject_advisory
+      title: p=reject relies on SPF alone (DKIM not aligned)
+      result: warn
+      detail: DMARCbis says p=reject MUST apply aligned DKIM; forwarded mail will bounce.
+      fix: DKIM-sign every stream with an aligned d= before staying at p=reject.
+    - id: dmarcbis.psd
+      title: psd tag correct (psd=n on an ordinary domain)
+      result: pass
+    - id: dmarcbis.testing_flag
+      title: Testing flag not softening enforcement (t=n)
+      result: pass
+    - id: dmarcbis.external_auth
+      title: Reporting-consent model conformant
+      result: info
+  # ---- matched problem states (see §9) ----
+  problem_states: [DMARCbis-03, DMARCbis-06, DMARCbis-07]
+```
+
+Field-name mapping: `org_domain.*` keys are 1:1 with the `dmarcbis_check_results` columns in §10
+(`author_domain`, `resolved_org_domain`, `found_via`, `matches_enforced_record`, `query_path`,
+`label_count`, `psd_verdict`, `covered_by_parent`); the `tags.*` snapshot maps to the
+`tag_conformance` JSONB; `tests[]` rows are the `findings` (`result: pass|fail|warn|info` ⇔ severity
+`ok|critical|warning|info`, though this companion emits no first-round criticals);
+`problem_states` is derived (§9 mapping) — never stored separately. `tool_runs[]` is **provenance**
+and lives only in the run YAML (no §10 table). The domain and run timestamps are **not** repeated
+inside `dmarcbis:` — the file's `run:` block owns them; `read_from: dmarc` records the sibling
+consumption.
+
+---
+
+## 6. User interface
+
+Two things this spec owns on the UI side: **how DMARCbis contributes to the DMARC dashboard cell**,
+and **the content of the DMARCbis sub-test explainer page**. Everything else — the category page
+chrome, the sub-tests band, the route pattern, the run context strip, the history strip — is
+**owned by [./dmarc.mdx](./dmarc.mdx) §6** and reused unchanged, exactly as [ARC](./arc.mdx) reuses
+it. DMARCbis registers as a **new sibling band row** in the DMARC category, alongside `arc` and
+`reports`.
+
+### 6.1 Dashboard contribution
+
+DMARCbis has **no cell of its own**; its findings feed the **DMARC** category cell (column 3). The
+cell's color is the worst severity across **all** `dmarc.*` **and** companion (`arc.*`, `dmarcbis.*`)
+findings in the run. Because DMARCbis first-round findings top out at **warning**, an all-conformant
+DMARCbis result contributes nothing to the color, and a `dmarcbis.*` warning can push a
+DMARC-green cell to **amber** (e.g. a tree-walk mismatch, an `sp` subdomain gap, `t=y`) but never to
+red on its own. `info`-only DMARCbis findings keep the cell as it was. When DMARCbis has never run
+for a domain (or the sibling `dmarc` result was absent), it contributes nothing and surfaces as a
+"Not yet evaluated" advisory in detail.
+
+### 6.2 Where it appears on the DMARC category page — the `dmarcbis` band row
+
+The DMARC category page ([dmarc.mdx §6.2–§6.3](./dmarc.mdx)) renders a **sub-tests band**: one
+clickable row per unit in the category, including the sibling-owned `arc` and `reports` rows.
+**DMARCbis adds one more sibling row** to that registry — an **integrator note to [dmarc.mdx
+§6.3](./dmarc.mdx)**: add a `dmarcbis` `checkKey` whose chip is the **worst severity among this run's
+`checkId === "dmarcbis"` findings** (slate "not measured" when the run has none), title
+**"DMARCbis conformance"**, one-liner **"Does your record hold up under the 2026 standard (tree
+walk, np/psd/t)?"**, routing to the explainer at `…/dmarc/check/dmarcbis`. Like the `arc` row, this
+spec owns **only** that band row's chip/title/one-liner/route; the explainer **content** (the five
+blocks) is owned here in §6.3. DMARCbis contributes **no** tag rows to the category page's
+parsed-record table (the operational `dmarc` unit already owns every tag row); instead the
+DMARCbis-era tags on that table — `np`, `psd`, `t` — gain a small **"DMARCbis ›"** affordance linking
+to this explainer, so a user reading the record can jump from a new tag to its conformance lens.
+
+### 6.3 The DMARCbis explainer page — the five-block contract
+
+`/domains/:domainId/runs/:runId/dmarc/check/dmarcbis` (newest alias
+`/domains/:domainId/dmarc/check/dmarcbis`) reuses the category page's header row and **run context
+strip** (back link targets the run's DMARC page), then renders the **five locked blocks, in this
+order** — the contract every unit fills ([dmarc.mdx §6.4](./dmarc.mdx)):
+
+1. **What this is** — the DMARCbis concept, 2–4 short paragraphs, run-data-independent (renders even
+   for "not measured"): DMARCbis is the 2026 successor (RFC 9989/9990/9991) that swaps the Public
+   Suffix List for a **DNS tree walk**, adds `np`/`psd`/`t`, retires `pct`/`rf`/`ri`, and turns
+   `p=reject` into a signal receivers weigh rather than obey blindly. One-line gloss of Organizational
+   Domain and the tree walk on first use. Ends with the "your DMARC works today; here is how it holds
+   up under the new standard" framing.
+2. **Your current state** — everything from the **viewed run's** persisted data (`results.dmarcbis`
+   §5 plus the run's `dmarcbis.*` findings), never a live lookup:
+   - a large **status chip** (§6.4) with a one-line verdict, e.g. *"Conformant tree walk, but two
+     migration gaps: no `np`, and `p=reject` leans on SPF."*;
+   - the **org-domain / tree-walk panel** (see §6.4) — the ordered query path, the selected Org
+     Domain, how it was selected (`psd=n` / `psd=y`-below / fewest-labels), and whether it matches
+     the enforced record;
+   - the **finding rows** sorted fail → warn → info → pass (status icon, id in small caps, title,
+     accordion → observed evidence in monospace, why-it-matters, `[copy fix]`), each ending with a
+     **"Full drill-down ›"** to its DMARCbis-nn problem page (§9);
+   - a **scoped parsed-field table** over `results.dmarcbis` — only the fields this unit reads
+     (`resolved_org_domain`, `found_via`, `matches_enforced_record`, `np`, `psd`, `t`,
+     `removed_tags_present`, `reject_reality.*`), each with value, meaning, and grayed rendering when
+     null. The DMARCbis-era tags (`np`/`psd`/`t`) are highlighted as the unit's "owned" fields.
+3. **What it means** — deliverability/migration impact keyed to the current result: one paragraph
+   for the conformant state ("nothing about the 2026 transition will surprise you") and one per gap
+   ("under DMARCbis this record behaves like X, degrading placement because Y"), reusing the §9
+   problem-state copy where a state maps.
+4. **What you can do about it** — numbered, copy-pasteable fixes: the exact tag edit (copy button
+   carries the publishable value — `np=reject`, `psd=n`, the corrected record, or the verify command
+   from §3), where to paste it, the propagation wait, and the tree-walk verify command. When
+   conformant this block collapses to "nothing to do — your record is DMARCbis-ready" plus the §8
+   standing recommendation.
+5. **Run this check now** — the scoped re-run (§6.5): button, what it executes, how the page
+   refreshes.
+
+Below the five blocks, every explainer carries the **run-history strip** ([dmarc.mdx §6.7](./dmarc.mdx))
+scoped to this unit (the unit's worst `dmarcbis.*` result across the domain's last 10 runs) and the
+**references footer** (§6.6).
+
+### 6.4 Status-chip derivation, entry points & the org-domain panel
+
+**Status chip (block 2 headline + band row).** One rule, shared by both surfaces: the **worst
+severity among the viewed run's `checkId === "dmarcbis"` findings** — `warning` → ⚠ amber, `info` →
+ⓘ slate, all-`ok` → ✓ green; **no `dmarcbis.*` findings in the run** → gray "not measured" (the
+checker was disabled, the sibling `dmarc` result was absent, or the run predates DMARCbis). The chip
+label spells out the headline: `✓ DMARCbis-ready`, `⚠ migration gaps`, `ⓘ conformant (notes)`,
+`— not measured`.
+
+**Entry points:**
+
+| Entry point | Surface | Link |
+| --- | --- | --- |
+| Sub-tests band row "DMARCbis conformance" | DMARC category page ([dmarc.mdx §6.2](./dmarc.mdx)) | whole-row → run-scoped explainer |
+| "DMARCbis ›" affordance on the `np`/`psd`/`t` tag rows | DMARC category page parsed-record table (§6.2) | `…/dmarc/check/dmarcbis` |
+| DMARCbis mini-row in the run report's per-unit mini-list | Run report's DMARC section (RunDetailPage, [dmarc.mdx §6.6](./dmarc.mdx)) | `…/runs/:runId/dmarc/check/dmarcbis` |
+| History-strip chips on this page | the explainer itself | same route, other `:runId` |
+| "under the new standard" mentions in the DMARC `policy` explainer copy | sibling explainers | newest alias |
+
+**The org-domain / tree-walk panel (block 2).** Unlike the operational `dmarc` unit, DMARCbis has a
+distinctive visual: a **query-path ladder** rendering `org_domain.query_path` top (author domain) to
+bottom (the cap), one rung per queried name, each showing the label count, a ✓/✗ for whether a
+`v=DMARC1` record was found there, and its `psd` value when present. The **selected Org Domain** rung
+is outlined, annotated with how it was chosen (`psd=n` / `psd=y`→below / fewest-labels), and a badge
+states whether it **matches the enforced record** (`matches_enforced_record`). When
+`covered_by_parent` is true, the panel adds a line: *"This domain has no record of its own — it is
+governed by <parent>'s `sp=<value>`."* This panel is the DMARCbis analogue of the ARC signer-key
+cards: the mechanism-specific evidence block the category contract's "raw record" slot renders.
+
+### 6.5 "Run this check now" — the scoped re-run
+
+Block 5, plus a small icon button on the band row, offers **Run this check now** — re-running the
+DMARC category (which includes DMARCbis) for the domain and refreshing:
+
+- **v1 wiring (works today).** Calls the existing `POST /api/audit/run/:domainId`
+  (audit.controller.ts) — a full seven-category run; tooltip "Re-runs all checks for <domain>". The
+  button spins/disables in flight (as does the header Re-run); on completion the page navigates to
+  the **newest alias** of the same explainer (`/domains/:domainId/dmarc/check/dmarcbis`); on failure
+  a toast reports the error and the page stays on the viewed run.
+- **Target endpoint (small backend addition).** `POST /api/audit/run/:domainId/check/dmarc` →
+  `202 { runId }` — the category-scoped endpoint runs the `dmarc` checker **and its companions**
+  (`arc` **and** `dmarcbis`) together, because DMARCbis's input is the sibling `dmarc` result (the
+  run graph orders `dmarcbis ← dmarc`, so the two are never re-run separately). Sibling category
+  sections copy forward from the newest run with a `carried_from` marker (gated on the
+  [../storage.mdx](../storage.mdx) amendment, per the category spec). The caption states the scope:
+  *"Re-runs the DMARC + ARC + DMARCbis checks for example.com and refreshes this page."*
+- **Keyboard**: `r` triggers the button (same input-field guard as the pager's `←`/`→`).
+
+### 6.6 History strip & references footer
+
+- **History strip** — the category's reusable ten-chip element ([dmarc.mdx §6.7](./dmarc.mdx))
+  scoped to this unit: each chip = one run, colored by that run's **worst `dmarcbis.*` severity**,
+  gray for runs where the checker did not run, the viewed run outlined, oldest → newest. Hover shows
+  the run timestamp plus a one-line delta versus the previous run — DMARCbis-specific examples:
+  *"tree-walk Org Domain changed — parent record added"*, *"np=reject published"*, *"t=y removed —
+  now enforcing as written"*, *"pct tag deleted"*. Click swaps `:runId`. Data derives client-side
+  from `GET /api/audit/runs` + cached run results, upgrading to the optional
+  `GET /api/audit/history/:domainId?category=dmarc&unit=dmarcbis` endpoint identically to the
+  category.
+- **References footer** — external links, new tab, the only external navigation on the page:
+  **RFC 9989** (DMARCbis core / tree walk), **RFC 9990** (aggregate reporting), **RFC 9991** (failure
+  reporting), **RFC 7489** (obsoleted DMARC), **RFC 9091** (PSD), **RFC 8020** (NXDOMAIN, which `np`
+  relies on), the Stalwart **"DKIM2 and DMARCbis have landed"** blog + the **mail-auth playground**
+  (reference oracle), the **checkdmarc** CHANGELOG (DMARCbis support), and **dmarc.org**.
+
+### 6.7 Clickable sub-concepts — where every click goes
+
+Nothing on the page is a dead end:
+
+| Clickable element | Destination |
+| --- | --- |
+| Back link (header) | the run's DMARC category page `/domains/:domainId/runs/:runId/dmarc` |
+| ‹ prev / next › pager, history-strip chips | same explainer, other `:runId` |
+| Org-domain panel "enforced record" badge | `…/dmarc/check/presence` (the operational record-presence unit) |
+| `sp` / subdomain-gap mentions in blocks 2/3 | `…/dmarc/check/subdomain-policy` |
+| `p=reject` reality-check DKIM mention | the run's DKIM category page `/domains/:domainId/runs/:runId/dkim` |
+| `p=reject` reality-check SPF mention | the run's SPF category page `/domains/:domainId/runs/:runId/spf` |
+| Finding row "Full drill-down ›" | that finding's DMARCbis-nn problem page (§9) |
+| `[copy]` buttons | clipboard only — value confirmed by a toast |
+| Run this check now | re-run then the newest alias of this page (§6.5) |
+| References footer links | external, new tab |
+
+---
+
+## 7. UX design — what goes where
+
+Written as the UX designer would hand it to engineering. Desktop-first (localhost tool), 1200 px
+content max-width, the app-wide left nav (256 px) stays. Vertical order = triage order: concept
+first (short), verdict + evidence second, work items third, education last — the same rhythm as the
+DMARC explainer, so the two feel like one family.
+
+The §6.3 five-block contract, drawn for the common first-round state (conformant tree walk, but a
+missing `np`, an `sp` subdomain gap, and a `p=reject`/SPF-only warning):
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Back to DMARC     DMARCbis conformance                    [Re-run ⟳]   │  header row
+│ example.com  ·  DMARC › sub-test  ·  [companion · RFC 9989]               │
+│ Run 2026-07-01 09:14  ·  [‹ prev]  [next ›]  ·  ★ newest  ·  ▪▪▪▪▪▪▪▪▪▣    │  run context strip
+├────────────────────────────────────────────────────────────────────────────┤
+│  WHAT THIS IS                                                               │  block 1
+│  DMARCbis (2026, RFC 9989/9990/9991) succeeds DMARC: it trades the static  │
+│  Public Suffix List for a live DNS tree walk, adds np/psd/t, retires       │
+│  pct/rf/ri, and makes p=reject a signal receivers weigh. Your DMARC works  │
+│  today — this shows how it holds up under the new standard.                │
+├────────────────────────────────────────────────────────────────────────────┤
+│  YOUR CURRENT STATE                                 [ ⚠ MIGRATION GAPS ]   │  block 2
+│  ┌ TREE WALK — Organizational Domain ─────────────────────────────────┐   │
+│  │  _dmarc.example.com          2 labels   ✓ record   psd=n  ◄ selected │   │
+│  │  selected by: psd=n     matches enforced record: ✓                   │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│  ⚠ dmarcbis.np              no np= while p=reject                   [v]    │
+│  ⚠ dmarcbis.sp_semantics    sp=none leaves subdomains spoofable     [v]    │
+│  ⚠ dmarcbis.reject_advisory p=reject leans on SPF alone             [v]    │
+│  ⓘ dmarcbis.removed_tags    pct present (removed in RFC 9989)       [v]    │
+│  ✓ dmarcbis.tree_walk · ✓ dmarcbis.psd · ✓ dmarcbis.testing_flag   [v]    │
+│  ┌ field ─────────────────── value ──────────── meaning ────────────┐    │
+│  │ resolved_org_domain       example.com        tree-walk boundary   │    │
+│  │ np                        — (absent)          phantom-subdomain gap│    │
+│  │ psd                       n                    ordinary org domain │    │
+│  │ t                         n                    enforcing as written│    │
+│  │ removed_tags_present      [pct]                conformance cleanup │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+├────────────────────────────────────────────────────────────────────────────┤
+│  WHAT IT MEANS                                                              │  block 3
+│  Your tree walk is clean, so the 2026 transition won't move your Org       │
+│  Domain. But made-up subdomains aren't rejected, real subdomains are       │
+│  weaker than the apex, and p=reject without aligned DKIM will bounce       │
+│  forwarded mail — three migration gaps to close.                          │
+├────────────────────────────────────────────────────────────────────────────┤
+│  WHAT YOU CAN DO ABOUT IT                                                   │  block 4
+│  1. Close the phantom-subdomain gap:  add  np=reject               [copy]  │
+│  2. Protect real subdomains:          set  sp=reject               [copy]  │
+│  3. DKIM-sign every stream (aligned d=) before staying at p=reject         │
+│  4. Delete the removed tag:  …record minus pct…                    [copy]  │
+│  5. Verify the walk:  doggo _dmarc.example.com TXT --json          [copy]  │
+├────────────────────────────────────────────────────────────────────────────┤
+│  RUN THIS CHECK NOW                                        [ Run check ⟳ ] │  block 5
+│  Re-runs the DMARC + ARC + DMARCbis checks for example.com and refreshes.  │
+├────────────────────────────────────────────────────────────────────────────┤
+│  HISTORY   ▪▪▪▪▪▪▪▪▪▣   (DMARCbis, last 10 runs — click to view)           │  history strip
+│  REFERENCES  RFC 9989 · 9990 · 9991 · 7489 · 9091 · 8020 · Stalwart · …    │  references footer
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+Placement rationale mirrors the DMARC explainer: concept before verdict (block 1 is two-to-four
+short paragraphs so the status chip is visible without scrolling on a 1080p display); the
+**tree-walk ladder is the hero evidence** — it is the DMARCbis-specific thing no other unit shows,
+so it leads block 2; monospace for every DNS name, TXT value, and tag; exactly one accent CTA per
+page (block 5's Run check; block 4's copy buttons are secondary). shadcn/ui primitives (`Card`,
+`Table`, `Accordion`, `Badge`), lucide icons (`GitBranch` for the walk, `ShieldAlert`/`Info`/
+`ChevronRight`/`Copy`). Severity colors identical to the Dashboard cells. The
+**problem-state drill-down pages** (`/domains/:domainId/runs/:runId/dmarc/:problemId`, ids
+`DMARCbis-nn`) reuse the header row + run context strip, then **Concept → Your data (this run's
+`dmarcbis` section) → Diagnose it yourself (copyable §3 commands) → Path forward → further reading**,
+exactly like the PS-nn pages.
+
+---
+
+## 8. Recommendations — how we tell the user to migrate
+
+Every failing conformance test carries its concrete one-line remediation (§2). Above the per-test
+fixes, the explainer computes one **primary recommendation** from a small migration-readiness ladder
+— the DMARCbis analogue of the DMARC policy ladder, but about **standards conformance**, not policy
+level:
+
+| Current state | Gate | Primary recommendation |
+| --- | --- | --- |
+| Tree-walk mismatch (DMARCbis-01) | — | Publish a record at the tree-walk Org Domain (or confirm the parent's `sp` is intended); the PSL assumption your protection rested on no longer holds. |
+| `psd` misdeclared (DMARCbis-02) | — | Set `psd=n` on an ordinary domain (or remove it → `u`); only registries set `psd=y`. A wrong `psd` breaks the walk for everything beneath you. |
+| Phantom-subdomain gap (DMARCbis-03) | never send from non-existent subdomains | Add `np=reject`. Zero risk for a domain that doesn't use made-up subdomains; closes the spoofing gap NXDOMAIN opened. |
+| Subdomain gap / `sp` ineffective (DMARCbis-06) | — | Move the subdomain policy to `sp` on the Org-Domain record; set `sp=reject` to match the apex. |
+| `t=y` (DMARCbis-04) | ready to enforce as written | Remove `t=y`; your printed `p` is one level stronger than what receivers currently apply. |
+| `p=reject` on SPF alone (DMARCbis-07) | DKIM aligned on every stream | DKIM-sign every sending stream with an aligned `d=` before staying at `p=reject`; DKIM survives forwarding, SPF does not. Ramp `none`→`quarantine`→`reject` if users post to lists. |
+| Removed tags present (DMARCbis-05) | — | Delete `pct`/`rf`/`ri` at the next DNS edit — harmless but non-conformant noise. |
+| Fully conformant (DMARCbis-00) | — | Nothing to do — your record is DMARCbis-ready. Keep watching the scheduled-run diff for regressions (a new parent record, a dropped `np`, `t=y` reappearing). |
+
+Additional standing recommendations surfaced as `info` when applicable: prefer aligned **DKIM** on
+every stream before `reject` (it survives forwarding); registries and parked-domain operators should
+publish `psd=y` protective defaults; keep the record to the DMARCbis tag set so future receivers see
+a clean, modern record; once report ingestion lands, confirm receivers are sending the `dmarc-2.0`
+namespace with `discovery_method=treewalk`.
+
+---
+
+## 9. Problem states & drill-down pages (DMARCbis-nn)
+
+The migration/conformance situations a domain can be in for DMARCbis. Each maps from finding ids
+(detection is automatic) and each has a drill-down UI page at the category's problem route with the
+same chrome as the DMARC spec's PS-nn pages ([dmarc.mdx §7](./dmarc.mdx) drill-down layout:
+**Concept → Your data → Diagnose it yourself → Path forward → further reading**, with header row +
+run context strip):
+
+```
+/domains/:domainId/runs/:runId/dmarc/:problemId    (canonical, run-scoped)
+/domains/:domainId/dmarc/:problemId                (newest-run alias)
+```
+
+**Id namespace.** DMARCbis problem ids use the **`DMARCbis-nn`** prefix — **disjoint** from the
+DMARC spec's `PS-nn` ids **and** from the ARC spec's `ARC-nn` ids (all three companions share the
+one `/dmarc/:problemId` route but never collide), and, like them, disjoint from the literal `check/`
+segment. The frontend problem-state registry (today `lib/dmarc-problems.ts`) gains the DMARCbis
+entries below, with this spec as their content source; matching stays "which ids fired in this run."
+Matched DMARCbis-nn cards append to the category page's PROBLEM STATES band **after** the PS-nn and
+ARC-nn cards, same card anatomy (title + one-line hook + chevron). DMARCbis-00 is the healthy goal
+state; the rest are unhealthy in descending typical severity (all first-round warnings/infos — the
+operational `dmarc` checker owns the criticals).
+
+| Id | Problem state | Detected by | Severity |
+| --- | --- | --- | --- |
+| DMARCbis-00 | DMARCbis-ready (fully conformant) | all `dmarcbis.*` tests pass | ok |
+| DMARCbis-01 | Tree walk selects a different Org Domain than the enforced record | `dmarcbis.tree_walk` (mismatch) | warning |
+| DMARCbis-02 | `psd` misdeclared for the domain's tree-walk role | `dmarcbis.psd` | warning |
+| DMARCbis-03 | Phantom-subdomain gap (`np` absent or weaker than `p`) | `dmarcbis.np` | warning |
+| DMARCbis-04 | Silent non-enforcement via `t=y` | `dmarcbis.testing_flag` | warning |
+| DMARCbis-05 | Removed tags lingering (`pct`/`rf`/`ri`) | `dmarcbis.removed_tags` | info |
+| DMARCbis-06 | `sp` ineffective / existing-subdomain gap under the tree walk | `dmarcbis.sp_semantics` | warning |
+| DMARCbis-07 | `p=reject` relying on SPF alone (no aligned DKIM) | `dmarcbis.reject_advisory` | warning |
+| DMARCbis-08 | External-report consent non-conformant | `dmarcbis.external_auth` | info |
+| DMARCbis-09 | Legacy report schema *(future — reports)* | `dmarcbis.report_schema` | info |
+| DMARCbis-10 | Failure-report non-conformance *(future — reports)* | `dmarcbis.failure_report_conformance` | info |
+
+### DMARCbis-00 — DMARCbis-ready
+
+The goal state: the tree walk selects the record actually enforced, `psd` matches the domain's role,
+`np` is at least as strict as `p`, `t=n` (or absent), `sp` reads from the Org-Domain record and
+covers subdomains, `p=reject` (if published) rests on aligned DKIM, and no removed tags remain.
+- **Data fields:** all `tests[]` pass; `org_domain.matches_enforced_record=true`,
+  `tags.valid_set_ok=true`, `tags.reject_reality.dkim_aligned_ok` (when `p=reject`).
+- **Diagnose/debug:** `checkdmarc <domain> -f json` should agree (valid, no removed-tag warnings);
+  the Stalwart mail-auth playground should resolve the same Org Domain via `treewalk`.
+- **UI:** green chip; drill-down explains *keeping* it ready — a new parent record, a dropped `np`,
+  or `t=y` reappearing are the regressions to watch on the scheduled-run diff.
+
+### DMARCbis-01 — Tree walk selects a different Org Domain than the enforced record
+
+- **Concept:** under RFC 7489 the PSL decided your Organizational Domain; DMARCbis walks DNS
+  instead. If the walk lands on a different boundary than the record you enforce, receivers applying
+  the new standard evaluate a **different** policy than you think — the "PSL was wrong for my domain"
+  class, now inverted.
+- **Data fields:** `org_domain.query_path`, `resolved_org_domain`, `found_via`,
+  `matches_enforced_record=false`, `selected_by`, `label_count`.
+- **Diagnose/debug:** replay the walk — the §3 8-query `doggo` sequence — and compare to
+  `checkdmarc`'s `location`; `kdig @8.8.8.8` each rung to rule out resolver skew.
+- **Tools:** doggo, kdig, checkdmarc, the Stalwart playground.
+- **Path forward:** publish `_dmarc` at the tree-walk Org Domain, or confirm the parent's `sp` is
+  the intended policy; if a subdomain needs its own policy, publish `_dmarc.<subdomain>` explicitly.
+- **UI:** the tree-walk ladder with the selected rung outlined and the enforced-record rung marked —
+  the mismatch is visually obvious. **Further reading:** RFC 9989 (tree walk), RFC 9091 (PSD).
+
+### DMARCbis-02 — `psd` misdeclared for the domain's tree-walk role
+
+- **Concept:** `psd` tells the walk whether you are a **public suffix**. `psd=y` on an ordinary
+  organization pushes the Org Domain a label the wrong way for everything beneath you; a genuine
+  registry without `psd=y` fails to publish its protective default.
+- **Data fields:** `tags.psd`, `org_domain.psd_verdict` (`misdeclared_y` / `missing_y`),
+  `label_count`.
+- **Diagnose/debug:** confirm the value; ask whether the domain is actually a public suffix (does it
+  sell/allocate names beneath it?).
+- **Tools:** checkdmarc (reads `psd`); the PSL / IANA root zone as a sanity reference.
+- **Path forward:** ordinary domains set `psd=n` (or remove it → default `u`); registries set
+  `psd=y`. **Further reading:** RFC 9091, RFC 9989.
+
+### DMARCbis-03 — Phantom-subdomain gap (`np`)
+
+- **Concept:** attackers spoof `invoices.example.com` when no such host exists — SPF/DKIM can never
+  be published for a name that isn't there. RFC 8020 (NXDOMAIN) lets receivers identify non-existent
+  subdomains, and DMARCbis's **`np`** tag says what to do with them. Absent or weak `np` leaves the
+  gap open.
+- **Data fields:** `tags.np` (null or weaker than `p`), the sibling `dmarc` `policy`.
+- **Diagnose/debug:** read `np`/`sp`/`p`; query a random non-existent subdomain
+  (`doggo <random>.example.com A --json` → NXDOMAIN) to confirm the domain doesn't wildcard.
+- **Tools:** doggo, checkdmarc.
+- **Path forward:** add `np=reject` if you never send from non-existent subdomains. **Further
+  reading:** RFC 9989 (`np`), RFC 8020 (NXDOMAIN).
+
+### DMARCbis-04 — Silent non-enforcement via `t=y`
+
+- **Concept:** `t=y` is DMARCbis's testing flag (replacing `pct`): it **softens enforcement one
+  level** — `reject`→`quarantine`, `quarantine`→`none` — while still generating reports. A record
+  printing `p=reject; t=y` is really quarantining. The trap the old `pct=0` set, wearing a new tag.
+- **Data fields:** `tags.t=y`, the printed `policy`, the effective (softened) policy.
+- **Diagnose/debug:** read `t`; cross-check the operational `dmarc.testing` finding.
+- **Tools:** checkdmarc (reads `t`).
+- **Path forward:** remove `t=y` (or set `t=n`) when ready to enforce as written. **Further
+  reading:** RFC 9989 (`t`).
+
+### DMARCbis-05 — Removed tags lingering
+
+- **Concept:** `pct`, `rf`, and `ri` were removed in RFC 9989. Receivers **ignore** them (no
+  breakage), but they are non-conformant noise and, in `pct`'s case, encode a staged-rollout model
+  DMARCbis abandoned.
+- **Data fields:** `tags.removed_tags_present[]`, the raw record.
+- **Diagnose/debug:** `checkdmarc` emits `"Support for the {tag} tag was removed in RFC 9989"` for
+  each.
+- **Tools:** checkdmarc.
+- **Path forward:** delete the tags at the next DNS edit (copy button holds the record minus them).
+  **Further reading:** RFC 9989 (removed tags).
+
+### DMARCbis-06 — `sp` ineffective / existing-subdomain gap under the tree walk
+
+- **Concept:** DMARCbis reads `sp` **only from the Org-Domain record** the walk yields — never from
+  a record on the subdomain. An `sp` published on a subdomain is ineffective, and an `sp` weaker than
+  `p` at the Org Domain leaves existing subdomains spoofable.
+- **Data fields:** `org_domain.resolved_org_domain`, the sibling `dmarc` `subdomain_policy`, where
+  `sp` is published vs read.
+- **Diagnose/debug:** read `sp` at the Org-Domain record; enumerate known sending subdomains and
+  check each for its own `_dmarc` (a `doggo` sweep).
+- **Tools:** doggo, checkdmarc (warns on ineffective `sp`).
+- **Path forward:** move the intended subdomain policy to `sp` on the Org-Domain record; set
+  `sp=reject` to match the apex. **Further reading:** RFC 9989 (`sp` + tree walk).
+
+### DMARCbis-07 — `p=reject` relying on SPF alone
+
+- **Concept:** DMARCbis says a domain at `p=reject` **MUST apply aligned DKIM** and **MUST NOT rely
+  on SPF alone**, because SPF breaks through forwarders while DKIM survives. A `p=reject` domain whose
+  DKIM is unhealthy will bounce legitimate forwarded mail — and receivers, per DMARCbis, are told to
+  weigh other evidence rather than obey `reject` blindly, so the outcome is inconsistent across
+  receivers.
+- **Data fields:** `tags.reject_reality.policy=reject`, `dkim_aligned_ok=false`, `spf_only_risk`,
+  cross-referencing the DKIM and SPF category health.
+- **Diagnose/debug:** confirm every sending system DKIM-signs with an aligned `d=`
+  ([./dkim.mdx](./dkim.mdx)); `mailauth report msg.eml` on a message from each stream reads the
+  alignment verdicts.
+- **Tools:** mailauth; swaks to generate live sends; the DKIM/SPF checks.
+- **Path forward:** DKIM-sign every stream with an aligned `d=` before staying at `p=reject`; ramp
+  `none`→`quarantine`→`reject` if users post to lists. **Further reading:** RFC 9989 (`p=reject`
+  guidance), [./dkim.mdx](./dkim.mdx), [./arc.mdx](./arc.mdx) (how forwarded mail can still pass).
+
+### DMARCbis-08 — External-report consent non-conformant
+
+- **Concept:** RFC 9990 keeps the `_report._dmarc` external-destination consent requirement; a
+  foreign `rua`/`ruf` destination without it silently receives nothing. The operational `dmarc`
+  checker raises the **critical**; DMARCbis notes the **conformance** angle so the migration lens is
+  complete.
+- **Data fields:** the sibling `dmarc` `external_report_auth[]` (reused, not re-probed).
+- **Diagnose/debug:** `doggo <domain>._report._dmarc.<report-domain> TXT --json` — expect
+  `"v=DMARC1"`.
+- **Tools:** doggo, checkdmarc.
+- **Path forward:** have the destination publish the consent record, or report to an in-domain
+  mailbox (see the operational `dmarc.external_report_auth` fix). **Further reading:** RFC 9990.
+
+### DMARCbis-09 — Legacy report schema *(future — reports)*
+
+- **Concept:** RFC 9990 moves aggregate reports to the `urn:ietf:params:xml:ns:dmarc-2.0` namespace
+  with `discovery_method` (`treewalk` vs `psl`), a required DKIM selector, and the `t`/`np` fields.
+  Reports still arriving in the old `dmarc-1.0` shape reveal receivers that haven't adopted DMARCbis
+  yet.
+- **Data fields (future):** the ingested report's namespace, `discovery_method`, selector presence.
+- **Diagnose/debug:** `parsedmarc <report.xml.gz>` and inspect the namespace.
+- **Tools:** parsedmarc (future).
+- **Path forward:** nothing on your side — this reflects **receiver** conformance; use it to confirm
+  adoption. **Further reading:** RFC 9990.
+
+### DMARCbis-10 — Failure-report non-conformance *(future — reports)*
+
+- **Concept:** RFC 9991 failure reports carry a `dmarc` failure type + a required
+  `Identity-Alignment` field, must be rate-limited, and PSD operators MUST NOT act on a `ruf` request
+  without a specific agreement. Many large receivers disable failure reports entirely for privacy.
+- **Data fields (future):** the ingested failure report's type, `Identity-Alignment`, arrival rate.
+- **Diagnose/debug:** `parsedmarc` on the failure report; inspect the AFRF fields.
+- **Tools:** parsedmarc (future).
+- **Path forward:** confirm your report tooling emits the RFC 9991 fields; PSD operators must secure
+  an agreement before acting on `ruf`. **Further reading:** RFC 9991, RFC 6591 (updated).
+
+**Drill-down ↔ explainer linking.** Every DMARCbis-nn page's Concept block ends with *"Full DMARCbis
+sub-test explainer ›"* → `…/dmarc/check/dmarcbis` (run-scoped); the explainer's finding rows link
+back per §6.3 — the two page kinds answer different questions (one problem deeply vs. the whole
+unit) and cross-link both ways. Back chevron returns to the run's DMARC page anchor, exactly like
+PS-nn and ARC-nn.
+
+---
+
+## 10. Information schema (database schema)
+
+DMARCbis reuses the **shared core tables** owned by [../engineering.mdx](../engineering.mdx) —
+`domains`, `audit_runs`, and `findings` (each `dmarcbis.*` finding is one `findings` row with
+`category = 'dmarc'` and `check_id` like `dmarcbis.tree_walk`). It reads the operational
+`dmarc_check_results` row for the same run (the sibling result) and adds **one result table**.
+Because the report-schema sub-checks are FUTURE, the report-conformance columns are **nullable**.
+
+```sql
+-- One row per audit run per domain: the DMARCbis conformance observation. Reads (never re-parses)
+-- the sibling dmarc_check_results row for this run; stores the tree-walk resolution + tag verdicts.
+CREATE TABLE dmarcbis_check_results (
+    id                      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    audit_run_id            BIGINT NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+    domain_id               BIGINT NOT NULL REFERENCES domains(id)    ON DELETE CASCADE,
+    read_from_dmarc_result  BIGINT REFERENCES dmarc_check_results(id) ON DELETE SET NULL, -- the sibling row consumed
+    -- ---- tree walk / Organizational Domain (RFC 9989) ----
+    author_domain           TEXT    NOT NULL,
+    resolved_org_domain     TEXT,                          -- what the tree walk selected
+    found_via               TEXT CHECK (found_via IN ('treewalk','parent','tld-cap')),
+    selected_by             TEXT CHECK (selected_by IN ('psd=n','psd=y-below','fewest-labels')),
+    org_label_count         INT,
+    matches_enforced_record BOOLEAN,                       -- equals the sibling dmarc found_at?
+    covered_by_parent       BOOLEAN,                       -- effective policy is a parent's sp
+    query_path              JSONB,                         -- [{name, labels, record_found, psd}] in walk order
+    query_count             INT,                           -- rungs actually queried (<= 8)
+    -- ---- tag conformance (read from the sibling parsed map; NOT re-parsed) ----
+    psd_verdict             TEXT CHECK (psd_verdict IN ('ok','misdeclared_y','missing_y')),
+    np_value                TEXT,                          -- np= (or null)
+    np_at_least_p           BOOLEAN,                       -- np rank >= p rank
+    testing_flag            BOOLEAN,                       -- t=y observed
+    removed_tags_present    JSONB,                         -- ["pct","rf","ri"] subset present
+    sp_effective            BOOLEAN,                       -- sp read from the Org-Domain record & covers subdomains
+    -- ---- p=reject reality check (cross-category) ----
+    reject_policy           BOOLEAN,                       -- p=reject published
+    dkim_aligned_ok         BOOLEAN,                       -- from the DKIM category result
+    spf_only_risk           BOOLEAN,                       -- p=reject leaning on SPF alone
+    -- ---- report-schema conformance (FUTURE — reports) ----
+    report_namespace        TEXT,                          -- 'dmarc-2.0' | 'dmarc-1.0' | null
+    report_discovery_method TEXT,                          -- 'treewalk' | 'psl' | null
+    report_selector_named   BOOLEAN,                       -- aggregate reports name the DKIM selector
+    failure_report_conformant BOOLEAN,                     -- RFC 9991 dmarc type + Identity-Alignment
+    checked_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (audit_run_id, domain_id)
+);
+CREATE INDEX ix_dmarcbis_results_domain        ON dmarcbis_check_results (domain_id, checked_at DESC);
+CREATE INDEX ix_dmarcbis_results_org_domain    ON dmarcbis_check_results (resolved_org_domain);
+CREATE INDEX ix_dmarcbis_results_query_path_gin ON dmarcbis_check_results USING GIN (query_path);
+```
+
+**Mapping onto today's file store.** There is **no database in the first round**. The audit runner
+persists every run as **one YAML file** at
+`~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml`
+([../storage.mdx](../storage.mdx)); this spec owns that file's top-level **`dmarcbis:`** key — the §5
+document. The checker's structured payload (`results.dmarcbis`) serializes as §5's `org_domain:` +
+`tags:` blocks, mapping 1:1 to `dmarcbis_check_results` (`query_path` ⇔ the `query_path` JSONB,
+`removed_tags_present` ⇔ the JSONB array, the `reject_reality.*` ⇔ the reject-check columns); the
+human-readable findings (`checkId:"dmarcbis"`, `category:"dmarc"`) serialize as the `tests[]` rows
+and map to the shared `findings` table; `problem_states` is derived (§9), never stored separately.
+`tool_runs[]` is YAML-only provenance with **no** table above — if it ever needs querying it becomes
+the generic `tool_runs` table shared by all categories, keyed by `audit_run_id` + category. The
+`read_from_dmarc_result` FK captures the sibling-consumption the run graph guarantees. Because the
+store module fronts all of this, the file→DB move is a single-module change.
+
+---
+
+## 11. When we run the check
+
+- **On-demand.** Runs on every manual audit (`POST /api/audit/run/:domainId` and the run-all
+  endpoint), **after** the `dmarc` checker in the run graph (`dmarcbis ← dmarc`) so the sibling
+  result is available. DMARCbis is cheap — at most 8 TXT lookups for the tree walk (deduped against
+  the DMARC lookups) plus reads of already-computed sibling results — so it always runs inline.
+- **Scoped re-run (§6.5).** The explainer's "Run this check now" wires to the full
+  `POST /api/audit/run/:domainId` at v1; the category-scoped `POST /api/audit/run/:domainId/check/dmarc`
+  (which runs `dmarc` **and** its `arc` **and** `dmarcbis` companions, sibling sections carried
+  forward with `carried_from`) is the small backend addition, gated on the
+  [../storage.mdx](../storage.mdx) `carried_from` amendment. DMARCbis is never re-run separately from
+  `dmarc` because its input is the DMARC result.
+- **Periodic.** The in-process scheduler ([../scheduled_checks.mdx](../scheduled_checks.mdx)) re-runs
+  DMARCbis on the normal domain cadence. Each run's `dmarcbis.*` findings are diffed against the
+  previous run; a newly appearing or worsened conformance gap is a **new problem** surfaced on the
+  Dashboard. High-value regressions: the tree walk starting to select a **different** Org Domain (a
+  new parent record appeared), a dropped `np`, `t=y` reappearing, an `sp` gap opening, or a
+  `p=reject` domain whose DKIM went unhealthy.
+- **First-round vs future.** All §2 sub-checks except `dmarcbis.report_schema` and
+  `dmarcbis.failure_report_conformance` are first-round pure DNS/sibling-read. Those two are gated
+  behind the [../emails.mdx](../emails.mdx) report-ingestion pipeline and the (future)
+  report-conformance columns.
+- **Cost / rate-limit / back-off.** No paid feeds or provider APIs in the first round; DNS lookups
+  only, capped at 8 for the walk. Resolver failures mid-walk get a short bounded retry and record as
+  a **warning** "could not complete the tree walk" rather than a false negative.
+- **Regression detection** applies exactly as in [../scheduled_checks.mdx](../scheduled_checks.mdx):
+  compare the `dmarcbis` section of the domain's two newest run files — `org_domain:` and `tests[]` —
+  by finding id + severity. Every run appends a new file; nothing is overwritten, so the diff (and
+  the §6 prev/next pager) always has both sides.
+
+---
+
+## 12. First round vs future
+
+| Sub-check | First round (pure `node:dns/promises` tree walk + sibling `dmarc`/`dkim`/`spf` read, deterministic) | Future (report ingestion / feed) |
+| --- | --- | --- |
+| `dmarcbis.tree_walk` | ✅ ordered 8-query walk + longest→shortest `psd` selection; compare to sibling `found_at` | — |
+| `dmarcbis.psd` | ✅ read `psd`, judge against tree-walk role | — |
+| `dmarcbis.np` | ✅ read `np` (fallback `np`→`sp`→`p`), compare to `p` | — |
+| `dmarcbis.testing_flag` | ✅ read `t` | live message verification of the softened policy via `mailauth` |
+| `dmarcbis.removed_tags` | ✅ diff tag map against the DMARCbis valid set | — |
+| `dmarcbis.sp_semantics` | ✅ tree-walk + `sp` publication-vs-read check | — |
+| `dmarcbis.reject_advisory` | ✅ cross-check sibling DKIM/SPF category health under `p=reject` | message-level aligned-DKIM confirmation via `mailauth` on a supplied `.eml` |
+| `dmarcbis.external_auth` | ✅ reuse sibling `external_report_auth[]` observations | — |
+| `dmarcbis.report_schema` | — | ⛔ aggregate-report ingestion ([../emails.mdx](../emails.mdx)): `dmarc-2.0` namespace, `discovery_method`, selector, `t`/`np` |
+| `dmarcbis.failure_report_conformance` | — | ⛔ failure-report ingestion: `dmarc` type + `Identity-Alignment`, rate-limit, PSD no-act rule |
+
+Rule of thumb: **anything answerable from DNS or an already-computed sibling result ships first** —
+which, for DMARCbis, is almost everything, because the whole standard was designed around DNS the
+owner controls; only the pieces that require reading **ingested reports** are a later round. The
+`Checker`/`Finding` contract is unchanged across rounds — only the checker's internals grow — so the
+Dashboard, store, and scheduler never change as DMARCbis matures.
+
+---
+
+## 13. Acceptance criteria
+
+A developer can verify the DMARCbis check is correct when **all** of the following hold:
+
+1. The checker registers under **`id: 'dmarcbis'`**, runs **after** `dmarc` in the run graph
+   (`dmarcbis ← dmarc`), and **reads** `results.dmarc` (record `parsed` map, `found_at`, `policy`,
+   `subdomain_policy`, `np_policy`, `external_report_auth[]`) rather than re-resolving or
+   re-tokenizing the `_dmarc` record; if the sibling result is absent it emits a single `info` and
+   stops.
+2. Every `dmarcbis.*` finding carries `category='dmarc'` (rolls into the DMARC cell), uses the
+   `dmarcbis.` id prefix, and every non-`ok` finding carries a **concrete** remediation (an exact tag
+   edit — `np=reject`, `psd=n`, `sp=reject`, the record minus a removed tag — or a verify command),
+   never a generic "check your DNS". The companion emits **no first-round criticals**.
+3. The tree walk follows RFC 9989: query `_dmarc.<author-domain>` first; for names **>7 labels**,
+   jump so only 7 remain, then strip **one** label at a time; **cap at 8 queries**; and for
+   `a.b.c.d.e.f.g.h.i.j.mail.example.com` it produces exactly the eight queries in §1 (full author
+   domain, then `g.h.i.j.mail.example.com` … `example.com`, `com`).
+4. Org-Domain selection is longest→shortest: a `psd=n` record stops the walk at its own domain; a
+   `psd=y` record (not the walk's start) puts the Org Domain one label below; otherwise the
+   fewest-labels record wins — and `org_domain.selected_by` records which rule fired.
+5. `dmarcbis.tree_walk` emits a **warning** when the resolved Org Domain differs from the sibling
+   `found_at`, an **info** when the domain is covered only via a parent (effective policy = parent's
+   `sp`), and a **pass** when they match.
+6. `dmarcbis.psd` warns on `psd=y` for an ordinary domain and on a genuine public suffix lacking
+   `psd=y`; `dmarcbis.np` warns when `np` is weaker than `p` under enforcement and infos when `np` is
+   absent while enforcing; `dmarcbis.testing_flag` warns on `t=y`; `dmarcbis.removed_tags` infos when
+   any of `pct`/`rf`/`ri` are present, cross-referencing the operational `dmarc` findings.
+7. `dmarcbis.sp_semantics` warns on an `sp` published on a non-Org-Domain record (ineffective under
+   DMARCbis) or an existing-subdomain gap the tree walk exposes; it reads `sp` **only** from the
+   Org-Domain record.
+8. `dmarcbis.reject_advisory` (advisory) warns when `p=reject` is published but the sibling DKIM
+   category is unhealthy/absent (authentication leaning on SPF alone), cross-checking
+   [./spf.mdx](./spf.mdx) and [./dkim.mdx](./dkim.mdx); a supplied `.eml` upgrades the check via
+   `mailauth`.
+9. `dmarcbis.report_schema` and `dmarcbis.failure_report_conformance` are **absent** in the first
+   round and clearly gated behind future report ingestion ([../emails.mdx](../emails.mdx)).
+10. Pass results are emitted as `ok` findings so the explainer renders an explicit passed/failed row
+    per test; a fully conformant record yields DMARCbis-00 and contributes nothing to the DMARC cell
+    color.
+11. Each run persists its DMARCbis results under the top-level **`dmarcbis`** key of the run's YAML
+    file at `~/.email_delivery_hero/runs/<domain>/<YYYY_MM_DD_hh_mm{AM|PM}>.yaml`
+    ([../storage.mdx](../storage.mdx)), with the `org_domain:` block (author domain, resolved Org
+    Domain, `found_via`, `matches_enforced_record`, the ordered `query_path` with label counts and
+    `psd` per rung, `selected_by`, `psd_verdict`, `covered_by_parent`), the `tags:` snapshot, the
+    `tests[]` rows, `read_from: dmarc`, and the derived `problem_states` — and never repeats the
+    `run:` block's domain/timestamps.
+12. Every external tool invocation during a run is captured as one `dmarcbis.tool_runs[]` entry with
+    the LOCKED shape (`tool`, exact argv `command`, `started_at`, `duration_ms`, `exit_code`,
+    `output_format`, `parsed`, `error`); in-process `node:dns` tree-walk lookups produce **no**
+    tool-run entries; a binary missing from PATH is skipped with a single `info` finding.
+13. The §3 execution table is honored: `checkdmarc -f json` (60 s) runs on every DMARCbis run and
+    cross-validates the tree-walk Org Domain and the np/psd/t + removed-tag verdicts; `doggo --json`
+    (10 s) runs once per distinct parent name the walk queried; `kdig` runs only on a resolver
+    disagreement at a rung; `mailauth` only with a user-supplied `.eml`; `parsedmarc` only inside the
+    future ingestion job.
+14. The DMARCbis explainer renders at the canonical run-scoped route
+    `/domains/:domainId/runs/:runId/dmarc/check/dmarcbis` **and** the newest-run alias
+    `/domains/:domainId/dmarc/check/dmarcbis`, using the shared category-page header row + run context
+    strip and the five locked blocks of [dmarc.mdx §6.4](./dmarc.mdx) in order; the status chip is the
+    **worst severity among this run's `checkId === "dmarcbis"` findings** (gray "not measured" when
+    none). Paging / history clicks swap `:runId` only.
+15. Block 2 renders **only this run's data** and includes the **org-domain / tree-walk ladder** (the
+    ordered `query_path`, the selected rung outlined with its selection rule, and the
+    matches-enforced-record badge; a "covered by parent" line when applicable), the finding rows
+    sorted fail → warn → info → pass with monospace evidence, and the **scoped parsed-field table**
+    over `results.dmarcbis` with the `np`/`psd`/`t` fields highlighted and null fields grayed.
+16. Block 4's fixes are **keyed to the current state**: each fix's copy button carries a
+    **publishable value** (the exact tag edit, the corrected record, or the verify command) — never
+    prose — and the conformant state collapses to the single "nothing to do — DMARCbis-ready" line
+    plus the §8 standing recommendation.
+17. Block 5's **Run this check now** wires v1 to the existing `POST /api/audit/run/:domainId`
+    (navigating to the newest alias on completion, toast + stay on error), upgrades later to
+    `POST /api/audit/run/:domainId/check/dmarc` (which runs `dmarc` **and** `arc` **and** `dmarcbis`
+    per the run graph), and honors keyboard `r`.
+18. A new `dmarcbis` **sibling band row** is registered in the DMARC category's `checkKey` registry
+    ([dmarc.mdx §6.3](./dmarc.mdx) — integrator note), with chip = worst `dmarcbis.*` severity, title
+    "DMARCbis conformance", the routing to this explainer, and the `np`/`psd`/`t` tag rows on the
+    category page carrying a "DMARCbis ›" affordance here; this spec owns only that band row and the
+    explainer content.
+19. Every `dmarcbis.*` finding id maps to **exactly one** `DMARCbis-nn` problem state (§9 table), the
+    drill-downs render at `/domains/:domainId/runs/:runId/dmarc/:problemId` (alias without
+    `/runs/:runId`) with ids **disjoint** from the DMARC spec's `PS-nn` and the ARC spec's `ARC-nn`
+    namespaces and from the literal `check/` segment, and each uses the five-part drill-down chrome
+    (Concept / Your data / Diagnose it yourself / Path forward / further reading) of
+    [dmarc.mdx §7](./dmarc.mdx).
+20. Every clickable element on the explainer navigates per the §6.7 map — org-domain "enforced
+    record" badge → `…/dmarc/check/presence`, `sp`/subdomain mentions → `…/dmarc/check/subdomain-policy`,
+    the `p=reject` DKIM/SPF mentions → the run's DKIM/SPF category pages, finding rows → their
+    DMARCbis-nn drill-down, references → external links in a new tab — and nothing clickable is a dead
+    end.
+21. The unit-scoped **history strip** colors each of the last 10 runs by that run's worst
+    `dmarcbis.*` severity, renders gray for runs where the checker did not run, outlines the viewed
+    run, and clicking a chip swaps `:runId` on the explainer route.
+22. Results persist to the run's **`dmarcbis`** YAML object today and map cleanly onto
+    `dmarcbis_check_results` (with the nullable future report-conformance columns and the
+    `read_from_dmarc_result` FK) when the store moves to PostgreSQL — a single store-module change,
+    no checker change.
+
+<!--
+  Maintenance notes:
+  * DMARCbis is the FINAL 2026 standard: RFC 9989 (core, obsoletes 7489, folds in 9091 PSD) /
+    9990 (aggregate reporting) / 9991 (failure reporting, updates 6591). Tree walk REPLACES the
+    Public Suffix List (8-query cap; longest->shortest psd selection). Tag set:
+    {v,p,sp,np,adkim,aspf,fo,rua,ruf,psd,t}. NEW np/psd/t; REMOVED pct/rf/ri (ignored, not
+    rejected). p=reject is a signal receivers weigh (MUST apply aligned DKIM; MUST NOT rely on SPF
+    alone; receiver MUST NOT reject solely on policy). No flag day.
+  * DMARCbis is a COMPANION to the operational dmarc check (like ARC): it has NO dashboard column;
+    dmarcbis.* findings carry category='dmarc' and roll into the DMARC cell (category 3). It READS
+    the sibling dmarc result (run graph dmarcbis <- dmarc) and does NOT re-parse the record. Keep
+    finding ids in sync with
+    code/packages/backend/src/modules/audit/checks/dmarcbis/dmarcbis.check.ts (authoritative id
+    list is §2) and register the sibling band row in ./dmarc.mdx §6.3.
+  * Almost everything is FIRST-ROUND (DNS-answerable today) — this is the one new standard we can
+    fully test now. Only dmarcbis.report_schema / dmarcbis.failure_report_conformance are FUTURE
+    (need ingested reports via ../emails.mdx).
+  * RUN STORAGE is owned by ../storage.mdx — one YAML file per run. This spec owns only the
+    top-level `dmarcbis:` key (§5): status, read_from, org_domain, tags, tool_runs[], tests[],
+    problem_states. Do NOT redefine the run: block here. tool_runs[] entry shape is LOCKED across
+    all category specs.
+  * ROUTES are LOCKED and SHARED with the DMARC category + its ARC companion: the explainer is
+    /domains/:domainId/runs/:runId/dmarc/check/dmarcbis (newest alias without /runs/:runId);
+    problem drill-downs at /dmarc/:problemId use the DMARCbis-nn namespace, DISJOINT from PS-nn
+    (dmarc.mdx) and ARC-nn (arc.mdx). Never fork the page chrome / five-block contract / history
+    strip — they are owned by dmarc.mdx §6.3-§6.7.
+  * SCOPED RE-RUN: v1 = existing POST /api/audit/run/:domainId (full run). The category-scoped
+    POST /api/audit/run/:domainId/check/dmarc runs dmarc + arc + dmarcbis together (never dmarcbis
+    alone — its input is the dmarc result); GATED on ../storage.mdx carried_from amendment.
+  * Toolbox (§3) verified 2026-07: checkdmarc HAS DMARCbis support (np/psd/t tags, removed-tag
+    warnings "Support for the {tag} tag was removed in RFC 9989", tree walk to single-label
+    parents); Stalwart mail-auth (Rust) is the reference impl with a WASM playground ("DKIM2 and
+    DMARCbis have landed"). parsedmarc dmarc-2.0-namespace parsing is maturing -> report-schema
+    sub-checks stay FUTURE.
+  * Cross-links: ./dmarc.mdx (the audit this layers on), ./arc.mdx (sibling companion + the
+    five-block/SQL-then-JSON pattern), ./dkim2.mdx (next-gen sibling, message-dependent),
+    ./spf.mdx + ./dkim.mdx (p=reject reality check), ../emails.mdx (FUTURE report ingestion),
+    ../overview.mdx, ../engineering.mdx. Update if those files move.
+-->

@@ -546,9 +546,199 @@ export const ARC_PROBLEM_STATES: DmarcProblemState[] = [
 	},
 ];
 
+/**
+ * The DMARCbis conformance problem-state catalog (pm/checks/dmarcbis.mdx §9/§10). The `dmarcbis.*`
+ * findings roll into the DMARC category, so these DMARCbis-nn drill-downs render at the shared
+ * /domains/:id/(runs/:runId/)dmarc/:problemId route with the same chrome as the PS-nn / ARC-nn
+ * pages. The DMARCbis-nn id namespace is disjoint from PS-nn and ARC-nn. Each state maps 1:1 to a
+ * `dmarcbis.*` finding id (the backend's deriveProblemStates() order).
+ */
+export const DMARCBIS_PROBLEM_STATES: DmarcProblemState[] = [
+	{
+		id: "DMARCbis-01",
+		title: "Tree walk resolves a different Organizational Domain",
+		hook: "The record receivers act on under DMARCbis isn't the one you enforce.",
+		severity: "warning",
+		findingIds: ["dmarcbis.tree_walk"],
+		concept: [
+			"DMARCbis (RFC 9989) replaces the static Public Suffix List with a live DNS tree walk: receivers query _dmarc.<domain>, then climb toward the root one label at a time (capped at 8 queries), and select the Organizational Domain from the records they find (a psd=n record marks its own domain; a psd=y record puts the org one label below; otherwise the shortest name with a record wins).",
+			"If the domain the tree walk selects is not the one carrying the policy you rely on, receivers may enforce a parent's subdomain policy (sp=) instead of your intended p=, or resolve a different owner boundary than the PSL used to imply.",
+		],
+		dataFields: [
+			"dmarcbis.org_domain.resolved_org_domain",
+			"dmarcbis.org_domain.query_path",
+			"dmarcbis.org_domain.covered_by_parent",
+		],
+		commands: [
+			"doggo _dmarc.<domain> TXT --json   # rung 0 of the tree walk",
+			"checkdmarc <domain> -f json   # 'location' is the Org Domain checkdmarc resolves",
+		],
+		tools: ["doggo", "checkdmarc", "Stalwart mail-auth playground"],
+		metrics: [
+			"resolved_org_domain equals the record you enforce (found_at)",
+			"covered_by_parent is false unless you intend the parent's sp= to govern",
+		],
+		pathForward: [
+			"Publish your policy at the domain the tree walk resolves as the Organizational Domain, or confirm the parent record's sp= is what you intend.",
+			"If a subdomain needs its own policy, publish _dmarc.<subdomain> explicitly so the walk stops there.",
+		],
+	},
+	{
+		id: "DMARCbis-02",
+		title: "psd tag mis-declared",
+		hook: "psd=y on an ordinary domain breaks the tree walk for everything beneath it.",
+		severity: "warning",
+		findingIds: ["dmarcbis.psd"],
+		concept: [
+			"The DMARCbis psd tag declares whether a domain IS a public suffix: y (a registry / public-suffix operator), n (an ordinary organization), or u (unknown — the default). It anchors the tree walk.",
+			"An ordinary org domain publishing psd=y tells receivers the real Organizational Domain sits one label below it, misdirecting the walk for every name underneath. A genuine public suffix that omits psd=y loses the protective default it could publish for its registrants.",
+		],
+		dataFields: ["dmarcbis.tags.psd", "dmarcbis.org_domain.psd_verdict"],
+		commands: ["doggo _dmarc.<domain> TXT --json   # read the psd= tag"],
+		tools: ["doggo", "checkdmarc"],
+		metrics: ["psd=n or absent on an ordinary org domain; psd=y only on a registry"],
+		pathForward: [
+			"Set psd=n (or remove the tag → u) on an ordinary organizational domain.",
+			"Registries / public-suffix operators set psd=y to anchor the walk and publish a default.",
+		],
+	},
+	{
+		id: "DMARCbis-03",
+		title: "Non-existent-subdomain gap (np)",
+		hook: "Made-up subdomains of your domain aren't explicitly rejected.",
+		severity: "warning",
+		findingIds: ["dmarcbis.np"],
+		concept: [
+			"DMARCbis adds np — a policy for subdomains that do not exist in DNS at all (identified by an NXDOMAIN answer, per RFC 8020). It closes the phantom-subdomain spoofing gap: an attacker forging mail from a never-registered subdomain.",
+			"When np is absent the receiver falls back to sp, then p — so if those are weak, invented subdomains are spoofable even though your real domain is protected.",
+		],
+		dataFields: ["dmarcbis.tags.np"],
+		commands: ["doggo _dmarc.<domain> TXT --json   # look for np="],
+		tools: ["doggo", "checkdmarc"],
+		metrics: ["np is at least as strict as p (np=reject when you never use subdomains)"],
+		pathForward: [
+			"Add np=reject if you never legitimately send from non-existent subdomains.",
+			"If some subdomains are real senders, keep np aligned with your sp policy.",
+		],
+	},
+	{
+		id: "DMARCbis-04",
+		title: "Record is in testing mode (t=y)",
+		hook: "Your printed p= is advisory — real enforcement is one level lower.",
+		severity: "warning",
+		findingIds: ["dmarcbis.testing_flag"],
+		concept: [
+			"DMARCbis replaces the old pct sampling tag with a plain testing flag t. t=n (default) applies the policy as written; t=y softens enforcement by one level — reject behaves like quarantine, quarantine like none — while still generating reports.",
+			"So a record printing p=reject with t=y is really enforcing at quarantine. It is useful during rollout, but leaves you less protected than the policy string suggests if left on.",
+		],
+		dataFields: ["dmarcbis.tags.t"],
+		commands: ["doggo _dmarc.<domain> TXT --json   # look for t=y"],
+		tools: ["doggo", "checkdmarc"],
+		metrics: ["t=n (or absent) once you are ready to enforce as written"],
+		pathForward: [
+			"Watch the aggregate reports while t=y; when legitimate mail passes aligned, remove t=y (or set t=n).",
+		],
+	},
+	{
+		id: "DMARCbis-05",
+		title: "Removed tags still present (pct / rf / ri)",
+		hook: "Tags DMARCbis deleted linger on the record.",
+		severity: "info",
+		findingIds: ["dmarcbis.removed_tags"],
+		concept: [
+			"DMARCbis removed three tags: pct (only 0 and 100 ever worked interoperably), rf (only afrf was ever deployed), and ri (receivers converged on ~daily reports regardless).",
+			"Receivers ignore them rather than reject the record, so nothing breaks — but they are non-conformant noise, and pct in particular can mislead you into thinking a partial rollout is still in effect.",
+		],
+		dataFields: ["dmarcbis.tags.removed_tags_present"],
+		commands: ["doggo _dmarc.<domain> TXT --json   # check for pct=/rf=/ri="],
+		tools: ["doggo", "checkdmarc"],
+		metrics: ["record keeps only the DMARCbis tag set {v,p,sp,np,adkim,aspf,fo,rua,ruf,psd,t}"],
+		pathForward: [
+			"Delete pct / rf / ri at your next DNS edit; use t= (not pct=) to stage enforcement.",
+		],
+	},
+	{
+		id: "DMARCbis-06",
+		title: "sp semantics leave subdomains under-protected",
+		hook: "Under the tree walk, sp is read only from the Organizational-Domain record.",
+		severity: "warning",
+		findingIds: ["dmarcbis.sp_semantics"],
+		concept: [
+			"DMARCbis redefines sp in terms of the tree walk: the subdomain policy is read ONLY from the record discovered at the Organizational Domain, not from a record sitting on a subdomain.",
+			"So an sp published on a subdomain record is ineffective, and existing subdomains can be left weaker than the apex if the org-domain record's sp (or its default from p) is permissive.",
+		],
+		dataFields: [
+			"dmarcbis.tags.reject_reality",
+			"dmarcbis.org_domain.resolved_org_domain",
+		],
+		commands: ["doggo _dmarc.<domain> TXT --json   # confirm where sp is published"],
+		tools: ["doggo", "checkdmarc"],
+		metrics: ["sp lives on the Org-Domain record and is at least as strict as intended"],
+		pathForward: [
+			"Move the intended subdomain policy to sp on the Organizational-Domain record; set sp=reject if subdomains should match the apex.",
+		],
+	},
+	{
+		id: "DMARCbis-07",
+		title: "p=reject leaning on SPF alone",
+		hook: "DMARCbis says p=reject MUST be backed by aligned DKIM, not SPF only.",
+		severity: "warning",
+		findingIds: ["dmarcbis.reject_advisory"],
+		concept: [
+			"DMARCbis turns p=reject from an unconditional bounce order into a strong signal receivers weigh. It sets rules for senders: at any p=reject you MUST apply valid aligned DKIM and MUST NOT rely on SPF alone, because SPF breaks through forwarding while DKIM survives it.",
+			"If your DKIM is unhealthy or absent while you enforce p=reject, legitimate forwarded mail fails DMARC and is dropped — the exact indirect-mail breakage DMARCbis warns against.",
+		],
+		dataFields: ["dmarcbis.tags.reject_reality.dkim_aligned_ok", "dmarcbis.tags.reject_reality.spf_only_risk"],
+		commands: [
+			"checkdmarc <domain> -f json",
+			"npx mailauth report <path-to-message.eml>   # confirm aligned DKIM on a real message",
+		],
+		tools: ["checkdmarc", "mailauth"],
+		metrics: ["every stream DKIM-signs with an aligned d= before/at p=reject"],
+		pathForward: [
+			"Fix DKIM alignment on every sending stream (see the DKIM category) before staying at p=reject.",
+			"If users post to mailing lists, ramp none → quarantine → reject rather than jumping straight to reject.",
+		],
+	},
+	{
+		id: "DMARCbis-08",
+		title: "External report destination not authorized",
+		hook: "A foreign rua/ruf destination hasn't consented to receive your reports.",
+		severity: "warning",
+		findingIds: ["dmarcbis.external_auth"],
+		concept: [
+			"When rua= or ruf= points at a mailbox on a different domain, DMARCbis (like RFC 7489) requires that domain to publish <your-domain>._report._dmarc.<their-domain> = v=DMARC1 to consent — otherwise the reports are silently discarded.",
+			"The operational dmarc check raises the hard failure; this DMARCbis view notes the same gap under the RFC 9990 reporting model.",
+		],
+		dataFields: ["dmarc.external_report_auth"],
+		commands: [
+			"doggo <your-domain>._report._dmarc.<report-provider> TXT --json",
+		],
+		tools: ["doggo", "checkdmarc"],
+		metrics: ["every external report domain publishes the _report._dmarc authorization"],
+		pathForward: [
+			"Have the destination publish <your-domain>._report._dmarc.<provider> = v=DMARC1, or point rua=/ruf= at an in-domain mailbox.",
+		],
+	},
+];
+
 /** Problem states matched by the latest run's findings (pm/checks/dmarc.mdx §9 mapping). */
 export function matchProblemStates(findings: Finding[]): DmarcProblemState[] {
 	return matchStates(DMARC_PROBLEM_STATES, findings);
+}
+
+/**
+ * DMARCbis-nn states matched from this run's `dmarcbis.*` findings (pm/checks/dmarcbis.mdx §9).
+ * Matches warning/critical findings (the generic matcher rule); the info-level conformance notes
+ * (removed tags, np absent) still render as rows on the DMARCbis sub-test explainer.
+ */
+export function matchDmarcbisProblemStates(
+	findings: Finding[],
+): DmarcProblemState[] {
+	return matchStates(
+		DMARCBIS_PROBLEM_STATES,
+		findings.filter((f) => f.checkId === "dmarcbis"),
+	);
 }
 
 /**
@@ -606,9 +796,14 @@ export function matchArcProblemStates(
 	return ARC_PROBLEM_STATES.filter((ps) => matched.has(ps.id));
 }
 
-/** Looks up PS-nn and ARC-nn states alike — both render at the shared /dmarc/:problemId route. */
+/**
+ * Looks up PS-nn, ARC-nn, and DMARCbis-nn states alike — all render at the shared
+ * /dmarc/:problemId route with the same chrome. The three id namespaces are disjoint.
+ */
 export function problemStateById(id: string): DmarcProblemState | undefined {
 	return (
-		stateById(DMARC_PROBLEM_STATES, id) ?? stateById(ARC_PROBLEM_STATES, id)
+		stateById(DMARC_PROBLEM_STATES, id) ??
+		stateById(ARC_PROBLEM_STATES, id) ??
+		stateById(DMARCBIS_PROBLEM_STATES, id)
 	);
 }

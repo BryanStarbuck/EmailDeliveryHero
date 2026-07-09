@@ -4,7 +4,9 @@ import { blacklistCheck } from "./blacklist/blacklist.check";
 import { contentScoringCheck } from "./content-scoring/content-scoring.check";
 import { daneTlsaCheck } from "./dane-tlsa/dane-tlsa.check";
 import { dkimCheck } from "./dkim/dkim.check";
+import { dkim2Check } from "./dkim2/dkim2.check";
 import { dmarcCheck } from "./dmarc/dmarc.check";
+import { dmarcbisCheck } from "./dmarcbis/dmarcbis.check";
 import { dmarcReportsCheck } from "./dmarc-reports/dmarc-reports.check";
 import { dnsHealthCheck } from "./dns-health/dns-health.check";
 import { dnssecCheck } from "./dnssec/dnssec.check";
@@ -34,12 +36,15 @@ import type { Checker } from "./types";
 export const CHECKERS: Checker[] = [
 	// SPF
 	spfCheck,
-	// DKIM
+	// DKIM (+ DKIM2 companion — the draft-04 signature chain of custody, pm/checks/dkim2.mdx)
 	dkimCheck,
-	// DMARC (+ ARC companion + ingested rua-report findings, pm/emails.mdx §5)
+	dkim2Check,
+	// DMARC (+ ARC companion + DMARCbis conformance companion + ingested rua-report findings)
 	dmarcCheck,
 	dmarcReportsCheck,
 	arcCheck,
+	// DMARCbis — the RFC 9989 standards-conformance / tree-walk lens (pm/checks/dmarcbis.mdx)
+	dmarcbisCheck,
 	// Blacklists
 	blacklistCheck,
 	// DNS & Infrastructure

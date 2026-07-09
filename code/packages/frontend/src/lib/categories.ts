@@ -40,8 +40,10 @@ interface CategoryDef {
 /** The categories in their display order. `dnssec` sits next to its parent `DNS` column. */
 export const CATEGORIES: CategoryDef[] = [
 	{ key: "spf", header: "SPF", prefixes: ["spf"] },
-	{ key: "dkim", header: "DKIM", prefixes: ["dkim"] },
-	{ key: "dmarc", header: "DMARC", prefixes: ["dmarc", "arc"] },
+	// DKIM2 (pm/checks/dkim2.mdx) is a companion of DKIM — its findings roll into the DKIM cell.
+	{ key: "dkim", header: "DKIM", prefixes: ["dkim", "dkim2"] },
+	// DMARCbis (pm/checks/dmarcbis.mdx) is the standards-conformance companion of DMARC, like ARC.
+	{ key: "dmarc", header: "DMARC", prefixes: ["dmarc", "arc", "dmarcbis"] },
 	{ key: "blacklists", header: "Blacklists", prefixes: ["blacklist", "dnsbl"] },
 	// Header shortened to "DNS" (pm/ui.mdx §1.1) so the column is narrow; DNSSEC is split out below.
 	{ key: "dnsInfra", header: "DNS", prefixes: ["infra"] },
