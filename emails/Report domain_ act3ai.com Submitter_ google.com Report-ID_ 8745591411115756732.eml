@@ -1,0 +1,202 @@
+Delivered-To: bryan@thestarbucks.com
+Received: by 2002:a05:6214:1a06:b0:8d1:5166:bab5 with SMTP id fh6csp282101qvb;
+        Fri, 24 Jul 2026 03:34:54 -0700 (PDT)
+X-Forwarded-Encrypted: i=4; AHgh+RqQXQQOyqBaT4iAAiX6fmV/M3GKZGt9ySqlkjx+28PX9Kd5JVZzTQpuFtyEBknQCY1fnYK45Q==@thestarbucks.com
+X-Received: by 2002:a05:622a:178f:b0:528:3142:d466 with SMTP id d75a77b69052e-5283dee88d0mr68271701cf.41.1784889293960;
+        Fri, 24 Jul 2026 03:34:53 -0700 (PDT)
+ARC-Seal: i=3; a=rsa-sha256; t=1784889293; cv=pass;
+        d=google.com; s=arc-20260327;
+        b=NDpMkJuhuoruKcg5D652rAYScUpplGH7fAjSd6k2wKzem7WxvgtU9C0jMiv6WngLPB
+         FgKCJRwJikOR6IPARMbgJFjuY+pX6VEefO7uEAFADhVLI4skvBKy+8bKR7d1SlbUjaSe
+         XWQ8M8NvjAuleNnw7KWG55zRrLCB3g6o2S3djvun0P3KWlUl1wk6Cvdv1MaFq1nHs9bs
+         zAFxKsCLaJWHcYMgb/KrE4byxUyEJZEzd14yGJqp/rioNlDWL4WP8A551G76N7E/RiLs
+         ibKTj9NXwaDKVWnaO34Pf3LuEcrCLrTccKqnDxLkF51CHj6AFpMxwzMvd1BY966WsXTx
+         DDSA==
+ARC-Message-Signature: i=3; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;
+        h=list-unsubscribe:list-subscribe:list-archive:list-help:list-post
+         :list-id:mailing-list:precedence:reply-to:content-transfer-encoding
+         :content-disposition:to:from:subject:message-id:date:mime-version
+         :dkim-signature;
+        bh=tqo1nhCP5L/PjqOy70f4WOs35mp475egLELd2m4qL58=;
+        fh=C4HMWGTDcws9f63XzTXZpiNf9en0Zo7laNjxAo10Pwg=;
+        b=IZfR9vcp5V4wHZa98aiS0BEdLWTh+TxSAwDW6WYubdZmyq2ZGwkQ7Oln88cepnANwo
+         2hoIBSQGx/Vgm1xgA1yj90N73IxtvXmB19Gl3nC5I1xf2H7fzjTxUiMmesx3dpJ7xItb
+         f9rfth4r3odAzlXnSAvj1ud14qIeUAmBB3hi+SLcH5Mr+NuaBvX00hky8R7QlWuXkv7q
+         A9ERIImzwNgqE97ZTWBAVIlUJWXlX0dn5/4jYhtcYycHvb3QatB+7IzDcdQMsTi2oqln
+         XN8GTYWAERsQoF8uyI6y8cJnUwu/gECQlP53weHAmaT+G0XVBxmWtNPCGAMAUGYL70TD
+         DFgA==;
+        dara=google.com
+ARC-Authentication-Results: i=3; mx.google.com;
+       dkim=pass header.i=@act3ai.com header.s=google2 header.b=Sd8li25M;
+       arc=pass (i=2 spf=pass spfdomain=google.com dkim=pass dkdomain=google.com dmarc=pass fromdomain=google.com);
+       spf=pass (google.com: domain of support+bncbcclzvvtvaarbtp7rtjqmgqec5uh5ai@act3ai.com designates 2607:f8b0:4864:20::745 as permitted sender) smtp.mailfrom=support+bncBCCLZVVTVAARBTP7RTJQMGQEC5UH5AI@act3ai.com;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=act3ai.com;
+       dara=neutral header.i=@thestarbucks.com
+Return-Path: <support+bncBCCLZVVTVAARBTP7RTJQMGQEC5UH5AI@act3ai.com>
+Received: from mail-qk1-x745.google.com (mail-qk1-x745.google.com. [2607:f8b0:4864:20::745])
+        by mx.google.com with ESMTPS id d75a77b69052e-528412ca47csi39651231cf.371.2026.07.24.03.34.53
+        for <bryan@thestarbucks.com>
+        (version=TLS1_3 cipher=TLS_AES_128_GCM_SHA256 bits=128/128);
+        Fri, 24 Jul 2026 03:34:53 -0700 (PDT)
+Received-SPF: pass (google.com: domain of support+bncbcclzvvtvaarbtp7rtjqmgqec5uh5ai@act3ai.com designates 2607:f8b0:4864:20::745 as permitted sender) client-ip=2607:f8b0:4864:20::745;
+Authentication-Results: mx.google.com;
+       dkim=pass header.i=@act3ai.com header.s=google2 header.b=Sd8li25M;
+       arc=pass (i=2 spf=pass spfdomain=google.com dkim=pass dkdomain=google.com dmarc=pass fromdomain=google.com);
+       spf=pass (google.com: domain of support+bncbcclzvvtvaarbtp7rtjqmgqec5uh5ai@act3ai.com designates 2607:f8b0:4864:20::745 as permitted sender) smtp.mailfrom=support+bncBCCLZVVTVAARBTP7RTJQMGQEC5UH5AI@act3ai.com;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=act3ai.com;
+       dara=neutral header.i=@thestarbucks.com
+Received: by mail-qk1-x745.google.com with SMTP id af79cd13be357-92e6ed4fe99sf57422985a.0
+        for <bryan@thestarbucks.com>; Fri, 24 Jul 2026 03:34:53 -0700 (PDT)
+ARC-Seal: i=2; a=rsa-sha256; t=1784889293; cv=pass;
+        d=google.com; s=arc-20260327;
+        b=HL/KVCCYUaQ86jfNrDsDlDZQIAF2YIuulqzzDyL3oRVZZWBH/v1/gZ7kOwGech2/A4
+         LkK8gsuxGx+1pwg2sXtSS6osZZ6OLdN3MklJ76ivVii0FPy4fjX9AgTO2ar1+HHHiNXZ
+         HtNbMwhhZyvJlHDl0oZtArbhN7CTDD1GWBkTzrsO8aI0N/GPx3s+LFVYWQmTglxME/gb
+         R1sxRZtxmqVZ9Q4cF5D+jJ8Ad74nj5kvc+AJEUzQAOabkrflepjD4Bft8HTuz/qOm9Co
+         3Dgy2EUvDRzMqYkb3FxTnLPx1NeBWLZkWXFG98UlxaVBkUs58bqnDT+gnDckqfdPP0By
+         TFoQ==
+ARC-Message-Signature: i=2; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;
+        h=list-unsubscribe:list-subscribe:list-archive:list-help:list-post
+         :list-id:mailing-list:precedence:reply-to:content-transfer-encoding
+         :content-disposition:to:from:subject:message-id:date:mime-version
+         :dkim-signature;
+        bh=tqo1nhCP5L/PjqOy70f4WOs35mp475egLELd2m4qL58=;
+        fh=C4HMWGTDcws9f63XzTXZpiNf9en0Zo7laNjxAo10Pwg=;
+        b=C850085oKO9awiQ5F8mNvgN9RImR18q7DrM3qqVFplRhWKP66jd4U11xKFXMyR9kVV
+         aFnlN4g6HOn70xdmPe1ozpMUFOaaP0P3yhRW5pvIWRhnv4MZ83PQLATBsAik+1bCTFYr
+         bbWN/JbKufbI6wGXi16oAJPh4CO8DKJd0BnZJX4v58PrceHblhNL49H77ugyMLjqAbLT
+         Ld1Tvbn5Ddw5J2PkwGCGqExnXRXGicV8DGMKzebRNDwubxOh/z2V4xGzc/pnQMmo0kLp
+         Hkxf44dbosL3vjtSyQKiu8tiuiZ9eYSOUZb9hLc9WRT9gIU0ccrGDJd6c6nOASWJdkrR
+         zMUg==;
+        darn=thestarbucks.com
+ARC-Authentication-Results: i=2; mx.google.com;
+       dkim=pass header.i=@google.com header.s=20251104 header.b=cFS2byEv;
+       spf=pass (google.com: domain of noreply-dmarc-support@google.com designates 209.85.220.73 as permitted sender) smtp.mailfrom=noreply-dmarc-support@google.com;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=google.com;
+       dara=neutral header.i=@act3ai.com
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+        d=act3ai.com; s=google2; t=1784889293; x=1785494093; darn=thestarbucks.com;
+        h=list-unsubscribe:list-subscribe:list-archive:list-help:list-post
+         :list-id:mailing-list:precedence:reply-to
+         :x-original-authentication-results:x-original-sender
+         :content-transfer-encoding:content-disposition:content-type:to:from
+         :subject:message-id:date:mime-version:from:to:cc:subject:date
+         :message-id:reply-to:content-type;
+        bh=tqo1nhCP5L/PjqOy70f4WOs35mp475egLELd2m4qL58=;
+        b=Sd8li25MaTY7ywHpOZTu7/VSjfpX333NXMJSj5tyvIsuXGSJZ8/OLKLYxnONOzp/zU
+         3rU/xVHamFmsuc2YtO+zx3CTRcVh5TEOQIJLhbzgjgpwHhJxhelFxC+Qwy7x6GiVXOpf
+         dDLs8Wo9N7y6dAqJfU7U+GtPs4EQo9QQe8gG4NFltAm7EDw2hF00P0fcGZiW15y8W6X+
+         iRBDVGLjW10uovvPPKZXeAQohR1nr2d/lHuax+Sfyu+Eejr2ABbPSkeOoMVxhNf+gaIr
+         2Z7ynRsCiXae3fzDXHeMNki+a/beWdI2W9vXmU5ocNP6k2kODCqykRRIVvh3B8Qx5yeW
+         5tSQ==
+X-Google-DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+        d=1e100.net; s=20251104; t=1784889293; x=1785494093;
+        h=list-unsubscribe:list-subscribe:list-archive:list-help:list-post
+         :x-spam-checked-in-group:list-id:mailing-list:precedence:reply-to
+         :x-original-authentication-results:x-original-sender
+         :content-transfer-encoding:content-disposition:content-type:to:from
+         :subject:message-id:date:mime-version:x-beenthere:x-gm-message-state
+         :from:to:cc:subject:date:message-id:reply-to:content-type;
+        bh=tqo1nhCP5L/PjqOy70f4WOs35mp475egLELd2m4qL58=;
+        b=V0Q+7GG03lO3I+aodKH5Q7KEYZpOO9RfC17afg3KQMPepyc5rlAwEbeCLNeyJSfyuA
+         9T4RW8S0SA93AIIo82qjFQ3U866FM1xzSWjKPjrP3MEgwr/JZ++AMTapQ+xrWBuu+e08
+         d7Sft6vVmE+iB3oS6wxEAQ2FKewmUQEkgXHFpI6jbYoECeWUht4p6gPxiORNQx47GGz5
+         I9qiIeFirLCdhSbjnod+PYyLkUM7QhR/COIKXy9JBpq6SgAjlu9uYSupTd77yKpUAOqc
+         Kv/iu8sm77EHJxMTWvEXgPv7+L6pP0nQxGJb2Ic0wzmLpRBKQvzHtXwi0T4gxRr+VZBz
+         vXBw==
+X-Forwarded-Encrypted: i=2; AHgh+Rrm0incrAl67GzV94Vx7mVXQfLz9XnO8dweIqUWmQMqU+rDP7HYLhouMcQ2PazeV1el2LQxPA==@thestarbucks.com
+X-Gm-Message-State: AOJu0YwV0Q3SPcAK+FbKjjvRAkrBzYOWOobpueKbSp8yEEE/jAmr686w
+	EpFewT4MDLhvCwiWjrDwsq6b7t2scHnzUlG74D1h4szekvzaoXr+BZJOj0vVIyPh490wfE8N/yY
+	=
+X-Received: by 2002:a05:620a:4081:b0:92b:6805:91b8 with SMTP id af79cd13be357-93103b15db5mr736898485a.64.1784889293220;
+        Fri, 24 Jul 2026 03:34:53 -0700 (PDT)
+X-BeenThere: support@act3ai.com; h="Aa7YSPSz14+XVnPI0wClcKyaaoqJwEuntc7MwAdE6St7cYK0zQ=="
+Received: by 2002:ac8:7fce:0:b0:51c:1533:7967 with SMTP id d75a77b69052e-5283a6f4aa5ls51690231cf.2.-pod-prod-06-us;
+ Fri, 24 Jul 2026 03:34:52 -0700 (PDT)
+X-Received: by 2002:a05:622a:64d:b0:51c:1a17:eba4 with SMTP id d75a77b69052e-5283de0ad5fmr68042631cf.24.1784889292496;
+        Fri, 24 Jul 2026 03:34:52 -0700 (PDT)
+ARC-Seal: i=1; a=rsa-sha256; t=1784889292; cv=none;
+        d=google.com; s=arc-20260327;
+        b=NTD5t8VWLMit5x/pXhkkZUrAYLZlr0Lavd3WXbGgv7V6OyDzXgMJdQ392Eeu/Da2pc
+         O31MSYKsXYfc3Nf8j1aw7BuI+DGsC2z1QJcgcPzliRDu+p3Q/CdT84pUhvhGn0etxZan
+         dRIVs0GjfVKsrhamEoP6V6XlW9u9AKnfPiNTDNNODWWQR8swiS3FBPep6dI43GKQbmuu
+         D+qGmW2Sp/MfNpplnHGiyJP6Jtdml9H4DWbI2xU5o4PLizjb96vK1yTgDj7ReT60ZSpv
+         cl8RgHlFufkDw4iFDc/T94lx70NhaCWNCkBJN9R6SecqN7ivJKcfrfEgR5PR7uHJjp9c
+         IC0Q==
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;
+        h=content-transfer-encoding:content-disposition:to:from:subject
+         :message-id:date:mime-version:dkim-signature;
+        bh=tqo1nhCP5L/PjqOy70f4WOs35mp475egLELd2m4qL58=;
+        fh=qrXT9FTHEJBTzX6qypXjEBS9uCounmle/dPno4uSBH4=;
+        b=dcAEV0fHuqn8LLqBaqqXMpJgENXSr+ZjZxRdYE6eIvZKwC7rEJUhR7CNCvud1iYSrA
+         BdqE0XYkUins3bBDgZ0I4SscMSOZNLZAcjkxtYyaV17Hvxo7bPswj7KhN7S1fevQN9AH
+         QvzUQr0FUDXgjbCjQjMbFdyNnrlJcS0qTk/6xbD+PpC9eKtOeh9zFQrXxD2CS2Fd+vLe
+         Z34FX7QhQF0hHe43kNeeDJDNRTYDmnxhYcPNBnH0kubNn74Tztc2oz/oYLEbsTGuT8tq
+         3gTC3lW7YHBSq9GXFXgQkl5AxajrzfVU0xfkoSQ26yFQB8NYamN5rZpRSbtBLiKrogqk
+         jezw==;
+        dara=google.com
+ARC-Authentication-Results: i=1; mx.google.com;
+       dkim=pass header.i=@google.com header.s=20251104 header.b=cFS2byEv;
+       spf=pass (google.com: domain of noreply-dmarc-support@google.com designates 209.85.220.73 as permitted sender) smtp.mailfrom=noreply-dmarc-support@google.com;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=google.com;
+       dara=neutral header.i=@act3ai.com
+Received: from mail-sor-f73.google.com (mail-sor-f73.google.com. [209.85.220.73])
+        by mx.google.com with SMTPS id 6a1803df08f44-907ba8c9575sor50711136d6.1.2026.07.24.03.34.52
+        for <support@act3ai.com>
+        (Google Transport Security);
+        Fri, 24 Jul 2026 03:34:52 -0700 (PDT)
+Received-SPF: pass (google.com: domain of noreply-dmarc-support@google.com designates 209.85.220.73 as permitted sender) client-ip=209.85.220.73;
+MIME-Version: 1.0
+X-Received: by 2002:a05:6214:2623:b0:8dc:1f0:9f2f with SMTP id
+ 6a1803df08f44-907ca588fbdmr73813606d6.17.1784889292357; Fri, 24 Jul 2026
+ 03:34:52 -0700 (PDT)
+Date: Thu, 23 Jul 2026 16:59:59 -0700
+Message-ID: <8745591411115756732@google.com>
+Subject: Report domain: act3ai.com Submitter: google.com Report-ID: 8745591411115756732
+From: noreply-dmarc-support via Support - ACT3ai <support@act3ai.com>
+To: support@act3ai.com, 0m9ufogd@ag.us.dmarcian.com
+Content-Type: application/zip; 
+	name="google.com!act3ai.com!1784764800!1784851199.zip"
+Content-Disposition: attachment; 
+	filename="google.com!act3ai.com!1784764800!1784851199.zip"
+Content-Transfer-Encoding: base64
+X-Original-Sender: noreply-dmarc-support@google.com
+X-Original-Authentication-Results: mx.google.com;       dkim=pass
+ header.i=@google.com header.s=20251104 header.b=cFS2byEv;       spf=pass
+ (google.com: domain of noreply-dmarc-support@google.com designates
+ 209.85.220.73 as permitted sender) smtp.mailfrom=noreply-dmarc-support@google.com;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=google.com;
+       dara=neutral header.i=@act3ai.com
+X-Original-From: noreply-dmarc-support@google.com
+Reply-To: noreply-dmarc-support@google.com
+Precedence: list
+Mailing-list: list support@act3ai.com; contact support+owners@act3ai.com
+List-ID: <support.act3ai.com>
+X-Spam-Checked-In-Group: support@act3ai.com
+X-Google-Group-Id: 404742140759
+List-Post: <https://groups.google.com/a/act3ai.com/group/support/post>, <mailto:support@act3ai.com>
+List-Help: <https://support.google.com/a/act3ai.com/bin/topic.py?topic=25838>, <mailto:support+help@act3ai.com>
+List-Archive: <https://groups.google.com/a/act3ai.com/group/support/>
+List-Subscribe: <https://groups.google.com/a/act3ai.com/group/support/subscribe>,
+ <mailto:support+subscribe@act3ai.com>
+List-Unsubscribe: <mailto:googlegroups-manage+404742140759+unsubscribe@googlegroups.com>,
+ <https://groups.google.com/a/act3ai.com/group/support/subscribe>
+
+UEsDBAoAAAAIAAlL+Fw0j2yCGgMAAL09AAAvAAAAZ29vZ2xlLmNvbSFhY3QzYWkuY29tITE3ODQ3
+NjQ4MDAhMTc4NDg1MTE5OS54bWztm0tzmzAQgO/5FYzvsRDmZY9CeuovaM+MDAtWAxIj5Dz+fQcj
+Hkkbp3HCTKazJ8Pu6rHrz6v1GrPbx7py7kG3QsmbFV27KwdkpnIhy5vVzx/fr+OVc5tcsQIg3/Ps
+LrlyHGbtE7p2GRluOoWGRmmT1mB4zg3vZI7DlC5TyWtISqXKCtaZqhkZhb0N1FxUiVQamurpOq+5
+zq7bY9NN920+rLezYx6N5mmmpOGZSYUsVHIwpml3hNih62ko4YTL9gE08fwwDGKXkb+M7ye2bog8
+iSM/CLbUp5TSIArCaOMxMql785wbSDWXpXXGcdgeSiETGsV+FPqx6zLSSwY9yPykjQNKt1tGuvt+
+MvJ8tnG1eUxZoyqRPaXNcV+J9gDjRlTNhUx4ZjZc9PGyol7P8ztRJ5qR/sIK26Y4ybrXXtQkGn5B
+ZhhprKSdRO0gazKT0M617qIXyclMnswY+dtWmYZM6WHXWj2McWnVUWeQiibx3O06Dtae5659ysik
+GEwzdZQm2USM9FeD3C4I97w6cjPEpo+PaBvVCtPhKpUERuaSmV0XnYa3LSNToGwcCqsYozVz8sWa
+jIyuMZGDNKIQoNtx2AF4DjottKqfvWdzuZ3oj+GMH80h1dAeKzPN+GK3b/BgWe+msE7Zm5m/UEFm
+lLYfXY+RUTI6P1/0FKBP28Asyoy8dLgzHih6J1Dh9nWg6AaBeguoeUK+FCjP9QJKXf9NopDpDzPt
+hR5CjVnyn7Jk6Ea7It67Oz8O/Z3n7na+H5xBC8FCsC4GK0KwsK5bAqz4dbB8zFiYsS4EKzh3FFIE
+C8G6EKzQD/EoxKPw84/C8FyNhRkLM9blYJ2psRAsBOtSsCIv+0pgFVxU2O1/T7f/4SAMHLgBWQoJ
+oIUsvyBlmy9VySNl/yVlMR6S+MvlEmAV2IhAsJYB60wjAst6LOsvBwsbEdjh+nDG4q67o34wA2uD
+GQvBWgYszFiYsRYBC1unCBb//OKduvioFpK1EFn4vRBz1jJkYZmFZC1DFtZZSNYCZO2pl2OXFB/X
+WoIszFmYs8jrZDEy/RP7N1BLAQIKAAoAAAAIAAlL+Fw0j2yCGgMAAL09AAAvAAAAAAAAAAAAAAAA
+AAAAAABnb29nbGUuY29tIWFjdDNhaS5jb20hMTc4NDc2NDgwMCExNzg0ODUxMTk5LnhtbFBLBQYA
+AAAAAQABAF0AAABnAwAAAAA=
