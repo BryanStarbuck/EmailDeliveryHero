@@ -16,7 +16,7 @@ import { dirname } from "node:path";
  * on disk. This writer keeps one active file plus at most `maxBackups` rotated files (default 5),
  * each ≤ `maxBytes` (default 5 MiB). Set `maxBackups: 0` for a single file truncated on overflow.
  *
- * Two write paths (modeled on the Philosophers_Stone gold-standard writer):
+ * Two write paths (modeled on the uplift gold-standard writer):
  *   • write()      — SYNCHRONOUS + durable. Used for WARN/ERROR/FATAL so the fault trail is on disk
  *                    immediately, even before a process.exit(1) after an uncaughtException.
  *   • writeAsync() — BATCHED + non-blocking. The hot path (INFO/DEBUG/VERBOSE) enqueues and flushes
