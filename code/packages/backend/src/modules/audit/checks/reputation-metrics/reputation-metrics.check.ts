@@ -1,3 +1,6 @@
+import { aggregateDmarc } from "@module/reports/derive-findings";
+import { listDmarcReports } from "@module/reports/report-store";
+import { readAppConfig } from "@shared/config-store";
 import { readBlacklistRuns } from "../blacklist/store";
 import { resolve4, resolveMx, resolveTxt } from "../dns-util";
 import type { Checker, Finding } from "../types";
@@ -12,7 +15,11 @@ import type { Checker, Finding } from "../types";
  *
  *   - content.reputation_data_available  (info: no integration connected → metrics unknown)
  *   - content.postmaster_verified        (DNS: is a Google verification TXT published?)
- *   - content.fbl_enrollment             (advisory: enroll the sending IPs' networks in provider FBLs)
+ *   - content.fbl_enrollment             (info-only reference: which networks to enroll in provider FBLs —
+ *                                         only when the sending IPs are actually KNOWN, i.e. configured
+ *                                         or observed passing DMARC in the ingested aggregate reports.
+ *                                         Never amber: enrollment is not observable without the FUTURE
+ *                                         FBL connector, so it can never be a detected fault here)
  *   - content.blocklist_history          (trend of stored ./blacklists results across audit runs —
  *                                         warns when the same DNSBL listed the domain/IP >= 2 times in
  *                                         the trailing window; reads the blacklist store, no integration)
@@ -32,11 +39,20 @@ const BLOCKLIST_HISTORY_WINDOW_DAYS = 30;
 /** A listing on the same DNSBL zone this many times in the window is a recurrence (spec §8 AC #7). */
 const BLOCKLIST_RECURRENCE_THRESHOLD = 2;
 
-/** Provider feedback-loop programs to enroll in, with the exact signup URL for each. */
-const FBL_PROGRAMS = [
-	"Yahoo Complaint Feedback Loop (CFL): https://senders.yahooinc.com/complaint-feedback-loop/",
+/**
+ * Provider feedback-loop programs, split by what they key on. The IP-keyed ones authorize through the
+ * netblock's WHOIS/abuse contact, so they are only enrollable by whoever OWNS the sending IPs — on a
+ * shared pool (Google Workspace, or any ESP) that is the provider, not the domain owner.
+ */
+const FBL_PROGRAMS_IP = [
 	"Microsoft SNDS + JMRP: https://sendersupport.olc.protection.outlook.com/snds/ and https://sendersupport.olc.protection.outlook.com/pm/",
 	"Comcast FBL: https://postmaster.comcast.net/",
+].join("; ");
+
+/** Keyed on the DKIM d= domain / the domain itself, so these stay enrollable on a shared pool. */
+const FBL_PROGRAMS_DOMAIN = [
+	"Yahoo Complaint Feedback Loop (CFL — enrolls your DKIM d= domain, not an IP): https://senders.yahooinc.com/complaint-feedback-loop/",
+	"Google Postmaster Tools (Gmail spam rate + domain reputation): https://postmaster.google.com/",
 ].join("; ");
 
 /**
@@ -145,19 +161,72 @@ const PENDING: PendingSubcheck[] = [
 	},
 ];
 
-/** Derive candidate sending IPs the same way blacklist.check does: configured first, else MX A records. */
+/** Where the IPs an advisory reasons about came from. `mx` is the INBOUND path — never outbound. */
+export type SendingIpSource = "configured" | "dmarc_reports" | "mx";
+
+export interface CandidateIps {
+	ips: string[];
+	source: SendingIpSource;
+}
+
+/**
+ * How many observed IPs the advisory prints. A cloud sender's DMARC reports name dozens of ephemeral
+ * addresses (Google alone rotates a wide IPv6 range), and FBL enrollment is per sending NETWORK, not
+ * per address — so the full list is noise. The finding always states the true total alongside.
+ */
+const MAX_ADVISED_IPS = 10;
+
+/**
+ * IPs observed sending AS this domain, from the ingested DMARC aggregate reports, heaviest first.
+ * Only rows that PASSED DMARC are taken: the same reports also list spoofing sources, and those must
+ * never be advised on as if they were ours.
+ */
+function observedSendingIps(domainId: string, windowDays: number): string[] {
+	const reports = listDmarcReports(domainId);
+	if (reports.length === 0) return [];
+	const agg = aggregateDmarc(reports, windowDays);
+
+	// One IP can appear on several rows (different envelope/alignment keys), so sum before ranking.
+	const volume = new Map<string, number>();
+	for (const row of agg.rows) {
+		if (!row.dmarcPass) continue;
+		volume.set(row.sourceIp, (volume.get(row.sourceIp) ?? 0) + row.count);
+	}
+	return [...volume.entries()]
+		.sort((a, b) => b[1] - a[1])
+		.map(([ip]) => ip);
+}
+
+/**
+ * Candidate sending IPs, best provenance first: configured, else observed in DMARC reports, else the
+ * MX hosts' A records.
+ *
+ * The MX tier is a LAST resort and is tagged `mx` so callers can tell it apart, because MX addresses
+ * are where mail ARRIVES, not where it leaves from — on Google Workspace they resolve to the
+ * `*-in-f*.1e100.net` inbound frontends while the real outbound is `mail-*.google.com` plus whatever
+ * ESP is in play. Any finding that speaks about *sending* must reject this tier rather than print it.
+ */
 async function candidateIps(
 	domain: string,
+	domainId: string,
 	configured: string[],
-): Promise<string[]> {
-	if (configured.length > 0) return configured;
+): Promise<CandidateIps> {
+	if (configured.length > 0) return { ips: configured, source: "configured" };
+
+	const reports = readAppConfig().reports;
+	if (domainId && reports.enabled) {
+		const observed = observedSendingIps(domainId, reports.windowDays);
+		if (observed.length > 0)
+			return { ips: observed, source: "dmarc_reports" };
+	}
+
 	const mx = await resolveMx(domain);
 	const ips: string[] = [];
 	for (const record of mx.records) {
 		const a = await resolve4(record.exchange);
 		ips.push(...a.records);
 	}
-	return [...new Set(ips)];
+	return { ips: [...new Set(ips)], source: "mx" };
 }
 
 /** content.postmaster_verified — is a Google verification TXT (the GPT/Search Console token) published? */
@@ -198,32 +267,56 @@ async function postmasterVerified(domain: string): Promise<Finding> {
 	};
 }
 
-/** content.fbl_enrollment — advisory: enroll the sending IPs' networks in provider FBLs. Config-only. */
-async function fblEnrollment(
+/**
+ * content.fbl_enrollment — advisory: enroll the sending IPs' networks in provider FBLs.
+ *
+ * Advises ONLY on IPs whose provenance is real (configured, or observed passing DMARC). When the
+ * only thing available is the MX fallback there is no evidence about outbound at all, so it says so
+ * instead — naming inbound MX addresses as "every sending IP" would be a false positive on every
+ * domain that has not recorded its sending IPs.
+ *
+ * ALWAYS `info`, never amber. Enrollment is not observable from here: it lives in the provider
+ * portals, behind the `reputation_integrations` connector that is still FUTURE (spec §7). Emitting a
+ * warning would assert non-enrollment we cannot see, and — because nothing the operator does could
+ * clear it — would pin the domain amber forever. Spec §4: `info` "unknown" (no integration) never
+ * turns a category amber; it shows as a "not connected" dot. Weight is 0, so the score is untouched.
+ * When the FBL connector lands, THAT is what may legitimately warn on a confirmed non-enrollment.
+ */
+export async function fblEnrollment(
 	domain: string,
+	domainId: string,
 	configured: string[],
 ): Promise<Finding> {
-	const ips = await candidateIps(domain, configured);
-	if (ips.length === 0) {
+	const { ips, source } = await candidateIps(domain, domainId, configured);
+
+	if (source === "mx" || ips.length === 0) {
 		return {
 			id: "content.fbl_enrollment.no_ips",
 			checkId: CHECK_ID,
 			title: "No sending IPs to advise FBL enrollment for",
 			severity: "info",
-			detail:
-				"No sending IPs were configured and none could be derived from MX records, so feedback-loop (FBL) enrollment could not be advised.",
-			remediation:
-				"Add the IP addresses your mail actually sends from to this domain, then enroll each network in its provider FBL.",
+			detail: `No sending IPs are recorded for ${domain} and none could be observed in its DMARC aggregate reports, so feedback-loop (FBL) enrollment cannot be advised. MX records are deliberately not used as a substitute: they are the inbound path — the addresses mail ARRIVES on — and say nothing about what this domain sends from.`,
+			remediation: `Record the IPs your mail actually sends from, or ingest DMARC aggregate reports so they can be observed from the field. If you send through a shared pool (Google Workspace, or an ESP) you will not own those IPs and cannot enroll them anywhere — use the domain-keyed programs instead: ${FBL_PROGRAMS_DOMAIN}.`,
 		};
 	}
+
+	const provenance =
+		source === "configured"
+			? "recorded for this domain"
+			: "observed passing DMARC alignment in this domain's aggregate reports";
+	const shown = ips.slice(0, MAX_ADVISED_IPS);
+	const listed =
+		ips.length > shown.length
+			? `${shown.join(", ")} — ${ips.length} sources in total, the ${shown.length} heaviest shown`
+			: shown.join(", ");
 	return {
 		id: "content.fbl_enrollment.advisory",
 		checkId: CHECK_ID,
-		title: "Enroll sending IPs in provider feedback loops (FBLs)",
-		severity: "warning",
-		detail: `Confirm every sending IP (${ips.join(", ")}) is enrolled in the relevant provider feedback loops. Without enrollment, spam complaints happen invisibly and the same recipients complain repeatedly, quietly eroding reputation.`,
-		remediation: `Enroll each sending network's FBL and wire the FBL mailbox into your suppression pipeline: ${FBL_PROGRAMS}.`,
-		evidence: ips.join(", "),
+		title: "Feedback-loop (FBL) enrollment for your sending networks",
+		severity: "info",
+		detail: `Reference — this is not a detected fault, and it does not affect this domain's health score. Enrollment lives in the provider portals and cannot be read from here, so treat it as a checklist. The networks behind every sending IP (${listed}), ${provenance}, should be enrolled in the feedback loops that apply to them. Where a network is not enrolled, spam complaints arrive invisibly and the same recipients can complain repeatedly.`,
+		remediation: `Enroll per sending NETWORK — not per address; a cloud pool rotates addresses — and wire the resulting complaint feed into your suppression pipeline. For a network whose IPs you own: ${FBL_PROGRAMS_IP}. For a shared/ESP pool those two are not enrollable by you, since the pool owner holds the netblock's abuse contact — use ${FBL_PROGRAMS_DOMAIN}, and take complaints from the ESP's own feed (its spam-report webhook / suppression list) instead.`,
+		evidence: `${shown.join(", ")}${ips.length > shown.length ? ` (+${ips.length - shown.length} more)` : ""} (source: ${source})`,
 	};
 }
 
@@ -332,8 +425,10 @@ export const reputationMetricsCheck: Checker = {
 		// content.postmaster_verified — pure DNS.
 		findings.push(await postmasterVerified(ctx.domain));
 
-		// content.fbl_enrollment — config advisory, derived from the sending IPs.
-		findings.push(await fblEnrollment(ctx.domain, ctx.sendingIps));
+		// content.fbl_enrollment — advisory over the sending IPs, when their provenance is real.
+		findings.push(
+			await fblEnrollment(ctx.domain, ctx.domainId ?? "", ctx.sendingIps),
+		);
 
 		// content.blocklist_history — a pure TREND over the app's own stored ./blacklists results across
 		// audit runs (needs NO external integration, spec §7). Reads the blacklist store (keyed by the

@@ -95,7 +95,7 @@ data — enrollment/config advisories and the DNSBL history cross-reference.
 | `content.gpt_domain_reputation` | GPT **domain reputation** band is **High** (or at least Medium). | GPT `TrafficStats.domainReputation` enum. | **critical:** `BAD` or `LOW`; **warning:** `MEDIUM`. | Cut volume to your most-engaged recipients only, fix complaint/bounce drivers, and hold steady 2–4 weeks; reputation is earned back slowly, not with a config change. |
 | `content.gpt_ip_reputation` | GPT **IP reputation** band per sending IP is High/Medium. | GPT `TrafficStats.ipReputations[]` per IP. | **critical:** an IP is `BAD`/`LOW`; **warning:** `MEDIUM`. | For a shared-IP pool, ask the ESP to move you or investigate co-tenants; for a dedicated IP, re-warm gradually and reduce complaint sources. |
 | `content.gpt_auth_rate` | GPT-reported SPF/DKIM/DMARC **pass percentages** are ~100% (aligned). | GPT `TrafficStats` `spfSuccessRatio` / `dkimSuccessRatio` / `dmarcSuccessRatio`. | **warning:** any ratio materially < 100% (some streams unauthenticated). | Trace the unaligned stream (forwarder, sub-mailer) and fix its SPF/DKIM alignment; cross-check [`./spf.mdx`](./spf.mdx), [`./dkim.mdx`](./dkim.mdx). |
-| `content.fbl_enrollment` | Sending domain/IP is **enrolled in the relevant provider FBLs** so complaints are captured & suppressible. | Config presence in `reputation_integrations` + advisory list of programs for the sending IPs' networks. | **warning:** not enrolled in Yahoo CFL / Microsoft SNDS-JMRP / etc. | Enroll: Yahoo Complaint Feedback Loop, Microsoft SNDS + JMRP, Comcast/other FBLs; wire the FBL mailbox into your suppression pipeline. |
+| `content.fbl_enrollment` | Reference list of **which networks to enroll in which provider FBLs**, so complaints are captured & suppressible. | Advisory list of programs for the sending IPs' networks. Sending IPs come from config, else DMARC-passing report sources — **never** MX A records (inbound path). | **info only, in both branches** (`.advisory` when the sending IPs are known, `.no_ips` when they are not). Never warning/critical: enrollment lives in the provider portals and is unreadable until the `reputation_integrations` FBL connector ships, so a warning would assert an unobservable fault that no operator action could clear. | Enroll and wire the FBL mailbox into your suppression pipeline. IPs you own: Microsoft SNDS + JMRP, Comcast. Shared/ESP pool (IPs not yours, so those are unenrollable): Yahoo CFL by DKIM `d=`, Google Postmaster Tools, plus your ESP's own complaint feed. |
 | `content.fbl_processing` | FBL complaints are actually **ingested and suppressed** (not just received). | FBL connector: complaints parsed in window vs suppressions applied. | **critical:** complaints received but recipients not suppressed (repeat complaints); **warning:** processing lag. | Automate: parse each FBL/ARF report, add the recipient to the global suppression list within 24h, never mail them again. |
 | `content.engagement` | Positive-engagement signals (opens/clicks/replies, "not spam") dominate over deletes/spam-marks. | ESP engagement metrics + GPT complaint ratio proxy. | **warning:** low open/high delete-unread, or engagement declining over time. | Segment by engagement; suppress 90-day+ non-openers; send wanted content/cadence; sunset dormant subscribers. |
 | `content.warmup` | New IP/domain **ramps volume gradually** — no cold-start spike. | Volume timeseries vs a warmup schedule (e.g. doubling daily cap) for domains flagged `is_new`/first-seen. | **critical:** brand-new IP/domain sent a large blast day one; **warning:** ramp faster than schedule. | Follow a warmup ramp (day 1: ~50/mailbox-provider, roughly double daily, prioritize most-engaged recipients) over 4–8 weeks; hold at each step if complaints rise. |
@@ -138,6 +138,20 @@ domain/IP per window, and cross-checks that each complained recipient was added 
 belong to?) and therefore ships first round as an advisory; `content.fbl_processing` needs the live
 mailbox and is future. Complaint rate from FBL is a fallback when GPT is absent
 (`complaints ÷ delivered`).
+
+**Sending-IP provenance is a precondition of the advisory.** The advisory names IPs, so it may only
+run on IPs that are genuinely *outbound*: configured `sendingIps` first, else sources observed
+**passing DMARC** in the ingested aggregate reports (a failing source in those reports is a spoofer,
+not ours). Where other checkers fall back to the MX hosts' A records, this one must **not** — MX is
+the inbound path, so on Google Workspace it yields the `*-in-f*.1e100.net` frontends while real
+outbound is `mail-*.google.com` plus whatever ESP is in play. With no real provenance the check emits
+`content.fbl_enrollment.no_ips` at **info**; it never prints an unverified IP list at amber.
+
+**Not every program is enrollable by every sender.** Microsoft SNDS/JMRP and Comcast authorize
+through the netblock's WHOIS/abuse contact, so they require *owning* the sending IPs — impossible on
+a shared pool (Google Workspace, or any ESP), where that contact is the provider. Yahoo CFL keys on
+the DKIM `d=` domain and Google Postmaster Tools on the domain, so those stay available. Remediation
+text must split the two groups rather than prescribing all of them unconditionally.
 
 **Connector C — ESP metrics (future).** Most ESPs (SendGrid, Mailgun, Postmark, SES, etc.) expose
 sent/delivered/bounce/complaint/open/click counts via API. The connector normalizes these into the
@@ -318,7 +332,7 @@ The `store` module is the only code touching these shapes, so promoting the JSON
 
 | Sub-check | First round (pure `node:dns/promises` / app-local data) | Future (probe / tool / feed / API) |
 | --- | --- | --- |
-| `content.fbl_enrollment` | ✅ config advisory: are we enrolled for the `sendingIps`' networks? | — |
+| `content.fbl_enrollment` | ✅ config advisory: are we enrolled for the `sendingIps`' networks? Requires real sending-IP provenance (config, else DMARC-passing report sources); MX A records do not qualify. | — |
 | `content.reputation_data_available`, `content.postmaster_verified` | ✅ config/verification state | — |
 | `content.blocklist_history` | ✅ trend the app's own stored `./blacklists.mdx` results across runs | — |
 | `content.complaint_rate`, `content.gpt_spam_rate`, `content.gpt_domain_reputation`, `content.gpt_ip_reputation`, `content.gpt_auth_rate`, `content.delivery_errors` | — | ⏳ **Google Postmaster Tools API** (OAuth2, daily sync) |
@@ -342,9 +356,14 @@ The `store` module is the only code touching these shapes, so promoting the JSON
 5. A brand-new IP/domain (first-seen within the warmup window) that sent a large day-one blast yields
    `content.warmup` **critical** with a concrete ramp schedule; day-over-day volume swings > 5× yield
    `content.volume_consistency` **warning**.
-6. `content.fbl_enrollment` warns when the domain/IP is not enrolled in the relevant provider FBLs and
-   names the exact programs to join (Yahoo CFL, Microsoft SNDS/JMRP, etc.); `content.fbl_processing`
-   flags complaints received but recipients not suppressed.
+6. `content.fbl_enrollment` names the exact programs to join, split into IP-keyed (Microsoft
+   SNDS/JMRP, Comcast — only when the sending IPs are owned) and domain-keyed (Yahoo CFL, Google
+   Postmaster Tools — valid on shared pools). It reports on sending IPs with real provenance
+   (configured, or observed passing DMARC in the reports); with only the MX fallback available it
+   emits `no_ips` instead. **Always `info`** — it is a checklist, not a detected fault, and carries
+   the `info` weight of 0 so it never moves the health score. `content.fbl_processing` flags
+   complaints received but recipients not suppressed; that one may warn, because the connector that
+   backs it can actually observe the failure.
 7. `content.blocklist_history` warns when the same DNSBL has listed the domain/IP **≥ 2 times** in the
    trailing window, cross-referencing the current state in [`./blacklists.mdx`](./blacklists.mdx), and
    requires **no** external integration.
