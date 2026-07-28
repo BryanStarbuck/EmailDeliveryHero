@@ -1,4 +1,10 @@
-import type { DmarcReportRow, ParsedDmarcReport } from "./report.types";
+import type {
+	DmarcDkimAuthResult,
+	DmarcPolicyOverride,
+	DmarcReportRow,
+	DmarcSpfAuthResult,
+	ParsedDmarcReport,
+} from "./report.types";
 
 /**
  * DMARC aggregate (rua) XML → ParsedDmarcReport (pm/emails.mdx §4.3/§4.4). Uses a tiny built-in
@@ -111,6 +117,28 @@ export function parseDmarcAggregateXml(xml: string): ParsedDmarcReport | null {
 
 		const spfAligned = text(evaluated, "spf").toLowerCase() === "pass";
 		const dkimAligned = text(evaluated, "dkim").toLowerCase() === "pass";
+
+		// The complaint-taxonomy detail (pm/Email_Complaints.mdx §4.3/§4.5): policy overrides, and
+		// the FULL per-signature results — the selector is what makes a forged signature visible.
+		const reasons: DmarcPolicyOverride[] = children(evaluated, "reason").map(
+			(node) => ({
+				type: text(node, "type").toLowerCase(),
+				comment: text(node, "comment") || null,
+			}),
+		);
+		const dkimResults: DmarcDkimAuthResult[] = authDkim.map((node) => ({
+			domain: text(node, "domain").toLowerCase(),
+			selector: text(node, "selector") || null,
+			result: text(node, "result").toLowerCase() || "none",
+			humanResult: text(node, "human_result") || null,
+		}));
+		const spfResults: DmarcSpfAuthResult[] = authSpf.map((node) => ({
+			domain: text(node, "domain").toLowerCase(),
+			scope: text(node, "scope").toLowerCase() || null,
+			// KDDI emits a capitalised "Fail" — normalize before anything compares it.
+			result: text(node, "result").toLowerCase() || "none",
+		}));
+
 		return {
 			sourceIp: text(row, "source_ip"),
 			count: Number(text(row, "count")) || 0,
@@ -132,6 +160,10 @@ export function parseDmarcAggregateXml(xml: string): ParsedDmarcReport | null {
 			dkimSigningDomains: authDkim
 				.map((n) => text(n, "domain").toLowerCase())
 				.filter(Boolean),
+			envelopeTo: text(identifiers, "envelope_to").toLowerCase() || null,
+			reasons,
+			dkimResults,
+			spfResults,
 		};
 	});
 
@@ -139,6 +171,9 @@ export function parseDmarcAggregateXml(xml: string): ParsedDmarcReport | null {
 		kind: "dmarc",
 		reporterOrg: text(metadata, "org_name") || "unknown",
 		reportId: text(metadata, "report_id"),
+		reporterEmail: text(metadata, "email") || null,
+		reporterContact: text(metadata, "extra_contact_info") || null,
+		reporterError: text(metadata, "error") || null,
 		window: {
 			begin: epochToIso(text(dateRange, "begin")),
 			end: epochToIso(text(dateRange, "end")),
@@ -151,6 +186,7 @@ export function parseDmarcAggregateXml(xml: string): ParsedDmarcReport | null {
 			aspf: text(policy, "aspf").toLowerCase() || "r",
 			pct: text(policy, "pct") || null,
 			np: text(policy, "np").toLowerCase() || null,
+			fo: text(policy, "fo") || null,
 		},
 		rows,
 	};

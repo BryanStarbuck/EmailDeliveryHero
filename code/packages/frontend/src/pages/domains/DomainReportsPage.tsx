@@ -70,6 +70,23 @@ export function DomainReportsPage() {
 
 	return (
 		<div className="mx-auto max-w-5xl">
+			{/*
+        pm/Email_Complaints.mdx §9.4 — the two pages are deliberately different products: THIS page
+        is the evidence, the complaints board is the argument. Users who want plain language
+        should never have to find it by accident.
+      */}
+			<Link
+				to="/domains/$id/complaints"
+				params={{ id }}
+				className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sky-900 hover:border-sky-300"
+			>
+				<span className="text-sm">
+					Prefer the plain-language view?{" "}
+					<span className="font-medium">Open Email complaints</span> — the same
+					reports, read as problems and fixes.
+				</span>
+				<ChevronRight className="h-4 w-4 shrink-0" />
+			</Link>
 			<div className="mb-4 flex items-center justify-between">
 				<button
 					type="button"

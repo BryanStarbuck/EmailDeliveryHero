@@ -1,0 +1,993 @@
+---
+title: EmailDeliveryHero — Email Complaints (what the receivers are complaining about)
+description: The authoritative spec for the Email Complaints surface — the domain-owner-facing reading of the DMARC aggregate (rua), TLS-RPT and forensic report emails that mailbox providers send us. Defines what a "complaint" is, the complete anatomy of the report emails (subjects, senders, attachment encodings, filename grammar) and the full data dictionary of every field inside them with the value ranges actually observed in the 74-message act3ai.com corpus under emails/, the 15-code complaint taxonomy with detection rule + verdict + fix for each, the is-this-a-problem verdict model and the metrics/time-series behind it, all six UI entry points, and the fully-specified three-zone Email Complaints page (/domains/:id/complaints) plus its per-complaint drill-down, API, storage and code map.
+---
+
+# EmailDeliveryHero — Email Complaints
+
+Every day, mailbox providers send us email **about us**. Google, Yahoo, Microsoft, Mimecast, Zoho,
+Rackspace and KDDI all mail our domain's report address to say: *here is the mail we saw claiming to
+be from you, here is whether we believed it, and here is what we did with it.* Those messages are
+not marketing and they are not errors — they are the only channel through which the rest of the
+internet tells a domain owner what it thinks of that domain's mail.
+
+Read literally they are XML and JSON. Read usefully they are **complaints**: "you told us to reject
+anything that fails, and 4 messages failed"; "a quarter of your mail is signed by a key that isn't
+yours"; "somebody in Japan is sending as you."
+
+**This spec is the complaint reading of those emails.** Where
+[emails.mdx](./emails.mdx) owns the *plumbing* — receive → classify → decode → parse → normalize →
+dedupe → store — this spec owns the *meaning*: what each complaint is, whether it is actually a
+problem, how big it is, whether it is getting worse, and exactly how to make it stop. It also owns
+the dedicated per-domain UI surface that answers those questions, `/domains/:id/complaints`.
+
+> **The evidence base.** Everything in §2–§6 is measured, not assumed. It comes from the **74 real
+> report emails for `act3ai.com`** checked into `~/BGit/Bryan_git/EmailDeliveryHero/emails/`,
+> covering **2026-05-26 → 2026-07-27**: 71 DMARC aggregate reports (881 `<record>` rows,
+> **10,177 messages**) and 3 TLS-RPT reports. Every value range quoted below was extracted from that
+> corpus. That directory is the **fixture set**, not a runtime path.
+
+**Read alongside**
+- [emails.mdx](./emails.mdx) — the ingestion pipeline, MIME decoding, dedupe, and on-disk report store this surface reads from.
+- [checks/dmarc.mdx](./checks/dmarc.mdx) — audits the `_dmarc` TXT record that *requests* these reports.
+- [checks/spf.mdx](./checks/spf.mdx) / [checks/dkim.mdx](./checks/dkim.mdx) — the two mechanisms whose field results the complaints are about.
+- [checks/tls_rpt.mdx](./checks/tls_rpt.mdx) / [checks/mta_sts.mdx](./checks/mta_sts.mdx) — the transport-security layer behind the C14 complaint.
+- [dashboard.mdx](./dashboard.mdx) — the fleet roll-up; the Complaints cell is defined in §9.1.
+- [ui.mdx](./ui.mdx) — page chrome, table, badge and drill-down conventions this page obeys.
+- [reports.mdx](./reports.mdx) — the run-report library; §9.4 defines the cross-link.
+- [storage.mdx](./storage.mdx) — the canonical state root the complaint snapshots live under.
+
+---
+
+## 1. What a "complaint" is
+
+**Definition.** A *complaint* is one **named, de-duplicated, scored problem statement** derived from
+one or more report-email rows, phrased from the domain owner's point of view, carrying a verdict
+(is this a problem?), a size (how much mail), a trend (is it getting worse?), and a fix.
+
+A complaint is **not** a report, and it is **not** a row. The relationship is:
+
+```
+report email (.eml)
+  └── attachment (.zip / .gz)
+        └── payload (DMARC <feedback> XML  |  TLS-RPT JSON)
+              └── <record> rows            (881 in the corpus)
+                    └── grouped + classified → COMPLAINT   (15 codes, §7)
+                          └── one card on /domains/:id/complaints
+```
+
+Three rules make this surface trustworthy:
+
+1. **Every row lands in exactly one complaint code.** No row is silently dropped. A row that is
+   entirely healthy lands in `C00 healthy_aligned`, which is a complaint code with verdict
+   *No action needed* — so the volumes always reconcile to 100%.
+2. **A complaint states its own verdict.** Roughly half the things receivers report are the system
+   *working* (a spoofer being rejected, a forward being rescued by ARC). Presenting those as red
+   alarms is the single most common failure of DMARC dashboards. Each code declares itself
+   `problem` / `watch` / `working_as_intended` (§8).
+3. **A complaint always ends in an instruction.** If we cannot say what to do about it, it is
+   telemetry, not a complaint, and it belongs in the raw Reports view instead.
+
+---
+
+## 2. Who complains, and how the complaint arrives
+
+### 2.1 The reporters observed
+
+Seven reporting organizations appear in the corpus. Their identity comes from
+`<report_metadata><org_name>` — never from the `From:` header, which is rewritten by our own mail
+routing (every message in the corpus arrives `via Support - ACT3ai <support@act3ai.com>`).
+
+| `org_name` | Reports | `<email>` | `<extra_contact_info>` | Window | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `google.com` | 55 | `noreply-dmarc-support@google.com` | `https://support.google.com/a/answer/2466580` | 24 h | The volume reporter — 74% of all reports, ~96% of all message volume |
+| `Yahoo` | 6 | `dmarchelp@yahooinc.com` | *(absent)* | 24 h | Submitter shows as `aol.com` or `yahoo.com`; same platform |
+| `Mimecast` | 4 | `no-reply@us-1.mimecastreport.com` | `https://community.mimecast.com/s/knowledge` | 24 h | Corporate gateway — indicates B2B recipients |
+| `Outlook.com` | 2 | `dmarcreport@microsoft.com` | *(absent)* | 24 h | Submitter `protection.outlook.com`; nests the attachment in `multipart/related` |
+| `au.com` (KDDI) | 2 | `noreply-dmarc-support@kddi.com` | *(absent)* | **1–2 h** | Sub-daily windows; the only reporter that caught the spoofing (§7 C01) |
+| `emailsrvr.com` | 1 | `dmarc_reports@emailsrvr.com` | `http://emailsrvr.com` | 24 h | Rackspace |
+| `zoho.com` | 1 | `noreply-dmarc@zoho.com` | `https://www.zoho.com/mail/help/adminconsole/dmarc-policy.html` | 24 h | — |
+
+**Design consequences.** (a) `org_name` is free text with inconsistent casing and is *not* a domain
+(`Yahoo`, `Outlook.com`, `Mimecast`) — normalize for grouping, display verbatim. (b) Report windows
+are **not** always 24 hours; KDDI sends 1–2 hour windows, so all rate math must be volume-weighted,
+never report-count-weighted. (c) `<extra_contact_info>` is present for 4 of 7 and is a genuinely
+useful "who do I talk to" link — surface it (§10.4).
+
+### 2.2 The paid DMARC service is a second subscriber, not the source
+
+`act3ai.com`'s `rua=` names **two** mailboxes: our own (`support@act3ai.com`) and a paid
+service — **dmarcian** (`0m9ufogd@ag.us.dmarcian.com`, visible in the `To:` of 6 messages). This is
+the normal and recommended configuration and has three consequences the product must handle:
+
+1. **The complaints are ours regardless of the vendor.** The reports come from the receivers; the
+   vendor is just another `rua` recipient. We are never dependent on the vendor's API.
+2. **A vendor may be a *forwarder* of reports.** The two KDDI reports arrive not as direct provider
+   mail but as a **digest** from a group address (subject `集約レポート結果 2026/7/24 (2件)` —
+   Japanese for "Aggregate report results … (2 items)", RFC 2047 `ISO-2022-JP` encoded). Ingestion
+   must therefore recurse into every MIME part of every message, not just top-level attachments
+   (§3.3), and must not depend on the subject line at all.
+3. **Coverage-gap detection matters (C13).** If the DMARC service is cancelled or the `rua=` is
+   edited, complaints stop arriving and the page would silently go green. §7 C13 makes silence
+   itself a complaint.
+
+### 2.3 Message-level anatomy
+
+| Property | Observed values |
+| --- | --- |
+| Subject (DMARC, English) | `Report Domain: act3ai.com Submitter: <org> Report-ID: <id>` — casing of `Domain`/`domain` varies by reporter |
+| Subject (digest/JP) | RFC 2047 encoded-word, `=?ISO-2022-JP?B?…?=` → `集約レポート結果 2026/7/24 (2件)` |
+| `From:` | Rewritten by our own routing to `… via Support - ACT3ai <support@act3ai.com>` — **never** a type discriminator |
+| `To:` | `support@act3ai.com`, `0m9ufogd@ag.us.dmarcian.com`, or both |
+| Top-level `Content-Type` | `multipart/mixed` (most), `multipart/related` (Outlook.com) |
+| Attachment `Content-Type` | `application/zip` ×56, `application/gzip` ×13, `application/tlsrpt+gzip` ×3, `application/octet-stream` ×2 |
+| Transfer encoding | `base64` in all 74 |
+| Attachment size | 380 B – 4.1 KB compressed |
+| Body text | Yahoo ships a plain-language explainer; Google/Microsoft/Mimecast ship an empty or near-empty body |
+
+**Attachment filename grammar** (RFC 7489 §7.2.1.1, confirmed in all 74):
+
+```
+<reporting-domain> ! <policy-domain> ! <window-begin-epoch> ! <window-end-epoch> [ ! <unique> ] . xml [ .gz | .zip ]
+
+google.com!act3ai.com!1783555200!1783641599.xml.gz
+protection.outlook.com!act3ai.com!1782259200!1782345600.xml.gz
+kddi.com!act3ai.com!1784874511!1784878232.xml.gz          ← 1h02m window
+134270636627083901+act3ai.com.json                        ← TLS-RPT uses report-id+domain instead
+```
+
+The filename is a **convenience**, never authority: `application/octet-stream` on 2 messages means
+the media type is unreliable too. Classification is by decompressed payload shape only — a
+`<feedback>` root element means DMARC, a JSON object with `policies[]` means TLS-RPT (see
+[emails.mdx §4.2](./emails.mdx)).
+
+---
+
+## 3. Decoding — what must work before any complaint exists
+
+Failures here look identical to "no complaints", which is the worst possible failure mode. The
+ingest path must handle every shape in the corpus:
+
+1. **Nested MIME.** Outlook.com wraps the gzip inside a `multipart/related` inside the
+   `multipart/mixed`. Walk the full part tree depth-first.
+2. **Three container formats.** gzip (magic `1f 8b`), zip (magic `50 4b`), and bare XML/JSON.
+   Detect by magic bytes, not by `Content-Type` or extension.
+3. **Digest messages** carrying N report attachments in one email (§2.2) — extract all of them.
+4. **Character encodings.** ISO-2022-JP subjects, `\t`-padded XML (Yahoo emits a literal tab after
+   every newline), CRLF and LF line endings, and XML with and without an `<?xml?>` prolog.
+5. **Optional root attributes.** Outlook.com emits
+   `<feedback xmlns:xsd="…" xmlns:xsi="…">`; Yahoo, Mimecast, KDDI and emailsrvr emit no
+   `<version>` element at all. Neither may cause a rejection.
+
+A decode failure is itself a complaint: **C15 `report_undecodable`** (§7).
+
+---
+
+## 4. Data dictionary — DMARC aggregate report
+
+Every element RFC 7489 Appendix C defines, with the values **actually observed** in the corpus. This
+is the authoritative field list for the parser and for the UI's evidence tables.
+
+### 4.1 `<report_metadata>`
+
+| Element | Req. | Observed range | Used for |
+| --- | --- | --- | --- |
+| `org_name` | yes | 7 distinct (§2.1) | Reporter grouping, coverage strip |
+| `email` | yes | 7 distinct | "Contact the reporter" link |
+| `extra_contact_info` | no | present in 4/7 (URLs) | Help link on the reporter chip |
+| `report_id` | yes | 64-bit int (Google), `<epoch.seq>` (Yahoo/AOL), UUID (Zoho, Rackspace), SHA-256 hex (Mimecast), `<hex>+<domain>` (Microsoft), `YYYYMMDDhhmmssnnnnnn` (KDDI) | Dedupe key, half of `(org, id)` |
+| `date_range/begin`, `/end` | yes | epoch seconds; spans of **1 h, 2 h, 24 h** | Time-series bucketing, window filter |
+| `error` | no | never present in the corpus | C15 evidence when present |
+
+### 4.2 `<policy_published>` — the policy the reporter *saw*
+
+| Element | Observed | Meaning |
+| --- | --- | --- |
+| `domain` | `act3ai.com` (100%) | Routes the report to a monitored domain |
+| `p` | `reject` (100%) | Requested policy for the org domain |
+| `sp` | `reject` or **absent** | Subdomain policy |
+| `np` | `reject` or **absent** | DMARCbis non-existent-subdomain policy |
+| `adkim` | **`r` or `s`** | DKIM alignment mode |
+| `aspf` | **`r` or `s`** | SPF alignment mode |
+| `pct` | `100` (100%) | Enforcement sampling |
+| `fo` | `1` or **absent** | Forensic-report options |
+
+**A real finding hiding in this table.** Nine distinct `policy_published` combinations appear across
+the 71 reports — including reporters that saw `adkim=r/aspf=r` and reporters that saw
+`adkim=s/aspf=s` in overlapping windows. Reporters do not invent these values; disagreement means
+the published record **changed during the window**, or **two `_dmarc` TXT records exist**, or a
+reporter is defaulting absent tags. This is complaint **C11 `policy_inconsistent`** and it is
+invisible to a DNS-only check, which sees only "now". It is one of the strongest arguments for this
+whole surface.
+
+### 4.3 `<record><row>`
+
+| Element | Observed | Notes |
+| --- | --- | --- |
+| `source_ip` | 135 distinct — IPv4 and IPv6, **59% of rows are IPv6** | IPv6 must be first-class everywhere (grouping, display, blacklist lookups) |
+| `count` | 1 – 8,207 | Volume weight; the long tail is almost all `count=1` |
+| `policy_evaluated/disposition` | `none` ×10,173 msgs, `reject` ×4 msgs | What the receiver *did* |
+| `policy_evaluated/dkim` | `pass` 7,547 / `fail` 2,630 msgs | **Aligned** DKIM verdict — not raw DKIM |
+| `policy_evaluated/spf` | `pass` 10,049 / `fail` 128 msgs | **Aligned** SPF verdict |
+| `policy_evaluated/reason/type` | `local_policy` ×3, `other` ×4 | RFC 7489 §6.7 allows `forwarded`, `sampled_out`, `trusted_forwarder`, `mailing_list`, `local_policy`, `other` |
+| `policy_evaluated/reason/comment` | `arc=pass`, or empty | Free text; `arc=pass` is the ARC rescue signal |
+
+The single most important trap: **`policy_evaluated` is the DMARC verdict after alignment, not the
+raw authentication result.** A message can show `<auth_results><dkim><result>pass` and
+`<policy_evaluated><dkim>fail` simultaneously — that is exactly complaint C02, and it accounts for
+**2,584 of act3ai.com's 10,177 messages** by `d=` tally — 2,622 once the rows carrying a second,
+Groups-added signature are folded in, which is the C02 figure in §6.
+
+The four-way cross-tab over the corpus (messages, not rows):
+
+| aligned DKIM | aligned SPF | disposition | Messages | % | Complaint |
+| --- | --- | --- | --- | --- | --- |
+| pass | pass | none | 7,426 | 72.97% | C00 healthy |
+| **fail** | pass | none | 2,623 | 25.77% | C02 / C05 |
+| pass | **fail** | none | 121 | 1.19% | C06 / C09 |
+| fail | fail | none | 3 | 0.03% | C07 (ARC-rescued) |
+| fail | fail | **reject** | 4 | 0.04% | **C01 spoofing** |
+
+### 4.4 `<record><identifiers>`
+
+| Element | Observed | Notes |
+| --- | --- | --- |
+| `header_from` | `act3ai.com` (100%) | The identity DMARC is protecting |
+| `envelope_from` | `act3ai.com` or absent | Only KDDI populates it |
+| `envelope_to` | `ezweb.ne.jp`, `au.com`, else absent | **Who was targeted** — the spoof-victim signal |
+
+`envelope_to` is emitted by almost nobody, but when it *is* present it is high value: it tells us the
+spoofer's target list. Both KDDI reports show Japanese consumer mailboxes, which reframes the
+complaint from "we are broken" to "a Japanese spam run is using our name."
+
+### 4.5 `<record><auth_results>` — the raw evidence
+
+`<spf>`:
+
+| Element | Observed |
+| --- | --- |
+| `domain` | `act3ai.com` (10,052), `em2598.act3ai.com` (100 — SendGrid), `gmail.com` (8), `whitehatengineering.com` (14), `thestarbucks.com` (2), `gologin.com` (1) |
+| `scope` | `mfrom`, or absent |
+| `result` | `pass` (10,148), `Fail` ×4 — **note the capital F from KDDI**, `softfail` ×1 |
+
+`<dkim>` — zero, one, or **two** elements per row:
+
+| `domain` (d=) / `selector` (s=) | Result | Msgs | Reading |
+| --- | --- | --- | --- |
+| `act3ai.com` / `google` | pass | 5,659 | Correct: custom Google Workspace DKIM, aligned |
+| `act3ai-com.20251104.gappssmtp.com` / `20251104` | pass | 2,584 | **Google's default key — signs, but never aligns (C02)** |
+| `act3ai.com` / `google2` | pass | 1,106 | Second custom selector — a rotation in progress |
+| `google.com` / `20251104` + `act3ai.com` / `google` | pass | 649 | Google Groups re-signing on top of ours |
+| `act3ai.com` / `s1` + `sendgrid.info` / `smtpapi` | pass | 90 | SendGrid, correctly branded |
+| `act3ai.com` / `google` | **fail** | 1 | Signature broke in transit (C08) |
+| `act3ai.com` / `admin-assassination6211` | **permerror** | 1 | Forged selector — spoofer (C01) |
+| `act3ai.com` / `service-k_r0524` | **permerror** | 1 | Forged selector — spoofer (C01) |
+| `act3ai.com` / `info-tk-tdhss410s-star3-2` | **permerror** | 1 | Forged selector — spoofer (C01) |
+| `act3ai.com` / `sales-kazutairuka-08070422` | **permerror** | 1 | Forged selector — spoofer (C01) |
+| — *(no `<dkim>` element at all)* | — | 8 | Unsigned mail |
+
+`human_result` is defined by the RFC but appears in none of the 74 reports; parse it, expect null.
+
+**The four `permerror` selectors are the corpus's clearest signal.** A legitimate sender uses a
+stable selector chosen by an administrator. These are per-campaign strings mixing a role word, a
+transliterated Japanese name, and a date (`sales-kazutairuka-08070422`). No key exists in our DNS
+for any of them, so DKIM returns `permerror`, SPF fails, DMARC fails both, and the receiver rejects.
+That is complaint C01 — and its verdict is **working as intended**.
+
+---
+
+## 5. Data dictionary — TLS-RPT report
+
+3 reports, all from Microsoft, all clean — which is exactly why they matter as a **baseline**.
+
+| Field | Observed |
+| --- | --- |
+| `organization-name` | `Microsoft Corporation` |
+| `contact-info` | `tlsrpt-noreply@microsoft.com` |
+| `report-id` | `134270636627083901+act3ai.com` |
+| `date-range` | `2026-06-26T00:00:00Z` → `…T23:59:59Z` (whole UTC days) |
+| `policies[].policy.policy-type` | `sts` |
+| `policies[].policy.policy-domain` | `act3ai.com` |
+| `policies[].policy.policy-string` | `version: STSv1`, `mode: enforce`, 5 × `mx: …aspmx.l.google.com`, `max_age: 86400` |
+| `summary.total-successful-session-count` | 2, 2, 3 |
+| `summary.total-failure-session-count` | 0, 0, 0 |
+| `policies[].failure-details[]` | *(absent — no failures)* |
+
+`policy-string` is a gift: it is **the receiver reading our MTA-STS policy back to us**. If our
+policy file drifts from our real MX set, the mismatch is visible here before any mail bounces. RFC
+8460 `result-type` values to expect when things do break, each mapped to a fix, are listed in §11.6.
+
+---
+
+## 6. What the corpus says about act3ai.com — the worked example
+
+This is the **measured** output of §7's classifier over all 74 emails (window = the full corpus).
+It is the reference fixture for the tests in §15 and the screenshot content for §10.
+
+| Code | Complaint | Verdict | Severity | Msgs | % |
+| --- | --- | --- | --- | --- | --- |
+| C00 | Fully authenticated mail | ✅ Working as intended | ok | 7,426 | 73.0% |
+| **C02** | **Mail signed with your provider's own key** | ⚠️ **Problem** | **critical** | **2,622** | **25.8%** |
+| C06 | Passing on DKIM alone (the SendGrid stream) | 👀 Watch | info | 120 | 1.2% |
+| **C01** | **Spoofing, rejected** | ✅ **Working as intended** | info | **4** | 0.04% |
+| C07 | Forwarded mail, rescued by ARC | ✅ Working as intended | info | 3 | 0.03% |
+| C08 | A signature broke in transit | 👀 Watch | info | 1 | 0.01% |
+| C09 | A third-party tool sending as you (`gologin.com`) | 👀 Watch | info | 1 | 0.01% |
+| **C11** | **Receivers disagree about your DMARC record** | ⚠️ **Problem** | warning | — | 9 variants |
+| C14 | Encryption on mail sent to you | ✅ Working as intended | ok | 7 sessions | — |
+
+Row-level volumes sum to exactly **10,177** — the reported total. C03, C04, C05, C10, C12, C13 and
+C15 do not fire on this corpus, which is itself information: no unauthorized sender got through, no
+mail of ours was blocked, no reporter went silent.
+
+Domain verdict: **🚨 Action required.** Fix plan, in order:
+`fix.custom_dkim` (2,622 msgs) → `fix.brand_return_path` (120) → `fix.authorize_sender` (1) →
+`fix.signature_survivability` (1) → `fix.single_dmarc_record`.
+
+**The headline.** The domain is at `p=reject`, receivers are honouring it, and **no legitimate mail
+is being blocked** — the scary-looking numbers are fine. The real defect is C02: **a quarter of all
+outbound mail is signed with the `act3ai-com.20251104.gappssmtp.com` key that Google assigns before
+custom DKIM is switched on.** That mail survives today only because SPF happens to align. The moment
+SPF alignment breaks — an ESP change, a forward, a Return-Path edit — 2,622 messages per window
+start failing DMARC under `p=reject` and are **rejected outright**. It is a single point of failure
+sitting behind a 73% "authenticated" figure that looks survivable, and finding exactly this is why
+the surface exists.
+
+---
+
+## 7. The complaint taxonomy
+
+Fifteen codes. Each row is a complete contract: the detection rule is normative, the verdict feeds
+§8, the fix feeds §11. `M` = message volume in the window; `p` = the published policy.
+
+### C00 — `healthy_aligned` · ✅ No action needed
+- **Complaint:** none — the receiver authenticated the mail and delivered it.
+- **Detect:** `policy_evaluated.dkim == pass && policy_evaluated.spf == pass`.
+- **Why it is listed:** so volumes reconcile to 100% and the user can see the healthy majority.
+- **Fix:** none. Keep it above 95%.
+
+### C01 — `spoof_rejected` · ✅ Working as intended
+- **Complaint:** someone else sent mail as us; the receiver rejected or quarantined it.
+- **Detect:** both alignments fail **and** `disposition ∈ {reject, quarantine}` **and** the source is
+  not a known sender (§7.1) — reinforced when any DKIM `result == permerror` with a selector absent
+  from our DNS, or when `envelope_to` is a domain we do not do business with.
+- **Corpus:** 4 messages, 4 IPs (`103.190.35.146`, `102.244.98.116`, `144.124.196.23`,
+  `154.255.40.146`), 4 forged selectors, targets `ezweb.ne.jp` / `au.com`.
+- **Verdict copy:** *"Not your problem — this is DMARC doing its job. Your `p=reject` policy is what
+  stopped it."*
+- **Fix:** nothing to change. Keep `p=reject`. Escalate only if volume crosses the §8.3 threshold.
+
+### C02 — `esp_default_dkim_key` · ⚠️ Problem
+- **Complaint:** our mail is DKIM-signed with the provider's **own** domain, so the signature can
+  never align with our From domain.
+- **Detect:** a DKIM `result == pass` whose `domain` is **not** under our org domain **and** matches
+  a known ESP-default pattern — `*.gappssmtp.com` (Google), `*.onmicrosoft.com` (Microsoft 365),
+  `sendgrid.net`, `*.mcsv.net` / `*.mcdlv.net` (Mailchimp), `amazonses.com`, `*.hubspotemail.net`,
+  `*.zoho.com` — **and** `policy_evaluated.dkim == fail`.
+- **Corpus:** 2,622 messages, `act3ai-com.20251104.gappssmtp.com` selector `20251104`.
+- **Severity escalation:** `critical` when the stream's SPF alignment is the only thing keeping it
+  passing **and** `p != none`; `warning` otherwise.
+- **Fix:** §11.1 — turn on custom DKIM at the provider.
+
+### C03 — `unauthorized_sender` · 🚨 Problem
+- **Complaint:** an unknown source is sending as us and the receiver **is not** blocking it.
+- **Detect:** both alignments fail, `disposition == none`, source not a known sender, no ARC rescue.
+- **Reading:** either a forgotten legitimate sender or a spoofer that got a pass because our policy
+  is `p=none`. Both are urgent for opposite reasons.
+- **Corpus:** 0 messages — because `act3ai.com` is at `p=reject`.
+- **Fix:** §11.3 (authorize it) or §11.4 (raise the policy).
+
+### C04 — `dkim_permerror` · ⚠️ Problem *(when the sender is ours)*
+- **Complaint:** a signature cites a selector we do not publish.
+- **Detect:** DKIM `result == permerror` or `temperror`, **and** the source is a known sender.
+  (Unknown source + permerror is C01, not this.)
+- **Fix:** §11.2 — publish or re-publish the selector's TXT record.
+
+### C05 — `spf_only_stream` · 👀 Watch
+- **Complaint:** the stream passes DMARC on SPF alone; DKIM does not align.
+- **Detect:** `spf == pass && dkim == fail`, source is a known sender, and it is not C02.
+- **Why it matters:** SPF does not survive forwarding. Every forwarded copy of this stream fails.
+- **Fix:** §11.1.
+
+### C06 — `dkim_only_stream` · 👀 Watch
+- **Complaint:** the stream passes on DKIM alone; the Return-Path does not align.
+- **Detect:** `dkim == pass && spf == fail`, envelope domain under our org domain or a known ESP.
+- **Corpus:** the SendGrid stream, envelope `em2598.act3ai.com`, 100 messages.
+- **Fix:** §11.5 — brand the Return-Path, or relax `aspf` to `r`.
+
+### C07 — `forwarded_arc_rescued` · ✅ Working as intended
+- **Complaint:** a forward broke authentication; the receiver trusted the ARC chain and delivered.
+- **Detect:** `reason.type == local_policy` with a comment matching `/arc\s*=\s*pass/i`, or
+  `reason.type ∈ {forwarded, trusted_forwarder, mailing_list}`.
+- **Corpus:** 3 messages forwarded from `thestarbucks.com` / `whitehatengineering.com`.
+- **Fix:** none. This is the failure mode ARC exists to absorb.
+
+### C08 — `dkim_signature_broken` · 👀 Watch
+- **Complaint:** we signed correctly, but the signature did not verify at the receiver.
+- **Detect:** DKIM `result == fail` (not `permerror`) on a `domain` under our org domain.
+- **Reading:** a middlebox, list server or gateway modified the message. Isolated instances are
+  normal; a persistent pattern for one receiver is a real interoperability bug.
+- **Corpus:** 1 message (reported by Zoho, selector `google`).
+- **Fix:** §11.7.
+
+### C09 — `third_party_sender` · 👀 Watch
+- **Complaint:** a SaaS tool is sending as us from an envelope we have not authorized.
+- **Detect:** SPF `result ∈ {softfail, neutral, none}` **or** an SPF/DKIM domain that is neither ours
+  nor a known ESP, with low volume and a recognizable vendor domain.
+- **Corpus:** 1 message, `gologin.com`, softfail.
+- **Fix:** §11.3 if it is ours; otherwise watch.
+
+### C10 — `receiver_enforced` · 🚨 Problem *(when the sender is ours)*
+- **Complaint:** a receiver quarantined or rejected mail from a source we recognize.
+- **Detect:** `disposition ∈ {quarantine, reject}` **and** the source is a known sender.
+- **Reading:** we are blocking our own mail. The most damaging complaint in the taxonomy.
+- **Corpus:** 0 messages.
+- **Fix:** §11.3, urgently.
+
+### C11 — `policy_inconsistent` · ⚠️ Problem
+- **Complaint:** reporters observing overlapping windows report **different** `policy_published`
+  values.
+- **Detect:** ≥2 distinct `(p, sp, np, adkim, aspf, pct)` tuples across reports whose windows
+  overlap.
+- **Corpus:** 9 distinct tuples; `adkim`/`aspf` seen as both `r` and `s`.
+- **Fix:** §11.8 — one `_dmarc` TXT record, explicit tags, no mid-window edits.
+
+### C12 — `sampled_out` · 👀 Watch
+- **Complaint:** the policy was not applied because `pct` excluded the message.
+- **Detect:** `reason.type == sampled_out`, or `policy_published.pct < 100`.
+- **Corpus:** 0 (`pct=100` throughout).
+- **Fix:** §11.4 — finish the ramp to `pct=100`.
+
+### C13 — `reporter_silence` · 👀 Watch
+- **Complaint:** a receiver that normally reports has stopped, or never started.
+- **Detect:** an expected reporter (`google.com`, `Yahoo`, `Outlook.com`, `Mimecast`, plus any
+  reporter seen in the previous 30 days) contributes zero reports in the current window.
+- **Reading:** either our `rua=` broke, or the report mailbox is full/misrouted, or we genuinely sent
+  that receiver no mail. Silence must never render as health.
+- **Fix:** §11.9.
+
+### C14 — `tls_transport` · severity varies
+- **Complaint:** TLS-RPT results for inbound mail to our MX.
+- **Detect:** `total-failure-session-count > 0` → problem, banded by `result-type`;
+  `== 0` → ✅ baseline recorded; a reporter seeing `no-policy-found` while others see `sts`/`tlsa`
+  → ⚠️ inconsistent policy publication.
+- **Corpus:** 7 successful sessions, 0 failures.
+- **Fix:** §11.6.
+
+### C15 — `report_undecodable` · ⚠️ Problem *(ours to fix)*
+- **Complaint:** a report arrived that we could not read — or a report carried `<error>`.
+- **Detect:** decode/parse failure during ingest, or a non-empty `<report_metadata><error>`.
+- **Reading:** an ingestion bug is indistinguishable from good news, so it must be loud.
+- **Fix:** §11.10.
+
+### 7.1 The "known sender" test (normative)
+
+**An identity is only evidence when the mechanism that carried it passed.** This is the single most
+important rule in the taxonomy, and getting it wrong inverts the product: a spoofer forges
+`envelope_from` and `d=` as the victim's domain — that *is* the attack — so a test that matches on
+the claimed domain alone files every spoofing attempt as C10 "your own mail was blocked" and hands
+the user a remediation list for an attacker's mail. Every spoofing row in the reference corpus
+claims `act3ai.com` in both the envelope and the DKIM `d=`; only the *results* tell them apart.
+
+A row's source is a **known sender** when any of:
+1. the `source_ip` falls inside a range resolved from our own published SPF record (checked first
+   and unconditionally — it is the one claim a forger cannot influence); or
+2. an SPF result of **`pass`** carries a `domain` that is our org domain or a subdomain of it; or
+3. a DKIM result of **`pass`** carries a `domain` that is our org domain or a subdomain of it; or
+4. a DKIM result of **`pass`** carries a `domain` matching the ESP-default pattern list in C02.
+
+Rule 1 matters at scale: 8,207 of act3ai.com's messages come from `209.85.220.69` alone and IPv6
+Google ranges dominate the tail, so without SPF expansion much of the fleet looks unfamiliar. It is
+supplied by [checks/spf.mdx](./checks/spf.mdx)'s expansion, cached per run, and is optional — the
+classifier degrades to rules 2–4, which are sufficient for every row in the corpus.
+
+Reports stored before per-result detail was parsed fall back to the identity lists, but only when
+the corresponding **aligned** verdict passed — the same principle, applied to coarser data.
+
+### 7.2 Classification order (normative)
+
+Codes are not mutually exclusive at the predicate level, so a row is classified by walking this
+order and stopping at the first match. This is what guarantees "every row lands in exactly one code",
+and it puts the specific diagnoses ahead of the general ones:
+
+```
+C00 → C07 → C01/C10 → C03 → C12 → C04 → C08 → C09 → C02 → C06 → C05
+```
+
+with C09 as the terminal fallback, so the function is total.
+
+- **C01 vs. C10** are the same predicate — the receiver enforced — split solely by §7.1.
+- **C08 before C02/C05**: a signature of ours that genuinely failed is a more specific diagnosis
+  than "DKIM does not align".
+- **C09 before C02/C06**: a foreign soft-failing identity explains the row better than the shape of
+  our own alignment does.
+
+C11, C12 (policy-level), C13, C14 and C15 are **report-level**, not row-level, and are evaluated
+separately in `board.ts`.
+
+---
+
+## 8. The verdict model — "is this a problem or not?"
+
+### 8.1 Per-complaint verdict
+
+Three values, fixed vocabulary, fixed colour, always shown as words as well as colour:
+
+| Verdict | Chip | Colour token | Means |
+| --- | --- | --- | --- |
+| `problem` | **Action required** | `--edh-danger` / `--edh-warn` | Something is broken or will break. There is a fix below. |
+| `watch` | **Worth watching** | `--edh-info` | Working today, fragile or unexplained. No emergency. |
+| `ok` | **Working as intended** | `--edh-ok` | The system did its job, including when it blocked an attacker. |
+
+### 8.2 Domain-level verdict (the top of the page)
+
+Computed from the complaint set, in order — first match wins:
+
+| Domain verdict | Condition |
+| --- | --- |
+| 🚨 **Action required** | any `critical` complaint, **or** C10 present, **or** C03 with ≥1% of volume |
+| ⚠️ **Needs attention** | any `warning` complaint (C02, C04, C11, C15), **or** authenticated rate < 95% |
+| 👀 **Healthy, with things to watch** | only `watch` complaints, and authenticated rate ≥ 95% |
+| ✅ **All clear** | only `ok` complaints |
+| ⬜ **Not enough data** | fewer than 3 reports, or a window with 0 messages |
+
+`act3ai.com` on the corpus resolves to **🚨 Action required** — driven by C02 (25.8% of volume under
+an enforcing policy, which escalates to `critical` per §8.3) and C11, and **not** by the spoofing.
+Saying that plainly at the top of the page — naming the boring configuration defect rather than the
+dramatic attack — is the single most valuable thing this surface does.
+
+### 8.3 Escalation thresholds
+
+| Signal | Watch | Problem |
+| --- | --- | --- |
+| Authenticated rate | < 99% | < 95% |
+| C02 share of volume | > 1% | > 10% |
+| C03 unauthorized volume | ≥ 1 msg | > 1% of volume, or > 100 msgs |
+| C01 spoof volume | any | > 5% of volume, or > 1,000 msgs (abuse-report territory) |
+| C10 own mail blocked | — | ≥ 1 msg |
+| Reporter silence (C13) | 1 expected reporter | ≥ 2, or the top reporter by volume |
+| TLS failure rate (C14) | > 0% | > 1% |
+
+### 8.4 Trend
+
+Every complaint carries a trend computed over the **previous window of equal length**:
+`new` (absent before), `worse` (+20% volume), `steady` (±20%), `better` (−20%), `resolved` (present
+before, absent now). Resolved complaints stay on the page for one further window, greyed, so the user
+can see their fix worked — a detail that turns the page from a nag into feedback.
+
+---
+
+## 9. UI entry points
+
+Six ways in. Each is a separate deliverable.
+
+### 9.1 Dashboard — the row-menu item
+The domain-health table's six category columns are **locked** by
+[dashboard.mdx](./dashboard.mdx), and this surface does not get to unlock them. So the entry point
+is a **row-menu (⋮) item, "Email complaints"**, on every domain row, routing to
+`/domains/:id/complaints`. Report-derived findings continue to roll into the existing DMARC and
+DNS & Infrastructure cells exactly as [emails.mdx](./emails.mdx) §6 specifies; no seventh column and
+no seventh category is introduced.
+
+### 9.2 Domain run page — the complaints card
+[`RunDetailPage`](../code/packages/frontend/src/pages/domains/RunDetailPage.tsx) gains a card under
+the DMARC category: **"Email complaints — what receivers are telling us"**, showing the verdict, the
+message volume in the window, and the top complaint's one-liner. Chevron → the page.
+
+### 9.3 The DMARC category page
+[`DmarcPage`](../code/packages/frontend/src/pages/domains/DmarcPage.tsx) already renders the
+`dmarc.reports` sub-test row; its "Ingested aggregate reports" band row gains a second link,
+**"See the complaints"**, alongside the existing explainer link.
+
+### 9.4 The raw Reports view
+[`DomainReportsPage`](../code/packages/frontend/src/pages/domains/DomainReportsPage.tsx) gains a
+banner at the top: *"Prefer the plain-language view? Open Email complaints."* The two pages are
+deliberately different products — that page is the evidence, this page is the argument.
+
+### 9.5 The report library
+[reports.mdx](./reports.mdx)'s `/reports` run rows link to the complaint board for the domain, so a
+user reviewing a historical run reaches the same conclusions.
+
+### 9.6 Direct routes
+
+| Route | Page |
+| --- | --- |
+| `/domains/:id/complaints` | The board (newest window) |
+| `/domains/:id/complaints/:code` | One complaint's drill-down |
+| `/domains/:id/runs/:runId/complaints` | Run-scoped alias of the board |
+| `/domains/:id/runs/:runId/complaints/:code` | Run-scoped alias of the drill-down |
+
+Static segments register ahead of param routes, matching the DNS/DMARC precedent in `router.tsx`.
+
+---
+
+## 10. The Email Complaints page
+
+`/domains/:id/complaints`. One page, three zones, in the order a person actually asks the questions:
+**Am I OK? → What's wrong? → What do I do?**
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ ← act3ai.com                                    [ Ingest now ] [ Re-run checks ] │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ZONE A — THE VERDICT                                                            │
+│  ┌────────────────────────────────────────────────────────────────────────────┐  │
+│  │  🚨  ACTION REQUIRED                                                        │  │
+│  │  2 problems, 3 things to watch · 10,177 messages · 7 receivers · 63 days    │  │
+│  │  "2,622 of your messages (25.8%) are signed with a key that isn't yours."   │  │
+│  └────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+│  ┌───────────────┬───────────────┬───────────────┬───────────────┐               │
+│  │ AUTHENTICATED │ NOT ALIGNED   │ BLOCKED       │ SPOOFING      │               │
+│  │    73.0%      │   2,751       │      4        │      4        │               │
+│  │   ▲ 1.2 pts   │   ▬ steady    │  ▬ steady     │   ● new       │               │
+│  │  7,426 msgs   │  27.0% of vol │ 0.04% of vol  │ all rejected  │               │
+│  └───────────────┴───────────────┴───────────────┴───────────────┘               │
+│                                                                                  │
+│  Messages by outcome, daily                                          [30│60│90d] │
+│  ███████████████████████████████████████████████████████████████  aligned        │
+│  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  one mechanism   │
+│  ▒▒                                                            ▒  failed both    │
+│  May 26 ─────────────────────────────────────────────────── Jul 27               │
+│                                                                                  │
+│  Who is reporting:  google.com 55 · Yahoo 6 · Mimecast 4 · Outlook.com 2 ·       │
+│                     au.com 2 · emailsrvr 1 · zoho 1        ⚠ 2 expected missing  │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ZONE B — WHAT TO WORK ON                        [ All ] [ Problems ] [ Watch ]  │
+│                                                                                  │
+│  ⚠️ ACTION REQUIRED                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────────┐  │
+│  │ C02 · Mail signed with your provider's own key         2,622 msgs · 25.8% ▬ │  │
+│  │ Most of your mail uses your own DKIM key. 2,622 messages use the key Google │  │
+│  │ assigns before you turn on custom DKIM — it can never match your domain.    │  │
+│  │ Those messages pass today only because SPF happens to align.                │  │
+│  │ ▸ 1 signing domain · 2 selectors · 89 source IPs · seen by 6 receivers      │  │
+│  │                                                    [ How to fix this ↓ ]   │  │
+│  └────────────────────────────────────────────────────────────────────────────┘  │
+│  ┌────────────────────────────────────────────────────────────────────────────┐  │
+│  │ C11 · Receivers disagree about your DMARC record             9 variants  ● │  │
+│  │ Reporters covering the same days saw both adkim=r and adkim=s. Your record  │  │
+│  │ changed mid-window, or there is more than one _dmarc TXT record.            │  │
+│  └────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+│  ✅ NOT YOUR PROBLEM — the system worked                                          │
+│  ┌────────────────────────────────────────────────────────────────────────────┐  │
+│  │ C01 · Spoofing, rejected                                      4 msgs  ● new │  │
+│  │ Four messages from 4 IPs in 3 countries forged your From address, using     │  │
+│  │ made-up DKIM selectors (sales-kazutairuka-08070422, …), aimed at Japanese   │  │
+│  │ consumer mailboxes. KDDI rejected all four because of your p=reject.        │  │
+│  │ Nothing to fix — this is the protection working.                            │  │
+│  └────────────────────────────────────────────────────────────────────────────┘  │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ZONE C — HOW TO FIX IT                                                          │
+│                                                                                  │
+│  ① Turn on custom DKIM in Google Workspace              fixes C02 · 2,622 msgs   │
+│     1. Admin console → Apps → Google Workspace → Gmail → Authenticate email      │
+│     2. Select act3ai.com, key length 2048, generate                              │
+│     3. Publish the TXT record below, wait for propagation                        │
+│        ┌──────────────────────────────────────────────────────────┐ [ Copy ]     │
+│        │ google._domainkey.act3ai.com  TXT  "v=DKIM1; k=rsa; p=…"  │             │
+│        └──────────────────────────────────────────────────────────┘             │
+│     4. Back in the console, click "Start authentication"                         │
+│     Verify:  dig +short google._domainkey.act3ai.com TXT          [ Copy ]       │
+│                                                     [ Re-check this now ]        │
+│                                                                                  │
+│  ② Publish exactly one _dmarc record                          fixes C11          │
+│     …                                                                            │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 10.1 Zone A — the verdict (normative)
+
+1. **Verdict banner.** The §8.2 chip in 28px semibold, the counts line, and a single
+   plain-English sentence naming the largest problem. Background tinted by verdict. When the verdict
+   is ✅ or ⬜, the banner says so without hedging — no yellow-tinted "all clear".
+2. **Four metric tiles**, fixed order: *Authenticated*, *Not aligned*, *Blocked*, *Spoofing*. Each
+   shows value, trend arrow vs. the previous window, and a denominator line. Tiles are buttons —
+   clicking scrolls Zone B to the matching filter.
+3. **The trend chart.** Daily stacked areas: aligned / one-mechanism / failed-both, with rejected
+   and quarantined volume as a red rule along the axis. Window selector 30/60/90 days. Buckets come
+   from `date_range`, volume-weighted (§2.1). Follow the `dataviz` conventions in
+   [ui.mdx](./ui.mdx): categorical colours from the shared token set, accessible in both themes, and
+   a horizontal-scroll container so the page body never scrolls sideways.
+4. **Reporter coverage strip.** One chip per reporter, `org_name` + report count, sorted by volume.
+   Chips carry the `<email>` and `<extra_contact_info>` in a tooltip. Expected-but-absent reporters
+   render as a dashed grey chip — the visual form of C13.
+
+**Empty state.** With zero reports: a single card explaining that DMARC reports take 24–72 h to
+start arriving after `rua=` is published, showing the domain's current `rua=` value (from the DMARC
+check), and offering **Ingest now**. Never an error, never an empty table.
+
+### 10.2 Zone B — what to work on (normative)
+
+- Complaints render as cards, grouped under three headings in this fixed order:
+  **⚠️ Action required**, **👀 Worth watching**, **✅ Not your problem — the system worked**.
+  Within a group, sort by volume descending.
+- Each card carries: code chip, title, volume + share + trend, a **2–4 sentence plain-English
+  explanation written for a non-expert**, a one-line evidence summary, and — for `problem` cards
+  only — a **How to fix this ↓** button that scrolls to the matching Zone C step.
+- Cards expand in place to the evidence table: source IP, reverse DNS, message count, SPF result +
+  domain, DKIM result + `d=` + selector, disposition, reporters, first/last seen. Sortable, top 50
+  rows with "show all".
+- The card title never uses jargon in the first clause. "Mail signed with Google's default key",
+  not "DKIM alignment failure (`adkim=s`)". The jargon belongs in the evidence table and the
+  drill-down.
+- Filter tabs **All / Problems / Watch / Working as intended** filter without navigating.
+
+### 10.3 Zone C — how to fix it (normative)
+
+- An **ordered fix plan**, not a list of tips: steps are numbered by impact (messages fixed), and
+  each step names the complaint codes it resolves.
+- Each step contains: numbered instructions naming the actual admin console path where one exists,
+  copy-paste DNS records pre-filled with the domain's real values (`CopyFixButton`), a **Verify**
+  command line (also copyable), and a **Re-check this now** button that runs only the relevant
+  checker and updates the card in place.
+- Steps for `ok`-verdict complaints are **not** rendered. Zone C is only ever things to do.
+- When there is nothing to do, Zone C renders one line: *"Nothing to fix. Keep `p=reject` and keep
+  the reports flowing."*
+
+### 10.4 The per-complaint drill-down
+
+`/domains/:id/complaints/:code` — the five-block contract used by the other technology pages
+([checks/dmarc.mdx](./checks/dmarc.mdx) §6.3), so the surface is not a special snowflake:
+
+1. **What this is** — the complaint in three sentences, plus which report field produced it.
+2. **What we saw** — the full evidence table (all rows, no truncation), the raw
+   `policy_published`, the reporters with contact links, and a **View raw report** link that pretty-
+   prints the source XML/JSON for the selected report.
+3. **What it means** — consequence if unfixed, and what breaks first.
+4. **How to fix it** — the same Zone C step, expanded, with the alternatives (e.g. "or relax
+   `aspf` to `r`") and their trade-offs.
+5. **Re-check** — run the relevant checker now; show the before/after.
+
+Plus a run-history strip (`RunHistoryStrip`) showing this complaint's volume across the last 10
+windows.
+
+### 10.5 Accessibility and copy rules
+
+- Verdict is never colour-only: chip text always states it.
+- Volumes always carry their denominator ("2,622 msgs · 25.8% of your mail").
+- No un-expanded acronym in any card title or metric-tile label.
+- Numbers are never rounded away: "0.04%" is shown as "4 messages (0.04%)".
+
+---
+
+## 11. The fix library
+
+Each fix is a reusable object (`id`, `title`, `appliesTo[]`, `steps[]`, `records[]`, `verify[]`,
+`recheck`), rendered identically in Zone C and in drill-down block 4.
+
+### 11.1 `fix.custom_dkim` — turn on your own DKIM key *(C02, C05)*
+1. Generate a 2048-bit key at the provider: Google Workspace → *Admin console → Apps → Google
+   Workspace → Gmail → Authenticate email*; Microsoft 365 → *Defender → Policies → DKIM*; SendGrid →
+   *Sender Authentication → Authenticate Your Domain*.
+2. Publish the provider's TXT record at `<selector>._domainkey.<domain>`.
+3. Wait for propagation (DNS TTL; providers commonly ask for up to 48 h).
+4. Return to the provider console and **start authentication** — the key is not used until this step.
+5. Confirm in the next report that `d=` equals the domain and `policy_evaluated.dkim` is `pass`.
+- **Verify:** `dig +short <selector>._domainkey.<domain> TXT`
+- **Warning to surface:** removing the ESP default key is not possible and not necessary; the custom
+  key simply takes precedence once authentication is started.
+
+### 11.2 `fix.publish_selector` — publish the missing selector *(C04)*
+Read the selector from the evidence table, re-export the public key from the sending platform,
+publish it, and check for the classic DNS-provider failure: a long TXT value split into multiple
+strings that the provider re-joined with whitespace.
+- **Verify:** `dig +short <selector>._domainkey.<domain> TXT | tr -d '" '`
+
+### 11.3 `fix.authorize_sender` — authorize a sender we actually use *(C03, C09, C10)*
+Add the vendor's `include:` to SPF (watching the 10-lookup limit — cross-link
+[checks/spf.mdx](./checks/spf.mdx)), enable DKIM at the vendor with a selector under our domain,
+and prefer a branded Return-Path so both mechanisms align.
+- **Verify:** `dig +short <domain> TXT | grep spf1`
+
+### 11.4 `fix.policy_ramp` — move the policy forward *(C03, C12)*
+`p=none` → `p=quarantine; pct=25` → `pct=100` → `p=reject`, with a stated wait of one full report
+window at each step and the rule: **never advance while a `problem` complaint is open**. Include
+`sp=` and `np=` explicitly so §C11 cannot recur.
+
+### 11.5 `fix.brand_return_path` — align the envelope *(C06)*
+Point a subdomain (`bounces.<domain>`, `em1234.<domain>`) at the ESP per its instructions so the
+Return-Path aligns; or, if that is not possible, set `aspf=r` and accept relaxed SPF alignment.
+State the trade-off: `aspf=r` also authorizes every sibling subdomain.
+- **Verify:** send a test message and read `Return-Path:` in the received headers.
+
+### 11.6 `fix.tls_transport` — repair inbound TLS *(C14)*, keyed by RFC 8460 `result-type`
+
+| `result-type` | Fix |
+| --- | --- |
+| `starttls-not-supported` | Enable STARTTLS on every MX host |
+| `certificate-host-mismatch` | Reissue the certificate to match the MX hostname |
+| `certificate-expired` | Renew and automate renewal |
+| `certificate-not-trusted` / `validation-failure` | Install a chain from a public CA |
+| `tlsa-invalid` / `dnssec-invalid` | Re-publish TLSA after the key roll; repair the DNSSEC chain |
+| `sts-policy-fetch-error` | Make `https://mta-sts.<domain>/.well-known/mta-sts.txt` reachable |
+| `sts-policy-invalid` | Fix the policy file syntax; keep `mx:` in sync with real MX |
+| `sts-webpki-invalid` | Fix the certificate on the policy host |
+
+### 11.7 `fix.signature_survivability` — stop signatures breaking *(C08)*
+Use relaxed/relaxed canonicalization, do not oversign volatile headers, drop `l=`, and check whether
+one gateway or list server accounts for all the failures.
+
+### 11.8 `fix.single_dmarc_record` — one record, explicit tags *(C11)*
+Exactly one TXT record at `_dmarc.<domain>`; set `p`, `sp`, `np`, `adkim`, `aspf`, `pct` explicitly
+rather than relying on defaults; change it at most once per report window.
+- **Verify:** `dig +short _dmarc.<domain> TXT` — more than one line is the bug.
+
+### 11.9 `fix.report_flow` — get the reports flowing again *(C13, C15)*
+Confirm `rua=` is present and the mailbox accepts mail from strangers; if `rua` points outside the
+domain, publish the authorization record
+`<our-domain>._report._dmarc.<their-domain> TXT "v=DMARC1"`; confirm the mailbox is not full and the
+drop folder / IMAP settings in *Settings → Admin* are correct.
+
+### 11.10 `fix.ingest_error` — read the report we could not read *(C15)*
+Surface the file name, the failing stage (MIME walk / decompress / parse), and the first 200 bytes of
+the payload; link the file in the drop folder's `processed/` directory; keep it out of the dedupe
+set so a fixed parser reprocesses it.
+
+---
+
+## 12. Data model
+
+```yaml
+ComplaintBoard:                   # GET /api/domains/:id/complaints
+  domainId: string
+  domain: string
+  verdict: ok | watch | attention | action | insufficient_data
+  headline: string                # the one-sentence Zone A summary
+  window: { begin: iso, end: iso, days: int }
+  previousWindow: { begin: iso, end: iso }
+  totals:
+    messages: int
+    authenticated: int            # dual-aligned
+    dmarcPassing: int             # either mechanism aligned
+    notAligned: int
+    blocked: int                  # quarantine + reject
+    spoof: int
+    authenticatedPct: number
+  deltas: { authenticatedPct: number, messages: number }
+  reporters:
+    - org: string
+      email: string
+      contactUrl: string | null
+      reportCount: int
+      messages: int
+      lastSeen: iso
+      expectedButMissing: boolean
+  series:                         # Zone A chart, one entry per UTC day
+    - date: YYYY-MM-DD
+      aligned: int
+      oneMechanism: int
+      failedBoth: int
+      quarantined: int
+      rejected: int
+  policyObserved:                 # every distinct policy_published tuple seen
+    - { p, sp, np, adkim, aspf, pct, fo, reporters: [string], firstSeen, lastSeen }
+  complaints:
+    - code: C00..C15
+      key: string                 # e.g. "esp_default_dkim_key"
+      title: string
+      verdict: ok | watch | problem
+      severity: ok | info | warning | critical
+      messages: int
+      sharePct: number
+      trend: new | worse | steady | better | resolved
+      previousMessages: int
+      explanation: string         # plain English, 2–4 sentences, values interpolated
+      evidenceSummary: string
+      fixIds: [string]
+      sources:                    # the evidence table
+        - sourceIp: string
+          ptr: string | null
+          count: int
+          disposition: string
+          spfDomain: string
+          spfResult: string
+          spfAligned: boolean
+          dkimDomain: string
+          dkimSelector: string
+          dkimResult: string
+          dkimAligned: boolean
+          envelopeTo: string | null
+          reasons: [{ type, comment }]
+          reporters: [string]
+          firstSeen: iso
+          lastSeen: iso
+  fixes:                          # Zone C, ordered by messages fixed
+    - id: string
+      title: string
+      appliesTo: [C..]
+      messagesFixed: int
+      steps: [string]
+      records: [{ name, type, value, note }]
+      verify: [string]
+      recheckCheckId: string | null
+  ingest:
+    lastIngestAt: iso | null
+    reportsStored: int
+    undecodable: [{ file, stage, message }]
+```
+
+Snapshots persist as `complaints.json` beside the run under the canonical state root defined in
+[storage.mdx](./storage.mdx), so a historical run renders its complaint board exactly as it was.
+
+---
+
+## 13. API
+
+| Method | Route | Auth | Returns |
+| --- | --- | --- | --- |
+| `GET` | `/api/domains/:id/complaints?days=60` | open | `ComplaintBoard` |
+| `GET` | `/api/domains/:id/complaints/:code?days=60` | open | One complaint, full `sources[]`, plus its fixes |
+| `GET` | `/api/domains/:id/complaints/:code/raw?report=<org>/<id>` | open | The pretty-printed source XML/JSON |
+| `POST` | `/api/domains/:id/complaints/recheck` | `RequireAuth` | Runs the checkers named by a fix; returns the refreshed board |
+| `GET` | `/api/domains/:id/runs/:runId/complaints` | open | The stored snapshot for that run |
+
+`?days` accepts 7 / 30 / 60 / 90, default 60, and is clamped. All windows anchor on the **newest
+report end** rather than `now`, so a historical corpus still analyzes (matching
+[emails.mdx §4.6](./emails.mdx)).
+
+---
+
+## 14. Code map
+
+| Responsibility | Location |
+| --- | --- |
+| Report parsing, extended with reasons / selectors / `envelope_to` / reporter contacts | `code/packages/backend/src/modules/reports/dmarc-xml.ts` — `parseDmarcAggregateXml()` |
+| Normalized report shapes | `code/packages/backend/src/modules/reports/report.types.ts` |
+| §7 taxonomy, §7.1 known-sender test, §7.2 classification order | `code/packages/backend/src/modules/reports/complaints/classify.ts` — `classifyRow()`, `isKnownSender()` |
+| §8 verdict model, §8.3 thresholds, §8.4 trend | `code/packages/backend/src/modules/reports/complaints/verdict.ts` — `boardVerdict()`, `trendOf()` |
+| §12 board assembly, §10.1 series, C11–C15 report-level complaints | `code/packages/backend/src/modules/reports/complaints/board.ts` — `buildComplaintBoard()` |
+| §11 fix library | `code/packages/backend/src/modules/reports/complaints/fixes.ts` — `fixesFor()` |
+| §13 API | `code/packages/backend/src/modules/reports/complaints.controller.ts` — `ComplaintsController` |
+| Snapshot persistence | `code/packages/backend/src/modules/reports/report-store.ts` |
+| Zone A/B/C page | `code/packages/frontend/src/pages/domains/EmailComplaintsPage.tsx` |
+| §10.4 drill-down | `code/packages/frontend/src/pages/domains/ComplaintDetailPage.tsx` |
+| UI copy catalog (titles, explanations, groupings) | `code/packages/frontend/src/lib/complaint-catalog.ts` |
+| Data hooks | `code/packages/frontend/src/api/complaints.ts` |
+| Routes §9.6 | `code/packages/frontend/src/router.tsx` |
+| Entry points §9.1–§9.5 | `DashboardPage.tsx`, `RunDetailPage.tsx`, `DmarcPage.tsx`, `DomainReportsPage.tsx` |
+
+---
+
+## 15. Acceptance criteria
+
+1. Ingesting all 74 files in `emails/` yields 71 DMARC + 3 TLS-RPT reports, 881 rows and
+   10,177 messages — no decode errors, including the `multipart/related` and ISO-2022-JP digests.
+2. Every row classifies into exactly one code; per-code volumes sum to 10,177.
+3. The board for `act3ai.com` reproduces §6 exactly, including C02 = 2,622 msgs and C01 = 4 msgs.
+4. The domain verdict is **🚨 Action required**, and the headline names C02 — the headline must not
+   mention spoofing.
+5. C01 renders under "Not your problem — the system worked", carries no `fixIds`, and no fix in the
+   Zone C plan declares `appliesTo: C01`.
+6. C11 fires on the 9 distinct `policy_published` tuples.
+7. Zone C lists `fix.custom_dkim` first, with `messagesFixed = 2622` and a copyable
+   `google._domainkey.act3ai.com` record carrying the real domain; fixes are ordered by
+   `messagesFixed` descending.
+7b. A row whose envelope **and** DKIM `d=` both claim our domain while both results are negative is
+   **not** a known sender (§7.1) — it classifies C01, never C10.
+8. All six entry points in §9 navigate to the page; run-scoped aliases render the stored snapshot.
+9. Zero reports renders the §10.1 empty state — never an error and never a green verdict.
+10. IPv6 sources display, group, sort and drill down identically to IPv4.
+11. The page renders correctly in light and dark themes, and the body never scrolls horizontally.
+12. Re-check runs only the checkers a fix names, and updates the board in place.
+
+---
+
+## 16. References
+
+- RFC 7489 — DMARC (aggregate report format, Appendix C; filename grammar §7.2.1.1; override reason types §6.7)
+- RFC 9990 / `draft-ietf-dmarc-aggregate-reporting` — DMARCbis aggregate reporting, `np=` and the tree walk
+- RFC 8460 — SMTP TLS Reporting (`result-type` vocabulary)
+- RFC 8617 — ARC, the mechanism behind C07
+- RFC 6376 — DKIM (`permerror` semantics, canonicalization)
+- [Google Workspace: turn on DKIM](https://support.google.com/a/answer/174124) — the C02 fix, and the `gappssmtp.com` default-key behaviour
+- [DMARCguard — How to read a DMARC aggregate report](https://dmarcguard.io/blog/how-to-read-dmarc-report/)
+- [DMARC Report — Common issues revealed by aggregate reports and how to prioritize them](https://dmarcreport.com/blog/common-dmarc-aggregate-report-issues-and-how-to-prioritize-them/)
+- [Red Sift — Debugging DMARC failures](https://redsift.com/guides/debugging-dmarc-failures-a-practical-guide)
+- [DMARCguard — DMARC fails on forwarded email: why ARC is the fix](https://dmarcguard.io/blog/dmarc-forwarding-arc-fix/)
+- [PowerDMARC — How to fix DKIM permerror](https://powerdmarc.com/how-to-fix-dkim-permerror/)
+- [Suped — Why DMARC fails even though DKIM and SPF pass in SendGrid](https://www.suped.com/learn/dmarc/why-is-my-dmarc-failing-even-though-dkim-and-spf-pass-in-sendgrid)

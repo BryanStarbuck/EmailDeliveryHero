@@ -152,16 +152,27 @@ function IngestedReportsSection() {
 							key={d.id}
 							className="border-t border-[var(--edh-border)] first:border-t-0"
 						>
-							<Link
-								to="/domains/$id/reports"
-								params={{ id: d.id }}
-								className="flex items-center justify-between px-4 py-3 text-sm hover:bg-slate-50"
-							>
+							<div className="flex items-center justify-between gap-2 px-4 py-3 text-sm">
 								<span className="font-medium">{d.name}</span>
-								<span className="inline-flex items-center gap-1 text-[var(--edh-muted)]">
-									Ingested reports <ChevronRight className="h-4 w-4" />
+								<span className="flex items-center gap-3">
+									{/* pm/Email_Complaints.mdx §9.5 — the same reports, read as
+									    problems and fixes rather than as evidence. */}
+									<Link
+										to="/domains/$id/complaints"
+										params={{ id: d.id }}
+										className="inline-flex items-center gap-1 text-[var(--edh-primary)] hover:underline"
+									>
+										Email complaints
+									</Link>
+									<Link
+										to="/domains/$id/reports"
+										params={{ id: d.id }}
+										className="inline-flex items-center gap-1 text-[var(--edh-muted)] hover:underline"
+									>
+										Ingested reports <ChevronRight className="h-4 w-4" />
+									</Link>
 								</span>
-							</Link>
+							</div>
 						</li>
 					))}
 				</ul>

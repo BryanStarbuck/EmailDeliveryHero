@@ -6,6 +6,38 @@
  * `<state>/reports/<domainId>/` (report-store.ts).
  */
 
+/**
+ * One `<policy_evaluated><reason>` override the receiver applied (RFC 7489 §6.7,
+ * pm/Email_Complaints.mdx §4.3). `type` is one of forwarded | sampled_out | trusted_forwarder |
+ * mailing_list | local_policy | other; `comment` is free text — Google writes "arc=pass" there,
+ * which is the ARC-rescue signal behind complaint C07.
+ */
+export interface DmarcPolicyOverride {
+	type: string;
+	comment: string | null;
+}
+
+/** One `<auth_results><dkim>` element (pm/Email_Complaints.mdx §4.5). */
+export interface DmarcDkimAuthResult {
+	/** The signing domain (d=). */
+	domain: string;
+	/** The selector (s=) — null when the reporter omits it. */
+	selector: string | null;
+	/** pass | fail | policy | neutral | temperror | permerror | none. */
+	result: string;
+	/** RFC-defined but emitted by no reporter in the corpus; parsed anyway. */
+	humanResult: string | null;
+}
+
+/** One `<auth_results><spf>` element (pm/Email_Complaints.mdx §4.5). */
+export interface DmarcSpfAuthResult {
+	domain: string;
+	/** mfrom | helo — null when the reporter omits it. */
+	scope: string | null;
+	/** Lower-cased: KDDI emits a capitalised "Fail". */
+	result: string;
+}
+
 /** One normalized `<record>` row of a DMARC aggregate report (pm/emails.mdx §4.4). */
 export interface DmarcReportRow {
 	sourceIp: string;
@@ -27,6 +59,19 @@ export interface DmarcReportRow {
 	envelopeSpfDomain: string;
 	/** Every d= that signed, from <auth_results><dkim><domain>. */
 	dkimSigningDomains: string[];
+	/**
+	 * The remaining RFC 7489 detail the complaint taxonomy needs (pm/Email_Complaints.mdx §4).
+	 * All optional: reports stored by an earlier build lack them, and the classifier degrades
+	 * gracefully rather than reprocessing the corpus.
+	 */
+	/** `<identifiers><envelope_to>` — who the sender was aiming at. Only KDDI populates it. */
+	envelopeTo?: string | null;
+	/** `<policy_evaluated><reason>` overrides — the ARC-rescue / sampled-out signals. */
+	reasons?: DmarcPolicyOverride[];
+	/** Full per-signature DKIM results, including the selector that makes forgery visible. */
+	dkimResults?: DmarcDkimAuthResult[];
+	/** Full per-identity SPF results. */
+	spfResults?: DmarcSpfAuthResult[];
 }
 
 /** The <policy_published> block — the DMARC policy the reporter saw. */
@@ -38,6 +83,8 @@ export interface DmarcPolicyPublished {
 	aspf: string;
 	pct: string | null;
 	np: string | null;
+	/** `fo=` forensic-report options — present on some reporters only (pm/Email_Complaints.mdx §4.2). */
+	fo?: string | null;
 }
 
 /** One parsed DMARC aggregate report — persisted as reports/<domainId>/dmarc/<org>-<id>.json. */
@@ -45,6 +92,12 @@ export interface ParsedDmarcReport {
 	kind: "dmarc";
 	reporterOrg: string;
 	reportId: string;
+	/** `<report_metadata><email>` — the reporter's contact address (pm/Email_Complaints.mdx §2.1). */
+	reporterEmail?: string | null;
+	/** `<report_metadata><extra_contact_info>` — the reporter's help URL; present for 4 of 7. */
+	reporterContact?: string | null;
+	/** `<report_metadata><error>` — a reporter-declared problem; drives complaint C15. */
+	reporterError?: string | null;
 	/** Report window as ISO date-times (converted from the XML's epoch seconds). */
 	window: { begin: string; end: string };
 	policyPublished: DmarcPolicyPublished;

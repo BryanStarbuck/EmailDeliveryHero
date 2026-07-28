@@ -232,6 +232,28 @@ export function RunDetailPage() {
 
 			<h1 className="text-2xl font-bold">{domain?.name ?? id} — run report</h1>
 
+			{/*
+        Email complaints (pm/Email_Complaints.mdx §9.2). This run audits what our DNS SAYS; the
+        complaints board reads what receivers actually OBSERVED. They answer different questions,
+        so the link sits right under the header rather than inside a category.
+      */}
+			<Link
+				to="/domains/$id/complaints"
+				params={{ id }}
+				className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-[var(--edh-border)] bg-[var(--edh-card)] px-4 py-3 hover:border-slate-300"
+			>
+				<span>
+					<span className="text-sm font-medium">
+						Email complaints — what receivers are telling us
+					</span>
+					<span className="mt-0.5 block text-xs text-[var(--edh-muted)]">
+						The DMARC and TLS reports mailbox providers sent back, read as
+						problems and fixes.
+					</span>
+				</span>
+				<ChevronRight className="h-4 w-4 shrink-0 text-[var(--edh-muted)]" />
+			</Link>
+
 			{!result ? (
 				<div className="mt-6 rounded-lg border border-dashed border-[var(--edh-border)] p-10 text-center">
 					<p className="text-slate-600">Not yet audited.</p>

@@ -1424,3 +1424,162 @@ export interface DmarcReportsSnapshot {
 	} | null;
 	rows: DmarcReportsSnapshotRow[];
 }
+
+// ─── Email Complaints (pm/Email_Complaints.mdx §12) ──────────────────────────────────────────────
+
+/** The 16 complaint codes (pm/Email_Complaints.mdx §7). */
+export type ComplaintCode =
+	| "C00"
+	| "C01"
+	| "C02"
+	| "C03"
+	| "C04"
+	| "C05"
+	| "C06"
+	| "C07"
+	| "C08"
+	| "C09"
+	| "C10"
+	| "C11"
+	| "C12"
+	| "C13"
+	| "C14"
+	| "C15";
+
+/** Per-complaint verdict (§8.1). `ok` includes "the system worked", e.g. spoofing that was blocked. */
+export type ComplaintVerdict = "ok" | "watch" | "problem";
+
+/** Domain-level verdict (§8.2), worst first. */
+export type BoardVerdict =
+	| "action"
+	| "attention"
+	| "watch"
+	| "ok"
+	| "insufficient_data";
+
+/** Trend versus the previous window of equal length (§8.4). */
+export type ComplaintTrend = "new" | "worse" | "steady" | "better" | "resolved";
+
+/** One row of a complaint's evidence table (§10.2). */
+export interface ComplaintSource {
+	sourceIp: string;
+	count: number;
+	disposition: string;
+	spfDomain: string;
+	spfResult: string;
+	spfAligned: boolean;
+	dkimDomain: string;
+	dkimSelector: string;
+	dkimResult: string;
+	dkimAligned: boolean;
+	envelopeTo: string | null;
+	reasons: { type: string; comment: string | null }[];
+	reporters: string[];
+	firstSeen: string;
+	lastSeen: string;
+}
+
+export interface Complaint {
+	code: ComplaintCode;
+	key: string;
+	title: string;
+	verdict: ComplaintVerdict;
+	severity: Severity;
+	messages: number;
+	sharePct: number;
+	trend: ComplaintTrend;
+	previousMessages: number;
+	explanation: string;
+	evidenceSummary: string;
+	fixIds: string[];
+	sources: ComplaintSource[];
+}
+
+export interface FixRecord {
+	name: string;
+	type: string;
+	value: string;
+	note?: string;
+}
+
+/** One step of the ordered fix plan (§11). */
+export interface ComplaintFix {
+	id: string;
+	title: string;
+	appliesTo: ComplaintCode[];
+	messagesFixed: number;
+	steps: string[];
+	records: FixRecord[];
+	verify: string[];
+	recheckCheckId: string | null;
+}
+
+export interface ComplaintReporter {
+	org: string;
+	email: string | null;
+	contactUrl: string | null;
+	reportCount: number;
+	messages: number;
+	lastSeen: string | null;
+	expectedButMissing: boolean;
+}
+
+export interface ComplaintSeriesPoint {
+	date: string;
+	aligned: number;
+	oneMechanism: number;
+	failedBoth: number;
+	quarantined: number;
+	rejected: number;
+}
+
+export interface ObservedPolicy {
+	p: string;
+	sp: string | null;
+	np: string | null;
+	adkim: string;
+	aspf: string;
+	pct: string | null;
+	fo: string | null;
+	reporters: string[];
+	firstSeen: string;
+	lastSeen: string;
+}
+
+/** GET /domains/:id/complaints — the whole Email Complaints board (§12). */
+export interface ComplaintBoard {
+	domainId: string;
+	domain: string;
+	verdict: BoardVerdict;
+	headline: string;
+	ingestionEnabled: boolean;
+	window: { begin: string; end: string; days: number };
+	previousWindow: { begin: string; end: string };
+	totals: {
+		messages: number;
+		authenticated: number;
+		dmarcPassing: number;
+		notAligned: number;
+		blocked: number;
+		spoof: number;
+		authenticatedPct: number;
+	};
+	deltas: { authenticatedPct: number; messages: number };
+	reporters: ComplaintReporter[];
+	series: ComplaintSeriesPoint[];
+	policyObserved: ObservedPolicy[];
+	complaints: Complaint[];
+	fixes: ComplaintFix[];
+	ingest: {
+		lastIngestAt: string | null;
+		reportsStored: number;
+		undecodable: { file: string; stage: string; message: string }[];
+	};
+}
+
+/** GET /domains/:id/complaints/:code — the drill-down payload (§10.4). */
+export interface ComplaintDetail {
+	board: Omit<ComplaintBoard, "complaints">;
+	complaint: Complaint;
+	fixes: ComplaintFix[];
+}

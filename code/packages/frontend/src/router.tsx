@@ -17,7 +17,9 @@ import { DnssecExpiryPage } from "@/pages/dnssec/DnssecExpiryPage";
 import { DnssecPage } from "@/pages/dnssec/DnssecPage";
 import { BlacklistTargetPage } from "@/pages/blacklists/BlacklistTargetPage";
 import { BlacklistZonePage } from "@/pages/blacklists/BlacklistZonePage";
+import { ComplaintDetailPage } from "@/pages/domains/ComplaintDetailPage";
 import { ContentScoringPage } from "@/pages/domains/ContentScoringPage";
+import { EmailComplaintsPage } from "@/pages/domains/EmailComplaintsPage";
 import { DkimPage } from "@/pages/domains/DkimPage";
 import { DkimProblemPage } from "@/pages/domains/DkimProblemPage";
 import { DmarcCheckPage } from "@/pages/domains/DmarcCheckPage";
@@ -344,6 +346,29 @@ const domainReportsRoute = createRoute({
 	path: "/domains/$id/reports",
 	component: DomainReportsPage,
 });
+// The Email Complaints surface (pm/Email_Complaints.mdx §9.6): the board and its per-complaint
+// drill-down, each with a run-scoped alias so a historical run renders the same conclusions.
+// The bare /complaints path registers before /complaints/$code so the static segment wins.
+const complaintsRoute = createRoute({
+	getParentRoute: () => appLayoutRoute,
+	path: "/domains/$id/complaints",
+	component: EmailComplaintsPage,
+});
+const complaintDetailRoute = createRoute({
+	getParentRoute: () => appLayoutRoute,
+	path: "/domains/$id/complaints/$code",
+	component: ComplaintDetailPage,
+});
+const runComplaintsRoute = createRoute({
+	getParentRoute: () => appLayoutRoute,
+	path: "/domains/$id/runs/$runId/complaints",
+	component: EmailComplaintsPage,
+});
+const runComplaintDetailRoute = createRoute({
+	getParentRoute: () => appLayoutRoute,
+	path: "/domains/$id/runs/$runId/complaints/$code",
+	component: ComplaintDetailPage,
+});
 // The Scheduled Checks configuration page (pm/scheduled_checks.mdx) — opened by the dashboard
 // chevron next to the scheduled-checks toggle.
 const scheduledChecksRoute = createRoute({
@@ -421,6 +446,10 @@ const routeTree = rootRoute.addChildren([
 		blacklistTargetRoute,
 		reportsRoute,
 		domainReportsRoute,
+		complaintsRoute,
+		complaintDetailRoute,
+		runComplaintsRoute,
+		runComplaintDetailRoute,
 		scheduledChecksRoute,
 		installRoute,
 		settingsIndexRoute,

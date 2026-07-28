@@ -1,5 +1,9 @@
 import { DomainsModule } from "@module/domains/domains.module";
 import { Module } from "@nestjs/common";
+import {
+	ComplaintsController,
+	ComplaintsService,
+} from "./complaints.controller";
 import { ReportsController } from "./reports.controller";
 import { ReportsService } from "./reports.service";
 
@@ -12,8 +16,10 @@ import { ReportsService } from "./reports.service";
  */
 @Module({
 	imports: [DomainsModule],
-	controllers: [ReportsController],
-	providers: [ReportsService],
-	exports: [ReportsService],
+	// ComplaintsController is registered AFTER ReportsController: both live under
+	// /domains/:id/…, and Nest matches in declaration order.
+	controllers: [ReportsController, ComplaintsController],
+	providers: [ReportsService, ComplaintsService],
+	exports: [ReportsService, ComplaintsService],
 })
 export class ReportsModule {}

@@ -177,11 +177,14 @@ function SubTestsBand({
 	goToCheck,
 	onRunNow,
 	scanning,
+	domainId,
 }: {
 	result: AuditResult;
 	goToCheck: (checkKey: string) => void;
 	onRunNow: () => void;
 	scanning: boolean;
+	/** Needed for the §9.3 complaints link on the Ingested-reports sibling row. */
+	domainId: string;
 }) {
 	const { tests } = normalizeDmarcSection(result.results?.dmarc);
 	const findings = dmarcCategoryFindings(result);
@@ -220,6 +223,20 @@ function SubTestsBand({
 								</span>
 							</span>
 						</button>
+						{/*
+              pm/Email_Complaints.mdx §9.3 — the Ingested-reports band row gains a second link,
+              alongside the existing explainer, straight to the complaints board.
+            */}
+						{unit.sibling === "reports" && (
+							<Link
+								to="/domains/$id/complaints"
+								params={{ id: domainId }}
+								onClick={(e) => e.stopPropagation()}
+								className="shrink-0 rounded px-2 py-1 text-xs font-medium text-[var(--edh-primary)] hover:bg-slate-100"
+							>
+								See the complaints
+							</Link>
+						)}
 						{!unit.sibling && (
 							<button
 								type="button"
@@ -496,6 +513,7 @@ export function DmarcPage() {
 						goToCheck={goToCheck}
 						onRunNow={onRunAgain}
 						scanning={scanning}
+						domainId={id}
 					/>
 
 					<PolicyLadder

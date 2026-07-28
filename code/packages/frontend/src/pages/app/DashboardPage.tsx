@@ -259,6 +259,18 @@ function DomainHealthTable({
 														}),
 												},
 												{
+													// pm/Email_Complaints.mdx §9.1. The six category
+													// columns are locked (pm/dashboard.mdx), so the
+													// complaints board is reached from the row menu
+													// rather than by adding a seventh column.
+													label: "Email complaints",
+													onClick: () =>
+														navigate({
+															to: "/domains/$id/complaints",
+															params: { id: d.id },
+														}),
+												},
+												{
 													// Lands on the Domains page with this domain's editor open (§4.3).
 													label: "Edit domain",
 													onClick: () =>
