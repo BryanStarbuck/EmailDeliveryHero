@@ -111,7 +111,7 @@ The load-bearing constants for the app, stored here as the single reference poin
 
 | Key | Value |
 | --- | --- |
-| **UI WebApp localhost port** | **4444** — the web app always runs on `http://localhost:4444/`. |
+| **UI WebApp localhost port** | **9999** — the web app always runs on `http://localhost:9999/`. |
 | Backend REST API port | `9312` (NestJS, served under `/api`; API only — not opened directly in a browser). |
 | Runtime | Node >= 20, **TypeScript** (strict) throughout. |
 | Repo layout | pnpm workspace monorepo under `code/` (`packages/backend`, `packages/frontend`). |
@@ -119,7 +119,7 @@ The load-bearing constants for the app, stored here as the single reference poin
 | Storage | On-disk JSON/YAML under `~/.email_delivery_hero/` — no database. |
 | Git remote | `https://github.com/BryanStarbuck/EmailDeliveryHero.git` |
 
-The **UI WebApp must always run on localhost on port 4444**. This is the canonical value for the
+The **UI WebApp must always run on localhost on port 9999**. This is the canonical value for the
 browser-facing web app; treat it as the source of truth when wiring the frontend dev/preview
 server and any launch scripts.
 
@@ -195,7 +195,7 @@ The full engine design (each checker is a pluggable module returning findings) i
 * **Language/runtime:** Node + **TypeScript** (strict), **pnpm** workspaces monorepo.
 * **Backend:** **NestJS** REST API under `/api`, on port **9312**.
 * **Frontend (UI WebApp):** **React 19 + Vite + Tailwind + shadcn/ui + lucide-react + TanStack
-  Router/Query**, always on localhost port **4444** (`http://localhost:4444/`).
+  Router/Query**, always on localhost port **9999** (`http://localhost:9999/`).
 * **Auth:** **OpenAuthFederated**, consumed as an external open-source library (`@auth/backend` +
   `@auth/react`) — federated Google Workspace SSO, no email/password. See
   [Authentication](./authentication.mdx).
@@ -217,7 +217,7 @@ global logger, exception filter, and process handlers, live in code:
 
 | Port | Surface | Browser URL |
 | --- | --- | --- |
-| **4444** | Frontend / UI WebApp (React 19 + Vite) | `http://localhost:4444/` |
+| **9999** | Frontend / UI WebApp (React 19 + Vite) | `http://localhost:9999/` |
 | **9312** | Backend (NestJS REST API under `/api`) | API only — not opened directly in a browser |
 
 ## Left navigation
@@ -258,7 +258,7 @@ EmailDeliveryHero/
 ├── code/                    # application code (pnpm monorepo; owned by another process)
 │   └── packages/
 │       ├── backend/         # NestJS REST API (port 9312)
-│       └── frontend/        # React 19 + Vite SPA — UI WebApp (port 4444)
+│       └── frontend/        # React 19 + Vite SPA — UI WebApp (port 9999)
 ├── pm/                      # product management — this directory of MDX specs
 │   ├── overview.mdx         # this file
 │   ├── authentication.mdx

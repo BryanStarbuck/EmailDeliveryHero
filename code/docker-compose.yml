@@ -19,7 +19,7 @@ services:
       # copy the state dir and you have moved the data (pm/engineering.mdx §7).
       EDH_STATE_DIR: /state
       # The frontend container is a distinct origin during preview; keep the allowlist explicit.
-      CORS_ORIGINS: http://localhost:4444
+      CORS_ORIGINS: http://localhost:9999
     volumes:
       - edh-state:/state
     ports:
@@ -29,15 +29,15 @@ services:
     image: email-delivery-hero
     depends_on:
       - backend
-    # Serve the built SPA with Vite preview on 4444; its /api proxy targets the backend service.
+    # Serve the built SPA with Vite preview on 9999; its /api proxy targets the backend service.
     command:
       ["pnpm", "--filter", "@edh/frontend", "exec", "vite", "preview", "--host", "0.0.0.0"]
     environment:
       API_HOST: backend
       API_PORT: "9312"
-      WEBAPP_PORT: "4444"
+      WEBAPP_PORT: "9999"
     ports:
-      - "4444:4444"
+      - "9999:9999"
 
 volumes:
   # The on-disk JSON/YAML store (default ~/.email_delivery_hero on bare metal) — no database.

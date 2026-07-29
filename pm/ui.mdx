@@ -20,7 +20,7 @@ user never retypes a DNS string.
 
 It builds on the siblings and does not repeat their internals:
 
-* [Overview](./overview.mdx) — the charter, personas, the check list, ports (UI **4444**, API **9312**).
+* [Overview](./overview.mdx) — the charter, personas, the check list, ports (UI **9999**, API **9312**).
 * [Security](./security.mdx) — **login is optional**; there is always a current user (`default` when
   logged out). This is why no screen ever gates behind a sign-in wall.
 * [Engineering](./engineering.mdx) — the audit engine, the `Finding` / `AuditResult` shape, the REST
@@ -409,7 +409,7 @@ The three canonical flows, described as the user experiences them across the scr
 
 ### 8.1 First run — "are my domains healthy?"
 
-1. The user opens `http://localhost:4444/` and lands on the **Dashboard** as the `default` user (no
+1. The user opens `http://localhost:9999/` and lands on the **Dashboard** as the `default` user (no
    login wall). It is empty, so a card invites **"Add your first domain."**
 2. They go to **Domains → Add domain**, type `whitehatengineering.com`, optionally add a DKIM selector
    (`google`) and a sending IP, and save. The row appears with six gray **Never** cells.

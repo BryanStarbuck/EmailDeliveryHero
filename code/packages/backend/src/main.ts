@@ -61,7 +61,7 @@ async function bootstrap() {
 	// CORS for the Vite front-end. NEVER reflect an arbitrary Origin with credentials — require an
 	// explicit allowlist and fail closed at boot if it is empty.
 	const origins = (
-		config.get<string>("CORS_ORIGINS") ?? "http://localhost:4444"
+		config.get<string>("CORS_ORIGINS") ?? "http://localhost:9999"
 	)
 		.split(",")
 		.map((o) => o.trim())
@@ -69,7 +69,7 @@ async function bootstrap() {
 	if (origins.length === 0) {
 		throw new Error(
 			"CORS_ORIGINS is empty. Refusing to start: CORS with credentials requires an explicit " +
-				"origin allowlist (e.g. CORS_ORIGINS=http://localhost:4444).",
+				"origin allowlist (e.g. CORS_ORIGINS=http://localhost:9999).",
 		);
 	}
 	app.enableCors({ origin: origins, credentials: true });

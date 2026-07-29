@@ -3,9 +3,9 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
-// The UI WebApp always runs on :4444 (override with WEBAPP_PORT). strictPort fails loudly rather
+// The UI WebApp always runs on :9999 (override with WEBAPP_PORT). strictPort fails loudly rather
 // than silently drifting to another port. See pm/overview.mdx "Key facts".
-const WEBAPP_PORT = Number(process.env.WEBAPP_PORT ?? 4444);
+const WEBAPP_PORT = Number(process.env.WEBAPP_PORT ?? 9999);
 const API_PORT = Number(process.env.API_PORT ?? 9312);
 // Where the backend lives. "localhost" for local dev; docker-compose sets API_HOST=backend so the
 // preview server inside the frontend container proxies /api to the backend service (pm/engineering.mdx §9).

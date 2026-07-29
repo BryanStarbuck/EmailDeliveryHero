@@ -2,7 +2,7 @@
 #
 # EmailDeliveryHero — one image, both services (pm/engineering.mdx §9 "Deploy").
 # docker-compose.yml runs this image twice: once as the NestJS backend (9312) and once as the
-# React/Vite frontend (4444). The on-disk state dir is mounted as a volume by compose.
+# React/Vite frontend (9999). The on-disk state dir is mounted as a volume by compose.
 #
 # IMPORTANT — build context: the backend/frontend depend on OpenAuthFederated via pnpm `link:`
 # paths that resolve to a SIBLING checkout of the EmailDeliveryHero repo
@@ -50,7 +50,7 @@ COPY --from=build /workspace /workspace
 ENV EDH_STATE_DIR=/state
 ENV NODE_ENV=production
 
-EXPOSE 9312 4444
+EXPOSE 9312 9999
 
 # Default: the NestJS backend on 9312. The frontend service overrides `command` in compose.
 CMD ["node", "packages/backend/dist/main.js"]

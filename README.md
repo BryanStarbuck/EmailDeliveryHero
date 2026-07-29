@@ -42,7 +42,7 @@ just build
 # 3. Run — starts the web app in the background
 just run
 
-# 4. Open http://localhost:4444/ in your browser
+# 4. Open http://localhost:9999/ in your browser
 ```
 
 Then add the domains you send from, click **Run checks**, and work the findings.
@@ -62,9 +62,9 @@ just dev      # run with backend watch-mode (for hacking on the code)
 
 _Click any screenshot to open it full size._
 
-Once you have it running on your local computer, then navigate to localhost:4444 to use it.
+Once you have it running on your local computer, then navigate to localhost:9999 to use it.
 
-<a href="pm/images/Large_File_Brdige_6.jpeg"><img src="pm/images/Large_File_Brdige_6.jpeg" width="100%" alt="EmailDeliveryHero running in a browser at localhost:4444"></a>
+<a href="pm/images/Large_File_Brdige_6.jpeg"><img src="pm/images/Large_File_Brdige_6.jpeg" width="100%" alt="EmailDeliveryHero running in a browser at localhost:9999"></a>
 
 **Dashboard** — one row per domain with a color-coded cell per check category, plus the full run history below.
 
@@ -215,7 +215,7 @@ concrete remediation.
 
 EmailDeliveryHero is a **local-first web app** — a TypeScript-on-Node monorepo you run yourself:
 
-* **Frontend:** React 19 + Vite UI at **`http://localhost:4444/`**.
+* **Frontend:** React 19 + Vite UI at **`http://localhost:9999/`**.
 * **Backend:** NestJS REST API on port **9312** (proxied at `/api`).
 * **Checks engine:** pluggable checkers driven by Node's native DNS plus proven Brew-installed command-line tooling, so results reflect the same signals real mail systems use. Runs are parallel per domain with bounded concurrency.
 * **Storage:** plain JSON/YAML files under `~/.email_delivery_hero/` — no database. Your domain list, run history, and findings are transparent files on your own disk.
@@ -236,7 +236,7 @@ EmailDeliveryHero/
 ├── code/          # the app: pnpm monorepo
 │   └── packages/
 │       ├── backend/    # NestJS REST API (port 9312)
-│       └── frontend/   # React 19 + Vite UI (port 4444)
+│       └── frontend/   # React 19 + Vite UI (port 9999)
 ├── pm/            # product & engineering specs (MDX) — start at pm/overview.mdx
 │   ├── checks/    # one deep spec per deliverability check topic
 │   └── use_cases/ # end-to-end user flows

@@ -28,7 +28,7 @@ export class AppConfig {
 	}
 
 	get corsOrigins(): string[] {
-		return (this.config.get<string>("CORS_ORIGINS") ?? "http://localhost:4444")
+		return (this.config.get<string>("CORS_ORIGINS") ?? "http://localhost:9999")
 			.split(",")
 			.map((o) => o.trim())
 			.filter(Boolean);

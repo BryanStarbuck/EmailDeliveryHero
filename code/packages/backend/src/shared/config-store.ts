@@ -310,7 +310,7 @@ export function defaultAppConfig(): AppConfigFile {
 	return {
 		schema_version: CONFIG_SCHEMA_VERSION,
 		updated_at: new Date().toISOString(),
-		server: { frontend_port: 4444, backend_port: 9312, mode: "local" },
+		server: { frontend_port: 9999, backend_port: 9312, mode: "local" },
 		checks: {
 			enabled: ["spf", "dkim", "dmarc", "blacklists", "dns_infra"],
 			spf: { maxLookups: 10 },

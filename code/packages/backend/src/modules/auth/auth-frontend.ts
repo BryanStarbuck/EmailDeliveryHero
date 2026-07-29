@@ -102,7 +102,7 @@ export function buildAuthFrontend(config: ConfigService) {
 	const isProd =
 		(config.get<string>("NODE_ENV") ?? "development") === "production";
 	const webappOrigin = (
-		config.get<string>("CORS_ORIGINS") ?? "http://localhost:4444"
+		config.get<string>("CORS_ORIGINS") ?? "http://localhost:9999"
 	)
 		.split(",")[0]
 		?.trim();

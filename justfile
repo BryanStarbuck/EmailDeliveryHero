@@ -3,7 +3,7 @@
 #   just build   → compile the TypeScript (frontend + backend) and install the macOS launchd
 #                  "plist-based cron job" so scheduled audits run on localhost.
 #   just run     → stop any pre-existing instance, then start BOTH the frontend and backend in the
-#                  BACKGROUND as one localhost web app (http://localhost:4444, API proxied to :9312).
+#                  BACKGROUND as one localhost web app (http://localhost:9999, API proxied to :9312).
 #                  The backend is compiled and served from dist/ (no file watcher), so in-flight
 #                  audit runs survive editors/git syncs touching the tree. Waits for both ports to
 #                  bind, then frees the command line. `just logs` follows it.
@@ -29,9 +29,9 @@ trigger := code / "deploy/launchd/trigger-scheduler.mjs"
 rotator := repo / "scripts/log_rotate_pipe.mjs"
 
 # App ports (keep in sync with pm/overview.mdx, code/packages/frontend/vite.config.ts and backend .env).
-# web_port is the UI WebApp — localhost:4444 by default (per pm/overview.mdx "Key facts").
+# web_port is the UI WebApp — localhost:9999 by default (per pm/overview.mdx "Key facts").
 # Overridable so the justfile agrees with the app when WEBAPP_PORT / API_PORT are set.
-web_port := env_var_or_default("WEBAPP_PORT", "4444")
+web_port := env_var_or_default("WEBAPP_PORT", "9999")
 api_port := env_var_or_default("API_PORT", "9312")
 
 # Background `run`: combined dev log + launcher pid. Kept in /tmp under the same
@@ -147,7 +147,7 @@ uninstall-agent:
 # Preflight (tools, env, state dir), STOP any pre-existing instance, then start
 # frontend + backend together in the BACKGROUND as one web app. Depending on `stop`
 # guarantees a fresh restart (no port collision — Vite uses strictPort and would die
-# on a stale :4444). The servers keep running after this recipe returns; the
+# on a stale :9999). The servers keep running after this recipe returns; the
 # command line is freed. Follow output with `just logs`; shut down with `just stop`.
 #
 # The backend is compiled once and served from dist/ (`pnpm start` → node dist/main.js),
@@ -156,7 +156,7 @@ uninstall-agent:
 # with it — the UI then pops "Audit failed" for each domain. Use `just dev` when you
 # actually want restart-on-change.
 #
-# Start the web app in the BACKGROUND (fresh restart; web :4444 + API :9312).
+# Start the web app in the BACKGROUND (fresh restart; web :9999 + API :9312).
 run mode="app": _preflight-tools _preflight-openauth stop
     #!/usr/bin/env bash
     set -euo pipefail
