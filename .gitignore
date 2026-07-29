@@ -1,3 +1,6 @@
 # Local-only bug-fix run reports (see fix_log/*.md) — never ship these.
 fix_log/
 .DS_Store
+
+# Local email corpus (DMARC/TLS-RPT reports) — never commit.
+emails/
