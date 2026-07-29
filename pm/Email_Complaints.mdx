@@ -938,8 +938,8 @@ evidence under a historical heading, which is precisely the failure this snapsho
 | `GET` | `/api/domains/:id/complaints/:code?days=60` | open | One complaint, full `sources[]`, plus its fixes |
 | `GET` | `/api/domains/:id/complaints/:code/raw?report=<org>/<id>` | open | The pretty-printed source XML/JSON. Serves the raw payload kept at ingest; for reports stored before the raw store existed it falls back to the normalized JSON and says so via `format: "normalized"` |
 | `GET` | `/api/domains/:id/complaints/:code/history` | open | This complaint's `{ windowEnd, messages, sharePct }` across the last 10 snapshots, oldest → newest — the §10.4 strip |
-| `POST` | `/api/domains/:id/complaints/recheck` | `RequireAuth` | Ingests any new reports, then returns the rebuilt board |
-| `POST` | `/api/domains/:id/complaints/recheck/:fixId` | `RequireAuth` | Runs **only** the checkers that fix's `recheckCheckId` names, and returns their findings plus the rebuilt board. Deliberately does **not** mint a run file: §10.3 updates the card in place, and "did my DNS change land?" is not a question a full audit answers better |
+| `POST` | `/api/domains/:id/complaints/recheck` | open | Ingests any new reports, then returns the rebuilt board |
+| `POST` | `/api/domains/:id/complaints/recheck/:fixId` | open | Runs **only** the checkers that fix's `recheckCheckId` names, and returns their findings plus the rebuilt board. Deliberately does **not** mint a run file: §10.3 updates the card in place, and "did my DNS change land?" is not a question a full audit answers better |
 | `GET` | `/api/domains/:id/runs/:runId/complaints` | open | The stored snapshot for that run. **404s** when a run has no snapshot (one recorded before §12 shipped) rather than substituting the live board — quietly serving different data than the URL promises is the bug this route exists to prevent |
 | `GET` | `/api/domains/:id/runs/:runId/complaints/:code` | open | One complaint from that run's stored snapshot |
 

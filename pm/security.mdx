@@ -145,6 +145,19 @@ Authentication is **identify, don't gate** for ordinary routes:
   user has none, so any gated route is refused with **`403`**. This is the one place where being
   logged out actually stops you. Ungated routes carry no decorator and stay open to everyone. The
   frontend also hides admin controls as UX, but the backend is authoritative.
+* **What may be gated — and what may not.** Only *admin configuration* may carry a gate. A
+  hardening pass once applied **`@RequireAuth()`** (any signed-in identity) across the ordinary
+  auditing surface — audit triggers, domain add/edit/delete, report ingest, blacklist recheck,
+  complaint recheck, content samples — and made the whole install controller `admin`-only including
+  its reads. Because login is optional and the normal user IS `default`, that silently **`403`'d
+  every write and every "Run checks" in the product**: the app looked alive (reads worked) but
+  nothing could be run. Gating ordinary auditing is a NON-GOAL (§6), so those decorators are gone
+  and `@RequireAuth()` is now deliberately unused. The rule going forward: **a route that the
+  `default` user cannot reach is a route the product cannot use.** Before adding any gate, ask
+  whether a logged-out user is *supposed* to be locked out of that action; for host-touching
+  concerns prefer the non-identity controls (loopback bind, fail-closed CORS, per-source rate
+  limits). Read-only routes on a run's critical path — notably `GET /api/install/preflight` — must
+  stay open even when their controller's mutating siblings are `admin`-gated.
 
 Implemented in code:
 `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/auth/jwt-auth.guard.ts` — class `JwtAuthGuard`, method `canActivate()` (falls back to the `default` user, never `401`) and `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/auth/roles.guard.ts` — class `RolesGuard`, method `canActivate()`; both registered as `APP_GUARD` (JwtAuthGuard first) in `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/app.module.ts`. The `default` `AuthUser` is `DEFAULT_USER` in `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/shared/current-user.decorator.ts` (also exports the `@CurrentUser()` decorator); `GET /auth/me` is `~/BGit/Bryan_git/EmailDeliveryHero/code/packages/backend/src/modules/auth/auth.controller.ts` — class `AuthController`, method `me()`.
