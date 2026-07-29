@@ -25,16 +25,21 @@ function asManager(v: unknown): ToolManager | "all" {
 }
 
 /**
- * The Install API (pm/install_brew.mdx §7.1, pm/install_npm.mdx §6). Installing host CLI tools runs
- * package-manager processes (brew/npm/pipx) — with maintainer post-install scripts — as the service
- * account, so the WHOLE controller is admin-gated (@RequireRole("admin")): the logged-out `default`
- * user and any non-admin signed-in user are refused 403 on every route, including the catalog reads.
- * This closes the unauthenticated remote-install surface (security audit finding #1). Never rely on
- * the UI hiding the page — the backend is authoritative.
+ * The Install API (pm/install_brew.mdx §7.1, pm/install_npm.mdx §6).
+ *
+ * Split gate. Installing host CLI tools runs package-manager processes (brew/npm/pipx) — with
+ * maintainer post-install scripts — as the service account, so the routes that ACTUALLY install or
+ * shell out stay admin-gated (@RequireRole("admin")), which is what closes the unauthenticated
+ * remote-install surface (security audit finding #1).
+ *
+ * The read-only routes (catalog / preflight / job status / job stream) are OPEN. They only report
+ * which tools are already present, and `GET /preflight` sits on the critical path of every run:
+ * gating the whole controller meant the logged-out `default` user could not start a check at all,
+ * which contradicts pm/security.mdx §6 and AC 1. Never rely on the UI hiding the page — the
+ * backend is authoritative.
  */
 @ApiTags("install")
 @ApiBearerAuth()
-@RequireRole("admin")
 @Controller("install")
 export class InstallController {
 	constructor(private readonly install: InstallService) {}
@@ -60,12 +65,14 @@ export class InstallController {
 	}
 
 	@Post("detect")
+	@RequireRole("admin")
   @ApiOperation({ summary: "Force a fresh detection (Re-detect)." })
   detect(@Query("manager") manager?: string): ToolStatus[] {
     return this.install.detect(asManager(manager))
   }
 
 	@Post("run")
+	@RequireRole("admin")
   @ApiOperation({ summary: "Install the selected ids serially; returns a jobId to stream/poll." })
   run(@Body() body: { ids?: unknown }): InstallJobAccepted {
     const ids = Array.isArray(body?.ids)

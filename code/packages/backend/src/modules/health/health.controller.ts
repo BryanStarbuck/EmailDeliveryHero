@@ -13,8 +13,10 @@ import { locateTools } from "@shared/tool-runner";
 import type { ClientErrorDto } from "./dto/client-error.dto";
 
 /**
- * Unauthenticated health + auth-config probes. These are the only routes reachable before sign-in
- * (marked @Public()). The frontend reads /health/auth-config on load to show a clear "OAuth not
+ * Unauthenticated health + auth-config probes. These are the only routes that skip the auth guard
+ * entirely (marked @Public()) — every OTHER route still runs it, but the guard identifies rather
+ * than gates, attaching the `default` user when logged out, so ordinary routes are reachable
+ * without signing in too. The frontend reads /health/auth-config on load to show a clear "OAuth not
  * configured" message instead of bouncing the user into a broken Google redirect.
  */
 @ApiTags("health")

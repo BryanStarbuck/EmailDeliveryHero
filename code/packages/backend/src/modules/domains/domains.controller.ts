@@ -8,7 +8,6 @@ import {
 	Patch,
 	Post,
 } from "@nestjs/common";
-import { RequireAuth } from "@module/auth/roles.decorator";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { type AuthUser, CurrentUser } from "@shared/current-user.decorator";
 import type { MonitoredDomain } from "./domain.types";
@@ -34,7 +33,6 @@ export class DomainsController {
   }
 
 	@Post()
-	@RequireAuth()
 	@ApiOperation({ summary: "Add a domain to monitor" })
 	create(
 		@Body() dto: CreateDomainDto,
@@ -44,7 +42,6 @@ export class DomainsController {
 	}
 
 	@Patch(":id")
-	@RequireAuth()
 	@ApiOperation({
 		summary: "Update a monitored domain (label, DKIM selectors, IPs, schedule)",
 	})
@@ -56,7 +53,6 @@ export class DomainsController {
 	}
 
 	@Delete(":id")
-  @RequireAuth()
   @HttpCode(204)
   @ApiOperation({ summary: "Stop monitoring a domain (also removes its audit history)" })
   async remove(@Param("id") id: string): Promise<void> {

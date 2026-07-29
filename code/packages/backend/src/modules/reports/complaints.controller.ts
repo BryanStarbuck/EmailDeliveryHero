@@ -1,5 +1,4 @@
 import { CHECKERS } from "@module/audit/checks";
-import { RequireAuth } from "@module/auth/roles.decorator";
 import { DomainsService } from "@module/domains/domains.service";
 import {
 	Controller,
@@ -237,7 +236,6 @@ export class ComplaintsController {
 	}
 
 	@Post("recheck")
-	@RequireAuth()
 	@ApiOperation({ summary: "Ingest any new reports, then rebuild the board" })
 	async recheck(
 		@Param("id") id: string,
@@ -252,7 +250,6 @@ export class ComplaintsController {
 	 * `recheckCheckId` through the same fix library the UI rendered, so the two can never disagree.
 	 */
 	@Post("recheck/:fixId")
-	@RequireAuth()
 	@ApiOperation({ summary: "Run only the checkers the named fix declares" })
 	async recheckFix(
 		@Param("id") id: string,

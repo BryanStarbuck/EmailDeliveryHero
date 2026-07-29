@@ -1,5 +1,4 @@
 import { RateLimit } from "@module/auth/rate-limit.decorator";
-import { RequireAuth } from "@module/auth/roles.decorator";
 import {
 	BadRequestException,
 	Body,
@@ -135,7 +134,6 @@ export class BlacklistsController {
 	}
 
 	@Patch("zones/:zone")
-	@RequireAuth()
 	@ApiOperation({
 		summary:
 			"Update one zone's operator override (enabled/weight) — writes <stateDir>/blacklist_zones.yaml, never the checked-in registry",
@@ -192,7 +190,6 @@ export class BlacklistsController {
   }
 
 	@Post(":domainId/recheck")
-	@RequireAuth()
 	@RateLimit(20, 60_000)
 	@ApiOperation({
 		summary:
@@ -215,7 +212,6 @@ export class BlacklistsController {
 	}
 
 	@Patch(":domain/portals/:provider")
-	@RequireAuth()
 	@ApiOperation({ summary: "Set the user's provider-portal checklist state" })
 	async setPortalState(
 		@Param("domain") domain: string,

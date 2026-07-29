@@ -11,7 +11,6 @@ import {
 	Query,
 } from "@nestjs/common";
 import { RateLimit } from "@module/auth/rate-limit.decorator";
-import { RequireAuth } from "@module/auth/roles.decorator";
 import {
 	ApiBearerAuth,
 	ApiOperation,
@@ -72,11 +71,17 @@ export class GenerateTlsaDto {
 }
 
 /**
- * Reads (GET) are open to every user including the logged-out `default` user. Every audit TRIGGER
- * (run / scoped re-run / spot-check / discovery) and the history-delete require a verified company
- * sign-in (@RequireAuth) — an anonymous caller cannot drive the server's outbound DNS/`dig`/RHSBL
- * fan-out or use it as a DNS-probe proxy (security audit finding #3). The two full-fan-out entry
- * points are additionally rate-limited per source so even a signed-in client cannot flood them.
+ * Every route here — reads AND audit triggers (run / scoped re-run / spot-check / discovery) — is
+ * open to every user, including the logged-out `default` user. Gating ordinary deliverability
+ * auditing behind login is an explicit NON-GOAL (pm/security.mdx §6): on localhost the audit data is
+ * the user's own domains and `default` is an acceptable owner for it, so requiring a sign-in here
+ * made the app unusable logged out and violated AC 1.
+ *
+ * The DNS-probe-proxy concern (security audit finding #3) is instead answered by the controls that
+ * do not depend on identity: the server binds loopback-only, CORS fails closed, and the two
+ * full-fan-out entry points stay rate-limited per source. A deployment that needs a real gate here
+ * should use the network boundary / policy toggle described in pm/security.mdx §6, not a decorator
+ * that no logged-out user can ever satisfy.
  */
 @ApiTags("audit")
 @ApiBearerAuth()
@@ -115,7 +120,6 @@ export class AuditController {
   }
 
 	@Delete("runs/:runId")
-  @RequireAuth()
   @ApiOperation({ summary: "Remove one run from the history" })
   async deleteRun(@Param("runId") runId: string): Promise<{ ok: true }> {
     await this.audit.deleteRun(runId)
@@ -123,7 +127,6 @@ export class AuditController {
   }
 
 	@Post("run/:domainId")
-	@RequireAuth()
 	@RateLimit(20, 60_000)
 	@ApiOperation({
 		summary:
@@ -152,7 +155,6 @@ export class AuditController {
 	}
 
 	@Post("run/:domainId/blacklists")
-  @RequireAuth()
   @ApiOperation({
     summary:
       "Category-scoped re-run: execute only the Blacklists category and write a new run file with run.scope: blacklists (pm/checks/blacklists.mdx §21 / AC 26)",
@@ -162,7 +164,6 @@ export class AuditController {
   }
 
 	@Post("run/:domainId/check/dns")
-  @RequireAuth()
   @ApiOperation({
     summary:
       "Category-scoped re-run: execute all ten DNS & Infrastructure family checkers and write a new run file with run.scope: dns (pm/checks/dns.mdx §15.1 / AC 20)",
@@ -172,7 +173,6 @@ export class AuditController {
   }
 
 	@Post("run/:domainId/check/dns/:checkKey")
-	@RequireAuth()
 	@ApiOperation({
 		summary:
 			"Family-scoped re-run: execute ONE DNS & Infrastructure family checker (kebab-case §14.1 check key, e.g. reverse-dns) and write a new run file with run.scope: dns.<family_key> (pm/checks/dns.mdx §15.1 / AC 20)",
@@ -203,7 +203,6 @@ export class AuditController {
 	}
 
 	@Post("run/:domainId/checks/dkim")
-  @RequireAuth()
   @ApiOperation({
     summary:
       "Category-scoped re-run: execute only the DKIM checker and persist a new run whose other five categories are carried forward unchanged (pm/checks/dkim.mdx §7.7 — 'Run DKIM now')",
@@ -213,7 +212,6 @@ export class AuditController {
   }
 
 	@Post("run/:domainId/check/:checkerId")
-	@RequireAuth()
 	@ApiOperation({
 		summary:
 			"Single-check re-run: execute ONE Spam & Content family checker (registry id, e.g. content.bimi) and surgically merge its findings/payload into the latest result — the immutable per-run history is never rewritten (pm/checks/spam_content.mdx §9)",
@@ -241,7 +239,6 @@ export class AuditController {
 	}
 
 	@Post("spot-check/:domainId/:checkKey")
-	@RequireAuth()
 	@ApiOperation({
 		summary:
 			"Re-run one DNS & Infrastructure family checker live (pm/checks/dns.mdx §6.2 — the ⟳ spot-check / 'run this check now'); never persisted",
@@ -262,7 +259,6 @@ export class AuditController {
 	}
 
 	@Post("dkim-discovery/:domainId")
-  @RequireAuth()
   @ApiOperation({
     summary:
       "Probe the MX-guided common-DKIM-selector wordlist for one domain and return the hits for one-click import (pm/checks/dkim.mdx §6.2 item 6 — 'Run discovery now'); never persisted",
@@ -285,7 +281,6 @@ export class AuditController {
   }
 
 	@Post("run")
-	@RequireAuth()
 	@RateLimit(6, 60_000)
 	@ApiOperation({ summary: "Run a fresh audit for every monitored domain" })
 	runAll(): Promise<AuditResult[]> {

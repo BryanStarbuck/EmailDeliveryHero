@@ -15,10 +15,15 @@ export const REQUIRE_AUTH_KEY = "requireAuth";
 /**
  * Require a verified, signed-in company identity — ANY authenticated user, not a specific role.
  * The domain allowlist is already enforced by the auth strategy before a token is accepted, so this
- * gates a route to "a real logged-in employee" and 403s the logged-out `default` user. Use it on
- * state-changing / host-touching routes that any employee may drive but an anonymous caller must
- * not (e.g. triggering audits, mutating monitored domains). For admin-only routes use
- * {@link RequireRole}("admin") instead.
+ * gates a route to "a real logged-in employee" and 403s the logged-out `default` user.
+ *
+ * DELIBERATELY UNUSED TODAY. Login is OPTIONAL (pm/security.mdx §6), so any route carrying this is
+ * a route the logged-out `default` user can never reach — and `default` is the normal way this app
+ * is used. It was previously applied to audit triggers and domain mutations, which broke the whole
+ * product for logged-out users; those decorators were removed. Do NOT reach for it to protect
+ * "state-changing" or "host-touching" routes: on localhost the state is the user's own. Reserve it
+ * for a future route that genuinely has no meaning without an identity (e.g. acting on behalf of a
+ * named employee). For admin-only configuration use {@link RequireRole}("admin") instead.
  */
 export const RequireAuth = () => SetMetadata(REQUIRE_AUTH_KEY, true);
 
