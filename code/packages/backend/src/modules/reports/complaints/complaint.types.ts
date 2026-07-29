@@ -160,6 +160,38 @@ export interface ComplaintReportRef {
 	windowEnd: string;
 }
 
+/**
+ * One row of the fleet complaint table — GET /api/complaints (pm/Email_Complaints.mdx §9.7).
+ *
+ * The left bar's **Complaints** item lands on a cross-domain view, so this is the board reduced to
+ * what fits one line: the verdict, how much mail it covers, the single loudest complaint, and
+ * whether reports are even arriving. Everything else stays on the per-domain board.
+ */
+export interface ComplaintFleetRow {
+	domainId: string;
+	domain: string;
+	verdict: BoardVerdict;
+	headline: string;
+	messages: number;
+	authenticatedPct: number;
+	/** How many of this domain's complaints carry a "problem" verdict / a "watch" verdict (§8.1). */
+	problems: number;
+	watching: number;
+	topComplaint: {
+		code: ComplaintCode;
+		key: string;
+		title: string;
+		messages: number;
+	} | null;
+	reporters: number;
+	reportsStored: number;
+	/** End of the analyzed window — the newest report we hold, not `now` (§13). */
+	lastReportAt: string | null;
+	ingestionEnabled: boolean;
+	/** Set when this domain's reports could not be read; the row renders, the fleet does not fail. */
+	error: string | null;
+}
+
 /** GET /api/domains/:id/complaints (pm/Email_Complaints.mdx §12). */
 export interface ComplaintBoard {
 	domainId: string;

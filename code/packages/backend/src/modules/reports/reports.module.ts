@@ -3,6 +3,7 @@ import { Module } from "@nestjs/common";
 import {
 	ComplaintsController,
 	ComplaintsService,
+	FleetComplaintsController,
 	RunComplaintsController,
 } from "./complaints.controller";
 import { ReportsController } from "./reports.controller";
@@ -21,7 +22,14 @@ import { ReportsService } from "./reports.service";
 	// /domains/:id/…, and Nest matches in declaration order.
 	// RunComplaintsController owns /domains/:id/runs/:runId/complaints — a distinct path, so its
 	// order relative to ComplaintsController does not matter, but it is listed alongside it.
-	controllers: [ReportsController, ComplaintsController, RunComplaintsController],
+	// FleetComplaintsController owns the flat /complaints path (the left bar's fleet view) — no
+	// overlap with the /domains/:id/… controllers, so declaration order is immaterial for it.
+	controllers: [
+		ReportsController,
+		ComplaintsController,
+		RunComplaintsController,
+		FleetComplaintsController,
+	],
 	providers: [ReportsService, ComplaintsService],
 	exports: [ReportsService, ComplaintsService],
 })

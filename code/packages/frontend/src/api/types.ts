@@ -1590,6 +1590,29 @@ export interface ComplaintBoard {
 	};
 }
 
+/** GET /complaints — one row per monitored domain, worst verdict first (§9.7). */
+export interface ComplaintFleetRow {
+	domainId: string;
+	domain: string;
+	verdict: BoardVerdict;
+	headline: string;
+	messages: number;
+	authenticatedPct: number;
+	problems: number;
+	watching: number;
+	topComplaint: {
+		code: ComplaintCode;
+		key: string;
+		title: string;
+		messages: number;
+	} | null;
+	reporters: number;
+	reportsStored: number;
+	lastReportAt: string | null;
+	ingestionEnabled: boolean;
+	error: string | null;
+}
+
 /** GET /domains/:id/complaints/:code — the drill-down payload (§10.4). */
 export interface ComplaintDetail {
 	board: Omit<ComplaintBoard, "complaints">;

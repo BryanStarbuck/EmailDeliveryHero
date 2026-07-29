@@ -17,6 +17,7 @@ import { DnssecExpiryPage } from "@/pages/dnssec/DnssecExpiryPage";
 import { DnssecPage } from "@/pages/dnssec/DnssecPage";
 import { BlacklistTargetPage } from "@/pages/blacklists/BlacklistTargetPage";
 import { BlacklistZonePage } from "@/pages/blacklists/BlacklistZonePage";
+import { ComplaintsFleetPage } from "@/pages/complaints/ComplaintsFleetPage";
 import { ComplaintDetailPage } from "@/pages/domains/ComplaintDetailPage";
 import { ContentScoringPage } from "@/pages/domains/ContentScoringPage";
 import { EmailComplaintsPage } from "@/pages/domains/EmailComplaintsPage";
@@ -354,6 +355,13 @@ const complaintsRoute = createRoute({
 	path: "/domains/$id/complaints",
 	component: EmailComplaintsPage,
 });
+// The fleet complaint view (pm/Email_Complaints.mdx §9.7) — where the left bar's Complaints item
+// lands: every monitored domain's verdict, worst first, each row opening that domain's board.
+const complaintsFleetRoute = createRoute({
+	getParentRoute: () => appLayoutRoute,
+	path: "/complaints",
+	component: ComplaintsFleetPage,
+});
 const complaintDetailRoute = createRoute({
 	getParentRoute: () => appLayoutRoute,
 	path: "/domains/$id/complaints/$code",
@@ -446,6 +454,7 @@ const routeTree = rootRoute.addChildren([
 		blacklistTargetRoute,
 		reportsRoute,
 		domainReportsRoute,
+		complaintsFleetRoute,
 		complaintsRoute,
 		complaintDetailRoute,
 		runComplaintsRoute,

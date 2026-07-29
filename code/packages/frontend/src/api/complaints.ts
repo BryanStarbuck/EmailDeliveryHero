@@ -1,6 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./axios";
-import type { ComplaintBoard, ComplaintDetail } from "./types";
+import type {
+	ComplaintBoard,
+	ComplaintDetail,
+	ComplaintFleetRow,
+} from "./types";
 
 /**
  * The Email Complaints API (pm/Email_Complaints.mdx §13) — the domain-owner-facing reading of the
@@ -42,6 +46,19 @@ export function useComplaintBoard(
 						})
 					).data,
 		enabled: !!domainId,
+	});
+}
+
+/**
+ * GET /complaints?days= — the fleet table behind the left bar's Complaints item (§9.7). One row per
+ * monitored domain, worst verdict first; each row opens that domain's board.
+ */
+export function useComplaintFleet(days = 60) {
+	return useQuery({
+		queryKey: ["complaints", "fleet", days] as const,
+		queryFn: async () =>
+			(await api.get<ComplaintFleetRow[]>("/complaints", { params: { days } }))
+				.data,
 	});
 }
 

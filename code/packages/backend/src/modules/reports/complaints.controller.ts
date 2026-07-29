@@ -17,9 +17,12 @@ import type { Finding } from "@module/audit/checks";
 import { buildComplaintBoard } from "./complaints/board";
 import { isEspDefaultDomain } from "./complaints/classify";
 import type {
+	BoardVerdict,
 	Complaint,
 	ComplaintBoard,
 	ComplaintFix,
+	ComplaintFleetRow,
+	ComplaintVerdict,
 } from "./complaints/complaint.types";
 import { buildFix } from "./complaints/fixes";
 import { resolvePtrs } from "./complaints/ptr";
@@ -39,6 +42,22 @@ import { ReportsService } from "./reports.service";
 const ALLOWED_DAYS = [7, 30, 60, 90];
 const DEFAULT_DAYS = 60;
 
+/** Worst-first ordering for the §9.7 fleet table (pm/Email_Complaints.mdx §8.2). */
+const BOARD_VERDICT_RANK: Record<BoardVerdict, number> = {
+	action: 0,
+	attention: 1,
+	watch: 2,
+	ok: 3,
+	insufficient_data: 4,
+};
+
+/** Worst-first ordering of a domain's own complaints, to pick the row's headline complaint (§8.1). */
+const VERDICT_RANK: Record<ComplaintVerdict, number> = {
+	problem: 0,
+	watch: 1,
+	ok: 2,
+};
+
 function clampDays(raw: string | undefined): number {
 	const n = Number(raw);
 	if (!Number.isFinite(n)) return DEFAULT_DAYS;
@@ -56,22 +75,30 @@ function clampDays(raw: string | undefined): number {
 export class ComplaintsService {
 	constructor(private readonly domains: DomainsService) {}
 
-	async board(domainId: string, days: number): Promise<ComplaintBoard> {
+	async board(
+		domainId: string,
+		days: number,
+		opts: { reverseDns?: boolean } = {},
+	): Promise<ComplaintBoard> {
 		const domain = this.domains.get(domainId);
 		const config = readAppConfig().reports;
 		const dmarcReports = listDmarcReports(domainId);
 
 		// Reverse DNS for the evidence tables (§10.2). Resolved here rather than inside
 		// buildComplaintBoard so board assembly stays pure and synchronous; highest-volume IPs first,
-		// because resolvePtrs() only looks up a bounded prefix.
-		const volumeByIp = new Map<string, number>();
-		for (const report of dmarcReports)
-			for (const row of report.rows)
-				volumeByIp.set(row.sourceIp, (volumeByIp.get(row.sourceIp) ?? 0) + row.count);
-		const ipsByVolume = [...volumeByIp.entries()]
-			.sort((a, b) => b[1] - a[1])
-			.map(([ip]) => ip);
-		const ptrByIp = await resolvePtrs(ipsByVolume);
+		// because resolvePtrs() only looks up a bounded prefix. The §9.7 fleet roll-up opts out: it
+		// shows no evidence table, and one page must never wait on N domains' worth of PTR lookups.
+		let ptrByIp = new Map<string, string | null>();
+		if (opts.reverseDns !== false) {
+			const volumeByIp = new Map<string, number>();
+			for (const report of dmarcReports)
+				for (const row of report.rows)
+					volumeByIp.set(row.sourceIp, (volumeByIp.get(row.sourceIp) ?? 0) + row.count);
+			const ipsByVolume = [...volumeByIp.entries()]
+				.sort((a, b) => b[1] - a[1])
+				.map(([ip]) => ip);
+			ptrByIp = await resolvePtrs(ipsByVolume);
+		}
 
 		return buildComplaintBoard({
 			domainId,
@@ -83,6 +110,70 @@ export class ComplaintsService {
 			lastIngestAt: readIngestState(domainId).lastIngestAt,
 			ptrByIp,
 		});
+	}
+
+	/**
+	 * §9.7 — the fleet roll-up behind the left bar's **Complaints** item: one summary row per
+	 * monitored domain, worst verdict first. Built from the same boards the per-domain page renders
+	 * (never a second classification path), minus reverse DNS, which the summary does not show.
+	 *
+	 * A domain whose reports cannot be read is reported as a row, not an exception: one unreadable
+	 * domain must not blank the whole fleet.
+	 */
+	async fleet(days: number): Promise<ComplaintFleetRow[]> {
+		const rows: ComplaintFleetRow[] = [];
+		for (const domain of this.domains.list()) {
+			try {
+				const board = await this.board(domain.id, days, { reverseDns: false });
+				const ranked = [...board.complaints].sort(
+					(a, b) =>
+						VERDICT_RANK[a.verdict] - VERDICT_RANK[b.verdict] ||
+						b.messages - a.messages,
+				);
+				const top = ranked[0];
+				rows.push({
+					domainId: domain.id,
+					domain: domain.name,
+					verdict: board.verdict,
+					headline: board.headline,
+					messages: board.totals.messages,
+					authenticatedPct: board.totals.authenticatedPct,
+					problems: board.complaints.filter((c) => c.verdict === "problem").length,
+					watching: board.complaints.filter((c) => c.verdict === "watch").length,
+					topComplaint: top
+						? { code: top.code, key: top.key, title: top.title, messages: top.messages }
+						: null,
+					reporters: board.reporters.length,
+					reportsStored: board.ingest.reportsStored,
+					lastReportAt: board.window.end || null,
+					ingestionEnabled: board.ingestionEnabled,
+					error: null,
+				});
+			} catch (err) {
+				rows.push({
+					domainId: domain.id,
+					domain: domain.name,
+					verdict: "insufficient_data",
+					headline: "Could not read this domain's reports",
+					messages: 0,
+					authenticatedPct: 0,
+					problems: 0,
+					watching: 0,
+					topComplaint: null,
+					reporters: 0,
+					reportsStored: 0,
+					lastReportAt: null,
+					ingestionEnabled: false,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+		return rows.sort(
+			(a, b) =>
+				BOARD_VERDICT_RANK[a.verdict] - BOARD_VERDICT_RANK[b.verdict] ||
+				b.messages - a.messages ||
+				a.domain.localeCompare(b.domain),
+		);
 	}
 
 	/** One complaint plus its fixes — the drill-down payload (§10.4). */
@@ -407,5 +498,27 @@ export class RunComplaintsController {
 	) {
 		const board = this.snapshot(id, runId);
 		return this.complaints.detailFrom(board, code, board.window.days);
+	}
+}
+
+/**
+ * The fleet complaint view (pm/Email_Complaints.mdx §9.7) — what the left bar's **Complaints** item
+ * asks for: across every monitored domain, is anybody complaining, and about what?
+ *
+ * One row per domain, worst verdict first, each row a door into that domain's board. Read is open
+ * (login is optional per pm/security.mdx §1); the re-check that touches the mailbox stays on the
+ * per-domain controller.
+ */
+@ApiTags("complaints")
+@Controller("complaints")
+export class FleetComplaintsController {
+	constructor(private readonly complaints: ComplaintsService) {}
+
+	@Get()
+	@ApiOperation({
+		summary: "Every monitored domain's complaint verdict, worst first",
+	})
+	fleet(@Query("days") days?: string): Promise<ComplaintFleetRow[]> {
+		return this.complaints.fleet(clampDays(days));
 	}
 }

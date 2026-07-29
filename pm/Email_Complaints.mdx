@@ -559,7 +559,7 @@ can see their fix worked — a detail that turns the page from a nag into feedba
 
 ## 9. UI entry points
 
-Six ways in. Each is a separate deliverable.
+Seven ways in. Each is a separate deliverable.
 
 ### 9.1 Dashboard — the row-menu item
 The domain-health table's six category columns are **locked** by
@@ -592,12 +592,51 @@ user reviewing a historical run reaches the same conclusions.
 
 | Route | Page |
 | --- | --- |
+| `/complaints` | The **fleet** view — every monitored domain (§9.7) |
 | `/domains/:id/complaints` | The board (newest window) |
 | `/domains/:id/complaints/:code` | One complaint's drill-down |
 | `/domains/:id/runs/:runId/complaints` | Run-scoped alias of the board |
 | `/domains/:id/runs/:runId/complaints/:code` | Run-scoped alias of the drill-down |
 
 Static segments register ahead of param routes, matching the DNS/DMARC precedent in `router.tsx`.
+
+### 9.7 The left bar — **Complaints** (normative)
+
+Every other entry point above requires the user to already be looking at a domain. That is the wrong
+starting position for the question people actually arrive with: *is anybody complaining about my mail
+at all, and where do I look first?* So the surface gets a **top-level left-bar item** —
+**Complaints**, icon `MailWarning`, route `/complaints`, order 7, between **Reports** and
+**Settings** ([left_bar.yaml](./left_bar.yaml) is the source of truth; [leftbar.mdx](./leftbar.mdx)
+§3 carries the styling).
+
+It is deliberately **not** the same thing as **Reports**: that item is the history of *our own*
+health-check runs; this one is what the *rest of the internet* says about our mail. It is also not a
+seventh dashboard category — [dashboard.mdx](./dashboard.mdx)'s six columns stay locked (§9.1).
+
+**The fleet page** at `/complaints`: one row per monitored domain, sorted worst verdict first
+(`action` → `attention` → `watch` → `ok` → `insufficient_data`), ties broken by message volume then
+name. Columns: **Domain** (with the board's own `headline` beneath it, never re-worded), **Verdict**
+(the §8.2 badge, spelled out in words per §10.5), **Loudest complaint** (that domain's worst-verdict,
+highest-volume complaint, linking straight to its drill-down), **Messages**, **Authenticated %**, and
+the open **problem / watch** counts. The row and its chevron open that domain's board.
+
+Four rules keep it honest:
+
+1. **Summary only.** No evidence tables and no fix plans — those live on the board, one click away.
+   Duplicating them here would create a second place for them to disagree.
+2. **Same classification, no second path.** Rows are reduced from the very boards §12 builds, so the
+   fleet view can never disagree with the page it links to.
+3. **No reverse DNS.** The summary shows no source IPs, and one page must never wait on N domains'
+   worth of PTR lookups; the board still resolves them for its own evidence tables (§10.2).
+4. **A broken domain is a row, not a failure.** If one domain's reports cannot be read, its row says
+   so in the headline slot and carries the `insufficient_data` verdict — one unreadable domain must
+   never blank the fleet.
+
+The window selector offers the same 30 / 60 / 90 vocabulary as the board (§13), so the two surfaces
+can be compared directly. "No reports yet" is stated plainly rather than rendered as a healthy zero —
+silence is not health (see C13).
+
+API: `GET /api/complaints?days=60` → `ComplaintFleetRow[]`. Open, like every other read (§13).
 
 ---
 
@@ -934,6 +973,7 @@ evidence under a historical heading, which is precisely the failure this snapsho
 
 | Method | Route | Auth | Returns |
 | --- | --- | --- | --- |
+| `GET` | `/api/complaints?days=60` | open | `ComplaintFleetRow[]` — the §9.7 fleet table: one summary row per monitored domain, worst verdict first, built from the same boards without reverse DNS |
 | `GET` | `/api/domains/:id/complaints?days=60` | open | `ComplaintBoard` |
 | `GET` | `/api/domains/:id/complaints/:code?days=60` | open | One complaint, full `sources[]`, plus its fixes |
 | `GET` | `/api/domains/:id/complaints/:code/raw?report=<org>/<id>` | open | The pretty-printed source XML/JSON. Serves the raw payload kept at ingest; for reports stored before the raw store existed it falls back to the normalized JSON and says so via `format: "normalized"` |
@@ -962,6 +1002,8 @@ report end** rather than `now`, so a historical corpus still analyzes (matching
 | §11 fix library | `code/packages/backend/src/modules/reports/complaints/fixes.ts` — `fixesFor()` |
 | §10.2 reverse-DNS column (bounded, cached, never fatal) | `code/packages/backend/src/modules/reports/complaints/ptr.ts` — `resolvePtrs()` |
 | §13 API | `code/packages/backend/src/modules/reports/complaints.controller.ts` — `ComplaintsController`, `RunComplaintsController` |
+| §9.7 fleet roll-up (`GET /api/complaints`) | `code/packages/backend/src/modules/reports/complaints.controller.ts` — `FleetComplaintsController`, `ComplaintsService.fleet()` |
+| §9.7 fleet page (left bar → `/complaints`) | `code/packages/frontend/src/pages/complaints/ComplaintsFleetPage.tsx` — `ComplaintsFleetPage`; hook `useComplaintFleet()` in `code/packages/frontend/src/api/complaints.ts` |
 | §12 per-run snapshot persistence (`<state>/runs/<domain>/complaints/<runId>.json`) | `code/packages/backend/src/modules/reports/complaints/snapshot-store.ts`; written from `audit.service.ts` — `saveComplaintSnapshotFor()` |
 | §10.4 raw report payloads kept at ingest (`<state>/reports/<domainId>/raw/…`) | `code/packages/backend/src/modules/reports/raw-store.ts`; written from `reports.service.ts` |
 | Parsed report persistence | `code/packages/backend/src/modules/reports/report-store.ts` |
@@ -990,7 +1032,9 @@ report end** rather than `now`, so a historical corpus still analyzes (matching
    `messagesFixed` descending.
 7b. A row whose envelope **and** DKIM `d=` both claim our domain while both results are negative is
    **not** a known sender (§7.1) — it classifies C01, never C10.
-8. All six entry points in §9 navigate to the page; run-scoped aliases render the stored snapshot.
+8. All seven entry points in §9 navigate to the page — including the left bar's **Complaints** item
+   (§9.7), whose fleet table lists every monitored domain worst-first and never disagrees with the
+   board it links to; run-scoped aliases render the stored snapshot.
 9. Zero reports renders the §10.1 empty state — never an error and never a green verdict.
 10. IPv6 sources display, group, sort and drill down identically to IPv4.
 11. The page renders correctly in light and dark themes, and the body never scrolls horizontally.

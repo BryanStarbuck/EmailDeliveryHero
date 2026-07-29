@@ -71,8 +71,15 @@ A flat, ordered list starting at the top of the bar; the account slot pinned to 
 | 2 | **Domains** | `Globe` | `/domains` | Add and manage the email-sending domains you monitor. |
 | 3 | **Audits** | `ShieldCheck` | `/audits` | Deliverability audit results — SPF, DKIM, DMARC, MX, and blacklist findings. |
 | 4 | **Blacklists** | `Ban` | `/blacklists` | DNSBL status for your sending IPs, with delisting steps. |
-| 5 | **Reports** | `Mailbox` | `/reports` | The report library — the newest health-check reports (one per run, from the run history); planned second section: ingested DMARC (`rua`) + TLS-RPT report emails ([emails.mdx](./emails.mdx)). |
-| 6 | **Settings** | `Settings` | `/settings` | Account, scheduling, and app configuration. |
+| 5 | **DNSSEC** | `ShieldCheck` | `/dnssec` | Cross-domain DNSSEC hygiene plus the RRSIG expiry radar ([checks/dnssec.mdx](./checks/dnssec.mdx) §19). |
+| 6 | **Reports** | `Mailbox` | `/reports` | The report library — the newest health-check reports (one per run, from the run history); planned second section: ingested DMARC (`rua`) + TLS-RPT report emails ([emails.mdx](./emails.mdx)). |
+| 7 | **Complaints** | `MailWarning` | `/complaints` | Email complaints — what mailbox providers are telling us about every monitored domain, one row per domain, worst verdict first ([Email_Complaints.mdx](./Email_Complaints.mdx) §9.7). |
+| 8 | **Settings** | `Settings` | `/settings` | Account, scheduling, and app configuration. |
+
+**Reports vs. Complaints.** They are different products and both belong in the bar. *Reports* is the
+history of **our own** health-check runs — what we tested and what we found. *Complaints* is what the
+**rest of the internet** says about our mail, in its own words, turned into plain language. Neither
+answers the other's question.
 
 States:
 

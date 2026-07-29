@@ -28,7 +28,7 @@ Left_Nav:
     # ==========================================================================
     - Location: app
       name: "EmailDeliveryHero — Main Left Bar"
-      description: "Primary navigation: Dashboard, Domains, Audits, Blacklists, Settings."
+      description: "Primary navigation: Dashboard, Domains, Audits, Blacklists, DNSSEC, Reports, Complaints, Settings."
       auth_system: "openauth_federated"
       sidebar_width: 256px
 
@@ -91,11 +91,18 @@ Left_Nav:
           order: 6
           description: "The report library: the newest health-check reports (one per run, from the on-disk run history), each opening the full view-one-report page. See pm/reports.mdx. Planned second section: ingested DMARC (rua) & TLS-RPT report emails per pm/emails.mdx."
 
+        - id: complaints
+          label: "Complaints"
+          icon: "MailWarning"
+          route: "/complaints"
+          order: 7
+          description: "Email complaints: what mailbox providers (Google, Yahoo, Microsoft…) are telling us about every domain you monitor, read as plain-language complaints with a verdict and a fix. Row → that domain's board. See pm/Email_Complaints.mdx §9.7."
+
         - id: settings
           label: "Settings"
           icon: "Settings"
           route: "/settings"
-          order: 7
+          order: 8
           description: "Account, scheduling, and app configuration."
 
       # Footer: account block (avatar/name/email) -> popup menu (expands UP).
