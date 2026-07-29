@@ -48,11 +48,17 @@ import { cn } from "@/lib/utils";
  * fine, and the boring configuration defect behind a green-looking pass rate is the real problem.
  */
 export function EmailComplaintsPage() {
-	const { id = "" } = useParams({ strict: false }) as { id?: string };
+	// `runId` is present only on the run-scoped alias (§9.6). When it is, the page renders that
+	// run's STORED SNAPSHOT — historical evidence, so the window selector and the re-check action
+	// are hidden: neither means anything for a board that is already frozen.
+	const { id = "", runId } = useParams({ strict: false }) as {
+		id?: string;
+		runId?: string;
+	};
 	const navigate = useNavigate();
 	const [days, setDays] = useState<number>(60);
 	const [filter, setFilter] = useState<ComplaintFilter>("all");
-	const { data: board, isLoading, isError } = useComplaintBoard(id, days);
+	const { data: board, isLoading, isError } = useComplaintBoard(id, days, runId);
 	const recheck = useRecheckComplaints(id, days);
 
 	const onRecheck = () =>
@@ -71,7 +77,9 @@ export function EmailComplaintsPage() {
 	if (isError || !board) {
 		return (
 			<p className="p-6 text-sm text-red-700">
-				Could not load the complaints for this domain.
+				{runId
+					? "This run has no stored complaint snapshot. Runs recorded before complaint snapshots shipped cannot be reconstructed, because the reports have moved on since — open the live board instead."
+					: "Could not load the complaints for this domain."}
 			</p>
 		);
 	}
@@ -96,17 +104,19 @@ export function EmailComplaintsPage() {
 					>
 						<Mailbox className="h-4 w-4" /> Raw reports
 					</Link>
-					<button
-						type="button"
-						onClick={onRecheck}
-						disabled={recheck.isPending}
-						className="inline-flex items-center gap-1 rounded-md bg-[var(--edh-primary)] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-60"
-					>
-						<RefreshCw
-							className={cn("h-4 w-4", recheck.isPending && "animate-spin")}
-						/>
-						{recheck.isPending ? "Re-checking…" : "Ingest & re-check"}
-					</button>
+					{runId ? null : (
+						<button
+							type="button"
+							onClick={onRecheck}
+							disabled={recheck.isPending}
+							className="inline-flex items-center gap-1 rounded-md bg-[var(--edh-primary)] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-60"
+						>
+							<RefreshCw
+								className={cn("h-4 w-4", recheck.isPending && "animate-spin")}
+							/>
+							{recheck.isPending ? "Re-checking…" : "Ingest & re-check"}
+						</button>
+					)}
 				</div>
 			</div>
 
@@ -115,6 +125,22 @@ export function EmailComplaintsPage() {
 				What mailbox providers are telling you about mail sent as{" "}
 				<span className="font-medium text-slate-700">{board.domain}</span>.
 			</p>
+
+			{runId ? (
+				<div className="mb-6 rounded-lg border border-[var(--edh-border)] bg-slate-50 px-4 py-3 text-sm text-slate-700">
+					<span className="font-medium">Historical snapshot.</span> This is the
+					board exactly as it stood when that run finished — not the current
+					state. Reports have arrived since.{" "}
+					<Link
+						to="/domains/$id/complaints"
+						params={{ id }}
+						className="text-[var(--edh-primary)] hover:underline"
+					>
+						Open the live board
+					</Link>
+					.
+				</div>
+			) : null}
 
 			{board.totals.messages === 0 ? (
 				<EmptyState board={board} />
@@ -520,6 +546,7 @@ export function EvidenceTable({
 					<thead className="bg-slate-50 text-[var(--edh-muted)]">
 						<tr>
 							<th className="px-3 py-2 font-medium">Source IP</th>
+							<th className="px-3 py-2 font-medium">Reverse DNS</th>
 							<th className="px-3 py-2 font-medium">Msgs</th>
 							<th className="px-3 py-2 font-medium">SPF</th>
 							<th className="px-3 py-2 font-medium">DKIM (d= / s=)</th>
@@ -535,6 +562,11 @@ export function EvidenceTable({
 								className="border-t border-[var(--edh-border)]"
 							>
 								<td className="px-3 py-2 font-mono">{s.sourceIp}</td>
+								{/* A PTR names the sender at a glance; its ABSENCE is a signal too —
+								    spoofing sources characteristically have none (§10.2). */}
+								<td className="px-3 py-2 font-mono text-[var(--edh-muted)]">
+									{s.ptr ?? "—"}
+								</td>
 								<td className="px-3 py-2 tabular-nums">
 									{s.count.toLocaleString()}
 								</td>

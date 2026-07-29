@@ -55,7 +55,7 @@ export interface ClassifyContext {
 	domain: string;
 	/**
 	 * Source IPs resolved from the domain's own published SPF record (pm/Email_Complaints.mdx §7.1
-	 * rule 4). Optional: without it the known-sender test falls back to identity matching, which is
+	 * rule 1). Optional: without it the known-sender test falls back to identity matching, which is
 	 * enough for every row in the reference corpus but under-counts large provider ranges.
 	 */
 	spfAuthorizedIps?: ReadonlySet<string>;

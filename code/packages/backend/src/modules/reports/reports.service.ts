@@ -35,6 +35,7 @@ import {
 	saveTlsRptReport,
 	writeIngestState,
 } from "./report-store";
+import { saveRawReport } from "./raw-store";
 import { parseTlsRptJson } from "./tlsrpt-json";
 
 /** File extensions the drop folder accepts (pm/emails.mdx §4.1). */
@@ -212,6 +213,15 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
 					continue;
 				}
 				if (saveDmarcReport(domain.id, report)) {
+					// Keep the receiver's own words alongside our normalized shape, so the §10.4
+					// drill-down can show the raw report rather than only our reading of it.
+					saveRawReport(
+						domain.id,
+						"dmarc",
+						report.reporterOrg,
+						report.reportId,
+						payload.content.toString("utf8"),
+					);
 					summary.ingested++;
 					stored = true;
 					logInfo(
@@ -227,7 +237,9 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
 					summary.skipped++;
 					continue;
 				}
-				stored = this.routeTlsRpt(report, summary) || stored;
+				stored =
+					this.routeTlsRpt(report, summary, payload.content.toString("utf8")) ||
+					stored;
 			} else {
 				summary.skipped++;
 				logInfo(
@@ -243,6 +255,7 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
 	private routeTlsRpt(
 		report: ParsedTlsRptReport,
 		summary: IngestSummary,
+		rawPayload?: string,
 	): boolean {
 		const byDomain = new Map<string, ParsedTlsRptReport>();
 		for (const policy of report.policies) {
@@ -263,6 +276,14 @@ export class ReportsService implements OnModuleInit, OnModuleDestroy {
 		let stored = false;
 		for (const [domainId, routed] of byDomain) {
 			if (saveTlsRptReport(domainId, routed)) {
+				if (rawPayload !== undefined)
+					saveRawReport(
+						domainId,
+						"tlsrpt",
+						routed.reporterOrg,
+						routed.reportDate,
+						rawPayload,
+					);
 				summary.ingested++;
 				stored = true;
 				logInfo(

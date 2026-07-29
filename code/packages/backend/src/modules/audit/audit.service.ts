@@ -6,7 +6,17 @@ import { Injectable } from "@nestjs/common";
 import { mapLimit } from "@shared/concurrency";
 import { readAppConfig } from "@shared/config-store";
 import { readJson, writeJson } from "@shared/json-store";
-import { logError, logInfo } from "@shared/logging";
+import { logError, logInfo, logWarn } from "@shared/logging";
+import { buildComplaintBoard } from "@module/reports/complaints/board";
+import {
+	deleteComplaintSnapshot,
+	saveComplaintSnapshot,
+} from "@module/reports/complaints/snapshot-store";
+import {
+	listDmarcReports,
+	listTlsRptReports,
+	readIngestState,
+} from "@module/reports/report-store";
 import { resolveStateDir } from "@shared/state-dir";
 import { locateTools } from "@shared/tool-runner";
 import { CHECKERS } from "./checks";
@@ -39,6 +49,7 @@ import {
 	listRuns as listRunsFromStore,
 	migrateLegacyRunsJson,
 	pruneRuns,
+	sanitizeDomainDir,
 	saveRun,
 } from "./runs-store";
 
@@ -287,6 +298,10 @@ export class AuditService {
 			// One YAML file per run; the filename is the start time in the configured local timezone
 			// (pm/storage.mdx §7.2). Written once, atomically, never edited afterward.
 			saveRun(result, config.schedule.timezone);
+			// The run's Email Complaints board, frozen beside it (pm/Email_Complaints.mdx §12): the
+			// reports keep arriving after this instant, so the run-scoped routes in §9.6 can only be
+			// honest if they read what was true when the run finished rather than rebuilding later.
+			this.saveComplaintSnapshotFor(result);
 			// Prune history older than the admin retention window (config.yaml → storage.retentionDays)
 			// AND cap at the newest RUNS_KEPT_PER_DOMAIN runs per domain — whole-file deletes only
 			// (pm/storage.mdx §7.4).
@@ -295,6 +310,43 @@ export class AuditService {
 		// Keep the chain alive even if a write throws (it's logged + rethrown to the caller below).
 		this.writeChain = run.catch(() => {});
 		return run;
+	}
+
+	/**
+	 * Freeze this run's Email Complaints board beside its run file (pm/Email_Complaints.mdx §12).
+	 *
+	 * Built synchronously and WITHOUT reverse DNS: a snapshot must never add network latency to
+	 * persisting a run, and PTRs are a cosmetic column that the live board resolves and caches
+	 * anyway. Entirely best-effort — a domain with no ingested reports simply gets no snapshot, and
+	 * a failure here must never lose the run itself, which is the actual product of the audit.
+	 */
+	private saveComplaintSnapshotFor(result: AuditResult): void {
+		try {
+			const dmarcReports = listDmarcReports(result.domainId);
+			const tlsReports = listTlsRptReports(result.domainId);
+			if (dmarcReports.length === 0 && tlsReports.length === 0) return;
+			const board = buildComplaintBoard({
+				domainId: result.domainId,
+				domain: result.domain,
+				dmarcReports,
+				tlsReports,
+				windowDays: 60,
+				ingestionEnabled: readAppConfig().reports.enabled,
+				lastIngestAt: readIngestState(result.domainId).lastIngestAt,
+			});
+			saveComplaintSnapshot(
+				sanitizeDomainDir(result.domain),
+				result.runId,
+				board,
+			);
+		} catch (err) {
+			logWarn(
+				`Could not snapshot the complaint board for run ${result.runId}: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+				"AuditService",
+			);
+		}
 	}
 
 	latest(domainId: string): AuditResult | null {
@@ -340,7 +392,13 @@ export class AuditService {
 	/** Remove one run from the history by deleting its file (dashboard Runs-row ⋮ → Delete run). */
 	deleteRun(runId: string): Promise<void> {
 		const run = this.writeChain.then(() => {
+			// Look the run up BEFORE deleting it — its domain is what names the snapshot's directory.
+			const doomed = getRunFromStore(runId);
 			deleteRunFile(runId);
+			// A complaint snapshot must never outlive the run it describes (pm/Email_Complaints.mdx
+			// §12): the run-scoped route would otherwise resolve for a run that no longer exists.
+			if (doomed)
+				deleteComplaintSnapshot(sanitizeDomainDir(doomed.domain), runId);
 		});
 		this.writeChain = run.catch(() => {});
 		return run;

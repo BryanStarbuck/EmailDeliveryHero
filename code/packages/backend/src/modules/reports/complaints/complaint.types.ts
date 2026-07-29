@@ -48,6 +48,13 @@ export type ComplaintTrend =
 /** One row of a complaint's evidence table (pm/Email_Complaints.mdx §10.2). */
 export interface ComplaintSource {
 	sourceIp: string;
+	/**
+	 * Reverse DNS for `sourceIp` — null when it has no PTR or the lookup has not run. This is the
+	 * column that turns an evidence table from a list of numbers into something a person can read:
+	 * `mail-sor-f41.google.com` identifies a sender at a glance where `209.85.220.69` does not, and
+	 * a spoofer's IP characteristically has no PTR at all.
+	 */
+	ptr: string | null;
 	count: number;
 	disposition: string;
 	spfDomain: string;
@@ -140,6 +147,19 @@ export interface ObservedPolicy {
 	lastSeen: string;
 }
 
+/**
+ * One stored report in the window — the key the §10.4 "View raw report" link resolves against
+ * (`<org>/<id>`). Listed on the board so the drill-down can offer a picker without a second index.
+ */
+export interface ComplaintReportRef {
+	org: string;
+	/** The report id for a DMARC aggregate, or the report date for a TLS-RPT report. */
+	id: string;
+	kind: "dmarc" | "tlsrpt";
+	windowBegin: string;
+	windowEnd: string;
+}
+
 /** GET /api/domains/:id/complaints (pm/Email_Complaints.mdx §12). */
 export interface ComplaintBoard {
 	domainId: string;
@@ -161,6 +181,8 @@ export interface ComplaintBoard {
 	};
 	deltas: { authenticatedPct: number; messages: number };
 	reporters: ComplaintReporter[];
+	/** Every report in the window, newest first — backs the §10.4 raw-report picker. */
+	reports: ComplaintReportRef[];
 	series: ComplaintSeriesPoint[];
 	policyObserved: ObservedPolicy[];
 	complaints: Complaint[];

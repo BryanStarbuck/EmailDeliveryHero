@@ -857,6 +857,12 @@ ComplaintBoard:                   # GET /api/domains/:id/complaints
       messages: int
       lastSeen: iso
       expectedButMissing: boolean
+  reports:                        # every report in the window, newest first — the §10.4 picker
+    - org: string                 # `<org>/<id>` is the key GET :code/raw resolves
+      id: string                  # report id (DMARC) or report date (TLS-RPT)
+      kind: dmarc | tlsrpt
+      windowBegin: iso
+      windowEnd: iso
   series:                         # Zone A chart, one entry per UTC day
     - date: YYYY-MM-DD
       aligned: int
@@ -881,7 +887,7 @@ ComplaintBoard:                   # GET /api/domains/:id/complaints
       fixIds: [string]
       sources:                    # the evidence table
         - sourceIp: string
-          ptr: string | null
+          ptr: string | null      # reverse DNS; null when absent or not looked up
           count: int
           disposition: string
           spfDomain: string
@@ -911,8 +917,16 @@ ComplaintBoard:                   # GET /api/domains/:id/complaints
     undecodable: [{ file, stage, message }]
 ```
 
-Snapshots persist as `complaints.json` beside the run under the canonical state root defined in
-[storage.mdx](./storage.mdx), so a historical run renders its complaint board exactly as it was.
+Snapshots persist beside the run under the canonical state root defined in
+[storage.mdx](./storage.mdx) — `<state>/runs/<domain>/complaints/<runId>.json`, one file per run,
+written once when the run is persisted and never edited afterward, exactly like the run YAML it sits
+next to. A historical run therefore renders its complaint board exactly as it was.
+
+Two consequences are deliberate. **The snapshot is written without reverse DNS**: PTRs are a cosmetic
+column that the live board resolves and caches on demand, and persisting a run must never wait on the
+network. **A run with no snapshot 404s** on the §9.6 run-scoped routes rather than falling back to the
+live board — reports keep arriving after a run finishes, so a silent fallback would show today's
+evidence under a historical heading, which is precisely the failure this snapshot exists to prevent.
 
 ---
 
@@ -922,9 +936,12 @@ Snapshots persist as `complaints.json` beside the run under the canonical state 
 | --- | --- | --- | --- |
 | `GET` | `/api/domains/:id/complaints?days=60` | open | `ComplaintBoard` |
 | `GET` | `/api/domains/:id/complaints/:code?days=60` | open | One complaint, full `sources[]`, plus its fixes |
-| `GET` | `/api/domains/:id/complaints/:code/raw?report=<org>/<id>` | open | The pretty-printed source XML/JSON |
-| `POST` | `/api/domains/:id/complaints/recheck` | `RequireAuth` | Runs the checkers named by a fix; returns the refreshed board |
-| `GET` | `/api/domains/:id/runs/:runId/complaints` | open | The stored snapshot for that run |
+| `GET` | `/api/domains/:id/complaints/:code/raw?report=<org>/<id>` | open | The pretty-printed source XML/JSON. Serves the raw payload kept at ingest; for reports stored before the raw store existed it falls back to the normalized JSON and says so via `format: "normalized"` |
+| `GET` | `/api/domains/:id/complaints/:code/history` | open | This complaint's `{ windowEnd, messages, sharePct }` across the last 10 snapshots, oldest → newest — the §10.4 strip |
+| `POST` | `/api/domains/:id/complaints/recheck` | `RequireAuth` | Ingests any new reports, then returns the rebuilt board |
+| `POST` | `/api/domains/:id/complaints/recheck/:fixId` | `RequireAuth` | Runs **only** the checkers that fix's `recheckCheckId` names, and returns their findings plus the rebuilt board. Deliberately does **not** mint a run file: §10.3 updates the card in place, and "did my DNS change land?" is not a question a full audit answers better |
+| `GET` | `/api/domains/:id/runs/:runId/complaints` | open | The stored snapshot for that run. **404s** when a run has no snapshot (one recorded before §12 shipped) rather than substituting the live board — quietly serving different data than the URL promises is the bug this route exists to prevent |
+| `GET` | `/api/domains/:id/runs/:runId/complaints/:code` | open | One complaint from that run's stored snapshot |
 
 `?days` accepts 7 / 30 / 60 / 90, default 60, and is clamped. All windows anchor on the **newest
 report end** rather than `now`, so a historical corpus still analyzes (matching
@@ -939,11 +956,15 @@ report end** rather than `now`, so a historical corpus still analyzes (matching
 | Report parsing, extended with reasons / selectors / `envelope_to` / reporter contacts | `code/packages/backend/src/modules/reports/dmarc-xml.ts` — `parseDmarcAggregateXml()` |
 | Normalized report shapes | `code/packages/backend/src/modules/reports/report.types.ts` |
 | §7 taxonomy, §7.1 known-sender test, §7.2 classification order | `code/packages/backend/src/modules/reports/complaints/classify.ts` — `classifyRow()`, `isKnownSender()` |
-| §8 verdict model, §8.3 thresholds, §8.4 trend | `code/packages/backend/src/modules/reports/complaints/verdict.ts` — `boardVerdict()`, `trendOf()` |
+| §8.2 domain verdict, §8.4 trend | `code/packages/backend/src/modules/reports/complaints/verdict.ts` — `boardVerdict()`, `trendOf()` |
+| §8.3 escalation thresholds | `code/packages/backend/src/modules/reports/complaints/board.ts` — `escalate()` (they need the per-code volumes and the observed policy, so they live with the assembly) |
 | §12 board assembly, §10.1 series, C11–C15 report-level complaints | `code/packages/backend/src/modules/reports/complaints/board.ts` — `buildComplaintBoard()` |
 | §11 fix library | `code/packages/backend/src/modules/reports/complaints/fixes.ts` — `fixesFor()` |
-| §13 API | `code/packages/backend/src/modules/reports/complaints.controller.ts` — `ComplaintsController` |
-| Snapshot persistence | `code/packages/backend/src/modules/reports/report-store.ts` |
+| §10.2 reverse-DNS column (bounded, cached, never fatal) | `code/packages/backend/src/modules/reports/complaints/ptr.ts` — `resolvePtrs()` |
+| §13 API | `code/packages/backend/src/modules/reports/complaints.controller.ts` — `ComplaintsController`, `RunComplaintsController` |
+| §12 per-run snapshot persistence (`<state>/runs/<domain>/complaints/<runId>.json`) | `code/packages/backend/src/modules/reports/complaints/snapshot-store.ts`; written from `audit.service.ts` — `saveComplaintSnapshotFor()` |
+| §10.4 raw report payloads kept at ingest (`<state>/reports/<domainId>/raw/…`) | `code/packages/backend/src/modules/reports/raw-store.ts`; written from `reports.service.ts` |
+| Parsed report persistence | `code/packages/backend/src/modules/reports/report-store.ts` |
 | Zone A/B/C page | `code/packages/frontend/src/pages/domains/EmailComplaintsPage.tsx` |
 | §10.4 drill-down | `code/packages/frontend/src/pages/domains/ComplaintDetailPage.tsx` |
 | UI copy catalog (titles, explanations, groupings) | `code/packages/frontend/src/lib/complaint-catalog.ts` |

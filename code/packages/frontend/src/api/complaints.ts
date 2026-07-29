@@ -14,39 +14,140 @@ const BOARD_KEY = (domainId: string, days: number) =>
 /** Window sizes the UI offers (§13); the backend clamps anything else. */
 export const COMPLAINT_WINDOWS = [30, 60, 90] as const;
 
-/** GET /domains/:id/complaints?days= */
+/**
+ * GET /domains/:id/complaints?days= — or, when `runId` is given, the STORED SNAPSHOT for that run
+ * (pm/Email_Complaints.mdx §9.6/§12). The run-scoped routes must render what was true when the run
+ * finished: reports keep arriving afterwards, so rebuilding live would put today's evidence under a
+ * historical heading.
+ */
 export function useComplaintBoard(
 	domainId: string | undefined,
 	days = 60,
+	runId?: string,
 ) {
 	return useQuery({
-		queryKey: BOARD_KEY(domainId ?? "", days),
+		queryKey: runId
+			? (["complaints", "run-board", domainId ?? "", runId] as const)
+			: BOARD_KEY(domainId ?? "", days),
 		queryFn: async () =>
-			(
-				await api.get<ComplaintBoard>(`/domains/${domainId}/complaints`, {
-					params: { days },
-				})
-			).data,
+			runId
+				? (
+						await api.get<ComplaintBoard>(
+							`/domains/${domainId}/runs/${runId}/complaints`,
+						)
+					).data
+				: (
+						await api.get<ComplaintBoard>(`/domains/${domainId}/complaints`, {
+							params: { days },
+						})
+					).data,
 		enabled: !!domainId,
 	});
 }
 
-/** GET /domains/:id/complaints/:code?days= */
+/** GET /domains/:id/complaints/:code?days= — or the run-scoped snapshot's copy of it. */
 export function useComplaintDetail(
 	domainId: string | undefined,
 	code: string | undefined,
 	days = 60,
+	runId?: string,
 ) {
 	return useQuery({
-		queryKey: ["complaints", "detail", domainId ?? "", code ?? "", days] as const,
+		queryKey: [
+			"complaints",
+			"detail",
+			domainId ?? "",
+			code ?? "",
+			runId ?? "live",
+			days,
+		] as const,
 		queryFn: async () =>
 			(
 				await api.get<ComplaintDetail>(
-					`/domains/${domainId}/complaints/${code}`,
-					{ params: { days } },
+					runId
+						? `/domains/${domainId}/runs/${runId}/complaints/${code}`
+						: `/domains/${domainId}/complaints/${code}`,
+					runId ? undefined : { params: { days } },
 				)
 			).data,
 		enabled: !!domainId && !!code,
+	});
+}
+
+/** One window of a complaint's history — the §10.4 run-history strip. */
+export interface ComplaintHistoryPoint {
+	windowEnd: string;
+	messages: number;
+	sharePct: number;
+}
+
+/** GET /domains/:id/complaints/:code/history — the last 10 windows, oldest → newest. */
+export function useComplaintHistory(
+	domainId: string | undefined,
+	code: string | undefined,
+) {
+	return useQuery({
+		queryKey: ["complaints", "history", domainId ?? "", code ?? ""] as const,
+		queryFn: async () =>
+			(
+				await api.get<ComplaintHistoryPoint[]>(
+					`/domains/${domainId}/complaints/${code}/history`,
+				)
+			).data,
+		enabled: !!domainId && !!code,
+	});
+}
+
+/** The raw report behind a complaint, pretty-printed (§10.4 block 2). */
+export interface RawReport {
+	report: string;
+	kind: string;
+	/** `raw` = the receiver's own XML/JSON; `normalized` = our parsed shape, for pre-raw-store reports. */
+	format: "raw" | "normalized";
+	content: string;
+}
+
+/** GET /domains/:id/complaints/:code/raw?report=<org>/<id> — fetched on demand, never on page load. */
+export function useRawReport(
+	domainId: string | undefined,
+	code: string | undefined,
+	report: string | null,
+) {
+	return useQuery({
+		queryKey: ["complaints", "raw", domainId ?? "", code ?? "", report ?? ""] as const,
+		queryFn: async () =>
+			(
+				await api.get<RawReport>(
+					`/domains/${domainId}/complaints/${code}/raw`,
+					{ params: { report } },
+				)
+			).data,
+		enabled: !!domainId && !!code && !!report,
+	});
+}
+
+/**
+ * POST /domains/:id/complaints/recheck/:fixId — run ONLY the checkers that fix names (§15.12), then
+ * return the rebuilt board so the card updates in place (§10.3) without a full re-audit.
+ */
+export function useRecheckFix(domainId: string, days = 60) {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: async (fixId: string) =>
+			(
+				await api.post<{
+					fixId: string;
+					ran: string[];
+					results: { checkId: string; findings: { severity: string; title: string; detail?: string }[] }[];
+					board: ComplaintBoard;
+				}>(`/domains/${domainId}/complaints/recheck/${fixId}`, undefined, {
+					params: { days },
+				})
+			).data,
+		onSuccess: (data) => {
+			qc.setQueryData(BOARD_KEY(domainId, days), data.board);
+			qc.invalidateQueries({ queryKey: ["complaints"] });
+		},
 	});
 }
 

@@ -19,10 +19,10 @@ import type {
 	ComplaintReporter,
 	ComplaintSeriesPoint,
 	ComplaintSource,
-	ComplaintTrend,
 	ObservedPolicy,
 } from "./complaint.types";
 import { type FixBuildContext, buildFixPlan } from "./fixes";
+import { boardVerdict, trendOf } from "./verdict";
 
 /**
  * Complaint-board assembly (pm/Email_Complaints.mdx §8/§12): take the stored, parsed report emails
@@ -44,8 +44,14 @@ export interface BuildBoardInput {
 	windowDays: number;
 	ingestionEnabled: boolean;
 	lastIngestAt: string | null;
-	/** IPs authorized by the domain's own SPF record, when a run has resolved them (§7.1 rule 4). */
+	/** IPs authorized by the domain's own SPF record, when a run has resolved them (§7.1 rule 1). */
 	spfAuthorizedIps?: ReadonlySet<string>;
+	/**
+	 * Reverse DNS per source IP, when it has been resolved (§10.2 evidence-table column). Resolved
+	 * outside this function because PTR lookups are async and network-bound while board assembly is
+	 * pure and synchronous; an absent map simply renders the column as "—".
+	 */
+	ptrByIp?: ReadonlyMap<string, string | null>;
 	/** Files that failed to decode during ingest — complaint C15. */
 	undecodable?: { file: string; stage: string; message: string }[];
 }
@@ -72,11 +78,13 @@ function toSource(
 	reporter: string,
 	windowBegin: string,
 	windowEnd: string,
+	ptrByIp?: ReadonlyMap<string, string | null>,
 ): ComplaintSource {
 	const dkim = (row.dkimResults ?? [])[0];
 	const spf = (row.spfResults ?? [])[0];
 	return {
 		sourceIp: row.sourceIp,
+		ptr: ptrByIp?.get(row.sourceIp) ?? null,
 		count: row.count,
 		disposition: row.disposition,
 		spfDomain: spf?.domain ?? row.envelopeSpfDomain ?? "",
@@ -96,6 +104,7 @@ function toSource(
 
 function mergeSource(into: ComplaintSource, from: ComplaintSource): void {
 	into.count += from.count;
+	into.ptr ??= from.ptr;
 	for (const r of from.reporters)
 		if (!into.reporters.includes(r)) into.reporters.push(r);
 	if (from.firstSeen < into.firstSeen) into.firstSeen = from.firstSeen;
@@ -106,6 +115,7 @@ function mergeSource(into: ComplaintSource, from: ComplaintSource): void {
 function classifyReports(
 	reports: ParsedDmarcReport[],
 	ctx: ClassifyContext,
+	ptrByIp?: ReadonlyMap<string, string | null>,
 ): Map<ComplaintCode, { messages: number; sources: Map<string, ComplaintSource> }> {
 	const out = new Map<
 		ComplaintCode,
@@ -122,6 +132,7 @@ function classifyReports(
 				report.reporterOrg,
 				report.window.begin,
 				report.window.end,
+				ptrByIp,
 			);
 			const existing = bucket.sources.get(key);
 			if (existing) mergeSource(existing, source);
@@ -130,41 +141,6 @@ function classifyReports(
 		}
 	}
 	return out;
-}
-
-/** §8.4 trend of one complaint versus the previous window of equal length. */
-export function trendOf(current: number, previous: number): ComplaintTrend {
-	if (previous === 0) return current > 0 ? "new" : "steady";
-	if (current === 0) return "resolved";
-	const ratio = current / previous;
-	if (ratio > 1.2) return "worse";
-	if (ratio < 0.8) return "better";
-	return "steady";
-}
-
-/** §8.2 domain verdict — first match wins, worst first. */
-export function boardVerdict(
-	complaints: Complaint[],
-	totals: { messages: number; authenticatedPct: number },
-	reportCount: number,
-): BoardVerdict {
-	if (reportCount < 3 || totals.messages === 0) return "insufficient_data";
-	const has = (code: ComplaintCode) =>
-		complaints.some((c) => c.code === code && c.messages > 0);
-	const c03 = complaints.find((c) => c.code === "C03");
-	if (
-		complaints.some((c) => c.severity === "critical") ||
-		has("C10") ||
-		(c03 && c03.sharePct >= 1)
-	)
-		return "action";
-	if (
-		complaints.some((c) => c.severity === "warning") ||
-		totals.authenticatedPct < 95
-	)
-		return "attention";
-	if (complaints.some((c) => c.verdict === "watch")) return "watch";
-	return "ok";
 }
 
 /** Human summary sentence for Zone A (§10.1 item 1). */
@@ -427,8 +403,8 @@ export function buildComplaintBoard(input: BuildBoardInput): ComplaintBoard {
 		domain,
 		spfAuthorizedIps: input.spfAuthorizedIps,
 	};
-	const currentByCode = classifyReports(current, ctx);
-	const previousByCode = classifyReports(previous, ctx);
+	const currentByCode = classifyReports(current, ctx, input.ptrByIp);
+	const previousByCode = classifyReports(previous, ctx, input.ptrByIp);
 
 	// ─── Totals ───────────────────────────────────────────────────────────────────────────────
 	let messages = 0;
@@ -691,6 +667,23 @@ export function buildComplaintBoard(input: BuildBoardInput): ComplaintBoard {
 			messages: messages - prevMessages,
 		},
 		reporters,
+		// The window's reports, newest first — the §10.4 raw-report picker's options.
+		reports: [
+			...current.map((r) => ({
+				org: r.reporterOrg,
+				id: r.reportId,
+				kind: "dmarc" as const,
+				windowBegin: r.window.begin,
+				windowEnd: r.window.end,
+			})),
+			...tlsCurrent.map((r) => ({
+				org: r.reporterOrg,
+				id: r.reportDate,
+				kind: "tlsrpt" as const,
+				windowBegin: r.window.begin || r.reportDate,
+				windowEnd: r.window.end || r.reportDate,
+			})),
+		].sort((a, b) => b.windowEnd.localeCompare(a.windowEnd)),
 		series: buildSeries(current),
 		policyObserved,
 		complaints,
@@ -705,3 +698,5 @@ export function buildComplaintBoard(input: BuildBoardInput): ComplaintBoard {
 
 /** Re-exported so the controller and tests share one known-sender definition (§7.1). */
 export { isKnownSender, underDomain };
+/** Re-exported from ./verdict (§8.2/§8.4) so existing importers of board.ts keep working. */
+export { boardVerdict, trendOf };

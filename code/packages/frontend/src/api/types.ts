@@ -1463,6 +1463,8 @@ export type ComplaintTrend = "new" | "worse" | "steady" | "better" | "resolved";
 /** One row of a complaint's evidence table (§10.2). */
 export interface ComplaintSource {
 	sourceIp: string;
+	/** Reverse DNS for sourceIp — null when it has no PTR or the lookup was skipped (§10.2). */
+	ptr: string | null;
 	count: number;
 	disposition: string;
 	spfDomain: string;
@@ -1477,6 +1479,15 @@ export interface ComplaintSource {
 	reporters: string[];
 	firstSeen: string;
 	lastSeen: string;
+}
+
+/** One stored report in the window — the key the §10.4 "View raw report" link resolves. */
+export interface ComplaintReportRef {
+	org: string;
+	id: string;
+	kind: "dmarc" | "tlsrpt";
+	windowBegin: string;
+	windowEnd: string;
 }
 
 export interface Complaint {
@@ -1566,6 +1577,8 @@ export interface ComplaintBoard {
 	};
 	deltas: { authenticatedPct: number; messages: number };
 	reporters: ComplaintReporter[];
+	/** Every report in the window, newest first — backs the §10.4 raw-report picker. */
+	reports: ComplaintReportRef[];
 	series: ComplaintSeriesPoint[];
 	policyObserved: ObservedPolicy[];
 	complaints: Complaint[];

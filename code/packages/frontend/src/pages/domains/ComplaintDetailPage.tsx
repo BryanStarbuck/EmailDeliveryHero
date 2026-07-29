@@ -1,7 +1,12 @@
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { ArrowLeft, BookOpen, Gauge, Wrench } from "lucide-react";
 import { useState } from "react";
-import { useComplaintDetail } from "@/api/complaints";
+import {
+	useComplaintDetail,
+	useComplaintHistory,
+	useRawReport,
+} from "@/api/complaints";
+import type { ComplaintReportRef } from "@/api/types";
 import { SeverityBadge } from "@/components/Badges";
 import { formatVolume, trendFor } from "@/lib/complaint-catalog";
 import { cn } from "@/lib/utils";
@@ -16,13 +21,14 @@ import { EvidenceTable, ZoneC } from "./EmailComplaintsPage";
  *   1 what this is · 2 what we saw · 3 what it means · 4 how to fix it · 5 re-check
  */
 export function ComplaintDetailPage() {
-	const { id = "", code = "" } = useParams({ strict: false }) as {
+	const { id = "", code = "", runId } = useParams({ strict: false }) as {
 		id?: string;
 		code?: string;
+		runId?: string;
 	};
 	const navigate = useNavigate();
 	const [days] = useState(60);
-	const { data, isLoading, isError } = useComplaintDetail(id, code, days);
+	const { data, isLoading, isError } = useComplaintDetail(id, code, days, runId);
 
 	if (isLoading)
 		return <p className="p-6 text-sm text-[var(--edh-muted)]">Loading…</p>;
@@ -125,6 +131,10 @@ export function ComplaintDetailPage() {
 					</table>
 				</div>
 
+				{/* §10.4 block 2 — the receiver's own words, on demand. The board is our reading of
+				    the reports; this is the report. */}
+				<RawReportViewer domainId={id} code={complaint.code} reports={board.reports} />
+
 				<h4 className="mt-6 mb-2 text-sm font-semibold">Who reported this</h4>
 				<ul className="space-y-1 text-xs">
 					{board.reporters
@@ -198,7 +208,127 @@ export function ComplaintDetailPage() {
 				>
 					Back to the board to ingest &amp; re-check
 				</Link>
+
+				<ComplaintHistoryStrip domainId={id} code={complaint.code} />
 			</Block>
+		</div>
+	);
+}
+
+/**
+ * The run-history strip (pm/Email_Complaints.mdx §10.4) — this complaint's volume across the last
+ * 10 stored windows, oldest → newest. Bars are scaled against the largest window, and a window
+ * where the complaint did not fire renders as an empty slot rather than being skipped: seeing the
+ * bars shrink to nothing is how a user knows the fix worked.
+ */
+function ComplaintHistoryStrip({
+	domainId,
+	code,
+}: {
+	domainId: string;
+	code: string;
+}) {
+	const { data } = useComplaintHistory(domainId, code);
+	if (!data || data.length < 2) return null;
+	const peak = Math.max(...data.map((d) => d.messages), 1);
+
+	return (
+		<div className="mt-6">
+			<h4 className="mb-2 text-sm font-semibold">
+				This complaint across the last {data.length} windows
+			</h4>
+			<div
+				className="flex items-end gap-1"
+				style={{ height: 48 }}
+				aria-label={`${code} volume across the last ${data.length} windows`}
+			>
+				{data.map((point) => (
+					<div
+						key={point.windowEnd}
+						title={`${point.windowEnd.slice(0, 10)} — ${point.messages.toLocaleString()} msgs (${point.sharePct}%)`}
+						className={cn(
+							"w-6 rounded-t",
+							point.messages > 0
+								? "bg-[var(--edh-primary)]"
+								: "border border-dashed border-[var(--edh-border)]",
+						)}
+						style={{
+							height: `${Math.max((point.messages / peak) * 100, point.messages > 0 ? 6 : 4)}%`,
+						}}
+					/>
+				))}
+			</div>
+			<p className="mt-1 text-[11px] text-[var(--edh-muted)]">
+				{data[0]?.windowEnd.slice(0, 10)} → {data.at(-1)?.windowEnd.slice(0, 10)}
+			</p>
+		</div>
+	);
+}
+
+/**
+ * "View raw report" (pm/Email_Complaints.mdx §10.4 block 2).
+ *
+ * The rest of this page is our READING of the reports; this is the report. Fetched only when the
+ * user picks one — the payloads are large and nobody needs them on page load. When a report was
+ * ingested before raw payloads were kept, the API returns the normalized JSON instead and says so,
+ * which is honest about what the user is looking at.
+ */
+function RawReportViewer({
+	domainId,
+	code,
+	reports,
+}: {
+	domainId: string;
+	code: string;
+	reports: ComplaintReportRef[];
+}) {
+	const [selected, setSelected] = useState<string | null>(null);
+	const { data, isLoading, isError } = useRawReport(domainId, code, selected);
+
+	if (reports.length === 0) return null;
+
+	return (
+		<div className="mt-6">
+			<h4 className="mb-2 text-sm font-semibold">View raw report</h4>
+			<p className="mb-2 text-xs text-[var(--edh-muted)]">
+				The receiver's own XML or JSON, exactly as it arrived.
+			</p>
+			<select
+				value={selected ?? ""}
+				onChange={(e) => setSelected(e.target.value || null)}
+				className="w-full max-w-xl rounded-md border border-[var(--edh-border)] bg-white px-2 py-1.5 text-xs"
+				aria-label="Choose a report to view"
+			>
+				<option value="">Choose a report…</option>
+				{reports.map((r) => (
+					<option key={`${r.org}/${r.id}`} value={`${r.org}/${r.id}`}>
+						{r.org} · {r.kind === "dmarc" ? "DMARC" : "TLS-RPT"} ·{" "}
+						{r.windowBegin.slice(0, 10)} → {r.windowEnd.slice(0, 10)}
+					</option>
+				))}
+			</select>
+
+			{selected && isLoading ? (
+				<p className="mt-2 text-xs text-[var(--edh-muted)]">Loading the report…</p>
+			) : null}
+			{selected && isError ? (
+				<p className="mt-2 text-xs text-red-700">
+					That report is no longer in the store.
+				</p>
+			) : null}
+			{data ? (
+				<div className="mt-2">
+					{data.format === "normalized" ? (
+						<p className="mb-1 text-xs text-amber-700">
+							This report was ingested before raw payloads were kept, so this is
+							our normalized reading of it rather than the original XML.
+						</p>
+					) : null}
+					<pre className="max-h-96 overflow-auto rounded-lg border border-[var(--edh-border)] bg-slate-50 p-3 text-[11px] leading-relaxed">
+						{data.content}
+					</pre>
+				</div>
+			) : null}
 		</div>
 	);
 }

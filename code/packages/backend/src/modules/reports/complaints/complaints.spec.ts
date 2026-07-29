@@ -273,7 +273,7 @@ describe("isKnownSender (pm/Email_Complaints.mdx §7.1)", () => {
 		).toBe(false);
 	});
 
-	it("is true when our own SPF record authorizes the IP (rule 4)", () => {
+	it("is true when our own SPF record authorizes the IP (rule 1)", () => {
 		expect(
 			isKnownSender(row, {
 				domain: DOMAIN,
@@ -379,5 +379,42 @@ describeCorpus("the act3ai.com complaint board (pm/Email_Complaints.mdx §6)", (
 		const google = b.reporters.find((r) => r.org === "google.com");
 		expect(google?.email).toBe("noreply-dmarc-support@google.com");
 		expect(google?.contactUrl).toContain("support.google.com");
+	});
+
+	it("lists every report in the window for the §10.4 raw-report picker", () => {
+		const b = board();
+		// 71 DMARC + 3 TLS-RPT, each addressable as <org>/<id> by GET :code/raw.
+		expect(b.reports.filter((r) => r.kind === "dmarc")).toHaveLength(71);
+		expect(b.reports.filter((r) => r.kind === "tlsrpt")).toHaveLength(3);
+		expect(b.reports.every((r) => r.org.length > 0 && r.id.length > 0)).toBe(true);
+		// Newest first, so the picker opens on the most recent report.
+		const ends = b.reports.map((r) => r.windowEnd);
+		expect([...ends].sort().reverse()).toEqual(ends);
+	});
+
+	it("carries a ptr field on every evidence row, null when unresolved", () => {
+		// The board is built without a ptrByIp map here, so every row must degrade to null rather
+		// than to undefined — the column renders "—" and the shape stays stable (§10.2/§12).
+		const sources = board().complaints.flatMap((c) => c.sources);
+		expect(sources.length).toBeGreaterThan(0);
+		expect(sources.every((s) => s.ptr === null)).toBe(true);
+	});
+
+	it("threads resolved reverse DNS onto the matching rows", () => {
+		const { dmarc, tlsrpt } = loadCorpus();
+		const b = buildComplaintBoard({
+			domainId: "spec-act3ai",
+			domain: DOMAIN,
+			dmarcReports: dmarc,
+			tlsReports: tlsrpt,
+			windowDays: 365,
+			ingestionEnabled: true,
+			lastIngestAt: null,
+			ptrByIp: new Map([["209.85.220.69", "mail-sor-f69.google.com"]]),
+		});
+		const row = b.complaints
+			.flatMap((c) => c.sources)
+			.find((s) => s.sourceIp === "209.85.220.69");
+		expect(row?.ptr).toBe("mail-sor-f69.google.com");
 	});
 });
