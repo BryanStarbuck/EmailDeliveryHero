@@ -1,6 +1,7 @@
 import type { Finding } from "@module/audit/checks/types";
 import { readAppConfig } from "@shared/config-store";
 import type {
+	DmarcPolicyOverride,
 	DmarcReportRow,
 	ParsedDmarcReport,
 	ParsedTlsRptReport,
@@ -9,10 +10,15 @@ import { listDmarcReports, listTlsRptReports } from "./report-store";
 
 /**
  * Report → Finding derivation (pm/emails.mdx §3/§5). Aggregates the stored, parsed reports over a
- * rolling window (default 7 days, anchored on the NEWEST report window so a historical corpus
- * still analyzes) and scores them against the problem catalog. Every finding carries
- * `source: "report"` and rolls into the EXISTING categories: `dmarc.*` (DMARC column) and
- * `infra.*` (DNS & Infrastructure column) — no seventh category (§6).
+ * rolling window (default 7 days, anchored on NOW) and scores them against the problem catalog.
+ * Every finding carries `source: "report"` and rolls into the EXISTING categories: `dmarc.*`
+ * (DMARC column) and `infra.*` (DNS & Infrastructure column) — no seventh category (§6).
+ *
+ * FINDINGS DESCRIBE THE PRESENT. The window is anchored on the clock, never on the newest stored
+ * report: a fault that receivers stopped reporting must age out of the window on its own, so a
+ * corpus that stops arriving reports "no current data" rather than freezing the last known verdict
+ * forever. Older reports stay in the store — they still feed the trend/new-source baselines — but
+ * they never keep a resolved problem lit.
  */
 
 // ─── Aggregation shapes (also served raw to the Reports UI, §7.1) ────────────────────────────────
@@ -21,7 +27,10 @@ import { listDmarcReports, listTlsRptReports } from "./report-store";
 export interface DmarcSourceRow {
 	sourceIp: string;
 	count: number;
-	/** Worst disposition seen for the source (reject > quarantine > none). */
+	/**
+	 * What receivers DID with this slice. Part of the row's identity, not a summary across the
+	 * source: one IP rejected by one receiver and delivered by another yields two rows.
+	 */
 	disposition: string;
 	spfEvaluated: string;
 	dkimEvaluated: string;
@@ -32,6 +41,12 @@ export interface DmarcSourceRow {
 	envelopeSpfDomain: string;
 	dkimSigningDomains: string[];
 	reporters: string[];
+	/**
+	 * `<policy_evaluated><reason>` overrides the receivers declared, unioned across merged rows. The
+	 * receiver telling us WHY it overrode DMARC is the strongest evidence available about a row —
+	 * see wasForwardedByReceiver.
+	 */
+	reasons?: DmarcPolicyOverride[];
 }
 
 export interface DmarcAggregate {
@@ -49,8 +64,17 @@ export interface DmarcAggregate {
 	dmarcPassMessages: number;
 	/** Dual-aligned percentage 0–100 (100 when no volume) — §12's 96.8%. */
 	passRatePct: number;
+	/**
+	 * The REAL DMARC pass percentage 0–100 — either mechanism aligned, i.e. what receivers actually
+	 * enforce on. Always >= passRatePct; the gap between the two is fragility, not failure.
+	 */
+	dmarcPassRatePct: number;
 	policyPublished: ParsedDmarcReport["policyPublished"] | null;
 	rows: DmarcSourceRow[];
+	/** Stored reports that fall OUTSIDE the current window — history, deliberately not scored. */
+	staleReportCount: number;
+	/** Newest window end across ALL stored reports (not just in-window); null when the store is empty. */
+	newestReportEnd: string | null;
 }
 
 export interface TlsRptReporterDay {
@@ -70,13 +94,11 @@ export interface TlsRptAggregate {
 	totalFailure: number;
 	policyTypes: string[];
 	rows: TlsRptReporterDay[];
+	/** Stored reports that fall OUTSIDE the current window — history, deliberately not scored. */
+	staleReportCount: number;
+	/** Newest report date across ALL stored reports; null when the store is empty. */
+	newestReportEnd: string | null;
 }
-
-const DISPOSITION_RANK: Record<string, number> = {
-	none: 0,
-	quarantine: 1,
-	reject: 2,
-};
 
 /** True when `child` equals `parent` or is a subdomain of it. */
 export function underDomain(child: string, parent: string): boolean {
@@ -90,6 +112,86 @@ export function isKnownSender(row: DmarcReportRow, domain: string): boolean {
 	if (row.envelopeSpfDomain && underDomain(row.envelopeSpfDomain, domain))
 		return true;
 	return row.dkimSigningDomains.some((d) => underDomain(d, domain));
+}
+
+/**
+ * Every source IP that has passed DMARC for this domain at some point across the WHOLE stored
+ * corpus — the only evidence available here that a source is genuinely ours.
+ */
+export function authenticatedSourceIps(
+	reports: ParsedDmarcReport[],
+): Set<string> {
+	const ips = new Set<string>();
+	for (const report of reports)
+		for (const row of report.rows) if (row.dmarcPass) ips.add(row.sourceIp);
+	return ips;
+}
+
+/**
+ * Ownership test for a row that failed BOTH alignments. `isKnownSender` must NOT be used here: the
+ * row failed SPF, so its envelope is an unverified claim, and it failed DKIM, so its `d=` is too —
+ * forging both is precisely what makes spoofed mail look like an own stream. Only independent
+ * evidence counts: the IP is configured as a sending IP, or it has authenticated for us before.
+ */
+export function isOwnUnalignedSender(
+	row: DmarcReportRow,
+	knownIps: Set<string>,
+): boolean {
+	return knownIps.has(row.sourceIp);
+}
+
+/** "reject" → "rejected", "quarantine" → "quarantined" — for readable finding titles. */
+export function dispositionPast(disposition: string): string {
+	if (disposition === "reject") return "rejected";
+	if (disposition === "quarantine") return "quarantined";
+	return disposition;
+}
+
+/** RFC 7489 §7.2 override types that mean "the receiver identified this as relayed mail". */
+const FORWARDING_OVERRIDES = new Set([
+	"forwarded",
+	"trusted_forwarder",
+	"mailing_list",
+]);
+
+/**
+ * Did the RECEIVER tell us this row is forwarded mail? A `<policy_evaluated><reason>` override is
+ * the reporter's own explanation for why it did not apply the policy, and forwarding is the reason
+ * a legitimate message arrives unaligned: the relay rewrote the Return-Path and the original DKIM
+ * no longer matches the org domain. Google emits `local_policy` with an `arc=pass` comment for
+ * exactly this. Such a row is relayed mail, not a forgery attempt, and must not be scored as one.
+ */
+export function wasForwardedByReceiver(row: {
+	reasons?: DmarcPolicyOverride[];
+}): boolean {
+	return (row.reasons ?? []).some((r) => {
+		const type = (r.type ?? "").toLowerCase();
+		if (FORWARDING_OVERRIDES.has(type)) return true;
+		return type === "local_policy" && /\barc\s*=\s*pass\b/i.test(r.comment ?? "");
+	});
+}
+
+/**
+ * The four realities behind "failed BOTH alignments". Only `own` is our misconfiguration and only
+ * `delivered` is an unanswered threat — `forwarded` and `blocked` are the system working as designed
+ * and must never raise a flag or generate an "add it to SPF" nudge.
+ */
+export type UnalignedKind = "own" | "forwarded" | "blocked" | "delivered";
+
+export function classifyUnaligned(
+	row: DmarcReportRow & { reasons?: DmarcPolicyOverride[] },
+	knownIps: Set<string>,
+): UnalignedKind {
+	if (isOwnUnalignedSender(row, knownIps)) return "own";
+	if (wasForwardedByReceiver(row)) return "forwarded";
+	if (row.disposition === "reject" || row.disposition === "quarantine")
+		return "blocked";
+	return "delivered";
+}
+
+/** Is this failure something the operator can actually act on? */
+export function isActionableUnaligned(kind: UnalignedKind): boolean {
+	return kind === "own" || kind === "delivered";
 }
 
 /**
@@ -166,16 +268,16 @@ function inWindow(
 	return begin <= stop && end >= start;
 }
 
-/** The rolling window, anchored on the newest report so old corpora still aggregate (§4.6). */
-function windowFor(
-	newestEnd: string,
-	windowDays: number,
-): { begin: string; end: string } {
-	const endMs = Date.parse(newestEnd);
-	const anchor = Number.isFinite(endMs) ? endMs : Date.now();
+/**
+ * The rolling window, anchored on NOW (§4.6). Deliberately NOT anchored on the newest stored
+ * report: that froze the window on whatever day reports last arrived, so an already-fixed fault
+ * stayed inside it and kept re-firing on every rescan.
+ */
+function windowFor(windowDays: number): { begin: string; end: string } {
+	const now = Date.now();
 	return {
-		begin: new Date(anchor - windowDays * 24 * 60 * 60 * 1000).toISOString(),
-		end: new Date(anchor).toISOString(),
+		begin: new Date(now - windowDays * 24 * 60 * 60 * 1000).toISOString(),
+		end: new Date(now).toISOString(),
 	};
 }
 
@@ -183,15 +285,15 @@ export function aggregateDmarc(
 	reports: ParsedDmarcReport[],
 	windowDays: number,
 ): DmarcAggregate {
-	const newestEnd =
-		reports
-			.map((r) => r.window.end)
-			.sort()
-			.at(-1) ?? new Date().toISOString();
-	const window = windowFor(newestEnd, windowDays);
+	const window = windowFor(windowDays);
 	const current = reports.filter((r) =>
 		inWindow(r.window.begin, r.window.end, window.begin, window.end),
 	);
+	const newestReportEnd =
+		reports
+			.map((r) => r.window.end)
+			.sort()
+			.at(-1) ?? null;
 
 	const bySource = new Map<string, DmarcSourceRow>();
 	let total = 0;
@@ -202,27 +304,38 @@ export function aggregateDmarc(
 			total += row.count;
 			if (row.spfAligned && row.dkimAligned) dualAligned += row.count;
 			if (row.dmarcPass) dmarcPass += row.count;
-			const key = `${row.sourceIp}|${row.envelopeSpfDomain}|${row.spfAligned}|${row.dkimAligned}`;
+			// `disposition` and `headerFrom` are part of the identity, NOT details to be reconciled
+			// after the fact. Severity keys on disposition, so collapsing rows that differ on it and
+			// keeping the strongest — the old behaviour — reported a source Gmail rejected and Yahoo
+			// DELIVERED as wholly rejected, hiding the delivered volume (the one case that is an
+			// unanswered threat) behind the label of the case that is the policy working.
+			const key = `${row.sourceIp}|${row.envelopeSpfDomain}|${row.spfAligned}|${row.dkimAligned}|${row.disposition}|${row.headerFrom}`;
 			const merged = bySource.get(key);
 			if (merged) {
 				merged.count += row.count;
-				if (
-					(DISPOSITION_RANK[row.disposition] ?? 0) >
-					(DISPOSITION_RANK[merged.disposition] ?? 0)
-				) {
-					merged.disposition = row.disposition;
-				}
 				for (const d of row.dkimSigningDomains) {
 					if (!merged.dkimSigningDomains.includes(d))
 						merged.dkimSigningDomains.push(d);
 				}
 				if (!merged.reporters.includes(report.reporterOrg))
 					merged.reporters.push(report.reporterOrg);
+				// Union the receiver-declared overrides: they are the classifier's best evidence, so a
+				// merge must never drop the one row that carried the explanation.
+				for (const reason of row.reasons ?? []) {
+					merged.reasons ??= [];
+					if (
+						!merged.reasons.some(
+							(r) => r.type === reason.type && r.comment === reason.comment,
+						)
+					)
+						merged.reasons.push(reason);
+				}
 			} else {
 				bySource.set(key, {
 					...row,
 					dkimSigningDomains: [...row.dkimSigningDomains],
 					reporters: [report.reporterOrg],
+					reasons: row.reasons ? [...row.reasons] : undefined,
 				});
 			}
 		}
@@ -237,8 +350,12 @@ export function aggregateDmarc(
 		dmarcPassMessages: dmarcPass,
 		passRatePct:
 			total === 0 ? 100 : Math.round((dualAligned / total) * 1000) / 10,
+		dmarcPassRatePct:
+			total === 0 ? 100 : Math.round((dmarcPass / total) * 1000) / 10,
 		policyPublished: current[0]?.policyPublished ?? null,
 		rows: [...bySource.values()].sort((a, b) => b.count - a.count),
+		staleReportCount: reports.length - current.length,
+		newestReportEnd,
 	};
 }
 
@@ -246,12 +363,7 @@ export function aggregateTlsRpt(
 	reports: ParsedTlsRptReport[],
 	windowDays: number,
 ): TlsRptAggregate {
-	const newestEnd =
-		reports
-			.map((r) => r.window.end || r.reportDate)
-			.sort()
-			.at(-1) ?? new Date().toISOString();
-	const window = windowFor(newestEnd, windowDays);
+	const window = windowFor(windowDays);
 	const current = reports.filter((r) =>
 		inWindow(
 			r.window.begin || r.reportDate,
@@ -260,6 +372,11 @@ export function aggregateTlsRpt(
 			window.end,
 		),
 	);
+	const newestReportEnd =
+		reports
+			.map((r) => r.window.end || r.reportDate)
+			.sort()
+			.at(-1) ?? null;
 
 	const rows: TlsRptReporterDay[] = [];
 	let success = 0;
@@ -288,6 +405,8 @@ export function aggregateTlsRpt(
 		totalFailure: failure,
 		policyTypes: [...new Set(rows.map((r) => r.policyType))].sort(),
 		rows,
+		staleReportCount: reports.length - current.length,
+		newestReportEnd,
 	};
 }
 
@@ -298,6 +417,42 @@ const TLS_CHECK_ID = "infra.tls_rpt";
 
 function fmtWindow(w: { begin: string; end: string }): string {
 	return `${w.begin.slice(0, 10)}→${w.end.slice(0, 10)}`;
+}
+
+/** Whole days between an ISO instant and now; null when unparseable. */
+export function ageInDays(iso: string | null): number | null {
+	if (!iso) return null;
+	const ms = Date.parse(iso);
+	if (!Number.isFinite(ms)) return null;
+	return Math.max(0, Math.floor((Date.now() - ms) / (24 * 60 * 60 * 1000)));
+}
+
+/**
+ * The store holds reports but NONE inside the current window. Every scored row goes to `info` "no
+ * current data" rather than reusing the last in-window verdict — the whole point of the clock-
+ * anchored window is that a problem nobody is reporting any more stops being a current problem.
+ * `content.report_freshness` / the age note below is the one row that stays loud, because a corpus
+ * that stopped arriving IS the live fault worth acting on.
+ */
+function staleCorpusFindings(
+	ids: string[],
+	checkId: string,
+	domain: string,
+	windowDays: number,
+	newestReportEnd: string | null,
+	storedCount: number,
+): Finding[] {
+	const age = ageInDays(newestReportEnd);
+	const detail = `No report covering the last ${windowDays} day(s) has been ingested for ${domain}, so there is no current field data to score. ${storedCount} older report(s) remain in the store${age === null ? "" : `, the newest ${age} day(s) old`} — kept as history for trend baselines, deliberately not scored as a present-day problem.`;
+	return ids.map((id) => ({
+		id,
+		checkId,
+		title: `No DMARC report data in the last ${windowDays} day(s)`,
+		severity: "info" as const,
+		detail,
+		remediation: `Confirm receivers are still sending to the rua= address on _dmarc.${domain} and that the report mailbox/drop folder is wired up (Settings → Admin), then Ingest now on the Reports page.`,
+		source: "report" as const,
+	}));
 }
 
 /** The single muted finding when the admin master switch is off (pm/emails.mdx §8). */
@@ -319,6 +474,7 @@ export function ingestionDisabledFinding(id: string, checkId: string): Finding {
 export function deriveDmarcReportFindings(
 	domainId: string,
 	domain: string,
+	configuredSendingIps: string[] = [],
 ): Finding[] {
 	const config = readAppConfig().reports;
 	if (!config.enabled) {
@@ -340,33 +496,63 @@ export function deriveDmarcReportFindings(
 	}
 
 	const agg = aggregateDmarc(reports, config.windowDays);
+	if (agg.reportCount === 0) {
+		return staleCorpusFindings(
+			[
+				"dmarc.real_pass_rate",
+				"dmarc.report_unaligned_source",
+				"dmarc.report_alignment_fragility",
+				"dmarc.report_enforcement",
+			],
+			DMARC_CHECK_ID,
+			domain,
+			config.windowDays,
+			agg.newestReportEnd,
+			reports.length,
+		);
+	}
+
 	const findings: Finding[] = [];
 	const enforced = (agg.policyPublished?.p ?? "none") === "reject";
+	// Ownership evidence for the both-fail rows: configured sending IPs plus every IP that has ever
+	// authenticated for us across the whole store (see isOwnUnalignedSender on why not the envelope).
+	const knownIps = authenticatedSourceIps(reports);
+	for (const ip of configuredSendingIps) knownIps.add(ip);
 
-	// dmarc.real_pass_rate — the dual-aligned percentage over the window (§5 row 1, §12: 96.8%).
-	const failVolume = agg.totalMessages - agg.alignedPassMessages;
+	// dmarc.real_pass_rate — the pass rate receivers actually enforce on (§5 row 1). DMARC passes on
+	// EITHER aligned mechanism, so severity keys on that; the dual-aligned figure is reported
+	// alongside it as the fragility signal it is, and is scored by report_alignment_fragility below.
+	const fragileVolume = agg.totalMessages - agg.alignedPassMessages;
+	const failVolume = agg.totalMessages - agg.dmarcPassMessages;
 	const failSources = new Set(
-		agg.rows
-			.filter((r) => !(r.spfAligned && r.dkimAligned))
-			.map((r) => r.sourceIp),
+		agg.rows.filter((r) => !r.dmarcPass).map((r) => r.sourceIp),
 	).size;
+	// dmarc.report_unaligned_source — rows failing BOTH alignments (§5 row 2). !dmarcPass is exactly
+	// this set, so one classification serves the pass rate, the per-source rows and enforcement.
+	const bothFail = agg.rows.filter(
+		(r) => !r.spfAligned && !r.dkimAligned && r.count > 0,
+	);
+	const kindOf = new Map(
+		bothFail.map((r) => [r, classifyUnaligned(r, knownIps)] as const),
+	);
+	// Failures nobody can act on (forged mail the policy stopped, receiver-declared forwards) must not
+	// generate a "go fix your senders" instruction — that is how a healthy domain reads as broken.
+	const actionableVolume = bothFail
+		.filter((r) => isActionableUnaligned(kindOf.get(r) ?? "delivered"))
+		.reduce((n, r) => n + r.count, 0);
 	findings.push({
 		id: "dmarc.real_pass_rate",
 		checkId: DMARC_CHECK_ID,
-		title: `DMARC-aligned pass rate ${agg.passRatePct}%`,
-		severity: failVolume > 0 && agg.passRatePct < 99.5 ? "warning" : "info",
-		detail: `${agg.passRatePct}% of mail is DMARC-aligned (${agg.alignedPassMessages} / ${agg.totalMessages} msgs, ${fmtWindow(agg.window)}); ${failVolume} msgs from ${failSources} source(s) fail alignment on at least one mechanism. Reporters: ${agg.reporters.join(", ")}.`,
+		title: `DMARC pass rate ${agg.dmarcPassRatePct}%`,
+		severity:
+			actionableVolume > 0 && agg.dmarcPassRatePct < 99.5 ? "warning" : "info",
+		detail: `${agg.dmarcPassRatePct}% of mail passes DMARC (${agg.dmarcPassMessages} / ${agg.totalMessages} msgs, ${fmtWindow(agg.window)}) — one aligned mechanism is all DMARC requires. ${failVolume} msg(s) from ${failSources} source(s) fail it outright, of which ${actionableVolume} msg(s) are yours to fix (the rest is forged mail the policy stopped, or receiver-declared forwarding). Of the passing mail, ${agg.passRatePct}% is dual-aligned (${agg.alignedPassMessages} msgs); the remaining ${fragileVolume} msg(s) rely on a single mechanism — resilience, scored separately below, not a delivery failure. Reporters: ${agg.reporters.join(", ")}.`,
 		remediation:
-			failVolume > 0
+			actionableVolume > 0
 				? `Fix or authorize the failing sources (SPF include: / DKIM selector / alignment) ${enforced ? "— they are being evaluated under p=reject right now" : "before raising the policy"}.`
 				: undefined,
 		source: "report",
 	});
-
-	// dmarc.report_unaligned_source — rows failing BOTH alignments (§5 row 2).
-	const bothFail = agg.rows.filter(
-		(r) => !r.spfAligned && !r.dkimAligned && r.count > 0,
-	);
 	if (bothFail.length === 0) {
 		findings.push({
 			id: "dmarc.report_unaligned_source",
@@ -378,21 +564,44 @@ export function deriveDmarcReportFindings(
 		});
 	} else {
 		for (const row of bothFail) {
-			const known =
-				row.envelopeSpfDomain !== "" &&
-				underDomain(row.envelopeSpfDomain, domain);
+			const kind = kindOf.get(row) ?? "delivered";
+			const own = kind === "own";
+			const shape = {
+				own: {
+					title: `Own stream failing all authentication (${row.sourceIp})`,
+					severity: "warning" as const,
+					why: "This IP has authenticated for the domain before, so it is a real sender that has broken.",
+					fix: `Authorize this sender: add it to SPF (include:) and enable DKIM signing with a selector under ${domain}.`,
+				},
+				forwarded: {
+					title: `Forwarded mail arriving unaligned (${row.sourceIp})`,
+					severity: "info" as const,
+					why: `The reporter declared a policy override (${(row.reasons ?? []).map((r) => r.type + (r.comment ? `: ${r.comment}` : "")).join("; ")}) — it identified this as relayed mail and delivered it. A relay rewrites the Return-Path and breaks the original DKIM, so unaligned is expected here, not forged.`,
+					fix: undefined,
+				},
+				blocked: {
+					title: `Spoofed mail ${dispositionPast(row.disposition)} (${row.sourceIp})`,
+					severity: "info" as const,
+					why: `Neither mechanism authenticated, this IP has never authenticated for ${domain}, and no receiver declared it as relayed — so its envelope (${row.envelopeSpfDomain || "-"}) and DKIM d= (${row.dkimSigningDomains.join(",") || "-"}) are forged claims. Receivers ${dispositionPast(row.disposition)} it: the published policy is doing its job.`,
+					fix: `No action needed — do NOT add this IP to SPF. Keep the policy at p=${agg.policyPublished?.p ?? "reject"} and report high-volume abuse to the netblock's abuse contact.`,
+				},
+				delivered: {
+					title: `Unauthorized sender ${row.sourceIp}`,
+					severity: "critical" as const,
+					why: `Neither mechanism authenticated for ${domain} and this IP has never done so, yet receivers DELIVERED the mail — unaligned mail is reaching inboxes as ${row.headerFrom || domain}.`,
+					fix: `Raise enforcement so receivers drop this: publish p=reject on _dmarc.${domain}. Do NOT add this IP to SPF unless you can independently confirm it is yours.`,
+				},
+			}[kind];
 			findings.push({
-				id: `dmarc.report_unaligned_source.${row.sourceIp}`,
+				// Disposition is part of the identity: one source can be rejected by one receiver and
+				// delivered by another, which is two different findings at two different severities.
+				id: `dmarc.report_unaligned_source.${row.sourceIp}.${row.disposition}`,
 				checkId: DMARC_CHECK_ID,
-				title: known
-					? `Own stream failing all authentication (${row.sourceIp})`
-					: `Unauthorized sender ${row.sourceIp}`,
-				severity: known ? "warning" : "critical",
-				detail: `Source ${row.sourceIp} sent ${row.count} msg(s) as ${row.headerFrom || domain} — SPF ${row.spfEvaluated}/aligned ${row.spfAligned}, DKIM ${row.dkimEvaluated}/aligned ${row.dkimAligned} (disposition: ${row.disposition}).`,
-				remediation: known
-					? `Authorize this sender: add it to SPF (include:) and enable DKIM signing with a selector under ${domain}.`
-					: `If this is your sender, add it to SPF (include:) and enable DKIM for it; if not, it is spoofing — it is already being rejected under p=reject, monitor it and report high-volume abuse.`,
-				evidence: `${row.sourceIp} envelope=${row.envelopeSpfDomain || "-"} dkim_d=${row.dkimSigningDomains.join(",") || "-"}`,
+				title: shape.title,
+				severity: shape.severity,
+				detail: `Source ${row.sourceIp} sent ${row.count} msg(s) as ${row.headerFrom || domain} — SPF ${row.spfEvaluated}/aligned ${row.spfAligned}, DKIM ${row.dkimEvaluated}/aligned ${row.dkimAligned} (disposition: ${row.disposition}). ${shape.why}`,
+				remediation: shape.fix,
+				evidence: `${row.sourceIp} envelope=${row.envelopeSpfDomain || "-"} dkim_d=${row.dkimSigningDomains.join(",") || "-"} spf=${row.spfEvaluated} dkim=${row.dkimEvaluated} ever_authenticated=${own} classified=${kind}`,
 				source: "report",
 			});
 		}
@@ -452,13 +661,24 @@ export function deriveDmarcReportFindings(
 		});
 	} else {
 		for (const row of enforcedRows) {
+			// Mail dropped because it was spoofed is the policy working, not our mail being lost. Only
+			// a drop of a source we can independently tie to this domain is a real delivery failure.
+			const kind = kindOf.get(row);
+			const own = row.dmarcPass || kind === "own" || kind === "forwarded";
+			const past = dispositionPast(row.disposition);
 			findings.push({
-				id: `dmarc.report_enforcement.${row.sourceIp}`,
+				id: `dmarc.report_enforcement.${row.sourceIp}.${row.disposition}`,
 				checkId: DMARC_CHECK_ID,
-				title: `Mail ${row.disposition} by receivers (${row.sourceIp})`,
-				severity: "critical",
-				detail: `${row.count} msg(s) from ${row.sourceIp} were ${row.disposition} by ${row.reporters.join(", ")}.`,
-				remediation: `Identify the failing source ${row.sourceIp}, authorize it (SPF include: / DKIM selector under ${domain}), and confirm alignment before it recurs.`,
+				title: own
+					? `Our mail ${past} by receivers (${row.sourceIp})`
+					: `Spoofed mail ${past} by receivers (${row.sourceIp})`,
+				severity: own ? "critical" : "info",
+				detail: own
+					? `${row.count} msg(s) from ${row.sourceIp} were ${past} by ${row.reporters.join(", ")} — this is a source that authenticates for ${domain}, so real mail is being dropped.`
+					: `${row.count} msg(s) from ${row.sourceIp} were ${past} by ${row.reporters.join(", ")}. The source failed both SPF and DKIM alignment and has never authenticated for ${domain} — this is forged mail the published policy correctly stopped, not lost mail of ours.`,
+				remediation: own
+					? `Identify the failing source ${row.sourceIp}, authorize it (SPF include: / DKIM selector under ${domain}), and confirm alignment before it recurs.`
+					: undefined,
 				source: "report",
 			});
 		}
@@ -521,6 +741,21 @@ export function deriveTlsRptFindings(
 	}
 
 	const agg = aggregateTlsRpt(reports, config.windowDays);
+	if (agg.reportCount === 0) {
+		const age = ageInDays(agg.newestReportEnd);
+		return [
+			{
+				id: "infra.tls_rpt_reports_ingested",
+				checkId: TLS_CHECK_ID,
+				title: `No TLS report data in the last ${config.windowDays} day(s)`,
+				severity: "info",
+				detail: `No TLS-RPT report covering the last ${config.windowDays} day(s) has been ingested for ${domain}, so inbound TLS health is currently unknown. ${reports.length} older report(s) remain in the store${age === null ? "" : `, the newest ${age} day(s) old`} — history only, deliberately not scored as a present-day problem.`,
+				remediation: `Confirm receivers are still sending to the rua= address on _smtp._tls.${domain} and that the report mailbox/drop folder is wired up (Settings → Admin).`,
+				source: "report",
+			},
+		];
+	}
+
 	const findings: Finding[] = [];
 
 	if (agg.totalFailure > 0) {

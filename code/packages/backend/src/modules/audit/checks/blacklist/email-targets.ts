@@ -20,6 +20,12 @@ export interface EmailReportIp {
 	message_count: number;
 }
 
+/**
+ * Fallback lookback when no window is supplied. Callers should pass `reports.windowDays` instead:
+ * a sender that stopped sending is no longer a sending IP, and sweeping it keeps a decommissioned
+ * ESP's shared pool in the target list (and its DNSBL listings on the report) for weeks after the
+ * DNS records are gone — DNS is never consulted here, only the report corpus.
+ */
 const WINDOW_DAYS = 30;
 export const EMAIL_IP_CAP = 20;
 
@@ -174,24 +180,34 @@ export function parseRuaXml(xml: string): ParsedReport {
 }
 
 /**
- * The §19 pipeline: every public IPv4 that authenticated as `domain` in a rua report from the last
- * 30 days, aggregated and capped at the top EMAIL_IP_CAP by message volume.
+ * The §19 pipeline: every public IPv4 that authenticated as `domain` in a rua report inside the
+ * lookback window, aggregated and capped at the top EMAIL_IP_CAP by message volume.
+ *
+ * `agedOut` counts IPs that authenticated for us but only OUTSIDE the window — a decommissioned
+ * sender. They are excluded from the sweep (they are not current senders) but reported so the drop
+ * is never silent, the same rule the top-N cap follows.
  */
-export function collectEmailReportIps(domain: string): {
+export function collectEmailReportIps(
+	domain: string,
+	windowDays: number = WINDOW_DAYS,
+): {
 	ips: EmailReportIp[];
 	truncated: number;
+	agedOut: EmailReportIp[];
 } {
+	const empty = { ips: [], truncated: 0, agedOut: [] };
 	const dir = emailsDir();
-	if (!dir) return { ips: [], truncated: 0 };
-	const cutoff = Date.now() / 1000 - WINDOW_DAYS * 24 * 3600;
+	if (!dir) return empty;
+	const cutoff = Date.now() / 1000 - windowDays * 24 * 3600;
 	const wanted = domain.toLowerCase();
 	const byIp = new Map<string, EmailReportIp>();
+	const staleByIp = new Map<string, EmailReportIp>();
 
 	let files: string[];
 	try {
 		files = readdirSync(dir).filter((f) => f.toLowerCase().endsWith(".eml"));
 	} catch {
-		return { ips: [], truncated: 0 };
+		return empty;
 	}
 
 	for (const file of files) {
@@ -204,19 +220,20 @@ export function collectEmailReportIps(domain: string): {
 		for (const xml of extractReportXml(eml)) {
 			const report = parseRuaXml(xml);
 			if (report.domain !== wanted) continue;
-			if (report.endEpoch !== null && report.endEpoch < cutoff) continue;
+			const stale = report.endEpoch !== null && report.endEpoch < cutoff;
 			const seen = new Date(
 				(report.endEpoch ?? Date.now() / 1000) * 1000,
 			).toISOString();
+			const bucket = stale ? staleByIp : byIp;
 			for (const row of report.rows) {
 				if (!row.aligned || !isPublicIp(row.ip)) continue;
-				const existing = byIp.get(row.ip);
+				const existing = bucket.get(row.ip);
 				if (existing) {
 					existing.message_count += row.count;
 					if (seen < existing.first_seen) existing.first_seen = seen;
 					if (seen > existing.last_seen) existing.last_seen = seen;
 				} else {
-					byIp.set(row.ip, {
+					bucket.set(row.ip, {
 						ip: row.ip,
 						first_seen: seen,
 						last_seen: seen,
@@ -230,9 +247,15 @@ export function collectEmailReportIps(domain: string): {
 	const all = [...byIp.values()].sort(
 		(a, b) => b.message_count - a.message_count,
 	);
+	// Only truly retired senders age out — an IP still sending inside the window is never "stale"
+	// just because it also appears in older reports.
+	const agedOut = [...staleByIp.values()]
+		.filter((s) => !byIp.has(s.ip))
+		.sort((a, b) => b.last_seen.localeCompare(a.last_seen));
 	return {
 		ips: all.slice(0, EMAIL_IP_CAP),
 		truncated: Math.max(0, all.length - EMAIL_IP_CAP),
+		agedOut,
 	};
 }
 
@@ -243,13 +266,17 @@ export interface EmailReportDomain {
 
 /**
  * §19.1 RHSBL domain targets: DKIM d= / SPF envelope domains that PASSED in rua <auth_results>
- * for `domain` (last 30 days) and are OURS — subdomains of the primary. Third-party ESP domains
- * and the primary itself (already the primary target) are excluded.
+ * for `domain` inside the lookback window and are OURS — subdomains of the primary. Third-party ESP
+ * domains and the primary itself (already the primary target) are excluded. Windowed for the same
+ * reason as the IPs: a retired ESP's return-path subdomain is not a current sending identity.
  */
-export function collectEmailReportDomains(domain: string): EmailReportDomain[] {
+export function collectEmailReportDomains(
+	domain: string,
+	windowDays: number = WINDOW_DAYS,
+): EmailReportDomain[] {
 	const dir = emailsDir();
 	if (!dir) return [];
-	const cutoff = Date.now() / 1000 - WINDOW_DAYS * 24 * 3600;
+	const cutoff = Date.now() / 1000 - windowDays * 24 * 3600;
 	const wanted = domain.toLowerCase();
 	const suffix = `.${wanted}`;
 	const out = new Map<string, EmailReportDomain>();

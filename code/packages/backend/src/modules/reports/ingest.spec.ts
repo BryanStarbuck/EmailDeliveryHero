@@ -13,6 +13,7 @@ import { join } from "node:path";
 // Isolate the store: state-dir reads EDH_STATE_DIR at call time, so set it before any store call.
 process.env.EDH_STATE_DIR = mkdtempSync(join(tmpdir(), "edh-reports-spec-"));
 
+import * as configStore from "@shared/config-store";
 import {
 	aggregateDmarc,
 	deriveDmarcReportFindings,
@@ -168,10 +169,20 @@ describeCorpus(
 		});
 
 		it("derives §12's findings: fragility warning, no spoofing, healthy TLS baseline (§14.5-7,12)", () => {
+			// The corpus is a FIXED historical snapshot and the aggregation window is anchored on the
+			// clock, so it ages out of the default 7-day window as time passes. Widen the window for
+			// this test so it keeps exercising the corpus instead of the no-current-data branch.
+			jest.spyOn(configStore, "readAppConfig").mockReturnValue({
+				reports: { enabled: true, windowDays: 3650 },
+			} as ReturnType<typeof configStore.readAppConfig>);
+
 			const findings = deriveDmarcReportFindings(DOMAIN_ID, "act3ai.com");
 
+			// DMARC passes on EITHER aligned mechanism: the corpus's real pass rate is high even though
+			// only ~73% is dual-aligned, so this row must not go amber on the dual-aligned figure.
 			const passRate = findings.find((f) => f.id === "dmarc.real_pass_rate");
-			expect(passRate?.severity).toBe("warning");
+			expect(passRate?.title).toMatch(/^DMARC pass rate /);
+			expect(passRate?.severity).toBe("info");
 			expect(passRate?.source).toBe("report");
 
 			// Fragile streams: own mail passing DMARC on ONE mechanism only, including the SendGrid
@@ -193,16 +204,44 @@ describeCorpus(
 			).toBe(true);
 
 			// The four KDDI-reported spoofing rows fail both alignments and were rejected — they
-			// surface as per-source unaligned findings (complaint C01 on the complaints board).
-			const unalignedSources = findings.filter((f) =>
-				f.id.startsWith("dmarc.report_unaligned_source."),
-			);
-			expect(unalignedSources.length).toBeGreaterThan(0);
+			// surface as per-source unaligned findings (complaint C01 on the complaints board). Each
+			// forges OUR envelope AND OUR d= with a junk selector, so ownership must not be inferred
+			// from either: they are spoofing the policy already stopped. Info, and never a
+			// "add it to SPF" nudge, which would authorize the forgery.
+			const SPOOFERS = [
+				"103.190.35.146",
+				"102.244.98.116",
+				"144.124.196.23",
+				"154.255.40.146",
+			];
+			for (const ip of SPOOFERS) {
+				const f = findings.find(
+					(x) => x.id.startsWith(`dmarc.report_unaligned_source.${ip}.`),
+				);
+				expect(f?.severity).toBe("info");
+				expect(f?.title).toContain("Spoofed mail");
+				expect(f?.remediation).toContain("do NOT add this IP to SPF");
+				// The same event must not also be a red enforcement row.
+				const enforced = findings.find(
+					(x) => x.id.startsWith(`dmarc.report_enforcement.${ip}.`),
+				);
+				expect(enforced?.severity).toBe("info");
+				expect(enforced?.title).toContain("Spoofed mail");
+			}
 
-			// Four messages WERE rejected by receivers, so this is no longer the "nothing enforced"
-			// info finding.
+			// A Google relay that DOES authenticate for us, failing alignment on a cross-domain
+			// forward, is the opposite case: real sender, so amber — not spoofing.
+			const ownRelay = findings.find(
+				(f) => f.id.startsWith("dmarc.report_unaligned_source.2607:f8b0:4864:20::f2e."),
+			);
+			expect(ownRelay?.severity).toBe("warning");
+			expect(ownRelay?.title).toContain("Own stream failing all authentication");
+
+			// No message of OURS was dropped anywhere in the corpus, so no enforcement row is red.
 			expect(
-				findings.some((f) => f.id.startsWith("dmarc.report_enforcement.")),
+				findings
+					.filter((f) => f.id.startsWith("dmarc.report_enforcement."))
+					.every((f) => f.severity === "info"),
 			).toBe(true);
 
 			// TLS-RPT: healthy baseline, info only — never turns the cell amber (§14.8).

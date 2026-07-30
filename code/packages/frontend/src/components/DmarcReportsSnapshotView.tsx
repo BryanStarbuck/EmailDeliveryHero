@@ -41,9 +41,20 @@ export function DmarcReportsSnapshotView({
 						label="Messages"
 						value={snapshot.total_messages.toLocaleString()}
 					/>
+					{/* Two DIFFERENT figures: DMARC passes on either aligned mechanism, so the pass rate
+					    is what receivers enforce on. Dual alignment is resilience, always the lower of
+					    the two — showing only the latter as "the pass rate" reads as mass failure. */}
+					<Row
+						label="Passed DMARC"
+						value={`${snapshot.dmarc_pass_messages.toLocaleString()}${
+							snapshot.dmarc_pass_rate_pct === undefined
+								? ""
+								: ` (pass rate ${snapshot.dmarc_pass_rate_pct}%)`
+						}`}
+					/>
 					<Row
 						label="Dual-aligned"
-						value={`${snapshot.aligned_pass_messages.toLocaleString()} (pass rate ${snapshot.pass_rate_pct}%)`}
+						value={`${snapshot.aligned_pass_messages.toLocaleString()} (${snapshot.pass_rate_pct}% — resilience, not delivery)`}
 					/>
 					<Row
 						label="Passing on one mechanism"

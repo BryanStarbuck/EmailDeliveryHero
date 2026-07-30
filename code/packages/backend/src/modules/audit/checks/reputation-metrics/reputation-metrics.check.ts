@@ -327,6 +327,11 @@ export async function fblEnrollment(
  * >= BLOCKLIST_RECURRENCE_THRESHOLD times within the trailing window. Needs NO external integration.
  * A (zone, target) counts at most once per run, so recurrence means "listed on distinct runs",
  * not "many targets in one run".
+ *
+ * Recurrence only goes amber while the listing is STILL LIVE in the most recent run. A pair that
+ * recurred and then cleared — or whose target dropped out of the sweep entirely, which is how a
+ * shrinking target set silently preserved old verdicts — is reported as resolved history at `info`.
+ * A 30-day counter must not keep a fixed problem lit.
  */
 export function blocklistHistory(domain: string): Finding {
 	const runs = readBlacklistRuns(domain);
@@ -386,21 +391,39 @@ export function blocklistHistory(domain: string): Finding {
 		};
 	}
 
-	const listSummary = recurring
-		.slice(0, 6)
-		.map((c) => `${c.name} (${c.zone}) → ${c.target}: ${c.runs}×`)
-		.join("; ");
+	// Only a pair still listed in the LATEST run is a present-day problem. Everything else recurred
+	// and then stopped (delisted, or the target left the sweep) and reports as resolved history.
+	const latest = windowed.at(-1);
+	const liveKeys = new Set(
+		(latest?.results ?? [])
+			.filter((zr) => zr.listed)
+			.map((zr) => `${zr.zone} ${zr.target}`),
+	);
+	const live = recurring.filter((c) => liveKeys.has(`${c.zone} ${c.target}`));
+	const cleared = recurring.filter((c) => !liveKeys.has(`${c.zone} ${c.target}`));
+	const fmt = (c: { name: string; zone: string; target: string; runs: number }) =>
+		`${c.name} (${c.zone}) → ${c.target}: ${c.runs}×`;
+
+	if (live.length === 0) {
+		return {
+			id: "content.blocklist_history",
+			checkId: CHECK_ID,
+			title: "Past DNSBL listings, all clear now",
+			severity: "info",
+			detail: `${cleared.length} (DNSBL, target) pair(s) recurred across ${windowed.length} stored run(s) in the trailing ${BLOCKLIST_HISTORY_WINDOW_DAYS} days, but NONE is listed in the most recent run — the listings cleared, or their target is no longer in the sweep. Reported as history, not a current fault: ${cleared.slice(0, 6).map(fmt).join("; ")}. If a target dropped out of the sweep rather than being delisted, add it under the domain's sending IPs so it keeps being checked.`,
+			evidence: cleared.map((c) => `${c.zone}|${c.target}=${c.runs}(cleared)`).join(", "),
+		};
+	}
+
 	return {
 		id: "content.blocklist_history",
 		checkId: CHECK_ID,
-		title: "Recurring DNSBL listings over time",
+		title: "Recurring DNSBL listings, still listed now",
 		severity: "warning",
-		detail: `Across ${windowed.length} stored blacklist run(s) in the trailing ${BLOCKLIST_HISTORY_WINDOW_DAYS} days, the same DNSBL(s) listed ${domain} or its IPs ${BLOCKLIST_RECURRENCE_THRESHOLD}+ times — a recurrence pattern, not a one-off: ${listSummary}. Repeated listings mean the underlying cause was never fixed, only delisted.`,
+		detail: `${live.length} (DNSBL, target) pair(s) have listed ${domain} or its IPs ${BLOCKLIST_RECURRENCE_THRESHOLD}+ times across ${windowed.length} stored run(s) in the trailing ${BLOCKLIST_HISTORY_WINDOW_DAYS} days AND are still listed in the latest run: ${live.slice(0, 6).map(fmt).join("; ")}. Repeated listings that never clear mean the underlying cause was never fixed, only delisted.${cleared.length > 0 ? ` A further ${cleared.length} pair(s) recurred historically but are clear now.` : ""}`,
 		remediation:
 			"Fix the root cause (complaint source, compromised account, or open relay), not just the delisting request; cross-reference the current listing in the blacklists check.",
-		evidence: recurring
-			.map((c) => `${c.zone}|${c.target}=${c.runs}`)
-			.join(", "),
+		evidence: live.map((c) => `${c.zone}|${c.target}=${c.runs}`).join(", "),
 	};
 }
 

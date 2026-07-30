@@ -34,7 +34,11 @@ export const dmarcReportsCheck: Checker = {
 	label: "DMARC reports",
 	async run(ctx): Promise<CheckOutcome> {
 		const domainId = ctx.domainId ?? "";
-		const findings = deriveDmarcReportFindings(domainId, ctx.domain);
+		const findings = deriveDmarcReportFindings(
+			domainId,
+			ctx.domain,
+			ctx.sendingIps,
+		);
 		const config = readAppConfig().reports;
 		if (!config.enabled) return { findings };
 		const reports = listDmarcReports(domainId);
@@ -48,10 +52,13 @@ export const dmarcReportsCheck: Checker = {
 				reporters: agg.reporters,
 				window: { begin: agg.window.begin, end: agg.window.end },
 				window_days: config.windowDays,
+				stale_reports_excluded: agg.staleReportCount,
+				newest_report_end: agg.newestReportEnd,
 				total_messages: agg.totalMessages,
 				aligned_pass_messages: agg.alignedPassMessages,
 				dmarc_pass_messages: agg.dmarcPassMessages,
 				pass_rate_pct: agg.passRatePct,
+				dmarc_pass_rate_pct: agg.dmarcPassRatePct,
 				dkim_only: breakdown.dkimOnly,
 				spf_only: breakdown.spfOnly,
 				both_fail: breakdown.bothFail,

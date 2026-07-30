@@ -1,14 +1,17 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
+	ageInDays,
 	aggregateDmarc,
 	aggregateTlsRpt,
+	authenticatedSourceIps,
 	type DmarcAggregate,
 	dmarcVolumeBreakdown,
 	fragileStreams,
 	ingestionDisabledFinding,
+	isOwnUnalignedSender,
 	type TlsRptAggregate,
-	underDomain,
+	wasForwardedByReceiver,
 } from "@module/reports/derive-findings";
 import { parseDmarcAggregateXml } from "@module/reports/dmarc-xml";
 import { classifyPayload, extractReportPayloads } from "@module/reports/mime";
@@ -281,10 +284,13 @@ function buildSnapshot(
 		window: { begin: window.begin.slice(0, 10), end: window.end.slice(0, 10) },
 		dmarc: {
 			reports: dmarc.reportCount,
+			stale_reports_excluded: dmarc.staleReportCount,
+			newest_report_end: dmarc.newestReportEnd,
 			reporters: dmarc.reporters,
 			messages: dmarc.totalMessages,
 			dual_aligned: dmarc.alignedPassMessages,
 			pass_rate_pct: dmarc.passRatePct,
+			dmarc_pass_rate_pct: dmarc.dmarcPassRatePct,
 			dkim_only: breakdown.dkimOnly,
 			spf_only: breakdown.spfOnly,
 			both_fail: breakdown.bothFail,
@@ -294,6 +300,8 @@ function buildSnapshot(
 		},
 		tlsrpt: {
 			reports: tlsrpt.reportCount,
+			stale_reports_excluded: tlsrpt.staleReportCount,
+			newest_report_end: tlsrpt.newestReportEnd,
 			reporters: tlsrpt.reporters,
 			sessions_ok: tlsrpt.totalSuccess,
 			sessions_failed: tlsrpt.totalFailure,
@@ -309,11 +317,16 @@ function deriveCorpusFindings(
 	dmarc: DmarcAggregate,
 	tlsrpt: TlsRptAggregate,
 	windowDays: number,
-	hasDmarcReports: boolean,
-	hasTlsReports: boolean,
+	hasStoredDmarc: boolean,
+	hasStoredTls: boolean,
+	knownIps: Set<string>,
 ): Finding[] {
 	const domain = ctx.domain;
 	const findings: Finding[] = [];
+	// Stored vs CURRENT: the aggregates are windowed on the clock, so a store full of month-old
+	// reports has data but nothing to score. Only in-window volume may raise a flag.
+	const hasCurrentDmarc = dmarc.reportCount > 0;
+	const hasCurrentTls = tlsrpt.reportCount > 0;
 
 	// content.report_corpus — the "did the test actually look at my emails" row.
 	if (tally.decodeErrors.length > 0) {
@@ -377,7 +390,7 @@ function deriveCorpusFindings(
 	}
 
 	// content.report_pass_rate — mirrors dmarc.real_pass_rate (§5), aggregate row only.
-	if (!hasDmarcReports) {
+	if (!hasStoredDmarc) {
 		findings.push({
 			id: "content.report_pass_rate",
 			checkId: CHECK_ID,
@@ -386,19 +399,30 @@ function deriveCorpusFindings(
 			detail: `The corpus holds no DMARC aggregate report whose policy domain resolves to ${domain}; the field pass rate is unknown.`,
 			source: "report",
 		});
+	} else if (!hasCurrentDmarc) {
+		const age = ageInDays(dmarc.newestReportEnd);
+		findings.push({
+			id: "content.report_pass_rate",
+			checkId: CHECK_ID,
+			title: `No DMARC report data in the last ${windowDays} day(s)`,
+			severity: "info",
+			detail: `${dmarc.staleReportCount} stored DMARC report(s) for ${domain} all fall outside the ${windowDays}-day window${age === null ? "" : ` (newest is ${age} day(s) old)`}, so there is no current field data to score. Older reports are kept as history and never re-flagged as a present-day problem — see content.report_freshness for the live issue.`,
+			remediation: `Confirm receivers are still sending to the rua= address on _dmarc.${domain} and that the report mailbox/drop folder is wired up (Settings → Admin).`,
+			source: "report",
+		});
 	} else {
-		const failVolume = dmarc.totalMessages - dmarc.alignedPassMessages;
+		const failVolume = dmarc.totalMessages - dmarc.dmarcPassMessages;
+		const fragileVolume = dmarc.totalMessages - dmarc.alignedPassMessages;
 		const failSources = new Set(
-			dmarc.rows
-				.filter((r) => !(r.spfAligned && r.dkimAligned))
-				.map((r) => r.sourceIp),
+			dmarc.rows.filter((r) => !r.dmarcPass).map((r) => r.sourceIp),
 		).size;
 		findings.push({
 			id: "content.report_pass_rate",
 			checkId: CHECK_ID,
-			title: `${dmarc.passRatePct}% of mail dual-aligned`,
-			severity: failVolume > 0 && dmarc.passRatePct < 99.5 ? "warning" : "info",
-			detail: `${dmarc.passRatePct}% of ${dmarc.totalMessages} msgs dual-aligned over ${fmtWindow(dmarc.window)}; ${failVolume} msgs from ${failSources} source(s) pass on one mechanism only or fail.`,
+			title: `${dmarc.dmarcPassRatePct}% of mail passes DMARC`,
+			severity:
+				failVolume > 0 && dmarc.dmarcPassRatePct < 99.5 ? "warning" : "info",
+			detail: `${dmarc.dmarcPassRatePct}% of ${dmarc.totalMessages} msgs pass DMARC over ${fmtWindow(dmarc.window)} (${failVolume} msgs from ${failSources} source(s) fail outright). ${dmarc.passRatePct}% is dual-aligned; the other ${fragileVolume} msg(s) pass on a single mechanism — resilience, tracked by content.report_fragility, not lost mail.`,
 			remediation:
 				failVolume > 0
 					? "Authorize/align the failing streams (SPF include: / DKIM selector / alignment) before tightening policy."
@@ -420,23 +444,59 @@ function deriveCorpusFindings(
 				source: "report",
 			});
 		} else {
-			const ownOnly = bothFail.every(
-				(r) =>
-					r.envelopeSpfDomain !== "" &&
-					underDomain(r.envelopeSpfDomain, domain),
+			// Ownership comes from independent evidence only (isOwnUnalignedSender) — a both-fail row's
+			// envelope and d= are unverified claims a spoofer forges for free. Rows the RECEIVER
+			// declared as relayed are forwarded mail, unaligned by design, and are neither.
+			const own = bothFail.filter((r) => isOwnUnalignedSender(r, knownIps));
+			const relayed = bothFail.filter(
+				(r) => !isOwnUnalignedSender(r, knownIps) && wasForwardedByReceiver(r),
 			);
-			const volume = bothFail.reduce((n, r) => n + r.count, 0);
+			const spoofed = bothFail.filter(
+				(r) => !isOwnUnalignedSender(r, knownIps) && !wasForwardedByReceiver(r),
+			);
+			const unblocked = spoofed.filter(
+				(r) => r.disposition !== "reject" && r.disposition !== "quarantine",
+			);
+			const ownVolume = own.reduce((n, r) => n + r.count, 0);
+			const relayedVolume = relayed.reduce((n, r) => n + r.count, 0);
+			const spoofVolume = spoofed.reduce((n, r) => n + r.count, 0);
+			const unblockedVolume = unblocked.reduce((n, r) => n + r.count, 0);
+			// Spoofing the policy already stops is the policy working. Only own breakage (amber) or
+			// forged mail receivers still DELIVERED (red) is a fault.
+			const severity =
+				unblockedVolume > 0 ? "critical" : ownVolume > 0 ? "warning" : "info";
 			findings.push({
 				id: "content.report_spoofing",
 				checkId: CHECK_ID,
-				title: ownOnly
-					? `Own stream(s) failing all authentication (${volume} msgs)`
-					: `${bothFail.length} source(s) fail both SPF and DKIM alignment`,
-				severity: ownOnly ? "warning" : "critical",
-				detail: `${volume} msg(s) from ${bothFail.length} source(s) fail BOTH SPF and DKIM alignment${ownOnly ? " but trace to the domain — a misconfigured own sender" : " and do not trace to a known sender — spoofing or a forgotten sender"}. Per-IP detail: the DMARC category's unaligned-source rows.`,
-				remediation: ownOnly
-					? `Authorize the failing own sender(s): SPF include: and a DKIM selector under ${domain}.`
-					: "If a source is yours, add it to SPF and enable DKIM; if not, it is spoofing — already rejected under p=reject; monitor and report high-volume abuse.",
+				title:
+					unblockedVolume > 0
+						? `${unblocked.length} spoofing source(s) not being blocked`
+						: ownVolume > 0
+							? `Own stream(s) failing all authentication (${ownVolume} msgs)`
+							: spoofVolume > 0
+								? `${spoofed.length} spoofing source(s) blocked by policy`
+								: `${relayedVolume} forwarded msg(s) unaligned, no spoofing`,
+				severity,
+				detail: [
+					ownVolume > 0
+						? `${ownVolume} msg(s) from ${own.length} source(s) that have authenticated for ${domain} before now fail BOTH SPF and DKIM alignment — a real sender that has broken.`
+						: null,
+					spoofVolume > 0
+						? `${spoofVolume} msg(s) from ${spoofed.length} source(s) fail both mechanisms and have never authenticated for ${domain} — forged mail, of which ${spoofVolume - unblockedVolume} msg(s) were quarantined/rejected by receivers${unblockedVolume > 0 ? ` and ${unblockedVolume} msg(s) were still DELIVERED` : " exactly as the policy intends"}.`
+						: null,
+					relayedVolume > 0
+						? `A further ${relayedVolume} msg(s) from ${relayed.length} source(s) arrived unaligned but the receivers themselves declared them relayed (ARC/forwarding override) — forwarding breaks alignment by design and is not spoofing.`
+						: null,
+					"Per-IP detail: the DMARC category's unaligned-source rows.",
+				]
+					.filter(Boolean)
+					.join(" "),
+				remediation:
+					unblockedVolume > 0
+						? `Forged mail is still landing — publish p=reject on _dmarc.${domain} so receivers drop it. Do NOT add these IPs to SPF.`
+						: ownVolume > 0
+							? `Authorize the failing own sender(s): SPF include: and a DKIM selector under ${domain}. Leave the spoofing sources alone — adding them to SPF would authorize the forgery.`
+							: undefined,
 				source: "report",
 			});
 		}
@@ -473,17 +533,38 @@ function deriveCorpusFindings(
 			});
 		}
 
-		// content.report_enforcement — own mail actively quarantined/rejected right now.
+		// content.report_enforcement — OUR mail actively quarantined/rejected right now. Forged mail
+		// being dropped is the policy working and must never turn this row red.
 		const breakdown = dmarcVolumeBreakdown(dmarc);
 		const enforcedVolume = breakdown.quarantined + breakdown.rejected;
 		if (enforcedVolume > 0) {
+			const enforcedRows = dmarc.rows.filter(
+				(r) => r.disposition === "quarantine" || r.disposition === "reject",
+			);
+			const ownRows = enforcedRows.filter(
+				(r) =>
+					r.dmarcPass ||
+					isOwnUnalignedSender(r, knownIps) ||
+					wasForwardedByReceiver(r),
+			);
+			const ownVolume = ownRows.reduce((n, r) => n + r.count, 0);
+			const forgedVolume = enforcedVolume - ownVolume;
 			findings.push({
 				id: "content.report_enforcement",
 				checkId: CHECK_ID,
-				title: `${enforcedVolume} msg(s) quarantined/rejected by receivers`,
-				severity: "critical",
-				detail: `Receivers reported ${breakdown.quarantined} quarantined and ${breakdown.rejected} rejected msg(s) sent as ${domain} — mail is being dropped right now.`,
-				remediation: `Identify and authorize the failing source (SPF include: / DKIM selector under ${domain}) before the next send.`,
+				title:
+					ownVolume > 0
+						? `${ownVolume} of our msg(s) quarantined/rejected by receivers`
+						: `${forgedVolume} forged msg(s) blocked by policy`,
+				severity: ownVolume > 0 ? "critical" : "info",
+				detail:
+					ownVolume > 0
+						? `Receivers dropped ${ownVolume} msg(s) from ${ownRows.length} source(s) that authenticate for ${domain} — real mail is being lost right now${forgedVolume > 0 ? ` (a further ${forgedVolume} dropped msg(s) were forged and are not ours)` : ""}.`
+						: `Receivers reported ${breakdown.quarantined} quarantined and ${breakdown.rejected} rejected msg(s) sent as ${domain}, and every one failed both SPF and DKIM alignment from a source that has never authenticated for the domain — forged mail the policy correctly stopped. None of our own mail was dropped.`,
+				remediation:
+					ownVolume > 0
+						? `Identify and authorize the failing source (SPF include: / DKIM selector under ${domain}) before the next send.`
+						: undefined,
 				source: "report",
 			});
 		} else {
@@ -499,13 +580,23 @@ function deriveCorpusFindings(
 	}
 
 	// content.report_tls — the corpus-side echo of infra.tls_rpt_reports_ingested.
-	if (!hasTlsReports) {
+	if (!hasStoredTls) {
 		findings.push({
 			id: "content.report_tls",
 			checkId: CHECK_ID,
 			title: "No TLS-RPT reports for this domain",
 			severity: "info",
 			detail: `The corpus holds no TLS-RPT report whose policy domain resolves to ${domain}.`,
+			source: "report",
+		});
+	} else if (!hasCurrentTls) {
+		const age = ageInDays(tlsrpt.newestReportEnd);
+		findings.push({
+			id: "content.report_tls",
+			checkId: CHECK_ID,
+			title: `No TLS-RPT data in the last ${windowDays} day(s)`,
+			severity: "info",
+			detail: `${tlsrpt.staleReportCount} stored TLS-RPT report(s) for ${domain} all fall outside the ${windowDays}-day window${age === null ? "" : ` (newest is ${age} day(s) old)`}, so inbound TLS health is currently unknown rather than healthy or failing.`,
 			source: "report",
 		});
 	} else if (tlsrpt.totalFailure > 0) {
@@ -535,26 +626,25 @@ function deriveCorpusFindings(
 		});
 	}
 
-	// content.report_freshness — reports stopped arriving? (§13.2 last row)
-	if (hasDmarcReports || hasTlsReports) {
-		const newestEnd = [
-			hasDmarcReports ? dmarc.window.end : "",
-			hasTlsReports ? tlsrpt.window.end : "",
-		]
+	// content.report_freshness — reports stopped arriving? (§13.2 last row). Reads the newest STORED
+	// report, never the aggregate window: the window now always ends "now", so it can never age.
+	if (hasStoredDmarc || hasStoredTls) {
+		const newestEnd = [dmarc.newestReportEnd ?? "", tlsrpt.newestReportEnd ?? ""]
 			.filter(Boolean)
 			.sort()
 			.at(-1);
-		const newestMs = newestEnd ? Date.parse(newestEnd) : Number.NaN;
-		const ageDays = Number.isFinite(newestMs)
-			? Math.floor((Date.now() - newestMs) / (24 * 60 * 60 * 1000))
-			: null;
-		if (ageDays !== null && ageDays > 2 * windowDays) {
+		const ageDays = ageInDays(newestEnd ?? null);
+		// The threshold is the window itself, not 2× it. Once the newest report falls outside the
+		// window every scored row goes to "no current data" — so a 2× threshold left a whole window's
+		// width where nothing could score AND this row still said "current", the one combination that
+		// reads as a clean bill of health for a corpus that has stopped arriving.
+		if (ageDays !== null && ageDays > windowDays) {
 			findings.push({
 				id: "content.report_freshness",
 				checkId: CHECK_ID,
 				title: `Newest report is ${ageDays} days old`,
 				severity: "warning",
-				detail: `The corpus's newest report is ${ageDays} days old (> 2× the ${windowDays}-day window) — reports may have stopped arriving.`,
+				detail: `The corpus's newest report is ${ageDays} days old, outside the ${windowDays}-day window — reports may have stopped arriving, and until they resume there is no current field data to score.`,
 				remediation:
 					"Check the rua= address on the DMARC/TLS-RPT records and the drop folder/mailbox wiring (Settings → Admin).",
 				source: "report",
@@ -596,12 +686,16 @@ export const reportEmailsCheck: Checker = {
 			`Report corpus scan for ${ctx.domain}: ${tally.scannedFiles} file(s), ${tally.parsedReports} report(s) parsed (${tally.duplicates} duplicate(s)), ${tally.skipped} skipped at ${dir}`,
 			"ReportEmailsCheck",
 		);
-		// Aggregate THIS domain's stored reports over the rolling window (anchored on the newest
-		// report so a historical corpus still analyzes — §13.1 step 4).
+		// Aggregate THIS domain's stored reports over the rolling window (anchored on NOW, so a corpus
+		// that stopped arriving reports "no current data" instead of freezing its last verdict — §13.1
+		// step 4). Ownership evidence spans the WHOLE store, not just the window: an IP that
+		// authenticated for us last month is still our sender when it breaks today.
 		const dmarcReports = listDmarcReports(domainId);
 		const tlsReports = listTlsRptReports(domainId);
 		const dmarc = aggregateDmarc(dmarcReports, config.windowDays);
 		const tlsrpt = aggregateTlsRpt(tlsReports, config.windowDays);
+		const knownIps = authenticatedSourceIps(dmarcReports);
+		for (const ip of ctx.sendingIps) knownIps.add(ip);
 		const findings = deriveCorpusFindings(
 			ctx,
 			tally,
@@ -610,6 +704,7 @@ export const reportEmailsCheck: Checker = {
 			config.windowDays,
 			dmarcReports.length > 0,
 			tlsReports.length > 0,
+			knownIps,
 		);
 		return { findings, results: buildSnapshot(tally, dmarc, tlsrpt) };
 	},

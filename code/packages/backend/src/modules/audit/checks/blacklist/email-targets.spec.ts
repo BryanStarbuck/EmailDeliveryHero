@@ -151,4 +151,53 @@ describe("collectEmailReportIps", () => {
 		writeFileSync(join(dir, "stale.eml"), emlWithGzip(stale));
 		expect(collectEmailReportIps("example.com").ips).toHaveLength(0);
 	});
+
+	it("honours a caller-supplied window so a retired sender leaves the sweep", () => {
+		// A decommissioned ESP: last sent 20 days ago. Inside the legacy 30-day default it is still
+		// swept — with the app's 7-day report window it is correctly no longer a sending IP.
+		const retired = ruaXml({
+			domain: "example.com",
+			endEpoch: NOW_EPOCH - 20 * 24 * 3600,
+			rows: [{ ip: "203.0.113.90", count: 67, dkim: "pass", spf: "pass" }],
+		});
+		writeFileSync(join(dir, "retired.eml"), emlWithGzip(retired));
+
+		expect(collectEmailReportIps("example.com").ips.map((i) => i.ip)).toEqual([
+			"203.0.113.90",
+		]);
+
+		const windowed = collectEmailReportIps("example.com", 7);
+		expect(windowed.ips).toHaveLength(0);
+		// Never silent: the drop is reported with the date it last sent.
+		expect(windowed.agedOut.map((i) => i.ip)).toEqual(["203.0.113.90"]);
+		expect(windowed.agedOut[0].message_count).toBe(67);
+	});
+
+	it("does not age out an IP that is still sending inside the window", () => {
+		// Same IP in both an old and a current report — presence now wins over absence then.
+		writeFileSync(
+			join(dir, "old.eml"),
+			emlWithGzip(
+				ruaXml({
+					domain: "example.com",
+					endEpoch: NOW_EPOCH - 20 * 24 * 3600,
+					rows: [{ ip: "203.0.113.24", count: 5, dkim: "pass", spf: "pass" }],
+				}),
+			),
+		);
+		writeFileSync(
+			join(dir, "now.eml"),
+			emlWithGzip(
+				ruaXml({
+					domain: "example.com",
+					endEpoch: NOW_EPOCH - 3600,
+					rows: [{ ip: "203.0.113.24", count: 11, dkim: "pass", spf: "pass" }],
+				}),
+			),
+		);
+
+		const windowed = collectEmailReportIps("example.com", 7);
+		expect(windowed.ips.map((i) => i.ip)).toEqual(["203.0.113.24"]);
+		expect(windowed.agedOut).toHaveLength(0);
+	});
 });

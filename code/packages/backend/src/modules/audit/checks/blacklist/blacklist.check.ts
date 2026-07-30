@@ -1,6 +1,7 @@
 import { Resolver } from "node:dns/promises";
 import { mapLimit, withResource } from "@shared/concurrency";
-import { logWarn } from "@shared/logging";
+import { readAppConfig } from "@shared/config-store";
+import { logInfo, logWarn } from "@shared/logging";
 import { resolveMx, resolveTxt, resolve4 as utilResolve4 } from "../dns-util";
 import type { Checker, CheckOutcome, Finding, Severity } from "../types";
 import type {
@@ -199,6 +200,7 @@ async function discoverIpTargets(
 	resolver: Resolver,
 	domain: string,
 	configured: string[],
+	reportWindowDays: number,
 ): Promise<IpTarget[]> {
 	const sources = new Map<string, IpTarget["source"]>();
 	for (const ip of configured) {
@@ -220,9 +222,9 @@ async function discoverIpTargets(
 			if (!sources.has(ip)) sources.set(ip, "spf_authorized");
 		}
 	}
-	// §19: IPs observed actually sending as this domain in DMARC rua reports (last 30 days),
+	// §19: IPs observed actually sending as this domain in DMARC rua reports inside the report window,
 	// capped at the top 20 by message volume. Dedupe keeps the stronger config-derived source tag.
-	const emailIps = collectEmailReportIps(domain);
+	const emailIps = collectEmailReportIps(domain, reportWindowDays);
 	for (const rep of emailIps.ips) {
 		if (!sources.has(rep.ip)) sources.set(rep.ip, "email_report");
 	}
@@ -230,6 +232,17 @@ async function discoverIpTargets(
 		// §19.1: the target cap is bounded but truncation is never silent.
 		logWarn(
 			`Blacklist sweep for ${domain}: ${emailIps.truncated} email-derived IP(s) beyond the top-20-by-volume cap were skipped`,
+			"BlacklistCheck",
+		);
+	}
+	if (emailIps.agedOut.length > 0) {
+		// A retired sender leaving the sweep is expected, but never silent — it is also why its old
+		// DNSBL listings stop being reported.
+		logInfo(
+			`Blacklist sweep for ${domain}: ${emailIps.agedOut.length} IP(s) last sent outside the ${reportWindowDays}-day report window and are no longer swept (${emailIps.agedOut
+				.slice(0, 8)
+				.map((s) => `${s.ip} last seen ${s.last_seen.slice(0, 10)}`)
+				.join(", ")})`,
 			"BlacklistCheck",
 		);
 	}
@@ -250,6 +263,83 @@ async function discoverIpTargets(
 			return { ip, source, ptr, fcrdns_ok: fcrdnsOk, asn };
 		},
 	);
+}
+
+/**
+ * Sources that are an AFFIRMATIVE statement of ownership by the operator: they typed the address
+ * into this domain's sending IPs, or published it as an ip4 literal in their own SPF record. Anything
+ * else is infrastructure we merely OBSERVED carrying the domain's mail — an MX host or an ESP relay —
+ * which MAY be a shared provider pool. The source tag alone does not settle it: see
+ * `hasOwnershipEvidence`.
+ */
+const OPERATOR_DECLARED_SOURCES = new Set<IpTarget["source"]>([
+	"sending_ips",
+	"spf_authorized",
+]);
+
+/** True when `child` equals `domain` or is a subdomain of it. */
+function underDomain(child: string, domain: string): boolean {
+	const c = child.replace(/\.$/, "").toLowerCase();
+	const d = domain.replace(/\.$/, "").toLowerCase();
+	return c === d || c.endsWith(`.${d}`);
+}
+
+/**
+ * Is there evidence the operator controls this address, beyond the tag that put it in the sweep?
+ *
+ * The source tag alone is not enough, and reading it as though it were is how a self-hosted mail
+ * server gets written off as somebody else's pool: `mx_resolved` is only ever populated when the
+ * operator declared NO sending IPs, and a self-hoster publishing `v=spf1 mx -all` emits no ip4
+ * literal either — so their own listed server matches neither declared source. Two further signals
+ * settle it:
+ *
+ *  - FCrDNS-verified PTR under the org domain. Forward and reverse both resolve and agree, and the
+ *    name is theirs: only the address's controller can arrange that.
+ *  - The ASN matches one the operator DID declare. Same network as infrastructure they claimed.
+ */
+function hasOwnershipEvidence(
+	target: IpTarget,
+	domain: string,
+	declaredAsns: Set<number>,
+): boolean {
+	if (OPERATOR_DECLARED_SOURCES.has(target.source)) return true;
+	if (target.fcrdns_ok === true && target.ptr && underDomain(target.ptr, domain))
+		return true;
+	return target.asn?.number != null && declaredAsns.has(target.asn.number);
+}
+
+/**
+ * A DNSBL listing on a shared provider pool (Google Workspace's outbound relays, an ESP's send
+ * cluster) is not this domain's own reputation and the operator cannot request the delisting: the
+ * netblock's abuse contact is the provider's. So the delisting instruction is wrong for these rows,
+ * and a `critical` tier reads as an emergency the operator cannot end.
+ *
+ * It is NOT nothing, though. The pool carries this domain's authenticated mail — every
+ * `email_report` address got there by passing DMARC as this domain — so a listing on it costs real
+ * delivery, and escalating to the provider or migrating off the pool is real work. Such a row is
+ * therefore capped at `warning`, never flattened to `info`: a listed address that carries your mail
+ * must not let the check report green.
+ *
+ * Mutates `results` in place so every downstream consumer of `severity` agrees.
+ */
+export function reclassifySharedNetblockListings(
+	results: ZoneResult[],
+	ipTargets: IpTarget[],
+	domain: string,
+): void {
+	const byIp = new Map(ipTargets.map((t) => [t.ip, t]));
+	const declaredAsns = new Set<number>();
+	for (const t of ipTargets) {
+		if (OPERATOR_DECLARED_SOURCES.has(t.source) && t.asn?.number != null)
+			declaredAsns.add(t.asn.number);
+	}
+	for (const r of results) {
+		if (!r.listed || r.kind !== "ip") continue;
+		const target = byIp.get(r.target);
+		if (!target || hasOwnershipEvidence(target, domain, declaredAsns)) continue;
+		r.shared_netblock = target.asn?.org ?? "an unidentified third-party network";
+		if (r.severity === "critical") r.severity = "warning";
+	}
 }
 
 /** §11.2 RFC 5782 preflight: 127.0.0.2 must be listed, 127.0.0.1 must not. */
@@ -493,6 +583,9 @@ export const blacklistCheck: Checker = {
 		const zones = loadZones().filter((z) => z.enabled);
 		const sweepZones = zones.filter((z) => !z.positive);
 		const toolRuns: ToolRun[] = [];
+		// Report-derived targets share the app's definition of "current" (pm/emails.mdx §4.6) — an IP
+		// that stopped sending is not a sending IP, whatever the corpus still remembers about it.
+		const reportWindowDays = readAppConfig().reports.windowDays;
 
 		// §11.1 target discovery (PTR/FCrDNS/ASN context probes attached — §11.7).
 		const ipTargets = await loggedPhase(
@@ -506,7 +599,13 @@ export const blacklistCheck: Checker = {
 						],
 				server,
 			),
-			() => discoverIpTargets(resolver, ctx.domain, ctx.sendingIps),
+			() =>
+				discoverIpTargets(
+					resolver,
+					ctx.domain,
+					ctx.sendingIps,
+					reportWindowDays,
+				),
 			(targets) => targets,
 		);
 		// §3/§19.1 domain targets: the primary sending domain plus our own subdomains observed
@@ -514,7 +613,10 @@ export const blacklistCheck: Checker = {
 		const domainTargets: DomainTarget[] = [
 			{ domain: ctx.domain, source: "primary", created: null },
 		];
-		for (const extra of collectEmailReportDomains(ctx.domain)) {
+		for (const extra of collectEmailReportDomains(
+			ctx.domain,
+			reportWindowDays,
+		)) {
 			domainTargets.push({
 				domain: extra.domain,
 				source: extra.source,
@@ -599,6 +701,10 @@ export const blacklistCheck: Checker = {
 			() => probePositiveReputation(resolver, ipTargets),
 			(rep) => rep,
 		);
+
+		// Cap listings on netblocks this domain has no evidence of owning, BEFORE anything reads
+		// severity — status, tests, problem states, the diff and the findings all derive from it.
+		reclassifySharedNetblockListings(results, ipTargets, ctx.domain);
 
 		const listedRows = results.filter((r) => r.listed);
 		const inconclusiveRows = results.filter((r) => r.inconclusive);
@@ -686,13 +792,22 @@ export const blacklistCheck: Checker = {
 
 		for (const r of listedRows) {
 			const severity: Severity = r.severity ?? "warning";
+			const shared = r.shared_netblock;
 			findings.push({
 				id: `blacklist.listed.${r.zone}.${r.target}`,
 				checkId: "blacklist",
-				title: `${r.target} is listed on ${r.name}`,
+				title: shared
+					? `${r.target} is listed on ${r.name} (${shared} netblock)`
+					: `${r.target} is listed on ${r.name}`,
 				severity,
-				detail: `${r.kind === "ip" ? "Sending IP" : "Domain"} ${r.target} is on ${r.name} (${r.zone} answered ${r.return_code}${r.sub_list ? ` = ${r.sub_list}` : ""}).${r.reason_txt ? ` Reason: ${r.reason_txt}` : ""}`,
-				remediation: delistRemediation(r),
+				detail: `${r.kind === "ip" ? "Sending IP" : "Domain"} ${r.target} is on ${r.name} (${r.zone} answered ${r.return_code}${r.sub_list ? ` = ${r.sub_list}` : ""}).${r.reason_txt ? ` Reason: ${r.reason_txt}` : ""}${
+					shared
+						? ` This address appears to belong to ${shared} rather than to you — it was observed carrying your mail, never declared as one of your sending IPs, and nothing ties it to your DNS or your networks. The listing reflects that shared pool's aggregate traffic rather than this domain's own reputation, and its abuse contact is the provider's, so YOU cannot request the delisting. It still carries your authenticated mail, so it still costs you delivery.`
+						: ""
+				}`,
+				remediation: shared
+					? `You cannot delist this yourself. Raise it with ${shared} (your provider's support/postmaster channel) and check whether your mail is actually being deferred or rejected; if it is, move this stream to a pool or dedicated IP you control. If you DO own this address, add it to this domain's sending IPs so it is scored as yours and the delisting steps apply.`
+					: delistRemediation(r),
 				evidence: queryNameFor(r),
 			});
 		}

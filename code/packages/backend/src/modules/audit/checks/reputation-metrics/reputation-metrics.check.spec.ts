@@ -116,6 +116,60 @@ describe("blocklistHistory", () => {
 		// Both recurrences are outside the 30-day window → no windowed runs → info.
 		expect(blocklistHistory("example.com").severity).toBe("info");
 	});
+
+	it("downgrades to info once the recurring listing has cleared", () => {
+		mockRuns([
+			run(recent(), [
+				listing("zen.spamhaus.org", "Spamhaus ZEN", "203.0.113.10"),
+			]),
+			run(recent(), [
+				listing("zen.spamhaus.org", "Spamhaus ZEN", "203.0.113.10"),
+			]),
+			run(recent(), [
+				listing("zen.spamhaus.org", "Spamhaus ZEN", "203.0.113.10", false),
+			]),
+		]);
+		const f = blocklistHistory("example.com");
+		expect(f.severity).toBe("info");
+		expect(f.title).toBe("Past DNSBL listings, all clear now");
+		expect(f.evidence).toContain("cleared");
+	});
+
+	it("downgrades to info when the target dropped out of the sweep entirely", () => {
+		// The shrinking-target-set case: the IP is no longer checked, so its old listings must not
+		// keep standing in as a current fault.
+		mockRuns([
+			run(recent(), [listing("bl.0spam.org", "0spam", "149.72.154.232")]),
+			run(recent(), [listing("bl.0spam.org", "0spam", "149.72.154.232")]),
+			run(recent(), []),
+		]);
+		const f = blocklistHistory("example.com");
+		expect(f.severity).toBe("info");
+		expect(f.detail).toContain("no longer in the sweep");
+	});
+
+	it("stays amber while the recurring listing is still live in the latest run", () => {
+		mockRuns([
+			run(recent(), [
+				listing("zen.spamhaus.org", "Spamhaus ZEN", "203.0.113.10"),
+				listing("bl.0spam.org", "0spam", "203.0.113.11"),
+			]),
+			run(recent(), [
+				listing("zen.spamhaus.org", "Spamhaus ZEN", "203.0.113.10"),
+				listing("bl.0spam.org", "0spam", "203.0.113.11"),
+			]),
+			run(recent(), [
+				listing("zen.spamhaus.org", "Spamhaus ZEN", "203.0.113.10"),
+				listing("bl.0spam.org", "0spam", "203.0.113.11", false),
+			]),
+		]);
+		const f = blocklistHistory("example.com");
+		expect(f.severity).toBe("warning");
+		// Only the still-listed pair is evidence; the cleared one is mentioned, not counted.
+		expect(f.evidence).toContain("zen.spamhaus.org|203.0.113.10");
+		expect(f.evidence).not.toContain("bl.0spam.org");
+		expect(f.detail).toContain("1 pair(s) recurred historically but are clear now");
+	});
 });
 
 /**

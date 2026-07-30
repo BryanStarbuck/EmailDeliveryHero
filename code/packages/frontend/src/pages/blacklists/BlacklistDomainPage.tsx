@@ -156,7 +156,25 @@ function DebugDrawer({
 						</div>
 					))}
 			</dl>
-			{row.listed && (
+			{row.listed && row.shared_netblock && (
+				<p className="mt-2 text-xs text-slate-700">
+					<span className="font-semibold">
+						Not yours to delist — but still yours to chase:
+					</span>{" "}
+					this address appears to belong to {row.shared_netblock} rather than to
+					you. It was observed carrying your mail, never declared as one of your
+					sending IPs, and nothing ties it to your DNS or your networks — so the
+					listing reflects that shared pool's aggregate traffic rather than this
+					domain's own reputation, and its abuse contact is the provider's, so you
+					cannot request the removal. It does carry your authenticated mail, so it
+					still costs you delivery: raise it with the provider, and if your mail is
+					actually being deferred or rejected, move the stream to a pool or
+					dedicated IP you control. If you do own this address, add it to this
+					domain's sending IPs so it is scored as yours and the delisting steps
+					apply.
+				</p>
+			)}
+			{row.listed && !row.shared_netblock && (
 				<p className="mt-2 text-xs text-slate-700">
 					<span className="font-semibold">Delisting steps:</span> ① fix the root
 					cause first (a delist request with the cause live gets re-listed) ②

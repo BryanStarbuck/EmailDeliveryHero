@@ -1121,6 +1121,12 @@ export interface BlacklistZoneResult {
 	problem_state: ProblemStateId | null;
 	paid_delist_offered: boolean;
 	auto_expires: string | null;
+	/**
+	 * Set when the listed IP is in a netblock this domain has no evidence of owning: the ASN org that
+	 * does own it. Such a listing is not this domain's reputation and is not delistable by its
+	 * operator, so `severity` is softened to `info`. Absent on runs from before the field existed.
+	 */
+	shared_netblock?: string | null;
 }
 
 export interface BlacklistPositiveReputation {
@@ -1312,6 +1318,8 @@ export interface DmarcSourceRow {
 	envelopeSpfDomain: string;
 	dkimSigningDomains: string[];
 	reporters: string[];
+	/** `<policy_evaluated><reason>` overrides the receivers declared, unioned across merged rows. */
+	reasons?: { type: string; comment: string | null }[];
 }
 
 /** The DMARC-aggregate rollup over the rolling window (pm/emails.mdx §4.6). */
@@ -1323,7 +1331,14 @@ export interface DmarcReportAggregate {
 	/** Dual-aligned volume — §12's "DMARC-aligned pass" figure. */
 	alignedPassMessages: number;
 	dmarcPassMessages: number;
+	/** Dual-aligned percentage — the fragility signal, always <= dmarcPassRatePct. */
 	passRatePct: number;
+	/** The real DMARC pass percentage (either mechanism aligned) — what receivers enforce on. */
+	dmarcPassRatePct: number;
+	/** Stored reports outside the current window — history, not scored. */
+	staleReportCount: number;
+	/** Newest window end across ALL stored reports; null when the store is empty. */
+	newestReportEnd: string | null;
 	policyPublished: {
 		domain: string;
 		p: string;
@@ -1355,6 +1370,10 @@ export interface TlsRptReportAggregate {
 	totalFailure: number;
 	policyTypes: string[];
 	rows: TlsRptReporterDay[];
+	/** Stored reports outside the current window — history, not scored. */
+	staleReportCount: number;
+	/** Newest report date across ALL stored reports; null when the store is empty. */
+	newestReportEnd: string | null;
 	totalReportsStored: number;
 }
 
@@ -1405,10 +1424,17 @@ export interface DmarcReportsSnapshot {
 	reporters: string[];
 	window: { begin: string; end: string };
 	window_days: number;
+	/** Stored reports outside the run's window — history, not scored. Absent on older run files. */
+	stale_reports_excluded?: number;
+	/** Newest report end across ALL stored reports. Absent on older run files. */
+	newest_report_end?: string | null;
 	total_messages: number;
 	aligned_pass_messages: number;
 	dmarc_pass_messages: number;
+	/** Dual-aligned percentage — the fragility signal, NOT the DMARC pass rate. */
 	pass_rate_pct: number;
+	/** The real DMARC pass percentage (either mechanism). Absent on older run files. */
+	dmarc_pass_rate_pct?: number;
 	dkim_only: number;
 	spf_only: number;
 	both_fail: number;

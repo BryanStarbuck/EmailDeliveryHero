@@ -125,6 +125,13 @@ export interface ZoneResult {
 	problem_state: ProblemStateId | null;
 	paid_delist_offered: boolean;
 	auto_expires: string | null;
+	/**
+	 * Set when the listed IP sits in a netblock this domain has no evidence of owning (a shared
+	 * provider/ESP pool): the ASN org that DOES own it. Such a listing is not this domain's
+	 * reputation and cannot be delisted by its operator, so `severity` is softened to `info` and
+	 * this field records why. Null/absent = an IP the operator declared as theirs.
+	 */
+	shared_netblock?: string | null;
 }
 
 export interface PositiveReputation {
