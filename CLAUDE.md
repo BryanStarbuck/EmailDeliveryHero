@@ -45,3 +45,26 @@ EmailDeliveryHero is a web app (runs on localhost) for **auditing email delivera
 We have a directory where we store emails that may well be reporting on problems with our domain. When you understand those and improve the specifications and the code for our part, to make sure we are measuring those problems and offering fixes. The email directory is located herre:
 ~/BGit/Bryan_git/EmailDeliveryHero/emails/
 
+
+## Sister Web Apps
+
+These are the sibling web apps that run on localhost alongside this one. Study them for
+patterns, conventions, and structure — several share our `code/` + `pm/` + `justfile`
+layout. They are **reference material**: read them, bring the *idea* back here, and never
+edit their files unless the user explicitly names that app and asks for the change.
+
+| Sister app | URL(s) | Directory |
+|---|---|---|
+| Internal Web App | http://localhost:9111/ (frontend) · API http://localhost:9112/ | `~/BGit/all/app/` |
+| Marketing AI | http://localhost:7700/ | `~/BGit/all/marketing/ai/` |
+| We The Citizens Social — Go backend | http://localhost:3081/ (consumer) · http://localhost:3082/ (admin + law enforcement) | `~/BGit/act3/AI_Coding/` |
+| We The Citizens Social — React UI | http://localhost:8000/ (consumer) · admin http://localhost:8001/ · law enforcement http://localhost:8002/ | `~/BGit/act3/Front_AI_Coding/` |
+| Large File Bridge | http://localhost:2222/ (frontend) · API http://localhost:8787/ | `~/BGit/Bryan_git/LargeFileBridge/` |
+| Starbuck Family Hub | http://localhost:1111/ (frontend) · API http://localhost:9322/ | `~/BGit/Bryan_git/the_starbucks/` |
+| We The Citizens | http://localhost:4444/ (frontend) · API http://localhost:9333/ | `~/BGit/Bryan_git/we_the_citizens/` |
+
+**We The Citizens** is the newest sister app: a local-first, citizen-powered
+decision-making platform — citizens record positions on societal issues, compare them
+against the social contract, have AI verify the reasoning from first principles, and
+optionally publish to We The Citizens Social. NestJS + Vite/React with a paired CLI over
+the same flat-file state; Google login via OpenAuthFederated — the same stack we use.
