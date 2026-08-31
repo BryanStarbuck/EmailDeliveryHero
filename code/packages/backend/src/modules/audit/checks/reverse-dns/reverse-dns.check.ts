@@ -23,6 +23,16 @@ import type { Checker, CheckOutcome, Finding } from "../types";
  *   - infra.ptr_cname    — reverse name is CNAMEd (RFC 2317 delegation)  (info, advisory)
  *   - infra.helo_match   — HELO/EHLO matches PTR                         (future: needs SMTP probe)
  *
+ * SOURCE MATTERS. When the domain has no configured sending IPs the audit falls back to the MX
+ * hosts' addresses (source: "mx") so the panel is not empty — but those are the inbound provider's
+ * front ends (Google, Microsoft, an ESP). Their reverse zone belongs to that provider, and large
+ * providers legitimately publish several rotating, unbranded PTR names per IP. So on mx-sourced
+ * IPs the NAME-QUALITY sub-checks (ptr_single / ptr_generic / ptr_no_ip_literal) drop to `info`
+ * and their remediation points at recording the real sending IPs instead of editing a zone the
+ * operator does not own. The hard gates (ptr_present / ptr_ipv6 / fcrdns / ptr_tld_valid) keep
+ * their severity on every IP — a broken PTR on your inbound MX is worth knowing about whoever
+ * owns it.
+ *
  * All lookups degrade gracefully: transient resolver failures (ESERVFAIL/timeout) become `info`
  * ("retry later"), distinct from a genuine ENOTFOUND/ENODATA (= no record). The authoritative party
  * for a reverse zone is the IP's network owner, so remediation names the provider control-panel
@@ -61,10 +71,13 @@ function withTimeout<T extends { error?: string }>(
 	p: Promise<T>,
 	timeoutValue: T,
 ): Promise<T> {
+	let timer: NodeJS.Timeout | undefined;
 	return Promise.race([
 		p,
-		new Promise<T>((r) => setTimeout(() => r(timeoutValue), LOOKUP_TIMEOUT_MS)),
-	]);
+		new Promise<T>((r) => {
+			timer = setTimeout(() => r(timeoutValue), LOOKUP_TIMEOUT_MS);
+		}),
+	]).finally(() => clearTimeout(timer));
 }
 
 const TIMED_OUT = { records: [] as string[], empty: false, error: "ETIMEOUT" };
@@ -224,6 +237,10 @@ async function auditIp(
 	const v6 = isIPv6(ip);
 	const family = v6 ? "IPv6" : "IPv4";
 	const mailHost = `mail1.${domain}`;
+	// Name-quality judgements are advisory on an MX host: the reverse zone is the provider's.
+	const providerOwned = source === "mx";
+	const providerNote = ` ${ip} is an MX host for ${domain}, not a configured sending IP, so this reflects the mail provider's reverse zone rather than anything ${domain} publishes.`;
+	const providerFix = `No change is possible at ${domain} — the reverse zone for ${ip} belongs to the mail provider. Record the IPs your mail actually sends from so reverse DNS is audited on the outbound path instead of the inbound MX.`;
 	const rev = await reverseWithRetry(ip);
 
 	if (rev.error) {
@@ -278,9 +295,11 @@ async function auditIp(
 			id: `infra.ptr_single.${ip}`,
 			checkId: "infra",
 			title: `${ip} returns ${hosts.length} PTR records`,
-			severity: "warning",
-			detail: `${ip} returns ${hosts.length} PTR records (${hosts.join(", ")}). Receivers may pick either, and FCrDNS can fail on the wrong one.`,
-			remediation: `Reduce to a single PTR = ${mailHost}. Remove stale reverse-zone entries at your provider.`,
+			severity: providerOwned ? "info" : "warning",
+			detail: `${ip} returns ${hosts.length} PTR records (${hosts.join(", ")}). Receivers may pick either, and FCrDNS can fail on the wrong one.${providerOwned ? providerNote : ""}`,
+			remediation: providerOwned
+				? providerFix
+				: `Reduce to a single PTR = ${mailHost}. Remove stale reverse-zone entries at your provider.`,
 			evidence: hosts.join(", "),
 		});
 	}
@@ -348,9 +367,11 @@ async function auditIp(
 			id: `infra.ptr_generic.${ip}`,
 			checkId: "infra",
 			title: `Generic/dynamic PTR for ${ip}`,
-			severity: "warning",
-			detail: `PTR ${host} looks auto-generated (matched "${generic}"); it reads as a dynamic/residential or cloud-default host, a strong spam signal (SpamAssassin RDNS_DYNAMIC).`,
-			remediation: `Replace the provider-default rDNS with a dedicated mail hostname, e.g. ${mailHost}, and publish the matching A/AAAA record. Never leave the ISP-generated PTR on a mail-sending IP.`,
+			severity: providerOwned ? "info" : "warning",
+			detail: `PTR ${host} looks auto-generated (matched "${generic}"); it reads as a dynamic/residential or cloud-default host, a strong spam signal (SpamAssassin RDNS_DYNAMIC).${providerOwned ? providerNote : ""}`,
+			remediation: providerOwned
+				? providerFix
+				: `Replace the provider-default rDNS with a dedicated mail hostname, e.g. ${mailHost}, and publish the matching A/AAAA record. Never leave the ISP-generated PTR on a mail-sending IP.`,
 			evidence: `${host} (pattern: ${generic})`,
 		});
 	}
@@ -364,9 +385,11 @@ async function auditIp(
 			id: `infra.ptr_no_ip_literal.${ip}`,
 			checkId: "infra",
 			title: `PTR for ${ip} embeds the literal IP`,
-			severity: "warning",
-			detail: `PTR ${host} re-encodes the IP address ("${literal}") — the classic generic/dynamic naming pattern.`,
-			remediation: `Replace with a semantic mail hostname (${mailHost}).`,
+			severity: providerOwned ? "info" : "warning",
+			detail: `PTR ${host} re-encodes the IP address ("${literal}") — the classic generic/dynamic naming pattern.${providerOwned ? providerNote : ""}`,
+			remediation: providerOwned
+				? providerFix
+				: `Replace with a semantic mail hostname (${mailHost}).`,
 			evidence: host,
 		});
 	}
@@ -392,8 +415,12 @@ async function auditIp(
 			checkId: "infra",
 			title: `PTR for ${ip} is not under ${domain}`,
 			severity: "info",
-			detail: `PTR ${host} is valid but not under ${domain}; branding/alignment is weaker. This is acceptable when sending through an ESP whose pool it owns.`,
-			remediation: `Optional: if you run your own IPs, name them under your domain (${mailHost}) for brand alignment. When using an ESP, the ESP-owned PTR is expected and fine.`,
+			detail: providerOwned
+				? `PTR ${host} is valid but not under ${domain} — expected for a provider-run MX host, and not a sending-path signal at all.`
+				: `PTR ${host} is valid but not under ${domain}; branding/alignment is weaker. This is acceptable when sending through an ESP whose pool it owns.`,
+			remediation: providerOwned
+				? providerFix
+				: `Optional: if you run your own IPs, name them under your domain (${mailHost}) for brand alignment. When using an ESP, the ESP-owned PTR is expected and fine.`,
 			evidence: host,
 		});
 	}
