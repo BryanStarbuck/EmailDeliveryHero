@@ -73,7 +73,10 @@ function loadCorpus(): {
 describeCorpus(
 	"report ingestion — the act3ai.com corpus (pm/emails.mdx §12)",
 	() => {
-		const { dmarc, tlsrpt } = loadCorpus();
+		// describe.skip still runs this body, so only read the corpus when it exists.
+		const { dmarc, tlsrpt } = hasCorpus
+			? loadCorpus()
+			: { dmarc: [], tlsrpt: [] };
 
 		it("classifies 71 DMARC aggregates and 3 TLS-RPT reports by payload, not subject (§14.2)", () => {
 			expect(dmarc).toHaveLength(71);

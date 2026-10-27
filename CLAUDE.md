@@ -61,7 +61,7 @@ edit their files unless the user explicitly names that app and asks for the chan
 | We The Citizens Social — React UI | http://localhost:8000/ (consumer) · admin http://localhost:8001/ · law enforcement http://localhost:8002/ | `~/BGit/act3/Front_AI_Coding/` |
 | Large File Bridge | http://localhost:2222/ (frontend) · API http://localhost:8787/ | `~/BGit/Bryan_git/LargeFileBridge/` |
 | Starbuck Family Hub | http://localhost:1111/ (frontend) · API http://localhost:9322/ | `~/BGit/Bryan_git/the_starbucks/` |
-| We The Citizens | http://localhost:4444/ (frontend) · API http://localhost:9333/ | `~/BGit/Bryan_git/we_the_citizens/` |
+| We The Citizens | http://localhost:4444/ (frontend) · API http://localhost:9333/ | `~/BGit/act3/we_citizens/` |
 
 **We The Citizens** is the newest sister app: a local-first, citizen-powered
 decision-making platform — citizens record positions on societal issues, compare them

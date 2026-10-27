@@ -225,11 +225,13 @@ describe("deleteRun / deleteDomainRuns — whole-file deletes only (§7.4)", () 
 
 describe("pruneRuns — retention window + per-domain cap (§7.4)", () => {
 	it("keeps only the newest N runs per domain", () => {
+		// Relative to now so the runs stay inside the 90-day retention window.
+		const base = Date.now() - 24 * 60 * 60 * 1000;
 		for (let i = 0; i < 5; i++) {
 			saveRun(
 				makeRun({
 					runId: `r${i}`,
-					startedAt: `2026-07-01T1${i}:00:00.000Z`,
+					startedAt: new Date(base + i * 60 * 60 * 1000).toISOString(),
 				}),
 				TZ,
 			);
